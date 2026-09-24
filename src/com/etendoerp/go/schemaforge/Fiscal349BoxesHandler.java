@@ -114,12 +114,14 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
-    try {
+    runDispatch(response, () -> {
       if (OPERATORS.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         JSONObject result = computeOperators(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         handleGenerate(orgId, year, period, request, response);
       } else if (VALIDATE_VIES.equals(entityName)) {
         JSONObject result = viesSupport.handleValidateVies(this, orgId, year, period);
@@ -129,11 +131,18 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new Date(sinceMs), response);
       }
-    } catch (FiscalHandlerException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new FiscalHandlerException(e);
-    }
+    });
+  }
+
+  /**
+   * ETP-5438 — thin, model-fixed wrapper around the shared {@link
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, so callers here
+   * (and {@code Fiscal349BoxesHandlerTest}) don't have to repeat the {@code "349"} literal. The
+   * guard logic itself (and {@code AlreadySubmittedException}) moved to the shared base class —
+   * see its javadoc — once {@code Fiscal303BoxesHandler} needed the identical check.
+   */
+  void guardNotAlreadySubmitted(String orgId, int year, String period) {
+    guardNotAlreadySubmitted(orgId, year, period, "349");
   }
 
   @Override
@@ -756,14 +765,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return report;
   }
 
-  private TaxReport findTaxReport(String orgId, String searchKey) {
-    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
-    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<TaxReport> list = crit.list();
-    return list.isEmpty() ? null : list.get(0);
-  }
+  // findTaxReport(orgId, searchKey) moved to AbstractFiscalHandler (SonarQube java:S1192 dedupe
+  // — was byte-identical to Fiscal303BoxesHandler's own copy).
 
 }

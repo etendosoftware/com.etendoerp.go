@@ -423,7 +423,6 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     // IMP-40: a child entity is readable only through its parent. The gate itself is not new —
     // McpParentScope has carried VERB_LIST since it was written, and neo_discover advertises
@@ -434,6 +433,15 @@ public class McpToolRouter {
     // refusal, because the caller then acts on rows belonging to records it never asked about.
     filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters);
 
+    // ETP-5405: a tab-less entity is served by its handler, exactly as it is over REST. Runs after
+    // the parent gate above so the scope check still applies, and before the tab is demanded.
+    JSONObject handled = McpTablessReadDispatcher.run(specName, entityName, null, sfEntity,
+        McpTablessReadDispatcher.buildParams(filters, parentId, offset, limit, orderBy));
+    if (handled != null) {
+      return handled;
+    }
+
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);
@@ -504,8 +512,16 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
+    // ETP-5405: see McpTablessReadDispatcher.run — the handler answers before the tab
+    // is demanded.
+    JSONObject handled = McpTablessReadDispatcher.run(specName, entityName, recordId, sfEntity,
+        McpTablessReadDispatcher.buildParams(null, null, null, null, null));
+    if (handled != null) {
+      return handled;
+    }
+
+    Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
     NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, dalEntityName);

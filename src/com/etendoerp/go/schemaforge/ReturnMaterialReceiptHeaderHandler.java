@@ -50,9 +50,12 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * <p>{@code issuerOrg} is additionally injected on detail GETs only (ETP-5124, mirroring the
  * ETP-4939 pattern), via the shared {@link NeoHandlerUtils#enrichIssuerOrg}, also used by
  * {@link GoodsShipmentHeaderHandler} and {@link ReturnToVendorShipmentHeaderHandler}.
+ *
+ * <p>Extends {@link AbstractReturnDocumentHeaderHandler}, which owns the {@code postingService}
+ * injection point and the {@code handle()} wiring shared with {@link ReturnToVendorShipmentHeaderHandler}.
  */
 @Named("returnMaterialReceiptHeaderHandler")
-public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
+public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptHeaderHandler.class);
 
@@ -76,9 +79,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    mirrorAccountingDate(context);
-
+  protected NeoResponse continueHandling(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equals(context.getHttpMethod())
         && context.getRecordId() == null) {
@@ -137,7 +138,8 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
    * falls back to whatever default the persistence layer applies instead of the document's own
    * movement date.
    */
-  static void mirrorAccountingDate(NeoContext context) {
+  @Override
+  protected void mirrorAccountingDate(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);

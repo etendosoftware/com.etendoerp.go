@@ -66,6 +66,14 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * Only the {@code posted} entry is touched; all other filters, sorting and paging are preserved.
  * Requests without a posted filter pass through unchanged.
  *
+ * <p><b>Confirm/PATCH guard (ETP-5414, pre-hook).</b> Delegates to
+ * {@link AmortizationConfirmGuard}, which runs before {@link #rewritePostedFilter(NeoContext)}
+ * and short-circuits with a {@link NeoResponse} error when either (a) the request is confirming
+ * (not reactivating) a document whose lines are missing/invalid ({@code a_amortization_process}
+ * never validates this itself), or (b) the request is a direct {@code PATCH}/{@code PUT} write to
+ * {@code processed}, which bypasses that process entirely. See
+ * {@link AmortizationConfirmGuard} for the full rationale.
+ *
  * <p>Registered via {@code JAVA_QUALIFIER = 'amortizationHeaderHandler'} on the
  * {@code header} entity of the {@code amortization} ETGO_SF_SPEC record.
  */
@@ -109,6 +117,13 @@ public class AmortizationHeaderHandler implements NeoHandler {
     NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
     if (posting != null) {
       return posting;
+    }
+    // ETP-5414 — closes the server-side gap: a_amortization_process never validates lines
+    // (missing %, non-positive amount, no lines at all) and header.Processed is directly
+    // PATCH-able, bypassing that process entirely. See AmortizationConfirmGuard's javadoc.
+    NeoResponse confirmRejection = AmortizationConfirmGuard.validateBeforeAction(context);
+    if (confirmRejection != null) {
+      return confirmRejection;
     }
     // Rewrite the list "Posted" boolean filter into correct binary String semantics
     // (Posted = 'Y' / Posted <> 'Y') before the default CRUD query builds. See class Javadoc.

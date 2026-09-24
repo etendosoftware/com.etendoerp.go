@@ -35,13 +35,13 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
 
 /**
@@ -138,18 +138,7 @@ public class SurveyConfigServlet extends HttpBaseServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
-
-    try {
-      NeoServletSupport.authenticateJwt(request);
-    } catch (OBException e) {
-      log.warn("Unauthorized SurveyConfig request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      log.warn("Unauthorized SurveyConfig request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return;
-    }
+    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "survey-config GET")) return;
 
     try {
       OBContext.setAdminMode();
@@ -177,18 +166,8 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       return;
     }
 
-    OBContext ctx;
-    try {
-      ctx = NeoServletSupport.authenticateJwt(request);
-    } catch (OBException e) {
-      log.warn("Unauthorized SurveyConfig response submission: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      log.warn("Unauthorized SurveyConfig response submission: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return;
-    }
+    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "survey-config POST")) return;
+    OBContext ctx = OBContext.getOBContext();
 
     handleSubmitResponse(request, response, ctx);
   }

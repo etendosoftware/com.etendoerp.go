@@ -73,7 +73,37 @@ final class McpHookExecutor {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
         .endpointType(NeoEndpointType.CRUD)
+        .build();
+  }
+
+  /**
+   * Build the {@link NeoContext} an MCP read passes to its entity hook.
+   *
+   * <p>ETP-5405 — mirrors what the REST dispatcher hands a handler on
+   * {@code GET /sws/neo/{spec}/{entity}}: {@code endpointType=CRUD}, {@code httpMethod=GET}, no
+   * request body, and the query string as a flat map. A read handler reads its input from
+   * {@link NeoContext#getQueryParams()} — {@code NotPostedDocumentsHandler.handleCrud} branches on
+   * {@code _mode} and then passes the whole map to its datasource — so the map must never be
+   * {@code null}, and the MCP arguments are flattened into it under the names the handler already
+   * expects from the SPA.</p>
+   *
+   * @param adTab the entity's AD tab, {@code null} for the tab-less entities this path exists for
+   */
+  static NeoContext buildReadHookContext(String specName, String entityName, String recordId,
+      Tab adTab, SFEntity sfEntity, Map<String, String> queryParams) {
+    return NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .httpMethod("GET")
+        .recordId(recordId)
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(queryParams)
         .build();
   }
 
@@ -92,6 +122,7 @@ final class McpHookExecutor {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
         .endpointType(NeoEndpointType.DEFAULTS)
         .queryParams(queryParams)
         .build();
@@ -131,6 +162,7 @@ final class McpHookExecutor {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
         .endpointType(NeoEndpointType.ACTION)
         .fieldName(actionName)
         .build();

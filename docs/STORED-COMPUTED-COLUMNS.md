@@ -304,7 +304,7 @@ One `AD_COLUMN_COMP_DEPENDENCY` row per source table you must react to:
 |-------|---------|-------|
 | `Source_Table_ID` | `C_OrderLine` | The table whose changes trigger a refresh |
 | `Insert_Event` / `Update_Event` / `Delete_Event` | Y / Y / Y | Which events fire |
-| `Target_ID_Resolver_SQL` | `SELECT COALESCE(NEW.c_order_id, OLD.c_order_id)` | Maps source row → target id(s); must never return NULL |
+| `Target_ID_Resolver_SQL` | `SELECT COALESCE(NEW.c_order_id, OLD.c_order_id) FROM dual` | Maps source row → target id(s); must never return NULL. `FROM dual` is mandatory (see §5) |
 | `SeqNo` | 10 | Row ordering within the column's dependency set |
 
 Exactly **one** of `Target_ID_Resolver_SQL` / `Target_Link_Column_ID` must be set (rule V11).

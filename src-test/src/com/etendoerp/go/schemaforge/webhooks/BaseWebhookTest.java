@@ -88,6 +88,20 @@ abstract class BaseWebhookTest {
 
         parameters = new HashMap<>();
         responseVars = new HashMap<>();
+
+        // ETP-5402 — SFRolesOverview/SFSystemRoleTemplates now resolve the 9-row Informes
+        // subsection (ReportAccessCatalog) on EVERY role card, which queries both classic
+        // AD_Process_Access and OBUIAPP ProcessAccess in addition to the pre-existing
+        // WindowAccess query. Without a default stub here, `obDal.createCriteria(...)` for
+        // either of these two NEW entity types returns null (Mockito's default for an
+        // unstubbed reference-type return) in every test that doesn't otherwise care about
+        // report access, and the webhook's own try/catch swallows the resulting NPE into an
+        // "error" response instead of "result" — a genuinely cross-cutting new query, so the
+        // default (empty grants, same as "no access") belongs here once, not copy-pasted into
+        // every existing test. A test that DOES care about a specific report grant calls
+        // {@link #mockCriteria(Class)} again itself to override this default.
+        mockCriteria(org.openbravo.client.application.ProcessAccess.class);
+        mockCriteria(org.openbravo.model.ad.access.ProcessAccess.class);
     }
 
     @AfterEach

@@ -20,11 +20,13 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
@@ -40,6 +42,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * Unit tests for {@link GoodsMovementsHeaderHandler}.
@@ -200,5 +204,85 @@ public class GoodsMovementsHeaderHandlerTest {
 
       assertNull(handler.handle(context("POST", body)));
     }
+  }
+
+  /**
+   * ETP-5436: a matched post/unpost action delegates to the injected
+   * {@link DocumentPostingService} and its response is returned as-is, short-circuiting
+   * before the documentNo materialization logic.
+   */
+  @Test
+  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse sentinel = NeoResponse.ok(new JSONObject());
+    when(service.handleAction(ctx)).thenReturn(sentinel);
+
+    handler.setPostingService(service);
+
+    assertSame(sentinel, handler.handle(ctx));
+  }
+
+  /**
+   * ETP-5436: when the posting service does not claim the action (returns {@code null}),
+   * the handler falls through to its pre-existing documentNo materialization exactly as
+   * before — the posting check is purely additive.
+   */
+  @Test
+  public void postingServiceReturningNullDoesNotBlockDocumentNoMaterialization() throws JSONException {
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    when(service.handleAction(any())).thenReturn(null);
+    handler.setPostingService(service);
+
+    JSONObject body = new JSONObject();
+    runWithSequence(body, "10000099", false);
+
+    assertEquals("10000099", body.getString("documentNo"));
+    verify(service).handleAction(any());
+  }
+
+  /**
+   * ETP-5436: a non-POST request still skips materialization even with a posting service
+   * present and consulted (returns null) — proves the two checks compose without
+   * interfering with each other.
+   */
+  @Test
+  public void postingServiceReturningNull_nonPostMethodStillSkipsDocumentNoMaterialization() {
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    when(service.handleAction(any())).thenReturn(null);
+    handler.setPostingService(service);
+
+    JSONObject body = new JSONObject();
+    try (MockedStatic<Utility> util = Mockito.mockStatic(Utility.class)) {
+      assertNull(handler.handle(context("PATCH", body)));
+      util.verify(() -> Utility.getDocumentNoConnection(any(), any(), any(), any(), anyBoolean()), never());
+    }
+    verify(service).handleAction(any());
+  }
+
+  /**
+   * ETP-5436 (order matters): {@link GoodsMovementProcessGuard}'s rejection must
+   * short-circuit {@link GoodsMovementsHeaderHandler#handle} BEFORE the posting service is
+   * ever consulted. Mocks the guard's static method directly (same package, package-private
+   * method — plain Mockito static mocking, Mockito's default inline mock maker supports
+   * final classes with no extra setup, same as the Utility/OBDal/OBContext statics already
+   * mocked above in this file).
+   */
+  @Test
+  public void processGuardRejectionShortCircuitsBeforePostingServiceIsConsulted() {
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    handler.setPostingService(service);
+
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse guardRejection = NeoResponse.error(400, "insufficient stock");
+
+    try (MockedStatic<GoodsMovementProcessGuard> guardMock =
+        Mockito.mockStatic(GoodsMovementProcessGuard.class)) {
+      guardMock.when(() -> GoodsMovementProcessGuard.validateBeforeProcess(ctx))
+          .thenReturn(guardRejection);
+
+      assertSame(guardRejection, handler.handle(ctx));
+    }
+    verify(service, never()).handleAction(any());
   }
 }

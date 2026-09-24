@@ -255,4 +255,18 @@ class PropertiesFeatureProviderTest {
     GoFeatureFlags.reset();
     assertFalse(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
   }
+
+  /**
+   * A configured local flag must not become an implicit fallback when ConfigCat is selected but
+   * cannot initialize. Otherwise a production ConfigCat outage or invalid key could enable a
+   * feature through stale local configuration instead of failing closed.
+   */
+  @Test
+  void aConfigCatInitializationFailureDoesNotFallBackToAnEnabledLocalFlag() {
+    System.setProperty(CONFIGCAT_SDK_KEY_PROPERTY, "wrong/lengths");
+    System.setProperty(FLAG_PROPERTY, "true");
+    GoFeatureFlags.reset();
+
+    assertFalse(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
+  }
 }

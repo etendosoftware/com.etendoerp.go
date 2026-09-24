@@ -382,10 +382,23 @@ class Fiscal303SubmissionSupport {
     // attempts a complementaria filing itself. Test-mode (ServValiDos) validations never change
     // declaration status, so re-validating an already-submitted declaration is harmless and
     // stays allowed — only production resubmission is blocked.
-    if (!testMode && STATUS_SUBMITTED_ACK.equals(decl.getDeclarationStatus())) {
+    //
+    // ETP-5438 (user decision) — "la presentación telemática debería funcionar igual que los
+    // otros casos": widened from the original submitted_ack-only check to the full submitted
+    // family (FiscalDeclCrudHandler#SUBMITTED_STATUSES — submitted/submitted_ext/submitted_ack),
+    // the same set every other already-submitted guard in this ticket (the frontend's
+    // isSubmitted, FiscalDeclCrudHandler#rejectRepresentation, AbstractFiscalHandler
+    // #guardNotAlreadySubmitted) already uses. A declaration reactivated by "Reactivar
+    // declaración" (back to draft) is unaffected — this only fires for a status already IN the
+    // submitted family, same as every other guard in this family.
+    String currentStatus = decl.getDeclarationStatus();
+    // `Set.of(...)`-backed SUBMITTED_STATUSES throws NPE on `contains(null)` (JDK immutable
+    // collections are null-hostile) — currentStatus is null for the many callers/tests where
+    // getDeclarationStatus() is legitimately unset, so the null check must come first.
+    if (!testMode && currentStatus != null && FiscalDeclCrudHandler.SUBMITTED_STATUSES.contains(currentStatus)) {
       writeJson(response, HttpServletResponse.SC_CONFLICT,
           owner.buildFailureJson(false, ERR_ALREADY_SUBMITTED,
-              "This declaration was already submitted to the AEAT (status: " + STATUS_SUBMITTED_ACK
+              "This declaration was already submitted to the AEAT (status: " + currentStatus
                   + "). Resubmitting the same declaration in production is not supported here — "
                   + "filing a complementaria is a separate, manual process."));
       return true;

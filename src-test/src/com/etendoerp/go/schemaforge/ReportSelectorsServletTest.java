@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -56,10 +57,11 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+
+import com.etendoerp.go.common.JwtAuthUtils;
 
 /**
  * Unit tests for {@link ReportSelectorsServlet}.
@@ -98,7 +100,7 @@ class ReportSelectorsServletTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
-  private MockedStatic<NeoServletSupport> neoSupportMock;
+  private MockedStatic<JwtAuthUtils> jwtAuthMock;
   private MockedStatic<com.etendoerp.go.common.CorsUtils> corsMock;
 
   private StringWriter stringWriter;
@@ -117,7 +119,7 @@ class ReportSelectorsServletTest {
 
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
-    neoSupportMock = mockStatic(NeoServletSupport.class);
+    jwtAuthMock = mockStatic(JwtAuthUtils.class);
     corsMock = mockStatic(com.etendoerp.go.common.CorsUtils.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
@@ -144,7 +146,7 @@ class ReportSelectorsServletTest {
   @AfterEach
   void tearDown() {
     corsMock.close();
-    neoSupportMock.close();
+    jwtAuthMock.close();
     obContextMock.close();
     obDalMock.close();
   }
@@ -154,7 +156,8 @@ class ReportSelectorsServletTest {
   // ---------------------------------------------------------------------------
 
   private void configureAuthenticatedGet(String type) throws Exception {
-    neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(obContext);
+    jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+        .thenReturn(true);
     when(request.getPathInfo()).thenReturn("/" + type);
     when(request.getParameter("q")).thenReturn("");
     when(request.getParameter("limit")).thenReturn("20");
@@ -195,33 +198,47 @@ class ReportSelectorsServletTest {
   class DoGetGuardTests {
 
     @Test
-    @DisplayName("returns 401 when JWT authentication throws OBException")
-    void authFailureOBException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new OBException("bad token"));
+    @DisplayName("authenticateOrFail returning false aborts the request: handler body never runs")
+    void authenticateOrFailFalseAbortsRequest() throws Exception {
+      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+          .thenReturn(false);
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      assertTrue(getResponseBody().contains("bad token"));
+      // JwtAuthUtils.authenticateOrFail owns writing the error response (401/403) itself —
+      // the servlet only has to stop. Assert the handler body never ran: no pathInfo read,
+      // no 200, no selector query.
+      verify(request, never()).getPathInfo();
+      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+      verify(obDal, never()).getSession();
     }
 
     @Test
-    @DisplayName("returns 401 when JWT authentication throws generic Exception")
-    void authFailureGenericException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new RuntimeException("unexpected"));
+    @DisplayName("authenticateOrFail returning true (cookie session) runs the handler body")
+    void authenticateOrFailTrueViaCookieSessionRunsHandler() throws Exception {
+      configureAuthenticatedGet("bpartner");
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      assertTrue(getResponseBody().contains("Invalid or expired token"));
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+    }
+
+    @Test
+    @DisplayName("authenticateOrFail returning true (legacy bearer) still runs the handler body — "
+        + "the servlet call site cannot tell cookie session and legacy bearer apart, by design")
+    void authenticateOrFailTrueViaLegacyBearerRunsHandler() throws Exception {
+      configureAuthenticatedGet("bpartner");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
     }
 
     @Test
     @DisplayName("returns 400 when pathInfo is null")
     void missingPathInfo() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(obContext);
+      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+          .thenReturn(true);
       when(request.getPathInfo()).thenReturn(null);
 
       servlet.doGet(request, response);
@@ -233,7 +250,8 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 400 when pathInfo is just /")
     void rootPathInfo() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(obContext);
+      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+          .thenReturn(true);
       when(request.getPathInfo()).thenReturn("/");
 
       servlet.doGet(request, response);
@@ -402,7 +420,8 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 500 when executeSelector throws unexpected exception")
     void internalError() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(obContext);
+      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+          .thenReturn(true);
       when(request.getPathInfo()).thenReturn("/bpartner");
       when(request.getParameter("q")).thenReturn("");
       when(request.getParameter("limit")).thenReturn("20");

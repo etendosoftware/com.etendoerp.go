@@ -39,6 +39,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.roles.SystemRoleTemplates;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -90,6 +91,17 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
 
   /** JSON key for a role's assigned-windows array. */
   private static final String WINDOWS = "windows";
+
+  /**
+   * ETP-5402 — JSON key for a role's assigned-reports array (the Informes subsection), parallel
+   * to {@link #WINDOWS} — needed here, not just on {@code SFRolesOverview}, because THIS
+   * webhook's roles are the User window's "Roles del usuario" tab matrix COLUMNS
+   * (`UserRolesTab.jsx`'s `columns`, sourced from {@code fetchTemplateRoles()`}): without a
+   * {@code reports} array here too, every Informes cell in that tab would resolve "no access"
+   * for every role regardless of the role's real grant, since that tab's cell lookup reads
+   * `role.reports`/`role.windows` off exactly this response, not {@code SFRolesOverview}'s.
+   */
+  private static final String REPORTS = "reports";
 
   /** JSON key for a window entry's access tier. */
   private static final String TIER = "tier";
@@ -167,14 +179,19 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
   }
 
   /**
-   * Builds a single role's JSON entry: id, name, and its windows array. No {@code userCount},
-   * no {@code isClientAdmin} — see the class javadoc for why.
+   * Builds a single role's JSON entry: id, name, its windows array, and (ETP-5402) its Informes
+   * {@code reports} array. No {@code userCount}, no {@code isClientAdmin} — see the class
+   * javadoc for why.
    */
   private JSONObject buildRoleJson(Role role, Set<String> goWindowIds) throws JSONException {
     JSONObject roleJson = new JSONObject();
     roleJson.put(ID, role.getId());
     roleJson.put(NAME, role.getName());
     roleJson.put(WINDOWS, buildWindowsJson(role, goWindowIds));
+    // ETP-5402 — Informes reports array, via the shared ReportAccessCatalog resolution/JSON
+    // builder (same one SFRolesOverview uses, so the two webhooks can never drift on which
+    // anchor id/category/kind backs a report row, or on how that tier map becomes JSON).
+    roleJson.put(REPORTS, ReportAccessCatalog.reportsJson(ReportAccessCatalog.resolveTierMap(role)));
     return roleJson;
   }
 

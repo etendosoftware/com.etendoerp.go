@@ -40,6 +40,7 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
+import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 
 public class EtendoGoJwtServletOnboardingDatasetTest {
 
@@ -524,6 +525,59 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     assertEquals(0, fiscalService.setupCount);
   }
 
+  @Test
+  public void testEnsureOnboardingDatasetAlignsWarehouseAddressAfterOrgInfoAndBeforeBaseline() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    CountingWarehouseAddressService warehouseAddressService = new CountingWarehouseAddressService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(),
+        baselineService);
+    servlet.onboardingWarehouseAddressService = warehouseAddressService;
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertTrue(ready);
+    assertEquals(1, warehouseAddressService.alignCount);
+    assertEquals("CLIENT-1", warehouseAddressService.clientId);
+    assertEquals("ORG-1", warehouseAddressService.orgId);
+    assertEquals("USER-1", warehouseAddressService.userId);
+    assertEquals("ROLE-1", warehouseAddressService.roleId);
+    assertEquals(1, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"warehouseAddress\""));
+    assertTrue(ndjson.contains("Warehouse address aligned"));
+    assertTrue(ndjson.indexOf("Organization address ready")
+        < ndjson.indexOf("Warehouse address aligned"));
+    assertTrue(ndjson.indexOf("Warehouse address aligned")
+        < ndjson.indexOf("Data-fix baseline registered"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetSkipsBaselineWhenWarehouseAddressAlignmentFails() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(),
+        baselineService);
+    servlet.onboardingWarehouseAddressService =
+        new FailingWarehouseAddressService("broken warehouse address");
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"warehouseAddress\""));
+    assertTrue(ndjson.contains("\"status\":\"error\""));
+    assertTrue(ndjson.contains("broken warehouse address"));
+    assertTrue(ndjson.contains("\"success\":false"));
+  }
+
   private static final class TestServlet extends EtendoGoJwtServlet {
     private TestServlet(OnboardingDatasetImportService importService) {
       this(importService, new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
@@ -560,6 +614,14 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
       this.onboardingAccountingWiringService = new NoOpAccountingWiringService();
       this.onboardingPeriodControlService = new NoOpPeriodControlService();
       this.onboardingOrgInfoService = new NoOpOrgInfoService();
+      // ETP-5444: wireWarehouseAddress also touches the DAL directly (OBDal.getInstance().get(...)
+      // on Client/OrganizationInformation, plus WarehouseLookupHelper) and is exercised by its own
+      // dedicated unit test (OnboardingWarehouseAddressServiceTest); stub it to a no-op here for the
+      // same reason as the services above. Without this, the field defaults to the real service
+      // instantiated by EtendoGoJwtServlet's own field initializer, which throws with no DAL/DB
+      // available in this no-database unit test, making every ensureOnboardingDataset() call
+      // return false.
+      this.onboardingWarehouseAddressService = new NoOpWarehouseAddressService();
       // ETP-4854: forceFlatAccountingDimensionVisibility also touches the DAL directly (raw SQL on
       // OBDal's shared connection) and is exercised by its own dedicated unit test
       // (OnboardingAcctdimCentrallyMaintainedServiceTest); stub it to a no-op here for the same
@@ -774,6 +836,52 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
         String countryIso, String address, String taxId) {
       // no-op: DAL wiring is covered by OnboardingOrgInfoServiceTest
+    }
+  }
+
+  private static class NoOpWarehouseAddressService extends OnboardingWarehouseAddressService {
+    @Override
+    public void alignDefaultWarehouseAddress(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      // no-op: DAL wiring is covered by OnboardingWarehouseAddressServiceTest
+    }
+  }
+
+  /**
+   * ETP-5444 — counts {@code alignDefaultWarehouseAddress} invocations and captures its
+   * arguments, so the servlet-level wiring (order relative to the other steps, argument
+   * pass-through) can be asserted without touching the DAL.
+   */
+  private static final class CountingWarehouseAddressService extends NoOpWarehouseAddressService {
+    private int alignCount;
+    private String clientId;
+    private String orgId;
+    private String userId;
+    private String roleId;
+
+    @Override
+    public void alignDefaultWarehouseAddress(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      alignCount++;
+      this.clientId = clientId;
+      this.orgId = orgId;
+      this.userId = adminUserId;
+      this.roleId = adminRoleId;
+    }
+  }
+
+  /** ETP-5444 — makes {@code alignDefaultWarehouseAddress} fail, to test the chain's short-circuit. */
+  private static final class FailingWarehouseAddressService extends NoOpWarehouseAddressService {
+    private final String message;
+
+    private FailingWarehouseAddressService(String message) {
+      this.message = message;
+    }
+
+    @Override
+    public void alignDefaultWarehouseAddress(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      throw new OBException(message);
     }
   }
 

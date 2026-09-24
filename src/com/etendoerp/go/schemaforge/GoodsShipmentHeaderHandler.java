@@ -267,8 +267,11 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    *       {@link #enrichLinkedOrder} (i.e. {@code shipmentRec.linkedOrders[0]}), which this
    *       method reads rather than re-querying;</li>
    *   <li>otherwise, the Business Partner's own configured price list;</li>
-   *   <li>otherwise, neither field is added — the frontend picker already falls back to the
-   *       system default price list on its own.</li>
+   *   <li>otherwise, the client's own DEFAULT sales price list — matching what Etendo Classic
+   *       falls back to when a Business Partner has none configured (ETP-5410 follow-up: this
+   *       tier used to be missing, leaving the field empty — this modal's own picker never
+   *       fills it in on its own, since {@code CreateInvoiceConfirmModal} always disables the
+   *       generic fallback here).</li>
    * </ol>
    * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
    * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
@@ -281,7 +284,10 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       if (applyPriceListFromLinkedOrder(shipmentRec)) {
         return;
       }
-      applyPriceListFromBusinessPartner(shipmentRec, shipmentId);
+      if (applyPriceListFromBusinessPartner(shipmentRec, shipmentId)) {
+        return;
+      }
+      applyClientDefaultPriceList(shipmentRec);
     } catch (Exception e) {
       log.warn("Could not resolve price list for shipment {}: {}", shipmentId, e.getMessage());
     }
@@ -307,15 +313,35 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     return true;
   }
 
-  private void applyPriceListFromBusinessPartner(JSONObject shipmentRec, String shipmentId)
+  private boolean applyPriceListFromBusinessPartner(JSONObject shipmentRec, String shipmentId)
       throws JSONException {
     try {
       OBContext.setAdminMode(true);
       ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, shipmentId);
       if (shipment == null || shipment.getBusinessPartner() == null) {
-        return;
+        return false;
       }
       PriceList priceList = shipment.getBusinessPartner().getPriceList();
+      if (priceList != null) {
+        shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
+        return true;
+      }
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Tier-3 fallback of {@link #enrichResolvedPriceList}: the client's own DEFAULT sales price
+   * list, reusing {@code MultiDocumentInvoiceSupport}'s lookup rather than a second copy of the
+   * same Criteria query.
+   */
+  private void applyClientDefaultPriceList(JSONObject shipmentRec) throws JSONException {
+    try {
+      OBContext.setAdminMode(true);
+      PriceList priceList = MultiDocumentInvoiceSupport.findDefaultPriceList(true);
       if (priceList != null) {
         shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
         shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());

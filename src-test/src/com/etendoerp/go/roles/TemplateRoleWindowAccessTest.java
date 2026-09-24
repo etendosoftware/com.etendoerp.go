@@ -630,4 +630,47 @@ class TemplateRoleWindowAccessTest {
         "Mutating a caller's copy must never affect the next caller — "
             + "standaloneProcessGrantsByRoleId() must return a fresh map each time");
   }
+
+  // --- ETP-5402 — standalone CLASSIC AD_Process_Access grants (tax-report) ---
+
+  private static final String PROCESS_TAX_REPORT = "8C1331B9EC14CED7E040007F010119A0";
+
+  @Test
+  void exposesExactlyTheFourNonAdminTemplateRolesForStandaloneClassicProcessGrants() {
+    Map<String, List<String>> byRoleId = TemplateRoleWindowAccess.standaloneClassicProcessGrantsByRoleId();
+    assertEquals(4, byRoleId.size());
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.FINANCE_ROLE_ID));
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.SALES_ROLE_ID));
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.PURCHASING_ROLE_ID));
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.INVENTORY_ROLE_ID));
+  }
+
+  @Test
+  void financeHasOnlyTheTaxReportStandaloneClassicProcessGrant() {
+    List<String> finance = TemplateRoleWindowAccess.standaloneClassicProcessGrantsByRoleId()
+        .get(SystemRoleTemplates.FINANCE_ROLE_ID);
+    assertEquals(List.of(PROCESS_TAX_REPORT), finance,
+        "Financiero must have exactly the Tax Report classic process grant, nothing else");
+  }
+
+  @Test
+  void salesPurchasingAndInventoryHaveNoStandaloneClassicProcessGrants() {
+    Map<String, List<String>> byRoleId = TemplateRoleWindowAccess.standaloneClassicProcessGrantsByRoleId();
+    assertTrue(byRoleId.get(SystemRoleTemplates.SALES_ROLE_ID).isEmpty(),
+        "Ventas must have zero ETP-5402 standalone classic-process grants");
+    assertTrue(byRoleId.get(SystemRoleTemplates.PURCHASING_ROLE_ID).isEmpty(),
+        "Compras must have zero ETP-5402 standalone classic-process grants");
+    assertTrue(byRoleId.get(SystemRoleTemplates.INVENTORY_ROLE_ID).isEmpty(),
+        "Almacén must have zero ETP-5402 standalone classic-process grants");
+  }
+
+  @Test
+  void standaloneClassicProcessGrantsByRoleIdReturnsAFreshMutableMapEachCall() {
+    Map<String, List<String>> first = TemplateRoleWindowAccess.standaloneClassicProcessGrantsByRoleId();
+    first.clear();
+    Map<String, List<String>> second = TemplateRoleWindowAccess.standaloneClassicProcessGrantsByRoleId();
+    assertEquals(4, second.size(),
+        "Mutating a caller's copy must never affect the next caller — "
+            + "standaloneClassicProcessGrantsByRoleId() must return a fresh map each time");
+  }
 }

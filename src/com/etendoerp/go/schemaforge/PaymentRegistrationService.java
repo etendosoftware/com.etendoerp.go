@@ -22,6 +22,7 @@ import java.text.ParseException;
 import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -255,9 +256,16 @@ public final class PaymentRegistrationService {
 
         String allowProp = allowProperty(isReceipt);
 
+        List<FIN_FinancialAccount> accounts = crit.list();
+        // ETP-5434: the payment methods of every listed account are fetched up front in a single
+        // grouped query instead of one query per account inside the loop (N+1). See
+        // PaymentAccountMethodsLoader for why this stays an OBCriteria, not HQL.
+        Map<String, List<FinAccPaymentMethod>> methodsByAccount =
+            PaymentAccountMethodsLoader.loadAllowedMethodsByAccount(accounts, allowProp);
+
         JSONArray arr = new JSONArray();
-        for (FIN_FinancialAccount acc : crit.list()) {
-          appendAccountItem(arr, acc, allowProp);
+        for (FIN_FinancialAccount acc : accounts) {
+          appendAccountItem(arr, acc, methodsByAccount.get(acc.getId()));
         }
         JSONObject resp = new JSONObject();
         resp.put(KEY_ITEMS, arr);
@@ -288,15 +296,16 @@ public final class PaymentRegistrationService {
    * it must remain selectable. The {@code invoiceCurrency} is no longer used to filter, but the
    * emitted {@code currency}/{@code currencyId} fields let the UI decide when to show the
    * conversion fields.
+   *
+   * <p>ETP-5434: {@code methods} arrives pre-loaded and grouped by
+   * {@link PaymentAccountMethodsLoader#loadAllowedMethodsByAccount} instead of being queried here
+   * once per account. A {@code null} list is the grouping's way of saying "this account has no
+   * allowed link row" and is the same omission the previous {@code methods.isEmpty()} check
+   * produced.
    */
-  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
-      throws Exception {
-    OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
-        .createCriteria(FinAccPaymentMethod.class);
-    methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
-    methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-    List<FinAccPaymentMethod> methods = methodCrit.list();
-    if (methods.isEmpty()) {
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc,
+      List<FinAccPaymentMethod> methods) throws Exception {
+    if (methods == null || methods.isEmpty()) {
       return;
     }
     JSONObject item = new JSONObject();

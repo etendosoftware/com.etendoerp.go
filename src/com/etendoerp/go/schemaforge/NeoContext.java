@@ -50,6 +50,15 @@ public class NeoContext {
   private JSONObject supersededDefaults;
   private final NeoEndpointType endpointType;
   private final String fieldName;
+  /**
+   * ETP-5284 — {@code true} when this context was built by the MCP layer rather than by the REST
+   * dispatcher. The two paths hand a handler its {@link #getRequestBody() request body} under
+   * different field-naming conventions (REST uses the window's field names, MCP its own tool
+   * names), so a handler that injects a value has to know which spelling the caller will
+   * understand. Nothing else should branch on this: it marks a naming difference, not a
+   * capability one.
+   */
+  private final boolean mcpOrigin;
 
   private NeoContext(Builder builder) {
     this.specName = builder.specName;
@@ -64,6 +73,16 @@ public class NeoContext {
     this.previousResult = builder.previousResult;
     this.endpointType = builder.endpointType;
     this.fieldName = builder.fieldName;
+    this.mcpOrigin = builder.mcpOrigin;
+  }
+
+  /**
+   * Whether this context was built by the MCP layer. See {@link #mcpOrigin}.
+   *
+   * @return {@code true} for an MCP-originated call, {@code false} for a REST one
+   */
+  public boolean isMcpOrigin() {
+    return mcpOrigin;
   }
 
   public String getSpecName() {
@@ -164,6 +183,19 @@ public class NeoContext {
     private NeoResponse previousResult;
     private NeoEndpointType endpointType;
     private String fieldName;
+    private boolean mcpOrigin;
+
+    /**
+     * Marks this context as MCP-originated and returns this builder. Defaults to {@code false},
+     * so the REST dispatcher needs no change.
+     *
+     * @param mcpOrigin {@code true} when the MCP layer is building the context
+     * @return this builder
+     */
+    public Builder mcpOrigin(boolean mcpOrigin) {
+      this.mcpOrigin = mcpOrigin;
+      return this;
+    }
 
     /**
      * Sets the spec name and returns this builder.

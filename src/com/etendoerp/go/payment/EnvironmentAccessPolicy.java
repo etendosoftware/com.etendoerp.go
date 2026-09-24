@@ -45,6 +45,7 @@ public final class EnvironmentAccessPolicy {
   public enum Decision {
     ALLOWED,
     MEMBERSHIP_REQUIRED,
+    /** A demo trial expired or access was revoked when it was promoted to a paid environment. */
     DEMO_TRIAL_EXPIRED,
     SUBSCRIPTION_REQUIRED
   }
@@ -85,11 +86,14 @@ public final class EnvironmentAccessPolicy {
     private final EnvironmentType type;
     private final Instant trialStartedAt;
     private final Instant renewalDueAt;
+    private final boolean associatedWithProductive;
 
-    private Environment(EnvironmentType type, Instant trialStartedAt, Instant renewalDueAt) {
+    private Environment(EnvironmentType type, Instant trialStartedAt, Instant renewalDueAt,
+        boolean associatedWithProductive) {
       this.type = type;
       this.trialStartedAt = trialStartedAt;
       this.renewalDueAt = renewalDueAt;
+      this.associatedWithProductive = associatedWithProductive;
     }
 
     /**
@@ -103,17 +107,29 @@ public final class EnvironmentAccessPolicy {
     }
 
     /**
-     * Creates a demo environment with an optional renewal date.
+     * Creates a demo environment with an optional renewal date, without a productive association.
      *
      * @param trialStartedAt instant when the demo trial started
-     * @param renewalDueAt instant when the associated renewal is due
+     * @param renewalDueAt instant when the renewal is due
      * @return a demo environment
      */
     public static Environment demo(Instant trialStartedAt, Instant renewalDueAt) {
       if (trialStartedAt == null) {
         throw new IllegalArgumentException("A demo requires a trial start timestamp");
       }
-      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt);
+      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt, false);
+    }
+
+    /**
+     * Creates a demo that has been converted to a paid productive environment. Its access is
+     * revoked as soon as the association is persisted, independently of trial or renewal state.
+     *
+     * @param trialStartedAt original instant when the demo trial started
+     * @param renewalDueAt productive subscription renewal date, when available
+     * @return an associated demo environment
+     */
+    public static Environment associatedDemo(Instant trialStartedAt, Instant renewalDueAt) {
+      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt, true);
     }
 
     /**
@@ -122,7 +138,7 @@ public final class EnvironmentAccessPolicy {
      * @return a productive environment
      */
     public static Environment productive() {
-      return new Environment(EnvironmentType.PRODUCTIVE, null, null);
+      return new Environment(EnvironmentType.PRODUCTIVE, null, null, false);
     }
 
     /**
@@ -132,7 +148,7 @@ public final class EnvironmentAccessPolicy {
      * @return a productive environment
      */
     public static Environment productive(Instant renewalDueAt) {
-      return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt);
+      return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt, false);
     }
 
     public EnvironmentType getType() {
@@ -146,6 +162,10 @@ public final class EnvironmentAccessPolicy {
     public Instant getRenewalDueAt() {
       return renewalDueAt;
     }
+
+    public boolean isAssociatedWithProductive() {
+      return associatedWithProductive;
+    }
   }
 
   /**
@@ -156,6 +176,9 @@ public final class EnvironmentAccessPolicy {
    */
   public Instant trialExpiresAt(Environment environment, Configuration configuration) {
     if (environment == null || environment.type != EnvironmentType.DEMO) {
+      return null;
+    }
+    if (environment.trialStartedAt == null) {
       return null;
     }
     return environment.trialStartedAt.plus(configuration.trialDays, ChronoUnit.DAYS);
@@ -199,6 +222,9 @@ public final class EnvironmentAccessPolicy {
       return Decision.MEMBERSHIP_REQUIRED;
     }
     if (environment.type == EnvironmentType.DEMO) {
+      if (environment.associatedWithProductive) {
+        return Decision.DEMO_TRIAL_EXPIRED;
+      }
       if (subscriptionStatus == SubscriptionStatus.CURRENT) {
         return Decision.ALLOWED;
       }

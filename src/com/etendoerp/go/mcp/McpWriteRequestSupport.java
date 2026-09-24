@@ -67,7 +67,9 @@ final class McpWriteRequestSupport {
   static Tab getAdTabOrThrow(SFEntity sfEntity, String entityName) throws Exception {
     Tab tab = sfEntity.getADTab();
     if (tab == null) {
-      throw new IllegalArgumentException("No AD_Tab linked to entity: " + entityName);
+      // ETP-5405: a routing failure, not a server fault — see McpRoutingException.entityHasNoTab.
+      throw McpRoutingException.entityHasNoTab(entityName,
+          McpHookExecutor.resolveEntityHandler(sfEntity) != null);
     }
     return tab;
   }
