@@ -19,8 +19,15 @@ import org.codehaus.jettison.json.JSONObject;
 public class StripePriceService {
   static final int CONNECT_TIMEOUT_MS = 5_000;
   static final int READ_TIMEOUT_MS = 10_000;
+  private static final String ACTIVE_FIELD = "active";
+  private static final String UNIT_AMOUNT_FIELD = "unit_amount";
 
-  /** Retrieves the configured Price and checks that its recurrence matches checkout mode. */
+  /**
+   * Retrieves the configured Price and checks that its recurrence matches checkout mode.
+   * @return the validated configured Stripe Price
+   * @throws IOException when Stripe rejects the lookup or the Price is invalid
+   * @throws JSONException when Stripe returns invalid JSON
+   */
   public Price retrieveConfiguredPrice() throws IOException, JSONException {
     String priceId = StringUtils.trimToNull(CheckoutConfiguration.priceId());
     if (StringUtils.isBlank(priceId) || StringUtils.isBlank(CheckoutConfiguration.secretKey())) {
@@ -31,7 +38,13 @@ public class StripePriceService {
     return price;
   }
 
-  /** Retrieves a previously persisted Price ID for an existing purchase. */
+  /**
+   * Retrieves a previously persisted Price ID for an existing purchase.
+   * @param priceId previously persisted Stripe Price ID
+   * @return the validated Stripe Price
+   * @throws IOException when Stripe rejects the lookup or the Price is invalid
+   * @throws JSONException when Stripe returns invalid JSON
+   */
   public Price retrievePrice(String priceId) throws IOException, JSONException {
     priceId = StringUtils.trimToNull(priceId);
     if (StringUtils.isBlank(priceId) || StringUtils.isBlank(CheckoutConfiguration.secretKey())) {
@@ -67,20 +80,20 @@ public class StripePriceService {
 
   /** Parses the Price contract without contacting Stripe. */
   static Price parsePrice(JSONObject provider) throws JSONException, IOException {
-    Object active = provider.has("active") && !provider.isNull("active")
-        ? provider.get("active") : null;
+    Object active = provider.has(ACTIVE_FIELD) && !provider.isNull(ACTIVE_FIELD)
+        ? provider.get(ACTIVE_FIELD) : null;
     if (!Boolean.TRUE.equals(active)) {
       throw new IOException("The configured Stripe Price is not explicitly active");
     }
     String id = StringUtils.trimToNull(provider.optString("id", ""));
-    Object amountValue = provider.has("unit_amount") && !provider.isNull("unit_amount")
-        ? provider.get("unit_amount") : null;
+    Object amountValue = provider.has(UNIT_AMOUNT_FIELD) && !provider.isNull(UNIT_AMOUNT_FIELD)
+        ? provider.get(UNIT_AMOUNT_FIELD) : null;
     if (id == null || !(amountValue instanceof Number)) {
       throw new IOException("Stripe Price is missing its id or unit amount");
     }
     Number amountNumber = (Number) amountValue;
     long amountMinor = amountNumber.longValue();
-    if (amountMinor < 0 || amountNumber.doubleValue() != (double) amountMinor) {
+    if (amountMinor < 0 || amountNumber.doubleValue() != amountMinor) {
       throw new IOException("Stripe Price has an invalid unit amount");
     }
     String currency = StringUtils.trimToNull(provider.optString("currency", ""));

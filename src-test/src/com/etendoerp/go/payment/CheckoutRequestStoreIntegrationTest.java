@@ -181,8 +181,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String accountId = createAccount(email);
     String requestId = newRequestId();
     String selectedDemoClientId = ZERO;
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT, selectedDemoClientId,
-        true, true, false);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(selectedDemoClientId, true, true, false, null));
     store.recordSessionCreated(requestId, "cs_" + requestId);
     CheckoutRequest retriedCheckout = store.findActiveForAccountAndClientName(
         accountId, email, ENVIRONMENT);
@@ -228,7 +228,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String email = newEmail("empty-demo-owner");
     String accountId = createAccount(email);
     String requestId = newRequestId();
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT, null, true, false, false);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, null));
     store.recordSessionCreated(requestId, "cs_" + requestId);
     store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
 
@@ -271,8 +272,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String accountId = createAccount(email);
     String requestId = newRequestId();
     String savedPriceId = "price_etp5463_saved";
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT, null, true,
-        false, false, savedPriceId);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, savedPriceId));
 
     assertEquals("The configured provider price must survive the committed write",
         savedPriceId, store.findStripePriceId(requestId));
@@ -742,7 +743,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     OBContext caller = OBContext.getOBContext();
     assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
 
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     assertSame("recordRequested must give the caller's context back", caller,
         OBContext.getOBContext());
 
@@ -841,7 +843,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     RuntimeException failure = null;
     try {
       store.recordRequested(newRequestId(), UNKNOWN_ACCOUNT_ID, newEmail("ctx-throwing"),
-          ENVIRONMENT);
+          ENVIRONMENT, new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     } catch (RuntimeException e) {
       failure = e;
     }
@@ -917,7 +919,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    */
   private String createRequest(String accountId, String email) {
     String requestId = newRequestId();
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     return requestId;
   }
 

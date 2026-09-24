@@ -10,12 +10,23 @@ public final class BillingOfferConfiguration {
   private BillingOfferConfiguration() {
   }
 
-  /** Retrieves the live configured offer. Provider/configuration failures are deliberately fatal. */
+  /**
+   * Retrieves the live configured offer. Provider/configuration failures are deliberately fatal.
+   * @return the current offer derived from the configured Stripe Price
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
   public static Offer current() throws IOException, JSONException {
     return current(new StripePriceService());
   }
 
-  /** Retrieves the live configured offer through the servlet's provider adapter. */
+  /**
+   * Retrieves the live configured offer through the servlet's provider adapter.
+   * @param stripePriceService adapter used to retrieve and validate the configured Stripe Price
+   * @return the current offer derived from the configured Stripe Price
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
   public static Offer current(StripePriceService stripePriceService)
       throws IOException, JSONException {
     StripePriceService.Price price = stripePriceService.retrieveConfiguredPrice();

@@ -17,6 +17,8 @@ import org.codehaus.jettison.json.JSONObject;
 
 /** Small provider adapter for Stripe Checkout Sessions. Pricing is always selected server-side. */
 public class HostedCheckoutService {
+  private static final String REQUEST_ID_FIELD = "requestId";
+  private static final String SUBSCRIPTION_FIELD = "subscription";
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
 
   /** A persisted purchase cannot be resumed when its original Stripe Price ID is missing. */
@@ -33,6 +35,7 @@ public class HostedCheckoutService {
    * @param accountId authenticated account id, correlated on the durable request row
    * @param accountEmail authenticated account email
    * @param clientName requested client name
+   * @param demoClientId immutable selected demo client id, or {@code null} when no demo is selected
    * @param origin public application origin for return URLs
    * @return checkout request id, URL, and mode
    * @throws IOException when the provider cannot be reached or rejects the request
@@ -40,7 +43,8 @@ public class HostedCheckoutService {
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String demoClientId, String origin) throws IOException, JSONException {
-    return createSession(accountId, accountEmail, clientName, origin, demoClientId, false, false);
+    return createSession(accountId, accountEmail, clientName, origin,
+        new SessionOptions(demoClientId, false, false, requestId -> { }));
   }
 
   /**
@@ -56,16 +60,28 @@ public class HostedCheckoutService {
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, Consumer<String> beforeProvider) throws IOException, JSONException {
-    return createSession(accountId, accountEmail, clientName, origin, null, false, false,
-        beforeProvider);
+    return createSession(accountId, accountEmail, clientName, origin,
+        new SessionOptions(null, false, false, beforeProvider));
   }
 
-  /** Creates a checkout bound to an immutable demo source and transfer selection. */
+  /**
+   * Creates a checkout bound to an immutable demo source and transfer selection.
+   * @param accountId authenticated account id, correlated on the durable request row
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param origin public application origin for return URLs
+   * @param demoClientId immutable selected demo client id, or {@code null} when no demo is selected
+   * @param transferProducts whether products should be copied from the demo
+   * @param transferContacts whether contacts should be copied from the demo
+   * @return checkout request id, URL, and mode
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, String demoClientId, boolean transferProducts, boolean transferContacts)
       throws IOException, JSONException {
-    return createSession(accountId, accountEmail, clientName, origin, demoClientId,
-        transferProducts, transferContacts, requestId -> { });
+    return createSession(accountId, accountEmail, clientName, origin,
+        new SessionOptions(demoClientId, transferProducts, transferContacts, requestId -> { }));
   }
 
   /**
@@ -73,9 +89,8 @@ public class HostedCheckoutService {
    * running {@code beforeProvider} with the request id once the row is committed and before the
    * provider is contacted.
    */
-  public JSONObject createSession(String accountId, String accountEmail, String clientName,
-      String origin, String demoClientId, boolean transferProducts, boolean transferContacts,
-      Consumer<String> beforeProvider) throws IOException, JSONException {
+  private JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin, SessionOptions options) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
     StripePriceService.Price price = new StripePriceService().retrieveConfiguredPrice();
     String requestId = UUID.randomUUID().toString();
@@ -85,16 +100,43 @@ public class HostedCheckoutService {
     // it is the evidence that someone tried to buy something, and it is always safe to expire
     // because the checkoutUrl only reaches the browser once this method returns.
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
-        demoClientId, true, transferProducts, transferContacts, price.getId());
-    beforeProvider.accept(requestId);
+        new CheckoutRequestStore.RequestOptions(options.demoClientId, true,
+            options.transferProducts, options.transferContacts, price.getId()));
+    options.beforeProvider.accept(requestId);
     return createProviderSession(requestId, accountEmail, clientName, origin, price,
         initialIdempotencyKey(requestId), null);
   }
 
-  /** Compatibility entry point for checkouts that do not select a demo environment. */
+  /**
+   * Compatibility entry point for checkouts that do not select a demo environment.
+   * @param accountId authenticated account id, correlated on the durable request row
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param origin public application origin for return URLs
+   * @return checkout request id, URL, and mode
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
-    return createSession(accountId, accountEmail, clientName, origin, null, false, false);
+    return createSession(accountId, accountEmail, clientName, origin,
+        new SessionOptions(null, false, false, requestId -> { }));
+  }
+
+  /** Internal options for the demo selection and pre-provider callback. */
+  private static final class SessionOptions {
+    private final String demoClientId;
+    private final boolean transferProducts;
+    private final boolean transferContacts;
+    private final Consumer<String> beforeProvider;
+
+    SessionOptions(String demoClientId, boolean transferProducts, boolean transferContacts,
+        Consumer<String> beforeProvider) {
+      this.demoClientId = demoClientId;
+      this.transferProducts = transferProducts;
+      this.transferContacts = transferContacts;
+      this.beforeProvider = beforeProvider;
+    }
   }
 
   /**
@@ -153,20 +195,20 @@ public class HostedCheckoutService {
       throws JSONException {
     String paymentStatus = session.optString("payment_status", "");
     JSONObject result = new JSONObject();
-    result.put("requestId", requestId);
+    result.put(REQUEST_ID_FIELD, requestId);
     result.put("providerStatus", "complete");
     result.put("paymentStatus", paymentStatus);
     result.put("paymentComplete", "paid".equals(paymentStatus)
         || "no_payment_required".equals(paymentStatus));
     result.put("stripeCustomer", session.optString("customer", ""));
-    result.put("stripeSubscription", session.optString("subscription", ""));
+    result.put("stripeSubscription", session.optString(SUBSCRIPTION_FIELD, ""));
     return result;
   }
 
   private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
       String origin, StripePriceService.Price price, String idempotencyKey,
       String expectedSessionId) throws IOException, JSONException {
-    String mode = "once".equals(price.getInterval()) ? "payment" : "subscription";
+    String mode = "once".equals(price.getInterval()) ? "payment" : SUBSCRIPTION_FIELD;
     String form = buildSessionForm(requestId, accountEmail, clientName, origin, price.getId(), mode);
     HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl()
         + "/v1/checkout/sessions").openConnection();
@@ -192,7 +234,7 @@ public class HostedCheckoutService {
     // this response is the only place it appears. Recorded before the URL is handed back.
     checkoutRequestStore.recordSessionCreated(requestId, expectedSessionId, providerSessionId);
     JSONObject result = new JSONObject();
-    result.put("requestId", requestId);
+    result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", providerUrl);
     result.put("mode", mode);
     result.put("priceId", price.getId());
@@ -219,7 +261,7 @@ public class HostedCheckoutService {
       throw new IllegalStateException("The checkout provider returned no session URL");
     }
     JSONObject result = new JSONObject();
-    result.put("requestId", requestId);
+    result.put(REQUEST_ID_FIELD, requestId);
     result.put("checkoutUrl", checkoutUrl);
     result.put("mode", mode);
     if (priceId != null) result.put("priceId", priceId);
@@ -284,7 +326,7 @@ public class HostedCheckoutService {
     // The sandbox product is not configured for Stripe Managed Payments. Keep the
     // Checkout contract explicit until Product selects an eligible tax code.
     add(form, "managed_payments[enabled]", "false");
-    if ("subscription".equals(mode)) {
+    if (SUBSCRIPTION_FIELD.equals(mode)) {
       add(form, "subscription_data[metadata][request_id]", requestId);
       // Skip the card when a promotion code brings the total to 0, so a 100%-off code does not make
       // the buyer enter card details for a charge that will never happen. Stripe evaluates this per

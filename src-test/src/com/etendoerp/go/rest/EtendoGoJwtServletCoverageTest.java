@@ -178,7 +178,7 @@ public class EtendoGoJwtServletCoverageTest {
         mockStatic(com.etendoerp.go.payment.DemoDataTransferFlag.class)) {
       transferFlag.when(com.etendoerp.go.payment.DemoDataTransferFlag::isEnabled)
           .thenReturn(false);
-      Object recorded = prepareOnboardingForPersistedSelection(store);
+      Object recorded = prepareOnboardingForPersistedSelection();
       Object recordedRequest = getField(recorded, "request");
       assertEquals("STORED-DEMO", getField(recordedRequest, "demoClientId"));
       assertFalse((boolean) getField(recordedRequest, "transferProducts"));
@@ -188,7 +188,7 @@ public class EtendoGoJwtServletCoverageTest {
       verify(profileTransfer).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
       verify(dataTransfer).transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false, true);
 
-      Object legacy = prepareOnboardingForPersistedSelection(store);
+      Object legacy = prepareOnboardingForPersistedSelection();
       Object legacyRequest = getField(legacy, "request");
       assertNull(getField(legacyRequest, "demoClientId"));
       assertFalse((boolean) getField(legacyRequest, "transferProducts"));
@@ -205,8 +205,7 @@ public class EtendoGoJwtServletCoverageTest {
     verify(store, times(1)).findTransferSelection("purchase-1", "account-1", "user@test.com");
   }
 
-  private Object prepareOnboardingForPersistedSelection(CheckoutRequestStore store)
-      throws Exception {
+  private Object prepareOnboardingForPersistedSelection() throws Exception {
     HttpServletRequest request = jsonRequest("/onboarding",
         "{\"clientName\":\"New Productive\",\"currency\":\"EUR\","
             + "\"paymentToken\":\"purchase-1\",\"demoClientId\":\"BODY-DEMO\","

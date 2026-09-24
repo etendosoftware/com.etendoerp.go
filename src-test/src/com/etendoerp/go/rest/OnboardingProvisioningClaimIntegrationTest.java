@@ -385,8 +385,8 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
     String accountId = accountIdFor(email);
     String requestId = MARKER + UUID.randomUUID().toString().replace("-", "");
     // A current purchase always records its environment source; this one has no demo source.
-    fixtureStore.recordRequested(requestId, accountId, email, clientName, null, true, false,
-        false);
+    fixtureStore.recordRequested(requestId, accountId, email, clientName,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, null));
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
     fixtureStore.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
     return requestId;

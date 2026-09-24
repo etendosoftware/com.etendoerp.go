@@ -439,7 +439,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         || routeAccountGet(path, request, response) || routeCheckoutGet(path, request, response)) {
       return;
     }
-    writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+    writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
   }
 
   private boolean routePrimaryGet(String path, HttpServletRequest request,
@@ -818,21 +818,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
             account.getEmail(), activePurchase.getClientName(), origin);
         if ("complete".equals(result.optString("providerStatus", ""))) {
-          boolean paymentReceived = result.optBoolean("paymentComplete", false);
-          if (paymentReceived) {
-            checkoutRequestStore.recordPaid(activePurchase.getRequest(),
-                result.optString("stripeCustomer", ""),
-                result.optString("stripeSubscription", ""));
-          }
-          CheckoutRequest currentPurchase = checkoutRequestStore.find(activePurchase.getRequest(),
-              account.getId(), account.getEmail());
-          JSONObject purchaseResult = buildBillingPurchaseJson(
-              currentPurchase == null ? activePurchase : currentPurchase);
-          purchaseResult.put("paymentReceived", paymentReceived);
-          purchaseResult.put("message", paymentReceived
-              ? "Payment received. We are finishing your environment setup."
-              : "Checkout completed. We are confirming your payment before setup continues.");
-          writeResponse(response, HttpServletResponse.SC_OK, purchaseResult);
+          writeCompletedBillingPurchase(response, account, activePurchase, result);
           return;
         }
         addDemoDataTransferSelectionBestEffort(result, activePurchase.getRequest());
@@ -853,6 +839,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     JSONObject result = buildBillingPurchaseJson(activePurchase);
     writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
+  }
+
+  private void writeCompletedBillingPurchase(HttpServletResponse response, Account account,
+      CheckoutRequest activePurchase, JSONObject providerResult) throws IOException, JSONException {
+    boolean paymentReceived = providerResult.optBoolean("paymentComplete", false);
+    if (paymentReceived) {
+      checkoutRequestStore.recordPaid(activePurchase.getRequest(),
+          providerResult.optString("stripeCustomer", ""),
+          providerResult.optString("stripeSubscription", ""));
+    }
+    CheckoutRequest currentPurchase = checkoutRequestStore.find(activePurchase.getRequest(),
+        account.getId(), account.getEmail());
+    JSONObject purchaseResult = buildBillingPurchaseJson(
+        currentPurchase == null ? activePurchase : currentPurchase);
+    purchaseResult.put("paymentReceived", paymentReceived);
+    purchaseResult.put(FIELD_MESSAGE, paymentReceived
+        ? "Payment received. We are finishing your environment setup."
+        : "Checkout completed. We are confirming your payment before setup continues.");
+    writeResponse(response, HttpServletResponse.SC_OK, purchaseResult);
   }
 
   private void handleCheckoutStatus(HttpServletRequest request, HttpServletResponse response)
@@ -2855,7 +2860,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeInvalidDemoSelection(response);
       return null;
     }
-    JSONObject transfer = body.optJSONObject("dataTransfer");
+    JSONObject transfer = body.optJSONObject(FIELD_DATA_TRANSFER);
     return new CheckoutSelection(demoClientId,
         demoClientId != null && transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false),
         demoClientId != null && transfer != null && transfer.optBoolean(FIELD_CONTACTS, false));
@@ -3249,12 +3254,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (preparation == null) {
       return;
     }
-    String accountId = preparation.accountId;
     String accountEmail = preparation.accountEmail;
     OnboardingRequestData onboardingRequest = preparation.request;
-    String currencyId = preparation.currencyId;
     boolean paidUpgrade = preparation.paidUpgrade;
-    Long provisioningClaim = preparation.provisioningClaim;
 
     // Tracked across the try/catch/finally below. Provisioning has many graceful exits that
     // `return` after writing a result line rather than throwing, so the catch block alone would
@@ -3436,34 +3438,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
-    if (paidUpgrade) {
-      boolean selectionRecorded = checkoutRequestStore.hasRecordedDemoSelection(
-          onboardingRequest.paymentToken, accountId, accountEmail);
-      if (selectionRecorded) {
-        String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
-            onboardingRequest.paymentToken, accountId, accountEmail);
-        Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
-        try {
-          onboardingRequest.demoClientId = resolvePaidDemoClientId(true,
-              persistedDemoClientId, currentFreeDemoClientIds);
-        } catch (IllegalArgumentException e) {
-          writeError(response, HttpServletResponse.SC_CONFLICT, "DEMO_SELECTION_REQUIRED",
-              e.getMessage(), e.getMessage());
-          return null;
-        }
-        CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
-            .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
-        onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
-            && transferSelection != null && transferSelection.isProducts();
-        onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
-            && transferSelection != null && transferSelection.isContacts();
-      } else {
-        // Legacy paid requests never saved a source or transfer intent. Resume them as a new
-        // productive environment without inferring a demo or copying/revoking any tenant.
-        onboardingRequest.demoClientId = null;
-        onboardingRequest.transferProducts = false;
-        onboardingRequest.transferContacts = false;
-      }
+    if (paidUpgrade && !restorePaidOnboardingSelection(onboardingRequest, accountId,
+        accountEmail, response)) {
+      return null;
     }
     Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountId,
         accountEmail, response);
@@ -3472,6 +3449,39 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     return new OnboardingPreparation(accountId, accountEmail, onboardingRequest, currencyId,
         paidUpgrade, provisioningClaim);
+  }
+
+  private boolean restorePaidOnboardingSelection(OnboardingRequestData onboardingRequest,
+      String accountId, String accountEmail, HttpServletResponse response) throws IOException {
+    boolean selectionRecorded = checkoutRequestStore.hasRecordedDemoSelection(
+        onboardingRequest.paymentToken, accountId, accountEmail);
+    if (!selectionRecorded) {
+      // Legacy paid requests never saved a source or transfer intent. Resume them as a new
+      // productive environment without inferring a demo or copying/revoking any tenant.
+      onboardingRequest.demoClientId = null;
+      onboardingRequest.transferProducts = false;
+      onboardingRequest.transferContacts = false;
+      return true;
+    }
+
+    String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
+        onboardingRequest.paymentToken, accountId, accountEmail);
+    Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
+    try {
+      onboardingRequest.demoClientId = resolvePaidDemoClientId(true, persistedDemoClientId,
+          currentFreeDemoClientIds);
+    } catch (IllegalArgumentException e) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, "DEMO_SELECTION_REQUIRED",
+          e.getMessage(), e.getMessage());
+      return false;
+    }
+    CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
+        .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
+    onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
+        && transferSelection != null && transferSelection.isProducts();
+    onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
+        && transferSelection != null && transferSelection.isContacts();
+    return true;
   }
 
   /** Resolves a paid purchase's fixed demo source, or null for a legacy purchase without one. */

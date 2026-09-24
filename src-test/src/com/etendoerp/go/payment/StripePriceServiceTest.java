@@ -149,7 +149,8 @@ class StripePriceServiceTest {
           stripe.checkoutForm.get());
       String requestId = result.getString("requestId");
       verify(store).recordRequested(eq(requestId), eq("account-1"), eq("owner@example.test"),
-          eq("Acme"), eq(null), eq(true), eq(false), eq(false), eq("price_retrieved"));
+          eq("Acme"), eq(new CheckoutRequestStore.RequestOptions(null, true, false, false,
+              "price_retrieved")));
       verify(store).recordSessionCreated(eq(requestId), eq(null), eq("cs_created"));
     }
   }
