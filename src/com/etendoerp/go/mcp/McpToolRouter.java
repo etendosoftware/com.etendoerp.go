@@ -56,7 +56,9 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -1187,12 +1189,29 @@ public class McpToolRouter {
    * so the agent sees exactly the same fields the UI would show.
    */
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
+    // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
+    // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
+    // spec as not CRUD-capable (resolveIncludedEntityOrExplain). Null for every other spec, which
+    // then takes the unchanged path below.
+    JSONObject declaredActionsSchema = reportSpecActionsSchema(specName, args);
+    if (declaredActionsSchema != null) {
+      return declaredActionsSchema;
+    }
     McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-5468: an entity whose handler declares named actions (bank-reconciliation) has no
+    // field payload of its own — its AD tab is only there for role gating, and dumping that tab's
+    // columns and buttons would advertise actions this entity does not serve. Its schema IS the
+    // action catalog, whatever view was asked for.
+    Map<String, NeoActionContract> declaredActions = declaredActionsOf(sfEntity);
+    if (!declaredActions.isEmpty()) {
+      return wrapAsTextContent(
+          McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions));
+    }
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     Entity dalEntity = ModelProvider.getInstance()
@@ -1561,6 +1580,69 @@ public class McpToolRouter {
     // a business partner given by name is already an id. See McpBillToInjector.
     McpBillToInjector.injectIfMissing(body, adTab, dalEntity, log);
     return null;
+  }
+
+  /**
+   * {@code neo_schema} for a report spec whose handler declares named actions (ETP-5468): the
+   * action catalog of the requested entity. When {@code entity} is omitted and exactly one included
+   * entity declares actions, that one is used; with none or several, {@code null} lets the generic
+   * path answer (its "Missing required argument: entity" stays the error).
+   *
+   * @return the catalog, or {@code null} when the spec is not such a spec / the entity declares none
+   */
+  private static JSONObject reportSpecActionsSchema(String specName, JSONObject args)
+      throws JSONException {
+    SFSpec spec;
+    try {
+      spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    } catch (Exception e) {
+      return null;
+    }
+    if (spec == null || !"R".equals(spec.getSpecType())) {
+      return null;
+    }
+    // Only a spec that actually declares actions is handled here. Every other report spec returns
+    // before any entity lookup, so its neo_schema answer stays exactly the generic path's (e.g.
+    // the 422 pointing at its generate_* tool) — BUG-4.
+    if (!NeoActionContract.resolve(spec).isPresent()) {
+      return null;
+    }
+    String requested = args != null
+        ? StringUtils.trimToNull(args.optString(McpConstants.PARAM_ENTITY, null)) : null;
+    SFEntity target = null;
+    Map<String, NeoActionContract> contracts = java.util.Collections.emptyMap();
+    if (requested != null) {
+      target = McpToolRouterSupport.findIncludedEntity(spec.getId(), requested);
+      contracts = target != null ? declaredActionsOf(target) : contracts;
+    } else {
+      int declaring = 0;
+      for (SFEntity candidate : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
+        Map<String, NeoActionContract> c = declaredActionsOf(candidate);
+        if (!c.isEmpty()) {
+          declaring++;
+          target = candidate;
+          contracts = c;
+        }
+      }
+      if (declaring != 1) {
+        return null;
+      }
+    }
+    if (target == null || contracts.isEmpty()) {
+      return null;
+    }
+    return wrapAsTextContent(
+        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts));
+  }
+
+  /**
+   * The named actions the entity's handler declares (ETP-5468), or an empty map. Looked up quietly:
+   * a CDI failure must not break {@code neo_schema} for an ordinary entity.
+   */
+  private static Map<String, NeoActionContract> declaredActionsOf(SFEntity sfEntity) {
+    NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(sfEntity.getJavaQualifier());
+    Map<String, NeoActionContract> contracts = handler != null ? handler.actionContracts() : null;
+    return contracts != null ? contracts : java.util.Collections.emptyMap();
   }
 
   // ── neo_action ────────────────────────────────────────────────────────

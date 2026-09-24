@@ -31,6 +31,7 @@ import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -48,6 +49,7 @@ import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
@@ -116,13 +118,21 @@ public class ToolRegistry {
     List<String> updatableWindowSpecs = new ArrayList<>();
     List<String> deletableWindowSpecs = new ArrayList<>();
 
+    // ETP-5468: report specs whose handler declares named actions (bank-reconciliation). They
+    // are not window specs — neo_list/neo_get cannot serve them — so they join ONLY the enums of
+    // the two tools that can: neo_schema (to read the action contracts) and neo_action.
+    List<String> actionReportSpecs = new ArrayList<>();
+
     for (SFSpec spec : specs) {
       processSpec(spec, accessibleWindowSpecs, creatableWindowSpecs, updatableWindowSpecs,
           deletableWindowSpecs, tools, permissions);
+      if (isActionReportSpec(spec)) {
+        actionReportSpecs.add(spec.getName());
+      }
     }
 
     registerCrudTools(tools, accessibleWindowSpecs, creatableWindowSpecs,
-        updatableWindowSpecs, deletableWindowSpecs, permissions);
+        updatableWindowSpecs, deletableWindowSpecs, permissions, actionReportSpecs);
 
     // ETP-5184: the image-upload tools are built-in and type-driven, not spec-driven — they create
     // an AD_Image row and nothing else, and the same three tools serve every image-typed field in
@@ -240,7 +250,8 @@ public class ToolRegistry {
    */
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
       List<String> creatableWindowSpecs, List<String> updatableWindowSpecs,
-      List<String> deletableWindowSpecs, ScopePermissions permissions) {
+      List<String> deletableWindowSpecs, ScopePermissions permissions,
+      List<String> actionReportSpecs) {
     // Register the amortization plan tool independently of window specs availability:
     // it is a built-in endpoint that does not require a window spec to be accessible.
     if (permissions.canProcess) {
@@ -255,7 +266,7 @@ public class ToolRegistry {
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
       tools.add(buildDefaultsTool(accessibleWindowSpecs));
-      tools.add(buildSchemaTool(accessibleWindowSpecs));
+      tools.add(buildSchemaTool(withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
     if (permissions.canWrite) {
       if (!creatableWindowSpecs.isEmpty()) {
@@ -273,8 +284,37 @@ public class ToolRegistry {
       if (McpConstants.BATCH_TOOL_ENABLED) {
         tools.add(buildBatchTool());
       }
-      tools.add(buildActionTool(accessibleWindowSpecs));
+      tools.add(buildActionTool(withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
+  }
+
+  /**
+   * Whether a report spec serves named actions through {@code neo_action} (ETP-5468): its handler
+   * declares {@code NeoHandler#actionContracts()} and the role passes the same report-spec gate the
+   * UI does. Independent of {@link NeoReportCallability}: such a spec is not a report generator
+   * (IMP-19 keeps its {@code generate_*} tool retired) but it does have an action surface.
+   */
+  private static boolean isActionReportSpec(SFSpec spec) {
+    try {
+      return "R".equals(spec.getSpecType())
+          && NeoAccessUtils.hasReportSpecAccess(spec, "GET")
+          && NeoActionContract.resolve(spec).isPresent();
+    } catch (Exception e) {
+      log.warn("Could not probe the action contracts of spec '{}': {}", spec.getName(),
+          e.getMessage());
+      return false;
+    }
+  }
+
+  private static List<String> withActionSpecs(List<String> windowSpecs,
+      List<String> actionReportSpecs) {
+    if (actionReportSpecs == null || actionReportSpecs.isEmpty()) {
+      return windowSpecs;
+    }
+    List<String> merged = new ArrayList<>(windowSpecs);
+    merged.addAll(actionReportSpecs);
+    Collections.sort(merged);
+    return merged;
   }
 
   // ── Amortization plan tool ─────────────────────────────────────────────
@@ -1095,7 +1135,10 @@ public class ToolRegistry {
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
             + "rules, and neo_get the record first if unsure. "
-            + "Returns {processResult: success|error|warning, processMessage: ...}.",
+            + "Returns {processResult: success|error|warning, processMessage: ...}. "
+            + "Handler-served actions are listed by neo_schema view:\"actions\" with a JSON "
+            + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "
+            + "the handler's own JSON.",
         buildObjectSchema(props,
             List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
   }

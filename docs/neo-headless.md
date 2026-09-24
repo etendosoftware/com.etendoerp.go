@@ -1538,6 +1538,16 @@ Behavior details (`McpActionsView`):
   the catalog still offered as callable while carrying no `actionValues`, no `actionParameter` and no
   `agentPrompt`. Curation cannot express this: `Processing` is curated `system`, which states that
   the server fills a payload value and says nothing about a button.
+- **Display logic is NOT part of invokability — not even a constant `'false'` (ETP-5468).** Only
+  `AD_Field.isDisplayed = 'N'` counts as hidden. A button AD hides through its display logic stays
+  invokable unless it is curated `discarded`, and `neo_action` / `POST …/action/<button>` execute it
+  (`NeoButtonActionHelper.findButtonColumn` gates only on `ETGO_SF_FIELD.ISINCLUDED`). That is how
+  Core APRM's "Add Transaction" (`EM_Aprm_Addtransactionpd`, display logic `false`) on
+  `financial-account/account` left statement lines matched into an unconfirmed draft
+  reconciliation. The fix was curation (the two `false`-display-logic APRM buttons, `…Addtransactionpd`
+  and `…Findtransactionspd`, are `discarded` there, which also makes the REST route answer 404; the
+  visible APRM buttons were left untouched) — so **a Classic/OBUIAPP button that must never run
+  outside its own popup has to be curated `discarded`**, not trusted to its display logic.
 - **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
   On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
 - A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL
@@ -1554,6 +1564,69 @@ Behavior details (`McpActionsView`):
 
 **When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a
 record (complete, cancel, post, …), not the full editable/read-only column list.
+
+##### 4.12.1.1 Handler-declared actions — `NeoHandler#actionContracts()` (ETP-5468)
+
+Some actions have no AD button column behind them: they are served by a `NeoHandler` on a spec
+whose routes are its own. The first one is **`bank-reconciliation`** (`ReconciliationHandler`), a
+report spec (`SPEC_TYPE=R`) the SPA drives through `?action=` query routes. Its `generate_*` tool
+stays retired (IMP-19: it is not a report generator); its actions are published instead.
+
+- **Declaration.** `NeoHandler#actionContracts()` returns `Map<String, NeoActionContract>` (empty by
+  default). `NeoActionContract` (`schemaforge/util`) carries the name, a description, whether it
+  mutates, and typed parameters (`string`, `boolean`, `date` = `yyyy-MM-dd`, `array` of
+  `string`/`object`, closed `enum`s). A non-empty declaration also makes the default
+  `servesActions()` answer `true`; handlers that declare nothing keep answering `false`.
+- **Catalog.** `ToolRegistry` adds such R specs (role passing `hasReportSpecAccess(spec,"GET")`) to
+  the **`neo_schema` and `neo_action` enums only** — never to `neo_list`/`neo_get`, which cannot
+  serve them. `neo_discover` reports such a spec with `isReport:true`, `callable:false` (it is not a
+  report generator, IMP-19), `status:"actions_only"` (NOT `not_configured_for_report_generation`),
+  `message:"Not a report generator; '<spec>' serves named actions through neo_action (entity
+  <entity>)."`, plus `actionEntity`, `actions[]` and `actionsHint`. Three-way: a report generator
+  gets `callable:true` + `reportTool`; a spec with neither keeps `not_configured_for_report_generation`.
+- **Scope.** `neo_action` is registered only for write-capable tokens (`neo:write` / `neo:*`), so a
+  read-only token cannot call the read helpers (`pendingLines`, `candidates`, `autoMatch`) either.
+- **Schema.** For an entity whose handler declares actions, `neo_schema` returns the action catalog
+  whatever `view` is asked (`McpActionsView.buildDeclaredResponse`): each entry is
+  `{action, description, mutating, invokeVia:"neo_action", idDescription?, parameters:<JSON Schema>}`
+  — `idDescription` (from `NeoActionContract#withIdDescription`) says what `neo_action`'s `id` is,
+  so no window-specific wording lives in the generic MCP classes. The entity's
+  AD tab exists only for role gating; dumping its columns/buttons would advertise actions it does
+  not serve.
+- **Execution.** `neo_action(spec, entity, id, action, parameters)` reaches the handler's pre-hook
+  with `NeoEndpointType.ACTION`. `ReconciliationHandler.handle` sends only that endpoint type to
+  `ReconciliationAgentActions.dispatch`; the SPA's report-spec requests carry no endpoint type and
+  keep their route table untouched. The dispatcher validates the call against the contract
+  (`NeoActionContract.validate`) **before anything runs**, checks the same report-spec role gate the
+  SPA passes (`POST` for mutating actions, since `neo_action` itself is authorized as a read), maps
+  `id` → `financialAccountId` / `accountId`, and re-enters the SAME `ReconciliationHandlerSupport`
+  wrapper the SPA route uses — identical business validations, `runPostAction` rollback and error
+  mapping.
+- **Refusals (422, IMP-5 flat envelope after `toMcpHandlerError`).** Unknown action →
+  `availableActions`; undeclared key → `unknownParameters` + `acceptedParameters`; absent required
+  (or blank string / empty array) → `missingParameters`; wrong shape → `field` + `expectedType`;
+  value outside an enum → `field` + `allowedValues`; blank `id` → 422. Business refusals keep the
+  handler's own literals (and codes such as `GL_ITEM_REQUIRED`).
+
+| Action | Kind | Parameters (required in **bold**) | SPA route reused |
+|---|---|---|---|
+| `pendingLines` | read | `dateFrom`, `dateTo`, `q` | `GET ?action=pendingLines` |
+| `candidates` | read | **`statementLineId`**, `kind` (transactions\|invoices), `docType` (receipts\|payments), `dateFrom`, `dateTo` | `GET ?action=candidates` |
+| `autoMatch` | read | — | `GET ?action=autoMatch` |
+| `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `glItemId`, `description` | `POST ?action=reconcileGroup` |
+| `reconcileDifference` | write | **`statementLineId`**, `glItemId`, `description` | `POST ?action=reconcileDifference` |
+| `applySuggestions` | write | **`groups[{statementLineId, operationIds[], createPayment?}]`** | `POST ?action=applySuggestions` |
+| `undoReconciliation` | write | **`statementLineId`** | `POST ?action=reactivate` |
+| `removeOperation` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=removeOperation` |
+| `reactivateSelected` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=reactivateSelected` |
+
+Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond tolerance leaves
+a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
+because the account's difference GL item is the default — declaring it required would refuse calls
+the UI makes (the IMP-19 §4 reasoning); without either the handler answers `GL_ITEM_REQUIRED`.
+Multi-currency needs no parameter: conversion uses the same exchange rate as the UI, and
+`candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
+`applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
@@ -3265,7 +3338,8 @@ NEO Headless enforces security at multiple levels:
    entity's `Java_Qualifier` handler and is **fail-open**: a missing qualifier aside, an
    unregistered handler or a CDI failure keeps the spec visible. **Any handler serving ACTION
    requests should override `servesActions()`** — it is only consulted for tab-less specs today,
-   but the declaration keeps the catalog honest if the spec ever loses its tabs.
+   but the declaration keeps the catalog honest if the spec ever loses its tabs. A handler that
+   declares `actionContracts()` (§4.12.1.1, ETP-5468) gets `servesActions() == true` by default.
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 

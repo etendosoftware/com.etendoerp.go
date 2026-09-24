@@ -48,6 +48,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
 import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
@@ -404,8 +405,23 @@ public class ReconciliationHandler implements NeoHandler {
           + " HAVING SUM(psd.amount) > 0"
           + " ORDER BY inv.dateinvoiced ASC, inv.documentno ASC";
 
+  /**
+   * The actions an agent can run through {@code neo_action} (ETP-5468) — see
+   * {@link ReconciliationAgentActions}. Declaring them also makes {@link #servesActions()} true.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return ReconciliationAgentActions.CONTRACTS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    // ETP-5468: purely additive. Only neo_action produces an ACTION context for this spec; the
+    // SPA's ?action= calls arrive as report-spec requests with no endpoint type and never enter
+    // this branch, so their routing below is untouched.
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      return ReconciliationAgentActions.dispatch(this, context);
+    }
     Map<String, String> qp = context.getQueryParams();
     String action = qp != null ? qp.get(PARAM_ACTION) : null;
     // "<method> <action>" → its route. A single map lookup instead of one branch per action keeps
@@ -944,10 +960,15 @@ public class ReconciliationHandler implements NeoHandler {
    * matching. Lets a whole automatch batch ({@link #applySuggestions}) share ONE
    * {@code FIN_Reconciliation} header across every accepted group, instead of a document per
    * statement line.
+   *
+   * <p>ETP-5468: only an EMPTY draft is adopted. A draft that already holds transactions was built
+   * outside this request (Classic buttons, the pre-ETP-4951 "Reactivar") and nobody confirmed its
+   * matches; adopting it would process them along with the batch. A fresh draft is used instead —
+   * see {@link ReconciliationDraftGuard}.</p>
    */
   FIN_Reconciliation getOrCreateDraftReconciliation(FIN_FinancialAccount account) {
     FIN_Reconciliation draft = TransactionsDao.getLastReconciliation(account, "N");
-    return draft != null ? draft : addNewDraftReconciliation(account);
+    return ReconciliationDraftGuard.isReusable(draft) ? draft : addNewDraftReconciliation(account);
   }
 
   /**
@@ -1367,7 +1388,9 @@ public class ReconciliationHandler implements NeoHandler {
    * next removal keyed off. Instead:
    * <ol>
    *   <li>process the account's draft reconciliations first (Etendo only lets you reactivate the
-   *       latest completed one — ordering pre-step);</li>
+   *       latest completed one — ordering pre-step). ETP-5468: refused with a 400 when a draft other
+   *       than {@code rec} already holds transactions — see
+   *       {@link ReconciliationDraftGuard#requireNoForeignDraft};</li>
    *   <li>{@link ReconciliationRemovalUtil#reactivateAndRemoveReconciliation(FIN_Reconciliation)} —
    *       one {@code processReconciliation("R")} pass returns EVERY transaction to its
    *       pre-reconciliation "not cleared" state by direction (inflow → {@code RDNC}, outflow →
@@ -1388,6 +1411,10 @@ public class ReconciliationHandler implements NeoHandler {
   void undoReconciliation(FIN_FinancialAccount account, FIN_Reconciliation rec,
       List<FIN_FinaccTransaction> matched) throws Exception {
     List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
+    // ETP-5468: processing the drafts is only safe for empty ones (and for `rec` itself, which is
+    // removed right after). A draft holding someone else's unconfirmed matches is refused, never
+    // silently finalized. Throws before any write.
+    ReconciliationDraftGuard.requireNoForeignDraft(drafts, rec);
     ReconciliationRemovalUtil.processAllReconciliationInDraft(drafts);
     ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(rec);
     for (FIN_FinaccTransaction t : matched) {

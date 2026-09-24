@@ -19,9 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
@@ -135,10 +137,33 @@ public interface NeoHandler {
    * {@code NeoEndpointType.ACTION}</b> — it is only consulted for tab-less specs today, but
    * declaring it keeps the catalog honest if the spec ever becomes tab-less.</p>
    *
+   * <p>ETP-5468: a handler that declares {@link #actionContracts()} serves actions by definition,
+   * so the default answers {@code true} for it. For every other handler the default is unchanged
+   * ({@code false}), because {@code actionContracts()} is empty unless overridden.</p>
+   *
    * @return {@code true} when this handler answers ACTION sub-endpoint requests
    */
   default boolean servesActions() {
-    return false;
+    return !actionContracts().isEmpty();
+  }
+
+  /**
+   * Declares the named actions this handler serves through {@code neo_action} / the ACTION
+   * sub-endpoint, with the parameters each accepts (ETP-5468).
+   *
+   * <p>For handler-served actions that have no AD button column behind them — the configuration
+   * cannot describe them, so the handler is the only authority (same argument as
+   * {@link #servesActions()} and {@link #reportParameters()}). A non-empty declaration makes the MCP
+   * layer publish the actions in {@code neo_schema(view:"actions")} and {@code neo_discover}, list
+   * the spec in the {@code neo_action}/{@code neo_schema} enums, and lets the handler judge each call
+   * with {@link NeoActionContract#validate} before running it.</p>
+   *
+   * <p>Returns an empty map by default: the handler declares no named actions.</p>
+   *
+   * @return the declared actions by name, in the order they should be presented
+   */
+  default Map<String, NeoActionContract> actionContracts() {
+    return Collections.emptyMap();
   }
 
   /**
