@@ -17,9 +17,14 @@
 package com.etendoerp.go.session;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+import java.time.Duration;
+import java.time.Instant;
 
 import org.junit.After;
 import org.junit.Test;
@@ -57,12 +62,7 @@ public class JdbcGoSessionStoreIntegrationTest extends OBBaseTest {
     setTestUserContext();
     OBContext.setAdminMode(true);
     try {
-      Account account = (Account) OBDal.getInstance().createCriteria(Account.class)
-          .setMaxResults(1)
-          .uniqueResult();
-      assertNotNull("Test fixture must contain at least one ETGO_ACCOUNT to own the session",
-          account);
-      String accountId = account.getId();
+      String accountId = existingAccountId();
 
       // --- create: row persisted, only the hash stored, resolvable by the raw token ---
       IssuedGoSession issued = service.create(accountId, "password", "IT-UA", "ip-hash");
@@ -99,5 +99,90 @@ public class JdbcGoSessionStoreIntegrationTest extends OBBaseTest {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5465 — the renewal UPDATE against the real table: an active session near its idle expiry
+   * gets {@code expires_at} slid forward and keeps resolving.
+   */
+  @Test
+  public void renewIdleExpirySlidesExpiresAtInTheRealTable() {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      IssuedGoSession issued = service.create(existingAccountId(), "password", null, null);
+      GoSessionRecord nearExpiry = persistedWithIdleExpiry(issued, Instant.now().plusSeconds(60));
+
+      service.renewIdleExpiry(nearExpiry);
+
+      GoSessionRecord reloaded = reload(issued);
+      assertTrue("expires_at must be slid forward",
+          reloaded.getExpiresAt().isAfter(Instant.now().plus(Duration.ofMinutes(20))));
+      assertNotNull(service.resolve(issued.getSessionToken()));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** ETP-5465 — the compare-and-set: a stale observed expiry must not overwrite a newer one. */
+  @Test
+  public void touchExpiresAtRejectsAStaleExpectedExpiry() {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      IssuedGoSession issued = service.create(existingAccountId(), "password", null, null);
+      GoSessionRecord persisted = reload(issued);
+      Instant stale = persisted.getExpiresAt().minusSeconds(5);
+
+      assertFalse(store.touchExpiresAt(persisted.getId(), stale,
+          Instant.now().plus(Duration.ofMinutes(30))));
+      assertEquals(persisted.getExpiresAt(), reload(issued).getExpiresAt());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** ETP-5465 — revoked sessions and sessions past their absolute cap are never renewed. */
+  @Test
+  public void touchExpiresAtIgnoresRevokedAndAbsolutelyExpiredSessions() {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      String accountId = existingAccountId();
+      Instant next = Instant.now().plus(Duration.ofMinutes(30));
+
+      IssuedGoSession revoked = service.create(accountId, "password", null, null);
+      service.revoke(revoked.getRecord());
+      GoSessionRecord revokedRow = reload(revoked);
+      assertFalse(store.touchExpiresAt(revokedRow.getId(), revokedRow.getExpiresAt(), next));
+
+      IssuedGoSession capped = service.create(accountId, "password", null, null);
+      GoSessionRecord cappedRow = reload(capped);
+      cappedRow.setAbsoluteExpiresAt(Instant.now().minusSeconds(1));
+      store.update(cappedRow);
+      assertFalse(store.touchExpiresAt(cappedRow.getId(), reload(capped).getExpiresAt(), next));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String existingAccountId() {
+    Account account = (Account) OBDal.getInstance().createCriteria(Account.class)
+        .setMaxResults(1)
+        .uniqueResult();
+    assertNotNull("Test fixture must contain at least one ETGO_ACCOUNT to own the session",
+        account);
+    return account.getId();
+  }
+
+  /** Re-reads the row so comparisons use the column's real precision, not the in-memory value. */
+  private GoSessionRecord reload(IssuedGoSession issued) {
+    return store.findByTokenHash(OAuth2Utils.hashToken(issued.getSessionToken()));
+  }
+
+  private GoSessionRecord persistedWithIdleExpiry(IssuedGoSession issued, Instant expiresAt) {
+    GoSessionRecord persisted = reload(issued);
+    assertTrue(store.touchExpiresAt(persisted.getId(), persisted.getExpiresAt(), expiresAt));
+    return reload(issued);
   }
 }

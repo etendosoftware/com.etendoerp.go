@@ -40,6 +40,7 @@ public class GoSessionService {
 
   private static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofMinutes(30);
   private static final Duration DEFAULT_ABSOLUTE_TIMEOUT = Duration.ofHours(12);
+  private static final int IDLE_RENEWAL_THRESHOLD_DIVISOR = 2;
 
   private final GoSessionStore store;
   private final Duration idleTimeout;
@@ -100,7 +101,9 @@ public class GoSessionService {
   }
 
   /**
-   * Resolve the active session behind a plaintext session token.
+   * Resolve the active session behind a plaintext session token. Read-only: sliding the idle
+   * expiry is a separate step ({@link #renewIdleExpiry(GoSessionRecord)}) so the caller can defer
+   * it until the request is fully authorized.
    *
    * @param rawSessionToken the plaintext token from the cookie
    * @return the active, non-revoked, non-expired sessionRecord, or {@code null}
@@ -114,6 +117,49 @@ public class GoSessionService {
       return null;
     }
     return sessionRecord;
+  }
+
+  /**
+   * ETP-5465 — slides the idle expiry of an active session so that activity keeps it alive, while
+   * never extending it past its absolute cap. Without this the idle timeout behaved as a hard cap:
+   * {@code expires_at} was only set at create/rotate, so an active user was cut off exactly
+   * {@code idleTimeout} after entering the environment.
+   *
+   * <p>Writes are deferred until half of the idle window remains, so an authenticated request does
+   * not update the row every time. As a consequence, a user who stops making requests is cut off
+   * between half and the full idle window after their last request. The compare-and-set in the
+   * store keeps concurrent requests that observed the same expiry from overwriting each other.</p>
+   *
+   * <p>Only call this for a request that is fully authorized (e.g. after the CSRF check): a
+   * rejected request must not extend the session.</p>
+   *
+   * @param sessionRecord a record returned by {@link #resolve(String)}; {@code null} or a record
+   *     missing its expiry values is ignored
+   */
+  public void renewIdleExpiry(GoSessionRecord sessionRecord) {
+    if (sessionRecord == null || sessionRecord.getExpiresAt() == null
+        || sessionRecord.getAbsoluteExpiresAt() == null) {
+      return;
+    }
+    Instant now = Instant.now();
+    Instant currentExpiresAt = sessionRecord.getExpiresAt();
+    Instant absoluteExpiresAt = sessionRecord.getAbsoluteExpiresAt();
+    Duration remainingIdleTime = Duration.between(now, currentExpiresAt);
+    if (remainingIdleTime.compareTo(idleTimeout.dividedBy(IDLE_RENEWAL_THRESHOLD_DIVISOR)) > 0) {
+      return;
+    }
+
+    Instant nextExpiresAt = now.plus(idleTimeout);
+    if (nextExpiresAt.isAfter(absoluteExpiresAt)) {
+      nextExpiresAt = absoluteExpiresAt;
+    }
+    if (!nextExpiresAt.isAfter(currentExpiresAt)) {
+      return;
+    }
+
+    if (store.touchExpiresAt(sessionRecord.getId(), currentExpiresAt, nextExpiresAt)) {
+      sessionRecord.setExpiresAt(nextExpiresAt);
+    }
   }
 
   /**
