@@ -22,12 +22,38 @@ public class PlanNotAvailableException extends RuntimeException {
 
   private static final long serialVersionUID = 1L;
 
+  /** Longest prefix of a rejected key kept in the message; real plan keys are far shorter. */
+  static final int MAX_LOGGED_KEY_LENGTH = 64;
+
   /**
    * Creates a rejection naming the key that was asked for.
+   *
+   * <p>The key is untrusted browser input and the message is logged, so it goes through
+   * {@link #loggable(String)} first: a key carrying line breaks cannot forge log lines, and an
+   * oversized one cannot flood the log.
    *
    * @param planKey the plan key the request carried; only ever logged, never echoed to the caller
    */
   public PlanNotAvailableException(String planKey) {
-    super("No active plan is available under the key '" + planKey + "'");
+    super("No active plan is available under the key '" + loggable(planKey) + "'");
+  }
+
+  /**
+   * Makes an untrusted plan key safe to log: every control or line/paragraph separator character
+   * becomes {@code ?}, and anything past {@value #MAX_LOGGED_KEY_LENGTH} characters is cut and
+   * replaced by the original length.
+   *
+   * @param planKey the raw key, may be null
+   * @return a single-line, bounded rendering of the key
+   */
+  static String loggable(String planKey) {
+    if (planKey == null) {
+      return "<none>";
+    }
+    String singleLine = planKey.replaceAll("[\\p{Cntrl}\\p{Zl}\\p{Zp}]", "?");
+    if (singleLine.length() <= MAX_LOGGED_KEY_LENGTH) {
+      return singleLine;
+    }
+    return singleLine.substring(0, MAX_LOGGED_KEY_LENGTH) + "...(" + planKey.length() + " chars)";
   }
 }

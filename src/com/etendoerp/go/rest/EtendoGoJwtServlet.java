@@ -896,7 +896,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (PlanNotAvailableException e) {
       // Logged with the key, answered without it: the caller learns that this key is not usable
-      // and nothing about the rest of the plan catalog.
+      // and nothing about the rest of the plan catalog. The message carries the key already
+      // neutralised for logging (single line, bounded) — see PlanNotAvailableException.
       log.warn("Rejected a checkout for an unavailable plan: {}", e.getMessage());
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
           PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
