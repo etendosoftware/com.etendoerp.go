@@ -688,7 +688,8 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   private String createRequest(String email) {
     String accountId = createAccount(email);
     String requestId = REQUEST_MARKER + UUID.randomUUID().toString().replace("-", "");
-    fixtureStore.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    fixtureStore.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
     return requestId;
   }

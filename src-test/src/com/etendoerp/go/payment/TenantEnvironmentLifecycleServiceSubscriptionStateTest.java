@@ -2,8 +2,10 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -11,12 +13,15 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Test;
@@ -135,6 +140,103 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
     verify(dalInstance).save(created);
     verify(dalInstance, never()).commitAndClose();
     verify(dalInstance, never()).flush();
+  }
+
+  @Test
+  public void demoAssociationUsesCrossClientAdminModeAndRestoresItAfterBothWrites() {
+    AtomicBoolean adminMode = new AtomicBoolean(false);
+    AtomicBoolean writesWereAdmin = new AtomicBoolean(true);
+    OBDal dalInstance = associationDal(adminMode, writesWereAdmin, false);
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> provider = mockStatic(OBProvider.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
+      dal.when(OBDal::getInstance).thenReturn(dalInstance);
+      OBProvider providerInstance = mock(OBProvider.class);
+      when(providerInstance.get(Preference.class)).thenAnswer(invocation -> mock(Preference.class));
+      provider.when(OBProvider::getInstance).thenReturn(providerInstance);
+      context.when(org.openbravo.dal.core.OBContext::setAdminMode)
+          .thenAnswer(invocation -> { adminMode.set(true); return null; });
+      context.when(org.openbravo.dal.core.OBContext::restorePreviousMode)
+          .thenAnswer(invocation -> { adminMode.set(false); return null; });
+
+      assertTrue(service.associateDemoWithProductive("demo-client", "paid-client"));
+
+      assertTrue("Both ADPreference saves span different clients and require admin mode",
+          writesWereAdmin.get());
+      assertFalse("The prior non-admin mode is restored after successful association",
+          adminMode.get());
+      context.verify(org.openbravo.dal.core.OBContext::setAdminMode);
+      context.verify(() -> org.openbravo.dal.core.OBContext.setAdminMode(true), never());
+      context.verify(org.openbravo.dal.core.OBContext::restorePreviousMode);
+      org.mockito.Mockito.verify(dalInstance, times(2)).save(any(Preference.class));
+    }
+  }
+
+  @Test
+  public void demoAssociationRestoresPriorModeWhenSecondPreferenceSaveFails() {
+    AtomicBoolean adminMode = new AtomicBoolean(true);
+    AtomicBoolean previousAdminMode = new AtomicBoolean(true);
+    AtomicBoolean writesWereAdmin = new AtomicBoolean(true);
+    OBDal dalInstance = associationDal(adminMode, writesWereAdmin, true);
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> provider = mockStatic(OBProvider.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
+      dal.when(OBDal::getInstance).thenReturn(dalInstance);
+      OBProvider providerInstance = mock(OBProvider.class);
+      when(providerInstance.get(Preference.class)).thenAnswer(invocation -> mock(Preference.class));
+      provider.when(OBProvider::getInstance).thenReturn(providerInstance);
+      context.when(org.openbravo.dal.core.OBContext::setAdminMode)
+          .thenAnswer(invocation -> {
+            previousAdminMode.set(adminMode.get());
+            adminMode.set(true);
+            return null;
+          });
+      context.when(org.openbravo.dal.core.OBContext::restorePreviousMode)
+          .thenAnswer(invocation -> { adminMode.set(previousAdminMode.get()); return null; });
+
+      assertFalse("A failed preference write is reported without leaking admin mode",
+          service.associateDemoWithProductive("demo-client", "paid-client"));
+
+      assertTrue("Writes are attempted only after entering cross-client admin mode",
+          writesWereAdmin.get());
+      assertTrue("The prior admin mode is restored after the write exception", adminMode.get());
+      context.verify(org.openbravo.dal.core.OBContext::setAdminMode);
+      context.verify(() -> org.openbravo.dal.core.OBContext.setAdminMode(true), never());
+      context.verify(org.openbravo.dal.core.OBContext::restorePreviousMode);
+      org.mockito.Mockito.verify(dalInstance, times(2)).save(any(Preference.class));
+    }
+  }
+
+  /** Builds the DAL used by association and records the context active at each preference save. */
+  private static OBDal associationDal(AtomicBoolean adminMode, AtomicBoolean writesWereAdmin,
+      boolean failOnSecondWrite) {
+    OBDal dalInstance = mock(OBDal.class);
+    Client demo = mock(Client.class);
+    Client productive = mock(Client.class);
+    when(demo.getId()).thenReturn("demo-client");
+    when(productive.getId()).thenReturn("paid-client");
+    when(dalInstance.get(Client.class, "demo-client")).thenReturn(demo);
+    when(dalInstance.get(Client.class, "paid-client")).thenReturn(productive);
+    OBQuery<Preference> query = mock(OBQuery.class);
+    when(dalInstance.createQuery(eq(Preference.class), anyString())).thenReturn(query);
+    doAnswer(invocation -> query).when(query).setNamedParameter(anyString(), any());
+    doAnswer(invocation -> query).when(query).setFilterOnReadableClients(false);
+    doAnswer(invocation -> query).when(query).setFilterOnReadableOrganization(false);
+    doAnswer(invocation -> query).when(query).setMaxResult(1);
+    when(query.uniqueResult()).thenReturn(null);
+    AtomicInteger writes = new AtomicInteger();
+    doAnswer(invocation -> {
+      writesWereAdmin.compareAndSet(true, adminMode.get());
+      if (failOnSecondWrite && writes.incrementAndGet() == 2) {
+        throw new IllegalStateException("simulated preference write failure");
+      }
+      return null;
+    }).when(dalInstance).save(any(Preference.class));
+    return dalInstance;
   }
 
   /**
