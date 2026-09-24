@@ -368,15 +368,30 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
 
-Recurring. `ETGO_SF_FIELD` rows referencing a deleted `AD_COLUMN` fail `etgo_sf_fld_col_fk`. Fix:
-delete the `<AD_COLUMN_ID>` **line**, not the record — the column is `required="false"` and the
-field stays identified by its `JAVA_QUALIFIER`.
+Recurring. `update.database` fails `etgo_sf_fld_col_fk` on an `ETGO_SF_FIELD` row whose
+`AD_COLUMN_ID` is not in `AD_COLUMN`. **The usual cause is an unpulled module, not bad data**: the
+column belongs to another module whose local checkout predates it, so `update.database` has simply
+not created it yet. Pull first, then re-check:
 
-**`check-etgo-xml.sh` does not catch this** — it reports "Sin huérfanos" while the dangling
-reference is present, because its referential-integrity pass does not validate
-`ETGO_SF_FIELD.AD_COLUMN_ID` against core's `AD_COLUMN`. That silence is why it keeps resurfacing;
-only a failed `update.database` finds it. **Worth adding to that script.** Sweep for all of them at
-once rather than one per failed build — the error names only the first.
+```bash
+cd modules && grep -rl "<THE_ID>" .        # nothing? pull every module and grep again
+for d in */; do [ -d "$d/.git" ] && (cd "$d" && git pull --ff-only); done
+```
+
+**Do not delete the `<AD_COLUMN_ID>` line.** That advice used to stand here and was reversed on
+2026-09-21: during ETP-5046 it removed a valid reference (`Invoice_Date` on
+`etvfac_inv_sent_status_v`, added to `com.etendoerp.verifactu` by ETP-5229 — the local checkout was
+simply behind), which made `update.database` green while silently desynchronising this repo from
+schema_forge's pipeline (`make regen-check` DRIFT, `offline-regen-check.yml` failing). It was
+reverted in `301de9b5`. Only if the id exists in **no** module after pulling is it genuinely
+dangling; then removing the line (never the record) is defensible, since the column is
+`required="false"` and the field stays identified by its `JAVA_QUALIFIER`.
+
+**`check-etgo-xml.sh` does not catch this** — its referential-integrity pass does not validate
+`ETGO_SF_FIELD.AD_COLUMN_ID` against core's `AD_COLUMN`, so only a failed `update.database` finds
+it (for the unpulled-module case that silence is actually correct: the reference is valid). If a
+check is ever added, it must resolve ids against every module's sourcedata, not against the local
+database. When sweeping, sweep for all of them at once — the error names only the first.
 
 ### 🟡 4.3 Behaviour change: `revertTestModeForProductiveTenantBestEffort` fires more often
 
@@ -488,6 +503,29 @@ verdict as unknown rather than inherit an unearned pass.
 **Left unfixed on purpose.** Neither belongs to ETP-5046, and widening an already large merge to
 carry them would make it harder to review, not safer. They want their own ticket — and the fix is
 mechanical once the pattern is recognised, which is the entire reason this section exists.
+
+### 🟡 4.8 `priceId` still reaches the browser on two develop paths
+
+The plan catalog and the checkout request never carry a provider price id (`buildPlanJson`,
+`api.js`: "the server never sends a provider price id"). Two develop-owned responses still do:
+
+- `HostedCheckoutService.buildResult` / `createProviderSession` put `priceId` into the
+  `POST /checkout/session` answer (develop's ETP-5463 shape, kept by the merge);
+- `GET /sws/go/billing/offers` returns `offer.getPriceId()`.
+
+Neither is exploitable in the sense that matters — checkout has no request field for a price, so a
+client cannot choose one — but both contradict the documented rule and hand a caller the account's
+Stripe price ids. Dropping them needs a check that no develop consumer (account billing UI) reads
+the field. Raised in the ETP-5046 review (W3); left out of scope of the merge.
+
+### 🟡 4.9 No short-TTL cache on Stripe price lookups
+
+`GET /sws/go/plans` (legacy fallback: `retrieveConfiguredPrice()`) and every checkout
+(`StripePriceService.retrievePrice` on the plan's `PROVIDER_PRICE_ID`) call Stripe synchronously,
+once per request. The price for a given id is effectively immutable, so a small per-id cache with a
+short TTL (minutes) would remove that round-trip and the dependency of the plans page on Stripe
+latency; the checkout path must keep failing closed on a lookup error rather than serving a stale
+miss. Raised in the ETP-5046 review (S1); not implemented.
 
 ## 5. Handed forward to later tickets
 
