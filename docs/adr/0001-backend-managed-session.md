@@ -317,7 +317,10 @@ Two phases:
    alongside it). Only without a session does a Bearer count. A legacy JWT is gated by
    `GoLegacyBearer` and is the only credential counted as a legacy use. An OAuth2
    client-credentials token is accepted where the policy allows it, and is **not** gated by the
-   legacy switch, because it is not the browser's credential (D7).
+   legacy switch, because it is not the browser's credential (D7). A resolved cookie session is
+   also run through `GoSessionRoleReconciler` here (ETP-5395, above), so every policy in the table
+   below gets a revoked role rebound — or the request refused `401` when none is left — for free,
+   the same way `GET /sws/go/session` and the OAuth2 authorize step already did on their own.
 2. **Bind.** Build the context, repair a warehouse the role cannot read, install the context,
    refuse a commercially blocked environment (`402`) when the policy says so, and apply the request
    language.
@@ -372,6 +375,8 @@ A blocked environment's data is fully inaccessible. It is not deleted (TL, 2026-
   - `/oauth2/authorize` (cookie first, legacy JWT in the body);
   - the customer portal token;
   - `SFRefreshToken`, which decodes a token it has just issued;
+  - `DalRoleDirectory` (ETP-5395), which mints a token for an already-resolved user/role and
+    decodes its own output to derive an org/warehouse pair, the same trick as `SFRefreshToken`;
   - the `/sws/apps` spike (out of scope).
 - **G-02.** Every servlet mapped under an environment surface is discovered from
   `AD_MODEL_OBJECT_MAPPING.xml` and must authenticate through the pipeline. `/sws/neo/currency-format`

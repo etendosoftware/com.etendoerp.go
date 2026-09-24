@@ -42,6 +42,7 @@ import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -69,6 +70,13 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * contract change — only the cases where the branches used to disagree now agree. (One wording
  * was unified: support used to name the missing claim; every surface now answers
  * {@value #MSG_MISSING_CLAIMS}, still with 401.)
+ *
+ * <p>ETP-5395 — a cookie session's role is bound once, at environment entry, and every one of
+ * these surfaces used to authorize the request with it unconditionally. Resolving a cookie now
+ * also runs {@link GoSessionRoleReconciler}, which rebinds a role an admin has since revoked to
+ * one the user still holds (or refuses the request, {@code 401}, when none is left) — once, here,
+ * so every {@link SurfacePolicy} gets it for free rather than each cookie-consuming call site
+ * wiring it in on its own.
  */
 public class EnvironmentRequestAuthenticator {
 
@@ -93,11 +101,13 @@ public class EnvironmentRequestAuthenticator {
   private final GoSessionAuthenticator sessionAuthenticator;
   private final TenantEnvironmentLifecycleService lifecycleService;
   private final WarehouseResolver warehouseResolver;
+  private final GoSessionRoleReconciler sessionRoleReconciler;
 
   /** Production wiring: JDBC-backed sessions, the tenant lifecycle policy and the DAL. */
   public EnvironmentRequestAuthenticator() {
     this(new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore())),
-        new TenantEnvironmentLifecycleService(), new DalWarehouseResolver());
+        new TenantEnvironmentLifecycleService(), new DalWarehouseResolver(),
+        new GoSessionRoleReconciler());
   }
 
   /**
@@ -107,12 +117,16 @@ public class EnvironmentRequestAuthenticator {
    * @param sessionAuthenticator resolves the {@code __Host-go_session} cookie
    * @param lifecycleService     answers the commercial access decision for a client
    * @param warehouseResolver    repairs a context whose warehouse the role cannot read
+   * @param sessionRoleReconciler rebinds a cookie session whose role was revoked since it was
+   *                              bound (ETP-5395)
    */
   public EnvironmentRequestAuthenticator(GoSessionAuthenticator sessionAuthenticator,
-      TenantEnvironmentLifecycleService lifecycleService, WarehouseResolver warehouseResolver) {
+      TenantEnvironmentLifecycleService lifecycleService, WarehouseResolver warehouseResolver,
+      GoSessionRoleReconciler sessionRoleReconciler) {
     this.sessionAuthenticator = sessionAuthenticator;
     this.lifecycleService = lifecycleService;
     this.warehouseResolver = warehouseResolver;
+    this.sessionRoleReconciler = sessionRoleReconciler;
   }
 
   /**
@@ -191,11 +205,18 @@ public class EnvironmentRequestAuthenticator {
     }
   }
 
-  private static Resolution fromSession(GoSessionRecord session) {
+  private Resolution fromSession(GoSessionRecord session) {
     if (StringUtils.isAnyBlank(session.getUserId(), session.getRoleId(), session.getCtxOrgId(),
         session.getCtxClientId())) {
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_NO_ENVIRONMENT, AuthScheme.COOKIE);
     }
+    // ETP-5395 — an admin's promote/demote since the session entered this environment must not
+    // leave the request authorized with a role the user no longer holds. Rebinds `session` in
+    // place (role, and org/warehouse if the new role cannot use the old one) before its fields
+    // are read below; throws SessionRoleRevokedException (an OBException, caught by authenticate()
+    // /identify()'s RuntimeException handler and answered 401 with its own message) when the user
+    // holds no eligible role left.
+    sessionRoleReconciler.reconcile(session);
     return Resolution.of(new Identity(AuthScheme.COOKIE, session.getUserId(), session.getRoleId(),
         session.getCtxOrgId(), session.getWarehouseId(), session.getCtxClientId()));
   }

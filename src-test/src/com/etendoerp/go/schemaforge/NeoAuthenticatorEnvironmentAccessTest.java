@@ -54,6 +54,7 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -101,7 +102,8 @@ class NeoAuthenticatorEnvironmentAccessTest {
     sessionAuthenticator = mock(GoSessionAuthenticator.class);
     lifecycleService = mock(TenantEnvironmentLifecycleService.class);
     authenticator = new NeoAuthenticator(servlet, new EnvironmentRequestAuthenticator(
-        sessionAuthenticator, lifecycleService, mock(WarehouseResolver.class)));
+        sessionAuthenticator, lifecycleService, mock(WarehouseResolver.class),
+        mock(GoSessionRoleReconciler.class)));
 
     obContextStatic = mockStatic(OBContext.class);
     swsStatic = mockStatic(SecureWebServicesUtils.class);

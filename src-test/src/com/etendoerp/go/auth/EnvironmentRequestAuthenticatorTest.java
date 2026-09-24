@@ -63,6 +63,8 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -89,6 +91,7 @@ class EnvironmentRequestAuthenticatorTest {
   private GoSessionAuthenticator sessionAuthenticator;
   private TenantEnvironmentLifecycleService lifecycleService;
   private WarehouseResolver warehouseResolver;
+  private GoSessionRoleReconciler roleReconciler;
   private EnvironmentRequestAuthenticator authenticator;
   private OBContext context;
 
@@ -102,8 +105,11 @@ class EnvironmentRequestAuthenticatorTest {
     sessionAuthenticator = mock(GoSessionAuthenticator.class);
     lifecycleService = mock(TenantEnvironmentLifecycleService.class);
     warehouseResolver = mock(WarehouseResolver.class);
+    // Mockito's default for a boolean-returning method is false: "role still valid, no rebind" —
+    // the neutral case every test above this fixture already assumes.
+    roleReconciler = mock(GoSessionRoleReconciler.class);
     authenticator = new EnvironmentRequestAuthenticator(sessionAuthenticator, lifecycleService,
-        warehouseResolver);
+        warehouseResolver, roleReconciler);
 
     obContextStatic = mockStatic(OBContext.class);
     swsStatic = mockStatic(SecureWebServicesUtils.class);
@@ -262,6 +268,46 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals("Session has no environment selected", outcome.getMessage());
   }
 
+  // ============================== role reconciliation (ETP-5395) ==============================
+
+  /**
+   * A user promoted or demoted after entering the environment must be authorized with the role
+   * they hold now, not the one the session was opened with. {@link GoSessionRoleReconciler}
+   * rebinds {@code sessionRecord} in place; {@code fromSession} reads its fields AFTER that call.
+   */
+  @Test
+  void cookieSessionIsAuthorizedWithTheReboundRole() {
+    GoSessionRecord sessionRecord = stubCookie();
+    when(roleReconciler.reconcile(sessionRecord)).thenAnswer(invocation -> {
+      sessionRecord.setRoleId("rebound-role");
+      return true;
+    });
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertTrue(outcome.isAuthenticated());
+    assertEquals("rebound-role", outcome.getRoleId());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, "rebound-role", ORG_ID,
+        null, CLIENT_ID));
+  }
+
+  /** No role left to rebind to: the session cannot be used for any environment until re-entry. */
+  @Test
+  void cookieSessionWhoseUserHoldsNoRoleIsRejected() {
+    GoSessionRecord sessionRecord = stubCookie();
+    when(roleReconciler.reconcile(sessionRecord))
+        .thenThrow(new SessionRoleRevokedException("no role left"));
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals("no role left", outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
+  }
+
   @Test
   void noCredentialIs401() {
     when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
@@ -398,7 +444,7 @@ class EnvironmentRequestAuthenticatorTest {
     }
   }
 
-  private void stubCookie() {
+  private GoSessionRecord stubCookie() {
     GoSessionRecord sessionRecord = new GoSessionRecord();
     sessionRecord.setUserId(USER_ID);
     sessionRecord.setRoleId(ROLE_ID);
@@ -406,6 +452,7 @@ class EnvironmentRequestAuthenticatorTest {
     sessionRecord.setCtxClientId(CLIENT_ID);
     when(sessionAuthenticator.authenticate(any()))
         .thenReturn(GoSessionAuthResult.authenticated(sessionRecord));
+    return sessionRecord;
   }
 
   private void stubJwt() {

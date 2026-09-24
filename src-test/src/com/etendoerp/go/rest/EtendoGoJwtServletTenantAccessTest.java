@@ -135,7 +135,9 @@ class EtendoGoJwtServletTenantAccessTest {
   @Test
   void theDemoTransferStatusOfAnAllowedProductiveIsServed() throws Exception {
     Fixture fixture = new Fixture(Decision.ALLOWED);
-    when(fixture.transferService.status(CLIENT_ID)).thenReturn(new JSONObject());
+    // Unrelated develop change picked up by the merge: status() now takes the demo-tenant-id
+    // supplier as a second, lazily-evaluated argument; the mock never invokes it.
+    when(fixture.transferService.status(eq(CLIENT_ID), any())).thenReturn(new JSONObject());
 
     ResponseCapture resp;
     try (MockedStatic<DemoDataTransferFlag> flag = mockStatic(DemoDataTransferFlag.class)) {
@@ -144,7 +146,7 @@ class EtendoGoJwtServletTenantAccessTest {
     }
 
     assertEquals(200, resp.status);
-    verify(fixture.transferService).status(CLIENT_ID);
+    verify(fixture.transferService).status(eq(CLIENT_ID), any());
   }
 
   // ===================== fixture =====================

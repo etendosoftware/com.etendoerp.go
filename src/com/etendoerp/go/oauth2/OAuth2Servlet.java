@@ -115,7 +115,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   OAuth2Servlet(GoSessionService goSessionService) {
     this(goSessionService, new EnvironmentRequestAuthenticator(
         new GoSessionAuthenticator(goSessionService), new TenantEnvironmentLifecycleService(),
-        new DalWarehouseResolver()));
+        new DalWarehouseResolver(), new GoSessionRoleReconciler()));
   }
 
   OAuth2Servlet(GoSessionService goSessionService,

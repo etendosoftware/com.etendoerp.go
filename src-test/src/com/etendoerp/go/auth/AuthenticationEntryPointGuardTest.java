@@ -103,6 +103,11 @@ class AuthenticationEntryPointGuardTest {
         "the customer portal authenticates a portal access token, not a GO user");
     allow("schemaforge/webhooks/SFRefreshToken.java", 1,
         "decodes the token it has just issued, to echo its claims; it authenticates nothing");
+    allow("session/DalRoleDirectory.java", 1,
+        "ETP-5395's GoSessionRoleReconciler.RoleDirectory: mints a token for the (already "
+            + "DB-resolved) user/role and immediately decodes ITS OWN OUTPUT, to derive an "
+            + "org/warehouse pair the same way environment entry does; no inbound credential is "
+            + "read, same pattern as SFRefreshToken above");
     allow("apps/AppsServlet.java", 2,
         "spike surface /sws/apps, explicitly out of ETP-5455's scope (decision 3)");
   }

@@ -56,6 +56,7 @@ import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -349,7 +350,8 @@ class NeoAuthenticatorSchemeParityTest {
    */
   private NeoAuthenticator buildAuthenticator() {
     return new NeoAuthenticator(servlet, new EnvironmentRequestAuthenticator(
-        sessionAuthenticator, lifecycleService, warehouseResolver));
+        sessionAuthenticator, lifecycleService, warehouseResolver,
+        mock(GoSessionRoleReconciler.class)));
   }
 
   /** A context whose warehouse belongs to an organization the role cannot read. */

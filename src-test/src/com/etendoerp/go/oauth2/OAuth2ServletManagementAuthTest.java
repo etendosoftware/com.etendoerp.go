@@ -53,6 +53,7 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -90,7 +91,8 @@ class OAuth2ServletManagementAuthTest {
     sessionService = mock(GoSessionService.class);
     lifecycle = mock(TenantEnvironmentLifecycleService.class);
     servlet = new OAuth2Servlet(sessionService, new EnvironmentRequestAuthenticator(
-        new GoSessionAuthenticator(sessionService), lifecycle, mock(WarehouseResolver.class)));
+        new GoSessionAuthenticator(sessionService), lifecycle, mock(WarehouseResolver.class),
+        mock(GoSessionRoleReconciler.class)));
     obContextStatic = mockStatic(OBContext.class);
     swsStatic = mockStatic(SecureWebServicesUtils.class);
     languageStatic = mockStatic(NeoLanguage.class);
