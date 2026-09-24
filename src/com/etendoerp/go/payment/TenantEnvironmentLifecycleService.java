@@ -19,6 +19,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.domain.Preference;
@@ -328,8 +329,13 @@ public class TenantEnvironmentLifecycleService {
       if (demo == null || productive == null) {
         return false;
       }
-      setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
-      setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+      OBContext.setAdminMode();
+      try {
+        setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
+        setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
       return true;
     } catch (RuntimeException e) {
       log.error("Could not associate demo {} with productive {}", demoClientId, productiveClientId,
