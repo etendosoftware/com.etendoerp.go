@@ -18,6 +18,8 @@
 package com.etendoerp.go.featureflags;
 
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +32,7 @@ import dev.openfeature.contrib.providers.configcat.ConfigCatProvider;
 import dev.openfeature.contrib.providers.configcat.ConfigCatProviderConfig;
 import dev.openfeature.sdk.Client;
 import dev.openfeature.sdk.FeatureProvider;
+import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
 
@@ -129,16 +132,6 @@ public final class GoFeatureFlags {
   public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
 
   /**
-   * ETP-5443 — the demo-to-productive data transfer (ETP-5364): whether a paid productive tenant
-   * copies products/contacts from the account's demo, and whether {@code /sws/go/demo-data-transfer}
-   * exists at all. Environment-level, not per account: the endpoints are routed before any
-   * credential is read, so every toggle point evaluates the same context. Backend-only for the
-   * same reason as {@link #FLAG_BP_PORTAL_LINK} — the browser learns it from the endpoint answering
-   * 404. Its only caller is {@code DemoDataTransferFlag}.
-   */
-  public static final String FLAG_DEMO_DATA_TRANSFER = "demo-data-transfer";
-
-  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
@@ -165,6 +158,7 @@ public final class GoFeatureFlags {
   static final String OPENFEATURE_DOMAIN = "etendo-go";
 
   private static final Object INIT_LOCK = new Object();
+  private static final Set<String> loggedFallbacks = ConcurrentHashMap.newKeySet();
 
   private static volatile Client openFeatureClient;
   private static volatile boolean initializationAttempted;
@@ -185,14 +179,34 @@ public final class GoFeatureFlags {
       return false;
     }
     try {
-      return Boolean.TRUE.equals(
-          client.getBooleanValue(flagKey, false, toEvaluationContext(context)));
+      FlagEvaluationDetails<Boolean> details =
+          client.getBooleanDetails(flagKey, false, toEvaluationContext(context));
+      logFallbackIfNeeded(flagKey, details);
+      return Boolean.TRUE.equals(details.getValue());
     } catch (Exception e) {
       // The OpenFeature client already absorbs provider errors into the default value; this guard
       // exists so an unexpected failure can never propagate into the caller's request handling.
-      log.warn("Feature flag '{}' evaluation failed, treating as disabled: {}", flagKey,
-          e.getMessage(), e);
+      log.warn("Feature flag '{}' evaluation threw {}; treating as disabled", flagKey,
+          e.getClass().getSimpleName());
       return false;
+    }
+  }
+
+  private static void logFallbackIfNeeded(String flagKey, FlagEvaluationDetails<Boolean> details) {
+    if (details == null) {
+      return;
+    }
+    String reason = details.getReason();
+    Object errorCode = details.getErrorCode();
+    if (errorCode == null && !"DEFAULT".equals(reason) && !"ERROR".equals(reason)) {
+      return;
+    }
+    String fallbackReason = reason == null ? "unknown" : reason;
+    String fallbackError = errorCode == null ? "none" : errorCode.toString();
+    String deduplicationKey = flagKey + '|' + fallbackReason + '|' + fallbackError;
+    if (loggedFallbacks.add(deduplicationKey)) {
+      log.info("Feature flag '{}' resolved to its code default false (reason={}, errorCode={})",
+          flagKey, fallbackReason, fallbackError);
     }
   }
 
@@ -225,10 +239,12 @@ public final class GoFeatureFlags {
     String sdkKey = StringUtils.trimToNull(GoRuntimeProperties.readValue(
         CONFIGCAT_SDK_KEY_PROPERTY, CONFIGCAT_SDK_KEY_ENV, null));
     if (sdkKey == null) {
-      log.info("{} is not configured; feature flags resolve from local configuration",
+      log.info("{} is not configured; selecting the local properties feature-flag provider",
           CONFIGCAT_SDK_KEY_PROPERTY);
       return new PropertiesFeatureProvider();
     }
+    log.info("{} is configured; selecting the ConfigCat feature-flag provider (SDK key omitted)",
+        CONFIGCAT_SDK_KEY_PROPERTY);
     ConfigCatProviderConfig config = ConfigCatProviderConfig.builder()
         .sdkKey(sdkKey)
         .options(options -> options.pollingMode(
@@ -245,6 +261,7 @@ public final class GoFeatureFlags {
     synchronized (INIT_LOCK) {
       openFeatureClient = null;
       initializationAttempted = false;
+      loggedFallbacks.clear();
     }
   }
 
@@ -272,12 +289,14 @@ public final class GoFeatureFlags {
       // that gates authorisation, "not ready yet" and "disabled" must never be
       // the same observable outcome.
       api.setProviderAndWait(OPENFEATURE_DOMAIN, provider);
-      log.info("Etendo Go feature flags installed using provider '{}'",
-          provider.getMetadata().getName());
+      log.info("Etendo Go feature-flag provider '{}' initialized for domain '{}'",
+          provider.getMetadata().getName(), OPENFEATURE_DOMAIN);
       return api.getClient(OPENFEATURE_DOMAIN);
     } catch (Exception e) {
-      log.error("Could not install the feature-flag provider; all flags resolve to their code "
-          + "defaults", e);
+      // Provider exceptions can contain request URLs or configuration material; keep the
+      // diagnostic useful without logging exception messages, SDK keys or evaluation context.
+      log.error("Could not initialize the feature-flag provider ({}); all flags resolve to their "
+          + "code defaults", e.getClass().getSimpleName());
       return null;
     }
   }

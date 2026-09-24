@@ -170,13 +170,10 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     HttpServletRequest req = cookiePost(PURCHASES_PATH, SESSION_TOKEN, CSRF, foreignBody);
     ResponseCapture resp = mockResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
-        MockedStatic<com.etendoerp.go.payment.DemoDataTransferFlag> transferFlag =
-            mockStatic(com.etendoerp.go.payment.DemoDataTransferFlag.class)) {
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
       dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById(ACCOUNT_ID)).thenReturn(fixture.account);
       dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(ACCOUNT_EMAIL))
           .thenReturn(true);
-      transferFlag.when(com.etendoerp.go.payment.DemoDataTransferFlag::isEnabled).thenReturn(false);
       fixture.servlet.doPost(req, resp.response);
     }
 
@@ -373,10 +370,10 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     }
 
     GoSessionRecord validSession() {
-      GoSessionRecord record = new GoSessionRecord();
-      record.setAccountId(ACCOUNT_ID);
-      record.setCsrfToken(CSRF);
-      return record;
+      GoSessionRecord session = new GoSessionRecord();
+      session.setAccountId(ACCOUNT_ID);
+      session.setCsrfToken(CSRF);
+      return session;
     }
   }
 

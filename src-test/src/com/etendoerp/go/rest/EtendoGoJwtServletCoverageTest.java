@@ -19,6 +19,8 @@ package com.etendoerp.go.rest;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -31,7 +33,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -48,6 +52,9 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
+
+import javax.servlet.http.Cookie;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -69,7 +76,19 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.DemoDataTransferService;
+import com.etendoerp.go.payment.HostedCheckoutService;
+import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.TenantPaywallService;
+import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -84,6 +103,354 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class EtendoGoJwtServletCoverageTest {
 
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
+
+  @Test
+  public void paidRetryUsesThePersistedDemoEvenWhenSeveralFreeDemosExist() {
+    Set<String> currentFreeDemos = Set.of("TRIAL-SELECTED", "TRIAL-OTHER");
+
+    String resolved = EtendoGoJwtServlet.resolvePaidDemoClientId(
+        true, "TRIAL-SELECTED", currentFreeDemos);
+
+    assertEquals("The persisted checkout selection remains authoritative on retry",
+        "TRIAL-SELECTED", resolved);
+  }
+
+  @Test
+  public void paidRetryRejectsPersistedDemoWhenItIsNoLongerOwnedOrFree() {
+    IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+        () -> EtendoGoJwtServlet.resolvePaidDemoClientId(
+            true, "TRIAL-SELECTED", Set.of("TRIAL-OTHER")));
+
+    assertTrue(error.getMessage().contains("no longer available"));
+  }
+
+  @Test
+  public void legacyPaidRetryWithoutRecordedSelectionNeverInfersADemo() {
+    assertNull(EtendoGoJwtServlet.resolvePaidDemoClientId(false, null, Set.of("TRIAL-ONLY")));
+    assertNull(EtendoGoJwtServlet.resolvePaidDemoClientId(false, null, Set.of()));
+    assertNull(EtendoGoJwtServlet.resolvePaidDemoClientId(
+        false, null, Set.of("TRIAL-1", "TRIAL-2")));
+  }
+
+  @Test
+  public void explicitlyEmptyDemoSelectionDoesNotInferADemoThatAppearsLater() {
+    // A recorded null is an intentional productive-origin purchase, unlike a legacy row with
+    // no recorded-selection marker. Neither case may infer a source from the current demo set.
+    assertNull(EtendoGoJwtServlet.resolvePaidDemoClientId(
+        true, null, Set.of("TRIAL-ADDED-AFTER-CHECKOUT")));
+  }
+
+  @Test
+  public void paidOnboardingUsesPersistedDemoAndLegacySkipsTransfers()
+      throws Exception {
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    TenantPaywallService paywall = new TenantPaywallService();
+    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
+    confirmation.setAccessible(true);
+    confirmation.set(paywall, (TenantPaywallService.PaymentConfirmation) (token, email, name) -> true);
+    servlet.tenantPaywallService = paywall;
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    OnboardingCompanyProfileTransferService profileTransfer =
+        mock(OnboardingCompanyProfileTransferService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    servlet.onboardingCompanyProfileTransferService = profileTransfer;
+    when(lifecycle.associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE")).thenReturn(true);
+    when(store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(true, false);
+    when(store.findDemoClientId("purchase-1", "account-1", "user@test.com"))
+        .thenReturn("STORED-DEMO");
+    when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(true);
+    when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com"))
+        .thenReturn(7L);
+
+    Object recorded = prepareOnboardingForPersistedSelection();
+    Object recordedRequest = getField(recorded, "request");
+    assertEquals("STORED-DEMO", getField(recordedRequest, "demoClientId"));
+    invokeProfileTransfer("STORED-DEMO", "NEW-PRODUCTIVE");
+
+    Object legacy = prepareOnboardingForPersistedSelection();
+    Object legacyRequest = getField(legacy, "request");
+    assertNull(getField(legacyRequest, "demoClientId"));
+    invokeProfileTransfer(null, "LEGACY-PRODUCTIVE");
+    servlet.startDemoDataTransferBestEffort("purchase-1", null, "LEGACY-PRODUCTIVE",
+        "account-1", "user@test.com");
+    verify(lifecycle, times(1)).associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE");
+    verifyNoMoreInteractions(lifecycle);
+    verify(profileTransfer, times(1)).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
+    verifyNoMoreInteractions(profileTransfer);
+    verify(store, times(1)).findDemoClientId("purchase-1", "account-1", "user@test.com");
+  }
+
+  private Object prepareOnboardingForPersistedSelection() throws Exception {
+    HttpServletRequest request = jsonRequest("/onboarding",
+        "{\"clientName\":\"New Productive\",\"currency\":\"EUR\","
+            + "\"paymentToken\":\"purchase-1\",\"demoClientId\":\"BODY-DEMO\","
+            + "\"dataTransfer\":{\"products\":true,\"contacts\":false}}");
+    when(request.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    ResponseCapture response = mockResponse();
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("account-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn("currency-1");
+    Method prepare = EtendoGoJwtServlet.class.getDeclaredMethod("prepareOnboarding",
+        HttpServletRequest.class, HttpServletResponse.class);
+    prepare.setAccessible(true);
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<com.etendoerp.go.session.GoLegacyBearer> legacyBearer =
+            mockStatic(com.etendoerp.go.session.GoLegacyBearer.class);
+        MockedStatic<EmailVerificationDalHelper> verification =
+            mockStatic(EmailVerificationDalHelper.class)) {
+      legacyBearer.when(com.etendoerp.go.session.GoLegacyBearer::isEnabled).thenReturn(true);
+      verification.when(() -> EmailVerificationDalHelper.isEmailVerificationPending(account))
+          .thenReturn(false);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR")).thenReturn(currency);
+      dal.when(() -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com"))
+          .thenReturn(1);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+          .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("user@test.com"))
+          .thenReturn(Set.of("STORED-DEMO"));
+      support.when(() -> EtendoGoJwtSupport.findClientIdByName("New Productive"))
+          .thenReturn(null);
+      Object result = prepare.invoke(servlet, request, response.response);
+      assertNotNull("preparation should pass authentication, currency, ownership and paywall", result);
+      return result;
+    }
+  }
+
+  private void invokeProfileTransfer(String sourceClientId, String targetClientId)
+      throws Exception {
+    Method transferProfile = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "transferDemoCompanyProfile", String.class, String.class, String.class, String.class);
+    transferProfile.setAccessible(true);
+    transferProfile.invoke(servlet, "user@test.com", sourceClientId, targetClientId, "ORG-1");
+  }
+
+  private static Object getField(Object target, String fieldName) throws Exception {
+    Field field = target.getClass().getDeclaredField(fieldName);
+    field.setAccessible(true);
+    return field.get(target);
+  }
+
+  @Test
+  public void productiveOriginCreatesIndependentPurchaseDespiteOtherOwnedDemos() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("account-1");
+    when(account.getEmail()).thenReturn("owner@example.test");
+    GoSessionService sessions = mock(GoSessionService.class);
+    GoSessionRecord session = new GoSessionRecord();
+    session.setAccountId("account-1");
+    session.setCsrfToken("csrf-token-value-123456");
+    session.setCtxClientId("PROD-1");
+    when(sessions.resolve("session-cookie-token")).thenReturn(session);
+
+    EtendoGoJwtServlet purchaseServlet = new EtendoGoJwtServlet(
+        mock(TransactionalAuthEmailSender.class),
+        mock(EtendoGoSsoProviderRegistry.class), sessions);
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    HostedCheckoutService checkout = mock(HostedCheckoutService.class);
+    DemoDataTransferService transfer = mock(DemoDataTransferService.class);
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    purchaseServlet.checkoutRequestStore = requestStore;
+    purchaseServlet.hostedCheckoutService = checkout;
+    purchaseServlet.demoDataTransferService = transfer;
+    purchaseServlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("PROD-1")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+
+    JSONObject checkoutResult = new JSONObject().put("requestId", "purchase-prod-1");
+    when(checkout.createSession(eq("account-1"), eq("owner@example.test"), eq("New Production"),
+        eq("https://app.example.test"), isNull(), eq(false), eq(false), any()))
+        .thenReturn(checkoutResult);
+    HttpServletRequest request = jsonRequest("/billing/purchases",
+        "{\"clientName\":\"New Production\",\"demoClientId\":\"DEMO-1\","
+            + "\"dataTransfer\":{\"products\":true,\"contacts\":true}}");
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getCookies()).thenReturn(
+        new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "session-cookie-token") });
+    when(request.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn("csrf-token-value-123456");
+    when(request.getHeader("Origin")).thenReturn("https://app.example.test");
+    when(request.getHeader("Referer")).thenReturn(null);
+    when(request.getRequestURL()).thenReturn(new StringBuffer("https://app.example.test/sws/go/billing/purchases"));
+    ResponseCapture response = mockResponse();
+
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("account-1")).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("owner@example.test"))
+          .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("PROD-1", "owner@example.test"))
+          .thenReturn(true);
+      urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
+
+      purchaseServlet.doPost(request, response.response);
+
+      verify(checkout).createSession(eq("account-1"), eq("owner@example.test"),
+          eq("New Production"), eq("https://app.example.test"), isNull(), eq(false), eq(false),
+          any());
+      verify(requestStore).findActiveForAccountAndClientName("account-1", "owner@example.test",
+          "New Production");
+      org.mockito.Mockito.verifyNoInteractions(transfer);
+    }
+
+    assertEquals(201, response.status);
+    JSONObject responseBody = new JSONObject(response.body());
+    assertFalse(responseBody.has("demoClientId"));
+    assertFalse(responseBody.has("dataTransfer"));
+  }
+
+  @Test
+  public void billingPurchaseProjectionIncludesCreatedClientIdForSelectorReconciliation()
+      throws Exception {
+    CheckoutRequest purchase = mock(CheckoutRequest.class);
+    Client createdClient = mock(Client.class);
+    when(purchase.getRequest()).thenReturn("purchase-123");
+    when(purchase.getCheckoutRequestStatus()).thenReturn("PROVISIONED");
+    when(purchase.getClientName()).thenReturn("Acme Production");
+    when(purchase.getCreatedClient()).thenReturn(createdClient);
+    when(createdClient.getId()).thenReturn("created-client-456");
+
+    Method projection = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "buildBillingPurchaseJson", CheckoutRequest.class);
+    projection.setAccessible(true);
+    JSONObject body = (JSONObject) projection.invoke(servlet, purchase);
+
+    assertEquals("created-client-456", body.getString("createdClientId"));
+  }
+
+  @Test
+  public void freeOriginWithoutDemoSelectionReturnsDemoSelectionRequired() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("account-1");
+    when(account.getEmail()).thenReturn("owner@example.test");
+    GoSessionService sessions = mock(GoSessionService.class);
+    GoSessionRecord session = new GoSessionRecord();
+    session.setAccountId("account-1");
+    session.setCsrfToken("csrf-token-value-123456");
+    session.setCtxClientId("FREE-1");
+    when(sessions.resolve("session-cookie-token")).thenReturn(session);
+
+    EtendoGoJwtServlet purchaseServlet = new EtendoGoJwtServlet(
+        mock(TransactionalAuthEmailSender.class),
+        mock(EtendoGoSsoProviderRegistry.class), sessions);
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    HostedCheckoutService checkout = mock(HostedCheckoutService.class);
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    purchaseServlet.checkoutRequestStore = requestStore;
+    purchaseServlet.hostedCheckoutService = checkout;
+    purchaseServlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("FREE-1")).thenReturn(TenantPlanService.PLAN_FREE);
+    HttpServletRequest request = jsonRequest("/billing/purchases",
+        "{\"clientName\":\"New Production\"}");
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getCookies()).thenReturn(
+        new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "session-cookie-token") });
+    when(request.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn("csrf-token-value-123456");
+    when(request.getHeader("Origin")).thenReturn("https://app.example.test");
+    when(request.getHeader("Referer")).thenReturn(null);
+    when(request.getRequestURL()).thenReturn(
+        new StringBuffer("https://app.example.test/sws/go/billing/purchases"));
+    ResponseCapture response = mockResponse();
+
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("account-1"))
+          .thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("owner@example.test"))
+          .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("FREE-1", "owner@example.test"))
+          .thenReturn(true);
+
+      purchaseServlet.doPost(request, response.response);
+
+      verify(requestStore).findActiveForAccountAndClientName("account-1", "owner@example.test",
+          "New Production");
+    }
+
+    assertEquals(400, response.status);
+    assertEquals("DEMO_SELECTION_REQUIRED",
+        new JSONObject(response.body()).getJSONObject("error").getString("code"));
+    org.mockito.Mockito.verify(checkout, never()).createSession(anyString(), anyString(), anyString(),
+        anyString(), any(), anyBoolean(), anyBoolean(), any());
+  }
+
+  @Test
+  public void billingPurchaseRejectsDemoOwnedByAnotherAccount() throws Exception {
+    assertInvalidDemoSelectionRejected(false, TenantPlanService.PLAN_FREE);
+  }
+
+  @Test
+  public void billingPurchaseRejectsOwnedDemoThatIsNoLongerFree() throws Exception {
+    assertInvalidDemoSelectionRejected(true, TenantPlanService.PLAN_PRODUCTIVE);
+  }
+
+  private void assertInvalidDemoSelectionRejected(boolean selectedDemoOwned, String selectedDemoPlan)
+      throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("account-1");
+    when(account.getEmail()).thenReturn("owner@example.test");
+    GoSessionService sessions = mock(GoSessionService.class);
+    GoSessionRecord session = new GoSessionRecord();
+    session.setAccountId("account-1");
+    session.setCsrfToken("csrf-token-value-123456");
+    session.setCtxClientId("FREE-1");
+    when(sessions.resolve("session-cookie-token")).thenReturn(session);
+
+    EtendoGoJwtServlet purchaseServlet = new EtendoGoJwtServlet(
+        mock(TransactionalAuthEmailSender.class),
+        mock(EtendoGoSsoProviderRegistry.class), sessions);
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    HostedCheckoutService checkout = mock(HostedCheckoutService.class);
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    purchaseServlet.checkoutRequestStore = requestStore;
+    purchaseServlet.hostedCheckoutService = checkout;
+    purchaseServlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("FREE-1")).thenReturn(TenantPlanService.PLAN_FREE);
+    when(tenantPlan.resolvePlan("DEMO-1")).thenReturn(selectedDemoPlan);
+
+    HttpServletRequest request = jsonRequest("/billing/purchases",
+        "{\"clientName\":\"New Production\",\"demoClientId\":\"DEMO-1\"}");
+    when(request.getMethod()).thenReturn("POST");
+    when(request.getCookies()).thenReturn(
+        new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "session-cookie-token") });
+    when(request.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn("csrf-token-value-123456");
+    when(request.getHeader("Origin")).thenReturn("https://app.example.test");
+    when(request.getHeader("Referer")).thenReturn(null);
+    when(request.getRequestURL()).thenReturn(
+        new StringBuffer("https://app.example.test/sws/go/billing/purchases"));
+    ResponseCapture response = mockResponse();
+    OBDal dalInstance = mock(OBDal.class);
+    when(dalInstance.get(Client.class, "DEMO-1")).thenReturn(mock(Client.class));
+
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dalInstance);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("account-1")).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("owner@example.test"))
+          .thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("FREE-1",
+          "owner@example.test")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("DEMO-1",
+          "owner@example.test")).thenReturn(selectedDemoOwned);
+      urls.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn("https://app.example.test");
+
+      purchaseServlet.doPost(request, response.response);
+    }
+
+    assertEquals(400, response.status);
+    assertEquals("INVALID_DEMO_SELECTION",
+        new JSONObject(response.body()).getJSONObject("error").getString("code"));
+    org.mockito.Mockito.verifyNoInteractions(checkout);
+  }
 
   // ===================== POST /register — error path =====================
 

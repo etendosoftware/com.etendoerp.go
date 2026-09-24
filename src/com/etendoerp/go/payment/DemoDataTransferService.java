@@ -73,7 +73,7 @@ public class DemoDataTransferService {
 
   /**
    * Created on the first submission, never at construction: the servlet builds this service at
-   * init, and with flag {@code demo-data-transfer} off nothing may start a worker thread.
+   * init, and an instance that never receives a transfer must not start a worker thread.
    */
   private ExecutorService executor;
   private final Set<String> activeClients = ConcurrentHashMap.newKeySet();

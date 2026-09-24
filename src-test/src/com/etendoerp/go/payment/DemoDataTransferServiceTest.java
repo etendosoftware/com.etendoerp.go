@@ -181,8 +181,8 @@ class DemoDataTransferServiceTest {
 
   @Test
   void createsNoWorkerThreadUntilWorkIsSubmitted() throws Exception {
-    // ETP-5443: the servlet builds this service at init; with flag demo-data-transfer off nothing
-    // is ever submitted, so no executor may exist. Status reads with no RUNNING job stay lazy too.
+    // The servlet builds this service at init; until a transfer is submitted no executor may
+    // exist. Status reads with no RUNNING job stay lazy too.
     givenPreferenceReads(null, null, null, null, null, null);
     service.status(TARGET_ID);
     assertFalse(service.hasExecutor());
