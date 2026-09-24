@@ -511,16 +511,23 @@ class TenantPlanServiceTest {
     private final TenantPlanPreferenceFallback fallback = new TenantPlanPreferenceFallback();
 
     private CapturingAppender warnings;
+    private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
 
     @BeforeEach
     void captureWarnings() {
       warnings = CapturingAppender.attachTo(TenantPlanPreferenceFallback.class);
+      // The fallback reads in admin mode (a non-admin role cannot read AD_Preference), which
+      // needs no real session in a unit test.
+      contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
     }
 
     @AfterEach
     void releaseWarnings() {
       if (warnings != null) {
         warnings.detach();
+      }
+      if (contextMock != null) {
+        contextMock.close();
       }
     }
 

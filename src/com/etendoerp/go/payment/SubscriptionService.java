@@ -48,7 +48,9 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * parameter instead. Precedent: {@link TenantPlanService}'s preference lookup, which reads a
  * client-{@code 0} preference row about another tenant for exactly the same reason.
  *
- * <p>Following {@link CheckoutRequestStore}, each method makes sure it runs in admin mode, and
+ * <p>Following {@link CheckoutRequestStore}, each method makes sure it runs in admin mode — which is
+ * also what lets the NEO access check read a tenant's row as a user whose role cannot read
+ * {@code ETGO_SUBSCRIPTION}, the same concern ETP-5488 fixed for the lifecycle preferences — and
  * opens a system {@link OBContext} <em>only when there is none</em> — the webhook path is matched
  * before the authentication chain and has no context at all, while the environment-list and
  * onboarding callers already hold one that must survive the call unchanged.

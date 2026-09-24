@@ -26,6 +26,7 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.domain.Preference;
@@ -103,6 +104,9 @@ public class TenantPlanPreferenceFallback {
     if (StringUtils.isBlank(clientId)) {
       return false;
     }
+    // Admin mode, like the lifecycle preferences since ETP-5488: resolvePlan runs as the calling
+    // user, and a role that cannot read AD_Preference would otherwise read a paying tenant as free.
+    OBContext.setAdminMode(true);
     try {
       // Recovered verbatim from the pre-ETP-5046 TenantPlanService#resolvePlan: the tenant is in
       // VISIBLEAT_CLIENT_ID, never AD_CLIENT_ID (the row itself lives at client '0').
@@ -125,6 +129,8 @@ public class TenantPlanPreferenceFallback {
       log.warn("ETP-5046-TRANSITIONAL-FALLBACK: could not read the {} preference of tenant {};"
           + " treating it as not productive", TenantPlanService.PREFERENCE_ATTRIBUTE, clientId, e);
       return false;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -151,6 +157,8 @@ public class TenantPlanPreferenceFallback {
     if (ids.isEmpty()) {
       return Collections.emptySet();
     }
+    // Admin mode for the same reason as isProductive.
+    OBContext.setAdminMode(true);
     try {
       OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
           "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
@@ -174,6 +182,8 @@ public class TenantPlanPreferenceFallback {
               + " treating them as not productive", TenantPlanService.PREFERENCE_ATTRIBUTE,
           ids.size(), e);
       return Collections.emptySet();
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
