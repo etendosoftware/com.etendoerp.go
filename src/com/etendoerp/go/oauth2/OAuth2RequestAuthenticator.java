@@ -28,7 +28,9 @@ import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -69,7 +71,8 @@ final class OAuth2RequestAuthenticator {
    * @throws OAuth2Servlet.AuthException if neither a valid session nor a valid legacy JWT is present
    */
   static AuthorizePrincipal authenticateAuthorizeRequest(GoSessionService goSessionService,
-      HttpServletRequest request, OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest)
+      GoSessionRoleReconciler sessionRoleReconciler, HttpServletRequest request,
+      OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest)
       throws OAuth2Servlet.AuthException {
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
@@ -85,6 +88,13 @@ final class OAuth2RequestAuthenticator {
       if (StringUtils.isAnyBlank(sessionRecord.getUserId(), sessionRecord.getRoleId())) {
         throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN,
             "Session has no environment selected");
+      }
+      // An OAuth client authorized now keeps the role for as long as its tokens live, so it must
+      // get the role the user holds today, not a revoked one the session was opened with.
+      try {
+        sessionRoleReconciler.reconcile(sessionRecord);
+      } catch (SessionRoleRevokedException e) {
+        throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN, e.getMessage());
       }
       return new AuthorizePrincipal(sessionRecord.getUserId(), sessionRecord.getRoleId());
     }

@@ -314,6 +314,16 @@ public class SFRefreshToken extends BaseWebhookService {
       JSONObject body = new JSONObject();
       body.put(FIELD_UNCHANGED, true);
       body.put(FIELD_ROLE_LIST, roleList);
+      // ETP-5395 — the role/org this request was authorized with. A cookie session is rebound
+      // server-side when its role is revoked (GoSessionRoleReconciler), so it can differ from what
+      // the client still holds; the client has no token to read it from and needs it here.
+      OBContext context = OBContext.getOBContext();
+      if (context != null && context.getRole() != null) {
+        body.put(FIELD_SELECTED_ROLE_ID, context.getRole().getId());
+      }
+      if (context != null && context.getCurrentOrganization() != null) {
+        body.put(FIELD_SELECTED_ORG_ID, context.getCurrentOrganization().getId());
+      }
       return body;
     } catch (JSONException e) {
       throw new IllegalStateException("Unable to build unchanged result", e);

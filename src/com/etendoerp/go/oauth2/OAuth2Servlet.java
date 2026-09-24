@@ -71,6 +71,7 @@ import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Token;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 
@@ -98,6 +99,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
   private final GoSessionService goSessionService;
   private final EnvironmentRequestAuthenticator environmentAuthenticator;
+  // Package-visible so tests can swap the database-backed role lookups for a fake. Only
+  // /oauth2/authorize uses it directly (OAuth2RequestAuthenticator.authenticateAuthorizeRequest);
+  // every other cookie-authenticated endpoint here goes through environmentAuthenticator, which
+  // reconciles the role itself (ETP-5395 folded into the shared pipeline's bind step).
+  GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   /**
    * Creates the default servlet wired to a real, JDBC-backed session service.
@@ -1517,7 +1523,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
           OAuth2ClientPolicy.parseScopes(authorizeRequest.scope, VALID_SCOPES);
       Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
       OAuth2RequestAuthenticator.AuthorizePrincipal principal =
-          OAuth2RequestAuthenticator.authenticateAuthorizeRequest(goSessionService, request,
+          OAuth2RequestAuthenticator.authenticateAuthorizeRequest(goSessionService,
+              sessionRoleReconciler, request,
               authorizeRequest);
 
       String authCode = OAuth2Utils.generateAuthCode();

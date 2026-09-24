@@ -19,6 +19,8 @@ package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -29,6 +31,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
@@ -49,16 +52,23 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.model.ad.domain.Preference;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.uom.UOM;
+import org.openbravo.model.financialmgmt.tax.TaxCategory;
 import org.openbravo.model.materialmgmt.cost.Costing;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
+import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.pricing.pricelist.PriceListVersion;
+
 
 /**
  * Focused unit specifications for the durable demo-to-productive transfer (ETP-5364).
@@ -112,6 +122,7 @@ class DemoDataTransferServiceTest {
   void recordsCheckoutSelectionAtSystemScopeBeforeProvisioning() {
     Client system = mock(Client.class);
     when(obDal.get(Client.class, SYSTEM_ID)).thenReturn(system);
+    givenPreferenceReads((Preference) null);
 
     service.recordSelection(REQUEST_ID, true, false);
 
@@ -120,6 +131,44 @@ class DemoDataTransferServiceTest {
         system, null, null, null, null, null));
     verify(obDal).flush();
     verify(obDal).commitAndClose();
+  }
+
+  @Test
+  void readsTheSelectionRecordedForThePurchase() throws Exception {
+    givenPreferenceReads(preference("NY"));
+
+    JSONObject selection = service.selection(REQUEST_ID);
+
+    assertFalse(selection.getBoolean("products"));
+    assertTrue(selection.getBoolean("contacts"));
+  }
+
+  @Test
+  void oldPurchasesWithoutASelectionRemainUnselected() throws Exception {
+    givenPreferenceReads((Preference) null);
+
+    assertNull(service.selection(REQUEST_ID));
+  }
+
+  @Test
+  void purchaseSelectionCannotBeChangedOnReopen() {
+    givenPreferenceReads(preference("YN"));
+
+    IllegalStateException error = assertThrows(IllegalStateException.class,
+        () -> service.recordSelection(REQUEST_ID, false, true));
+
+    assertTrue(error.getMessage().contains("cannot change"));
+    preferencesStatic.verifyNoInteractions();
+  }
+
+  @Test
+  void duplicatePurchaseCreationPreservesTheOriginalSelection() {
+    givenPreferenceReads(preference("YN"));
+
+    service.recordSelection(REQUEST_ID, true, false);
+
+    preferencesStatic.verifyNoInteractions();
+    verify(obDal, never()).flush();
   }
 
   @Test
@@ -163,12 +212,48 @@ class DemoDataTransferServiceTest {
   }
 
   @Test
+  void refusesToCopyWhenSourceAndTargetAreTheSameTenant() throws Exception {
+    Client target = mock(Client.class);
+    when(obDal.get(Client.class, SOURCE_ID)).thenReturn(target);
+    givenPreferenceReads(preference("YY"));
+
+    service.start(REQUEST_ID, SOURCE_ID, SOURCE_ID);
+
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        "ETGO_DemoDataTransferStatus", DemoDataTransferService.STATUS_FAILED, false,
+        target, null, null, null, null, null));
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        eq("ETGO_DemoDataTransferFailure"), anyString(), eq(false),
+        eq(target), eq(null), eq(null), eq(null), eq(null), eq(null)));
+    verify(obDal, never()).save(org.mockito.ArgumentMatchers.isA(Product.class));
+    verify(obDal, never()).save(org.mockito.ArgumentMatchers.isA(BusinessPartner.class));
+  }
+
+  @Test
+  void aSelectedTransferWithNoDemoSourceIsFailedAndVisible() throws Exception {
+    Client target = mock(Client.class);
+    when(obDal.get(Client.class, TARGET_ID)).thenReturn(target);
+    givenPreferenceReads(preference("YN"));
+
+    service.start(REQUEST_ID, null, TARGET_ID);
+
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        "ETGO_DemoDataTransferStatus", DemoDataTransferService.STATUS_FAILED, false,
+        target, null, null, null, null, null));
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        "ETGO_DemoDataTransferFailure", "Source demo environment is unavailable", false,
+        target, null, null, null, null, null));
+    verify(obDal, never()).save(org.mockito.ArgumentMatchers.isA(Product.class));
+  }
+
+  @Test
   void retriesOnlyFailedWorkAndKeepsTheRetryScopedToItsProductiveTenant() throws Exception {
     Client target = mock(Client.class);
     Preference failed = preference(DemoDataTransferService.STATUS_FAILED);
     Preference running = preference(DemoDataTransferService.STATUS_RUNNING);
     when(obDal.get(Client.class, TARGET_ID)).thenReturn(target);
-    givenPreferenceReads(failed, running, null, null, null, null);
+    givenPreferenceReads(failed, preference(SOURCE_ID), running, preference(SOURCE_ID),
+        running, null, null, null, null);
     preventWorkerSubmission(TARGET_ID);
 
     JSONObject response = service.retry(TARGET_ID);
@@ -184,6 +269,7 @@ class DemoDataTransferServiceTest {
   @Test
   void doesNotRetryCompletedWork() throws Exception {
     givenPreferenceReads(preference(DemoDataTransferService.STATUS_COMPLETED),
+        preference(DemoDataTransferService.STATUS_COMPLETED),
         preference(DemoDataTransferService.STATUS_COMPLETED), null, null, null, null);
 
     JSONObject response = service.retry(TARGET_ID);
@@ -199,6 +285,13 @@ class DemoDataTransferServiceTest {
     Organization targetOrg = mock(Organization.class);
     Product sourceProduct = mock(Product.class);
     Product targetProduct = mock(Product.class);
+    Client system = client(SYSTEM_ID);
+    UOM unit = mock(UOM.class);
+    TaxCategory tax = mock(TaxCategory.class);
+    when(unit.getClient()).thenReturn(system);
+    when(tax.getClient()).thenReturn(system);
+    when(sourceProduct.getUOM()).thenReturn(unit);
+    when(sourceProduct.getTaxCategory()).thenReturn(tax);
     when(sourceProduct.getSearchKey()).thenReturn("SKU-001");
     when(sourceProduct.getName()).thenReturn("Migrated product");
 
@@ -216,7 +309,59 @@ class DemoDataTransferServiceTest {
     verify(obProvider, never()).get(Product.class);
     verify(targetProduct).setSearchKey("SKU-001");
     verify(targetProduct).setName("Migrated product");
+    verify(targetProduct).setUOM(unit);
+    verify(targetProduct).setTaxCategory(tax);
     verify(obDal).save(targetProduct);
+  }
+
+  @Test
+  void missingTargetTaxCategoryFailsInsteadOfLeavingAnInvalidProduct() throws Exception {
+    Client source = client(SOURCE_ID);
+    Client target = client(TARGET_ID);
+    TaxCategory tax = mock(TaxCategory.class);
+    when(tax.getClient()).thenReturn(source);
+    when(tax.getName()).thenReturn("Source VAT");
+    OBQuery<TaxCategory> missingCategory = queryWithUniqueResult(null);
+    when(obDal.createQuery(eq(TaxCategory.class), anyString()))
+        .thenReturn(missingCategory);
+    Method method = DemoDataTransferService.class.getDeclaredMethod(
+        "targetTaxCategory", TaxCategory.class, Client.class);
+    method.setAccessible(true);
+
+    InvocationTargetException error = assertThrows(InvocationTargetException.class,
+        () -> method.invoke(service, tax, target));
+
+    assertTrue(error.getCause().getMessage().contains("Source VAT"));
+  }
+
+  @Test
+  void aSourcePriceWithoutATargetPriceListVersionFailsTheTransfer() throws Exception {
+    Product sourceProduct = mock(Product.class);
+    Product targetProduct = mock(Product.class);
+    Client targetClient = client(TARGET_ID);
+    Organization targetOrg = mock(Organization.class);
+    ProductPrice sourcePrice = mock(ProductPrice.class);
+    PriceListVersion sourceVersion = mock(PriceListVersion.class);
+    PriceList sourceList = mock(PriceList.class);
+    when(sourceProduct.getId()).thenReturn("source-product");
+    when(targetOrg.getId()).thenReturn("target-org");
+    when(sourcePrice.getPriceListVersion()).thenReturn(sourceVersion);
+    when(sourceVersion.getPriceList()).thenReturn(sourceList);
+    when(sourceList.isSalesPriceList()).thenReturn(true);
+    OBQuery<ProductPrice> sourcePrices = queryWithList(List.of(sourcePrice));
+    when(obDal.createQuery(eq(ProductPrice.class), anyString()))
+        .thenReturn(sourcePrices);
+    OBCriteria<PriceListVersion> missingTargetVersions = mock(OBCriteria.class);
+    when(obDal.createCriteria(PriceListVersion.class)).thenReturn(missingTargetVersions);
+    when(missingTargetVersions.list()).thenReturn(Collections.emptyList());
+    Method method = DemoDataTransferService.class.getDeclaredMethod("copyPrices",
+        Product.class, Product.class, Client.class, Organization.class);
+    method.setAccessible(true);
+
+    InvocationTargetException error = assertThrows(InvocationTargetException.class,
+        () -> method.invoke(service, sourceProduct, targetProduct, targetClient, targetOrg));
+    assertTrue(error.getCause().getMessage().contains("sales price list version is missing"));
+    verify(obProvider, never()).get(ProductPrice.class);
   }
 
   @Test
@@ -234,6 +379,16 @@ class DemoDataTransferServiceTest {
     OBQuery<BusinessPartner> existingTarget = queryWithUniqueResult(targetContact);
     when(obDal.createQuery(eq(BusinessPartner.class), anyString()))
         .thenReturn(sourceContacts, existingTarget);
+    OBQuery<org.openbravo.model.common.businesspartner.Location> emptyPartnerLocations =
+        queryWithList(Collections.emptyList());
+    OBQuery<org.openbravo.model.common.geography.Location> emptyAddresses =
+        queryWithList(Collections.emptyList());
+    OBQuery<User> emptyUsers = queryWithList(Collections.emptyList());
+    when(obDal.createQuery(eq(org.openbravo.model.common.businesspartner.Location.class), anyString()))
+        .thenReturn(emptyPartnerLocations, emptyPartnerLocations);
+    when(obDal.createQuery(eq(org.openbravo.model.common.geography.Location.class), anyString()))
+        .thenReturn(emptyAddresses);
+    when(obDal.createQuery(eq(User.class), anyString())).thenReturn(emptyUsers, emptyUsers);
 
     invokeCopy("copyContacts", Client.class, Client.class, Organization.class, source, target, targetOrg);
 

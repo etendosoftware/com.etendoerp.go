@@ -347,8 +347,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       // AI reply
       String locale = body.optString("locale", "es");
       String userEmail = SupportIntegrationClient.getUserEmail(userId);
+      String environment = SupportIntegrationClient.resolveEnvironment(request.getServerName());
       SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail, ctx.clientId,
-          SupportIntegrationClient.ENVIRONMENT_NAME);
+          environment);
       String aiReplyText = SupportIntegrationClient.sendToAdk(userId, conv.getId(), firstMessage, attachments);
       if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 

@@ -51,6 +51,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
@@ -423,6 +424,37 @@ class EtendoGoJwtDalHelperTest {
       verify(query).setNamedParameter("accountPrefix", "user@test.com+%");
       verify(query).setFilterOnReadableClients(false);
       verify(query).setFilterOnReadableOrganization(false);
+    }
+  }
+
+  @Nested
+  @DisplayName("findOnlyFreeTenantIdByAccountEmail")
+  class FindOnlyFreeTenantIdByAccountEmail {
+
+    @Mock private OBQuery<User> usersQuery;
+    @Mock private OBQuery<Preference> preferenceQuery;
+
+    @Test
+    @DisplayName("excludes the new destination when resolving the only free source tenant")
+    void excludesDestinationFromFreeTenantCandidates() {
+      User demoUser = mock(User.class);
+      User targetUser = mock(User.class);
+      Client demoClient = mock(Client.class);
+      Client targetClient = mock(Client.class);
+      when(demoUser.getClient()).thenReturn(demoClient);
+      when(targetUser.getClient()).thenReturn(targetClient);
+      when(demoClient.getId()).thenReturn("demo-client");
+      when(targetClient.getId()).thenReturn("target-client");
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(demoUser, targetUser));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+
+      String result = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+          "user@test.com", "target-client");
+
+      assertEquals("demo-client", result);
+      verify(preferenceQuery).setNamedParameter("clientId", "demo-client");
     }
   }
 

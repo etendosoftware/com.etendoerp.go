@@ -18,7 +18,10 @@ package com.etendoerp.go.session;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import javax.servlet.http.Cookie;
@@ -116,6 +119,42 @@ public class GoSessionAuthenticatorTest {
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
 
     assertEquals(GoSessionAuthResult.Status.CSRF_FAILED, result.getStatus());
+  }
+
+  @Test
+  public void authenticatedRequestRenewsTheIdleExpiry() {
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
+    GoSessionService service = mock(GoSessionService.class);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
+    HttpServletRequest req = mockRequest("POST", RAW_TOKEN, APP_ORIGIN, CSRF);
+
+    new GoSessionAuthenticator(service).authenticate(req);
+
+    verify(service).renewIdleExpiry(sessionRecord);
+  }
+
+  @Test
+  public void csrfRejectedRequestDoesNotRenewTheIdleExpiry() {
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
+    GoSessionService service = mock(GoSessionService.class);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
+    HttpServletRequest req = mockRequest("POST", RAW_TOKEN, APP_ORIGIN, null);
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(GoSessionAuthResult.Status.CSRF_FAILED, result.getStatus());
+    verify(service, never()).renewIdleExpiry(any());
+  }
+
+  @Test
+  public void invalidSessionDoesNotRenewTheIdleExpiry() {
+    GoSessionService service = mock(GoSessionService.class);
+    when(service.resolve(RAW_TOKEN)).thenReturn(null);
+    HttpServletRequest req = mockRequest("GET", RAW_TOKEN, null, null);
+
+    new GoSessionAuthenticator(service).authenticate(req);
+
+    verify(service, never()).renewIdleExpiry(any());
   }
 
   private static GoSessionRecord recordWithCsrf(String csrf) {
