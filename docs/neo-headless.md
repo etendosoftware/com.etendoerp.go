@@ -2458,6 +2458,29 @@ re-proposing the value already on the record records nothing, and `$_identifier`
 skipped. It travels on `NeoContext.supersededDefaults`. **The REST path never reads it**: there the
 protected value came from a person, and there is nothing to warn about.
 
+#### 4.12.15 Server identity and localized tool titles
+
+`initialize` advertises the server as `serverInfo.name = "etendo-mcp"` with
+`title = "Etendo MCP"`, `websiteUrl` and one `icons` entry pointing at the public
+`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973). `protocolVersion` is still
+`2024-11-05`: the new fields are additive and older clients ignore them. None of this is what a
+client lists the server as — that is the alias chosen at registration (`claude mcp add <alias>`,
+`[mcp_servers.<alias>]`), and Claude does not render `serverInfo.icons` for custom connectors today.
+
+`tools/list` gives every tool a `title` next to its `name`, in the language of the user the token
+belongs to (`OBContext` language — MCP carries no client locale). Only the title is localized; the
+`description` is read by the model and stays in English. Resolution (`McpToolTitles`):
+
+| Tool kind | Title source |
+|---|---|
+| Fixed (`neo_list`, `docs`, ...) | `mcp/messages/mcp_titles_<lang>.properties` (`en`, `es`), English fallback |
+| Process (`complete_order`) and report (`generate_*`) | Translated name of the spec's AD_Process, else its AD_Window |
+| Anything else | The name humanized, `neo_` prefix dropped |
+
+A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key in **both** catalogs
+and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
+humanized name, so a cosmetic field can never drop a tool from the list.
+
 ---
 
 ### 4.13 Image Fields and Image Upload (ETP-5184)

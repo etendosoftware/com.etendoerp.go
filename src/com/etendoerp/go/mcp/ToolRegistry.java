@@ -40,6 +40,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
@@ -1102,6 +1103,21 @@ public class ToolRegistry {
 
   // ── Process tool ───────────────────────────────────────────────────────
 
+  /**
+   * Display title of a per-spec tool: the spec's AD_Process (else AD_Window) name in the user's
+   * language. Total by design: a title is cosmetic, so a lookup failure returns {@code null}
+   * ({@link McpToolTitles} then humanizes the tool name) instead of dropping the tool.
+   */
+  private static String specTitle(SFSpec spec) {
+    try {
+      OBContext context = OBContext.getOBContext();
+      return McpToolTitles.fromSpec(spec, context != null ? context.getLanguage() : null);
+    } catch (RuntimeException e) {
+      log.debug("Could not resolve the AD title for spec '{}'", spec.getName(), e);
+      return null;
+    }
+  }
+
   private McpToolDefinition buildProcessTool(String specName, SFSpec spec) {
     String toolName = kebabToSnake(specName);
     String desc = String.format("Execute the '%s' process", specName);
@@ -1115,7 +1131,8 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_PARAMETERS, objectProp("Process input parameters", paramProps));
 
-    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()),
+        specTitle(spec));
   }
 
   // ── Report tool ────────────────────────────────────────────────────────
@@ -1165,7 +1182,8 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_FORMAT, enumProp(
         "Output format (default: " + contract.getDefaultFormat() + ")", contract.getFormats()));
 
-    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()),
+        specTitle(spec));
   }
 
   /**
