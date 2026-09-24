@@ -223,6 +223,84 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
         + "nothing", 0, selectRows(statements.get(0)).size());
   }
 
+  /**
+   * The abort guard's raise path, executed: with no ACTIVE {@code legacy-productive} row, applying
+   * the fix to a productive tenant must ERROR — never insert a NULL-plan row, never quietly insert
+   * nothing.
+   *
+   * <p>That error is what the runner records as {@code FAILED}, which is not in its PROCESSED set,
+   * so the tenant's watermark does not advance and the fix is retried once the plan exists. A
+   * zero-row success would instead be recorded {@code APPLIED}, advance the watermark past R37 for
+   * good and leave a paying customer with no subscription and no marker.
+   *
+   * <p>The plan row is deactivated for the duration of the statement only and restored in a
+   * {@code finally}. The raise must also be <em>row-dependent</em>: PostgreSQL constant-folds a
+   * cast of a pure literal at plan time, so a guard written that way would fail every tenant; the
+   * shape spec above already shows it matches nothing while the plan is active.
+   */
+  @Test
+  public void testTheAbortGuardRaisesAndWritesNothingWhenTheLegacyPlanIsInactive() {
+    String tenant = createTenant("abort", true);
+    List<String> statements = statementsOf(applySection, tenant);
+
+    RuntimeException failure;
+    setLegacyPlanActive(false);
+    try {
+      failure = runApplyExpectingFailure(statements);
+    } finally {
+      setLegacyPlanActive(true);
+    }
+
+    assertNotNull("@apply must FAIL when the grandfathered plan is inactive, so the runner "
+        + "records FAILED and retries instead of advancing the watermark", failure);
+    assertTrue("The failure must be the fix's own abort message, not an unrelated error: "
+        + causeChain(failure), causeChain(failure).contains("R37 ABORT"));
+    assertTrue("The abort message must name the tenant it refused: " + causeChain(failure),
+        causeChain(failure).contains(tenant));
+    assertEquals("Nothing may have been inserted", 0L, rawTotalCount(tenant));
+    assertEquals("And the marker must survive, so the transitional fallback keeps the tenant "
+        + "productive until the fix is retried", 1L, rawPreferenceCount(tenant));
+
+    // Once the plan is back, the very same tenant is backfilled normally: the retry works.
+    assertEquals(1, apply(tenant));
+  }
+
+  /**
+   * Runs @apply's statements in one transaction, as the runner does, and returns the failure.
+   *
+   * @return the exception the statements raised, or null when they all succeeded
+   */
+  private RuntimeException runApplyExpectingFailure(List<String> statements) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      OBDal.getInstance().getSession().createNativeQuery(statements.get(0)).list();
+      OBDal.getInstance().getSession().createNativeQuery(statements.get(1)).executeUpdate();
+      OBDal.getInstance().getSession().createNativeQuery(statements.get(2)).executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+      return null;
+    } catch (RuntimeException e) {
+      OBDal.getInstance().rollbackAndClose();
+      return e;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void setLegacyPlanActive(boolean active) {
+    nativeUpdateCommitted("UPDATE ETGO_PLAN SET ISACTIVE = :active WHERE VALUE = :value",
+        "active", active ? "Y" : "N", "value", LEGACY_PLAN_VALUE);
+  }
+
+  private static String causeChain(Throwable failure) {
+    StringBuilder chain = new StringBuilder();
+    for (Throwable t = failure; t != null; t = t.getCause() == t ? null : t.getCause()) {
+      chain.append(t.getClass().getSimpleName()).append(": ").append(t.getMessage()).append(" | ");
+    }
+    return chain.toString();
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Group 2 — one row, then none: idempotency and convergence
   // ---------------------------------------------------------------------------------------------
@@ -273,10 +351,13 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    * status is {@code active} — anything else and the tenant would not read back as productive,
    * which is the entire purpose of the fix.
    *
-   * <p>{@code PROVIDER_PRICE_ID}, {@code SNAPSHOT_AMOUNT} and {@code SNAPSHOT_CURRENCY} must be
-   * NULL, and that is a deliberate statement rather than an omission: the grandfathered plan has
-   * no price, so there is nothing truthful to snapshot, and inventing a figure here would put a
-   * fabricated amount on a real customer's record.
+   * <p>The checkout request here recorded no charged price (a request older than develop's
+   * ETP-5463, which started storing {@code STRIPE_PRICE_ID}), so {@code PROVIDER_PRICE_ID} must be
+   * NULL: the only truthful source of a price id is what that request charged, and the
+   * grandfathered plan has none of its own. {@code SNAPSHOT_AMOUNT} and {@code SNAPSHOT_CURRENCY}
+   * are NULL in every case, because the request stores no amount — inventing one would put a
+   * fabricated figure on a real customer's record. The copied-price case is
+   * {@link #testTheChargedPriceIdIsCopiedFromTheCheckoutRequestButNoAmountIs()}.
    */
   @Test
   public void testTheCreatedRowIsAnOpenActiveGrandfatheredSubscriptionWithNoPriceSnapshot() {
@@ -297,7 +378,8 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
     assertEquals("The row is owned by the System pseudo-client and is ABOUT the tenant", ZERO,
         rawColumn(subscriptionId, "AD_CLIENT_ID"));
     assertEquals(tenant, rawColumn(subscriptionId, "ENVIRONMENT_CLIENT_ID"));
-    assertNull("The grandfathered plan has no price, so there is nothing truthful to snapshot",
+    assertNull("The checkout request recorded no charged price and the grandfathered plan has "
+        + "none of its own, so there is no truthful price id to copy",
         rawColumn(subscriptionId, "PROVIDER_PRICE_ID"));
     assertNull(rawColumn(subscriptionId, "SNAPSHOT_AMOUNT"));
     assertNull(rawColumn(subscriptionId, "SNAPSHOT_CURRENCY"));
@@ -348,6 +430,33 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
         reportText(withoutRequest).contains("stripe ids left NULL"));
   }
 
+  /**
+   * The Stripe price the tenant was actually charged, carried over from its checkout request.
+   *
+   * <p>Since develop's ETP-5463 the request records {@code STRIPE_PRICE_ID}; the backfill copies it
+   * into {@code PROVIDER_PRICE_ID}, because it is the only record of what a grandfathered
+   * subscriber pays (the plan itself has no price). The amount and currency are NOT copied: the
+   * request stores no amount, so both stay NULL rather than being guessed.
+   */
+  @Test
+  public void testTheChargedPriceIdIsCopiedFromTheCheckoutRequestButNoAmountIs() {
+    String tenant = createTenant("price-yes", true);
+    createPaidCheckoutRequest(tenant, "cus_etp5046bf_price", "sub_etp5046bf_price",
+        "price_etp5046bf_charged");
+
+    assertEquals(1, apply(tenant));
+
+    String subscriptionId = (String) uniqueResult("SELECT ETGO_SUBSCRIPTION_ID "
+        + "FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant", "tenant", tenant);
+    assertEquals("The price the request charged must be carried onto the subscription",
+        "price_etp5046bf_charged", rawColumn(subscriptionId, "PROVIDER_PRICE_ID"));
+    assertNull("The request stores no amount, so none may be invented",
+        rawColumn(subscriptionId, "SNAPSHOT_AMOUNT"));
+    assertNull(rawColumn(subscriptionId, "SNAPSHOT_CURRENCY"));
+    assertTrue("@report must name the copied price",
+        reportText(tenant).contains("price=price_etp5046bf_charged"));
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Group 3b — status and grace anchor carried over from the lifecycle preferences (ETP-5443)
   // ---------------------------------------------------------------------------------------------
@@ -372,8 +481,12 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
     createLifecyclePreference(expired, "ETGO_SubscriptionDueAt", dueAt);
     String current = createTenant("life-current", true);
     createLifecyclePreference(current, "ETGO_SubscriptionStatus", " current ");
+    // NONE is what the lifecycle projection stores for a productive tenant whose subscription is
+    // gone; the reader treats it as not paying, so the row must not say "active".
+    String none = createTenant("life-none", true);
+    createLifecyclePreference(none, "ETGO_SubscriptionStatus", "NONE");
 
-    for (String tenant : new String[] { pastDue, expired, current }) {
+    for (String tenant : new String[] { pastDue, expired, current, none }) {
       assertEquals(1, apply(tenant));
     }
 
@@ -383,6 +496,8 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
         EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, Instant.parse(dueAt));
     assertSeeded(current, SubscriptionService.STATUS_ACTIVE,
         EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+    assertSeeded(none, SubscriptionService.STATUS_CANCELED,
+        EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
     assertEquals("A canceled row stays open: canceled means free now, with no END_DATE", 1,
         rawOpenCount(expired));
     assertEquals("The lifecycle preferences are left in place; only the plan marker is retired",
@@ -818,6 +933,18 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    */
   private String createPaidCheckoutRequest(String tenantId, String stripeCustomerId,
       String stripeSubscriptionId) {
+    return createPaidCheckoutRequest(tenantId, stripeCustomerId, stripeSubscriptionId, null);
+  }
+
+  /**
+   * As {@link #createPaidCheckoutRequest(String, String, String)}, recording the Stripe price the
+   * request charged ({@code STRIPE_PRICE_ID}, stored since develop's ETP-5463).
+   *
+   * @param stripePriceId {@code price_...}, or null for a request that predates the column
+   * @return the correlation id of the request
+   */
+  private String createPaidCheckoutRequest(String tenantId, String stripeCustomerId,
+      String stripeSubscriptionId, String stripePriceId) {
     String accountId = newId();
     String email = MARKER.toLowerCase(Locale.ROOT) + newId().toLowerCase(Locale.ROOT)
         + "@example.test";
@@ -830,11 +957,13 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
     nativeUpdateCommitted("INSERT INTO ETGO_CHECKOUT_REQUEST (ETGO_CHECKOUT_REQUEST_ID, "
             + "AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, "
             + "REQUEST_ID, ETGO_ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, CHECKOUT_STATUS, "
-            + "STRIPE_CUSTOMER_ID, STRIPE_SUBSCRIPTION_ID, CREATED_CLIENT_ID, "
+            + "STRIPE_CUSTOMER_ID, STRIPE_SUBSCRIPTION_ID, STRIPE_PRICE_ID, CREATED_CLIENT_ID, "
             + "PROVISIONING_ATTEMPTS, CREATING_AT, PAID_AT) "
             + "VALUES (:id, '0', '0', 'Y', now(), '0', now(), '0', :requestId, :accountId, "
-            + ":email, :clientName, 'PROVISIONED', :customer, :subscription, :tenant, 0, "
-            + "now(), now())",
+            + ":email, :clientName, 'PROVISIONED', :customer, :subscription, "
+            // A literal NULL rather than a null bind: a null parameter carries no type.
+            + (stripePriceId == null ? "NULL" : "'" + stripePriceId + "'")
+            + ", :tenant, 0, now(), now())",
         "id", newId(), "requestId", requestId, "accountId", accountId, "email", email,
         "clientName", MARKER + "tenant", "customer", stripeCustomerId,
         "subscription", stripeSubscriptionId, "tenant", tenantId);
