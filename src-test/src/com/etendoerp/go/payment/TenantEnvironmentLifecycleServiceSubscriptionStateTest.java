@@ -148,11 +148,18 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
     when(provider.get(Preference.class)).thenReturn(created);
 
     try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
-         MockedStatic<OBProvider> providerStatic = mockStatic(OBProvider.class)) {
+         MockedStatic<OBProvider> providerStatic = mockStatic(OBProvider.class);
+         MockedStatic<org.openbravo.dal.core.OBContext> context =
+             mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
       providerStatic.when(OBProvider::getInstance).thenReturn(provider);
 
       service.recordSubscriptionEventAt(CLIENT_ID, EVENT_AT);
+
+      // The Stripe webhook has no user context of its own: the write runs in admin mode and
+      // leaves it again, rather than depending on a context an earlier call leaked.
+      context.verify(org.openbravo.dal.core.OBContext::setAdminMode);
+      context.verify(org.openbravo.dal.core.OBContext::restorePreviousMode);
     }
 
     verify(created).setAttribute(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE);

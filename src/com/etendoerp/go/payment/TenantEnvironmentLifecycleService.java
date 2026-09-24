@@ -438,10 +438,11 @@ public class TenantEnvironmentLifecycleService {
       if (demo == null || productive == null) {
         return false;
       }
+      // One admin-mode span covers both cross-client writes, so they call the unwrapped writer.
       OBContext.setAdminMode();
       try {
-        setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
-        setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+        setPreferenceValue(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
+        setPreferenceValue(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
       } finally {
         OBContext.restorePreviousMode();
       }
