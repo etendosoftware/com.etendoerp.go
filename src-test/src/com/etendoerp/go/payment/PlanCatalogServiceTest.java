@@ -176,4 +176,106 @@ class PlanCatalogServiceTest {
 
     assertTrue(service.hasProviderPrice(plan));
   }
+
+  // ===================== legacy price fallback (ETP-5046 §6.1) =====================
+
+  private static final String LEGACY_PRICE_ID = "price_LEGACY_configured";
+
+  @Test
+  void theFallbackIsActiveWhenALegacyPriceIsConfiguredAndNothingIsPriced() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    // The grandfathered row itself is active but priceless: it must not count as "priced", or the
+    // fallback would retire itself on the very row it exists to sell.
+    Plan legacy = planWithPrice(null);
+    when(planQuery.list()).thenReturn(List.of(legacy));
+
+    assertTrue(service.isLegacyFallbackActive());
+  }
+
+  @ParameterizedTest
+  @NullSource
+  @ValueSource(strings = { "", "   " })
+  void theFallbackIsInactiveWithoutAConfiguredLegacyPrice(String configured) {
+    service.configuredFallbackPriceId = () -> configured;
+    when(planQuery.list()).thenReturn(Collections.emptyList());
+
+    // No price configured means nothing to sell — never a price nobody reviewed.
+    assertFalse(service.isLegacyFallbackActive());
+    // Decided on the property alone: the catalog is not even consulted.
+    verify(obDal, never()).createQuery(eq(Plan.class), anyString());
+  }
+
+  @Test
+  void theFirstPricedPlanRetiresTheFallback() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    Plan legacy = planWithPrice(null);
+    Plan priced = planWithPrice("price_123");
+    when(planQuery.list()).thenReturn(List.of(legacy, priced));
+
+    // No redeploy, no property change: the next request sees the priced plan and the fallback is
+    // gone, even though the legacy property is still set.
+    assertFalse(service.isLegacyFallbackActive());
+  }
+
+  @Test
+  void onlyActivePricedPlansRetireTheFallback() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    when(planQuery.list()).thenReturn(Collections.emptyList());
+
+    service.isLegacyFallbackActive();
+
+    // An inactive priced row is not for sale, so it must not switch off the one thing that is.
+    // The predicate reuses listPurchasablePlans, whose query is restricted to active rows.
+    ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+    verify(obDal).createQuery(eq(Plan.class), hql.capture());
+    assertTrue(hql.getValue().contains("active = true"), hql.getValue());
+  }
+
+  @Test
+  void findsTheGrandfatheredPlanWhileTheFallbackIsActive() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    when(planQuery.list()).thenReturn(Collections.emptyList());
+    Plan legacy = planWithPrice(null);
+    when(planQuery.uniqueResult()).thenReturn(legacy);
+
+    assertSame(legacy, service.findLegacyFallbackPlan().orElseThrow());
+    verify(planQuery).setNamedParameter("searchKey", PlanCatalogService.LEGACY_PLAN_KEY);
+  }
+
+  @Test
+  void findsNoGrandfatheredPlanOnceTheFallbackIsInactive() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    Plan priced = planWithPrice("price_123");
+    Plan legacy = planWithPrice(null);
+    when(planQuery.list()).thenReturn(List.of(priced));
+    when(planQuery.uniqueResult()).thenReturn(legacy);
+
+    // The row still exists and is still active — it is the fallback that is gone, and with it the
+    // only way the priceless plan could be sold.
+    assertTrue(service.findLegacyFallbackPlan().isEmpty());
+    verify(planQuery, never()).setNamedParameter("searchKey", PlanCatalogService.LEGACY_PLAN_KEY);
+  }
+
+  @Test
+  void findsNoGrandfatheredPlanWhenItsRowIsMissingOrInactive() {
+    service.configuredFallbackPriceId = () -> LEGACY_PRICE_ID;
+    when(planQuery.list()).thenReturn(Collections.emptyList());
+    when(planQuery.uniqueResult()).thenReturn(null);
+
+    assertTrue(service.findLegacyFallbackPlan().isEmpty());
+  }
+
+  @ParameterizedTest
+  @NullSource
+  @ValueSource(strings = { "", "   ", "legacy-productive", "  legacy-productive  " })
+  void aBlankKeyOrTheLegacyKeyAsksForTheGrandfatheredPlan(String planKey) {
+    // A blank key is how an app-shell older than the plan catalog asks for "the" product.
+    assertTrue(PlanCatalogService.namesLegacyPlan(planKey));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = { "productive-monthly", "legacy-productive-2", "tampered-key" })
+  void anyOtherKeyDoesNotAskForTheGrandfatheredPlan(String planKey) {
+    assertFalse(PlanCatalogService.namesLegacyPlan(planKey));
+  }
 }

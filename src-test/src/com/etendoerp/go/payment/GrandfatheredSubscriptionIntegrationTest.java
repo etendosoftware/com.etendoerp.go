@@ -18,6 +18,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -223,6 +224,85 @@ public class GrandfatheredSubscriptionIntegrationTest extends OBBaseTest {
     assertEquals("Same answer straight from the database, past every cache", 0L,
         ((Number) uniqueResult("SELECT COUNT(*) FROM ETGO_PLAN_QUOTA WHERE ETGO_PLAN_ID = :planId",
             "planId", planId)).longValue());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 3 — the legacy price fallback only retires on an ACTIVE priced plan
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * An operator who prepares a priced plan but leaves it inactive has put nothing on sale, so the
+   * legacy price fallback must keep selling. Only an active row carrying a provider price retires
+   * it (design §6.1). Asserted against a real row, because "active" is a committed column the
+   * query filters on — a mock of the query would only restate the HQL.
+   *
+   * <p>Skipped when this database already sells a priced plan: the fallback is then off for a
+   * reason this spec does not control. Only an INACTIVE row is committed, so a running server
+   * sharing this database never sees its plan list change.
+   */
+  @Test
+  public void testAnInactivePricedPlanNeitherSellsNorRetiresTheLegacyFallback() {
+    PlanCatalogService catalog = new PlanCatalogService();
+    catalog.configuredFallbackPriceId = () -> "price_" + MARKER + "legacy";
+    org.junit.Assume.assumeTrue("this database already sells a priced plan",
+        purchasableIds(catalog).isEmpty());
+
+    String inactive = createInactivePricedPlan();
+
+    assertTrue("an inactive plan is not purchasable, whatever its price",
+        purchasableIds(catalog).isEmpty());
+    assertFalse(purchasableIds(catalog).contains(inactive));
+    assertTrue("an inactive priced plan must not retire the legacy fallback",
+        inFreshContext(catalog::isLegacyFallbackActive));
+  }
+
+  private List<String> purchasableIds(PlanCatalogService catalog) {
+    return inFreshContext(() -> {
+      List<String> ids = new java.util.ArrayList<>();
+      for (Plan plan : catalog.listPurchasablePlans()) {
+        ids.add(plan.getId());
+      }
+      return ids;
+    });
+  }
+
+  private static <T> T inFreshContext(java.util.function.Supplier<T> read) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    try {
+      return read.get();
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  /**
+   * Creates a fully priced plan that is switched off.
+   *
+   * @return the new {@code ETGO_PLAN_ID}
+   */
+  private String createInactivePricedPlan() {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      Plan plan = OBProvider.getInstance().get(Plan.class);
+      plan.setNewOBObject(true);
+      plan.setClient(OBDal.getInstance().get(Client.class, ZERO));
+      plan.setOrganization(OBDal.getInstance().get(Organization.class, ZERO));
+      plan.setActive(false);
+      plan.setSearchKey(MARKER + newId());
+      plan.setName(MARKER + "inactive priced " + newId());
+      plan.setProviderPriceID("price_" + MARKER + newId());
+      plan.setDisplayPrice(new java.math.BigDecimal("49.00"));
+      plan.setCurrencyCode("EUR");
+      plan.setBillingInterval("month");
+      OBDal.getInstance().save(plan);
+      OBDal.getInstance().flush();
+      String id = plan.getId();
+      OBDal.getInstance().commitAndClose();
+      return id;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   // ---------------------------------------------------------------------------------------------
