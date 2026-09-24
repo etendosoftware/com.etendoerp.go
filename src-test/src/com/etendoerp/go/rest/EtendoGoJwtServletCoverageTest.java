@@ -1963,6 +1963,39 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
+  @Test
+  public void aFallbackPurchaseOpensOnTheGrandfatheredPlanWithTheChargedPrice() {
+    // Bought under the legacy price fallback: the request carries legacy-productive, which has no
+    // price of its own, and the configured price that was actually charged. The subscription must
+    // snapshot THAT price — it is the only record of what this subscriber pays.
+    PaidUpgradeFixture fixture = new PaidUpgradeFixture();
+    Plan legacy = mock(Plan.class);
+    when(legacy.getSearchKey()).thenReturn("legacy-productive");
+    Account payer = mock(Account.class);
+    CheckoutRequest checkoutRequest = mock(CheckoutRequest.class);
+    when(checkoutRequest.getPlan()).thenReturn(legacy);
+    when(checkoutRequest.getEtendoGoAccount()).thenReturn(payer);
+    when(checkoutRequest.getStripeCustomer()).thenReturn("cus_legacy");
+    when(checkoutRequest.getStripeSubscription()).thenReturn("sub_legacy");
+    when(checkoutRequest.getStripePrice()).thenReturn("price_LEGACY_configured");
+    when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(checkoutRequest);
+    Subscription opened = mock(Subscription.class);
+    when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any(),
+        any())).thenReturn(opened);
+    servlet.checkoutRequestStore = fixture.checkoutRequestStore;
+    servlet.subscriptionService = fixture.subscriptionService;
+    servlet.tenantPlanService = fixture.tenantPlanService;
+    servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    when(fixture.lifecycleService.markProductive(anyString())).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = fixture.lifecycleService;
+
+    applyPaidUpgrade();
+
+    verify(fixture.subscriptionService).openSubscription(PAID_CLIENT_ID, legacy, payer,
+        "cus_legacy", "sub_legacy", "price_LEGACY_configured");
+    verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+  }
+
   /** The mocked collaborators of one paid-upgrade spec. */
   private static final class PaidUpgradeFixture {
     final CheckoutRequestStore checkoutRequestStore = mock(CheckoutRequestStore.class);

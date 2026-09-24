@@ -310,6 +310,179 @@ class SubscriptionServiceTest {
     }
   }
 
+  /**
+   * The overload the post-payment path calls: the subscription snapshots the price the checkout
+   * actually CHARGED, which under the legacy price fallback is not the (priceless) plan's.
+   */
+  @Nested
+  class OpenSubscriptionWithTheChargedPrice {
+
+    private Subscription created;
+
+    @BeforeEach
+    void givenANewRow() {
+      created = mock(Subscription.class);
+      when(obProvider.get(Subscription.class)).thenReturn(created);
+      when(obDal.get(eq(Client.class), any())).thenReturn(mock(Client.class));
+      when(obDal.get(eq(Organization.class), any())).thenReturn(mock(Organization.class));
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+    }
+
+    private Plan legacyPlan() {
+      Plan legacy = mock(Plan.class);
+      when(legacy.getSearchKey()).thenReturn(PlanCatalogService.LEGACY_PLAN_KEY);
+      when(legacy.getProviderPriceID()).thenReturn(null);
+      when(legacy.getDisplayPrice()).thenReturn(null);
+      when(legacy.getCurrencyCode()).thenReturn(null);
+      return legacy;
+    }
+
+    private Plan pricedPlan() {
+      Plan plan = mock(Plan.class);
+      when(plan.getSearchKey()).thenReturn(PLAN_KEY);
+      when(plan.getProviderPriceID()).thenReturn(PRICE_ID);
+      when(plan.getDisplayPrice()).thenReturn(new BigDecimal("49.0000"));
+      when(plan.getCurrencyCode()).thenReturn("EUR");
+      return plan;
+    }
+
+    @Test
+    void aFallbackPurchaseOpensOnTheGrandfatheredPlanWithTheChargedPrice() {
+      Plan legacy = legacyPlan();
+
+      service.openSubscription(CLIENT_ID, legacy, null, CUSTOMER_ID, STRIPE_SUBSCRIPTION_ID,
+          "price_LEGACY_configured");
+
+      verify(created).setPlan(legacy);
+      verify(created).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
+      // The grandfathered plan has no price of its own, so the charged one is the only record of
+      // what this subscriber pays.
+      verify(created).setProviderPriceID("price_LEGACY_configured");
+      // The plan's display amount describes the plan's price, which this is not: no snapshot.
+      verify(created, never()).setSnapshotAmount(any());
+      verify(created, never()).setSnapshotCurrency(any());
+      verify(obDal).save(created);
+    }
+
+    @Test
+    void aChargedPriceThatIsThePlansOwnSnapshotsTheAmountToo() {
+      service.openSubscription(CLIENT_ID, pricedPlan(), null, null, null, "  " + PRICE_ID + " ");
+
+      verify(created).setProviderPriceID(PRICE_ID);
+      verify(created).setSnapshotAmount(new BigDecimal("49.0000"));
+      verify(created).setSnapshotCurrency("EUR");
+    }
+
+    @Test
+    void aChargedPriceThatDiffersFromThePlansKeepsTheChargedIdAndNoAmount() {
+      // The plan was re-priced between checkout and provisioning: record what was charged, never
+      // the plan's current amount next to a price id it does not describe.
+      service.openSubscription(CLIENT_ID, pricedPlan(), null, null, null, "price_OLD");
+
+      verify(created).setProviderPriceID("price_OLD");
+      verify(created, never()).setSnapshotAmount(any());
+      verify(created, never()).setSnapshotCurrency(any());
+    }
+
+    @Test
+    void noChargedPriceFallsBackToThePlansPrice() {
+      service.openSubscription(CLIENT_ID, pricedPlan(), null, null, null, "   ");
+
+      verify(created).setProviderPriceID(PRICE_ID);
+      verify(created).setSnapshotAmount(new BigDecimal("49.0000"));
+    }
+  }
+
+  /** Where the Stripe lifecycle webhooks land for a tenant with an open subscription row. */
+  @Nested
+  class ApplyLifecycleStatus {
+
+    private static final java.time.Instant ANCHOR = java.time.Instant.parse("2026-10-31T00:00:00Z");
+
+    @Test
+    void currentIsStoredAsActive() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      assertTrue(service.applyLifecycleStatus(CLIENT_ID,
+          EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null));
+
+      verify(open).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
+      verify(open).setCurrentPeriodEnd(null);
+      verify(obDal).save(open);
+    }
+
+    @Test
+    void pastDueIsStoredWithTheGraceAnchorAsThePeriodEnd() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      assertTrue(service.applyLifecycleStatus(CLIENT_ID,
+          EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR));
+
+      verify(open).setSubscriptionStatus(SubscriptionService.STATUS_PAST_DUE);
+      // The access policy counts the grace days from this column.
+      verify(open).setCurrentPeriodEnd(java.util.Date.from(ANCHOR));
+    }
+
+    @Test
+    void expiredIsStoredAsCanceledWithoutClosingTheRow() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      assertTrue(service.applyLifecycleStatus(CLIENT_ID,
+          EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null));
+
+      verify(open).setSubscriptionStatus(SubscriptionService.STATUS_CANCELED);
+      // Closing a row is how a plan change opens its successor (ETP-5053); a cancellation is not
+      // one, so END_DATE is left alone.
+      verify(open, never()).setEndDate(any());
+      verify(open).setCurrentPeriodEnd(null);
+    }
+
+    @Test
+    void aStartAfterTheNewAnchorIsDroppedSoThePeriodCheckCannotRejectTheEvent() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(open.getCurrentPeriodStart())
+          .thenReturn(java.util.Date.from(ANCHOR.plusSeconds(86_400L)));
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      service.applyLifecycleStatus(CLIENT_ID, EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
+          ANCHOR);
+
+      verify(open).setCurrentPeriodStart(null);
+      verify(open).setCurrentPeriodEnd(java.util.Date.from(ANCHOR));
+    }
+
+    @Test
+    void aTenantWithoutAnOpenRowIsReportedSoTheCallerCanUseThePreferences() {
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+
+      assertEquals(false, service.applyLifecycleStatus(CLIENT_ID,
+          EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null));
+
+      verify(obDal, never()).save(any());
+    }
+
+    @Test
+    void doesNotCommit() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      service.applyLifecycleStatus(CLIENT_ID, EnvironmentAccessPolicy.SubscriptionStatus.CURRENT,
+          null);
+
+      // The webhook handler commits it together with the event's ledger row.
+      verify(obDal, never()).commitAndClose();
+    }
+
+    @Test
+    void refusesAStatusNoLifecycleEventProduces() {
+      assertThrows(IllegalArgumentException.class, () -> service.applyLifecycleStatus(CLIENT_ID,
+          EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT, null));
+    }
+  }
+
   @Test
   void opensASystemContextOnlyWhenTheCallerHasNone() {
     obContextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
