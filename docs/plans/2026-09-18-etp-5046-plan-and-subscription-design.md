@@ -402,6 +402,7 @@ through a capture-and-restore helper, and `SubscriptionService` opens a system c
 `OBContext.getOBContext()` is null.
 
 Out of scope here: usage capture and reporting, overage pricing, quota *evaluation* and
-enforcement (ETP-5051), moving the subscription lifecycle webhooks onto `ETGO_SUBSCRIPTION`
-(ETP-5047 — develop's ETP-5443 applier still writes the preference projection, see
-`open-and-notable-topics.md`), reconciliation (ETP-5048), plan change and proration (ETP-5053).
+enforcement (ETP-5051), the rest of the subscription lifecycle (ETP-5047 — since the develop
+merge the ETP-5443 webhooks already write `STATUS` and the grace anchor onto the open row, see
+`open-and-notable-topics.md` §3.7), reconciliation (ETP-5048), plan change and proration
+(ETP-5053).

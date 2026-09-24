@@ -48,29 +48,6 @@ counts clients **created** that day (a flow) while the billable quantity is how 
 stock). With no rollup yet the difference does not bite, but **storing a flow under a stock's name
 makes every later reading of it wrong**, including any quota built on it in ETP-5051.
 
-### 🔴 1.3 Who owns a subscription's lifecycle status — the table or the webhook projection?
-
-Two models met again in the develop merge (2026-09-24). ETP-5046 made `ETGO_SUBSCRIPTION` the
-source of truth for whether a tenant pays (§3.5), but develop's ETP-5443 wired the Stripe lifecycle
-webhooks (`invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated/deleted`) through
-`SubscriptionLifecycleApplier` into the **preference projection** (`ETGO_SubscriptionStatus`,
-`ETGO_SubscriptionDueAt`, `ETGO_SubscriptionEventAt`). Nothing updates `ETGO_SUBSCRIPTION.STATUS`
-or `CURRENT_PERIOD_END` after the row is opened.
-
-Left as it merged, a table-first read would have made those webhooks dead code for every tenant with
-a subscription row: a cancelled or unpaid Stripe subscription would stay `CURRENT` forever. The
-merge therefore resolves `TenantEnvironmentLifecycleService.productiveSnapshot()` as: **the open row
-answers until a lifecycle event has been applied to the tenant (`ETGO_SubscriptionEventAt` set);
-from then on the projection answers.** That keeps develop's lifecycle behaviour intact and the
-table authoritative for tenants that have not received an event.
-
-It is a stop-gap with a known cost — `ETGO_SUBSCRIPTION.STATUS` goes stale for exactly the tenants
-whose status changed — and it is not what either design intended. The decision owed: move the
-applier's writes onto the open subscription row (ETP-5047's job, which then retires this branch),
-including what `canceled` should do to `TenantPlanService.resolvePlan` (it would flip the tenant to
-`free`, with the §3.4 test-mode consequences), or keep the projection as the lifecycle authority and
-drop `STATUS` from the table.
-
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
@@ -336,6 +313,37 @@ preference, with §3.2's end condition never reached.
 in the target branch** — and re-date it if it is not strictly newer. A catalog test asserting that
 no two fix timestamps are equal would have caught half of this one.
 
+### 🟠 3.7 Lifecycle webhooks write the open subscription row — preferences only without one
+
+Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice.payment_failed`,
+`customer.subscription.updated`, `customer.subscription.deleted`) into a preference projection
+(`ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt`). Since the develop merge,
+`TenantEnvironmentLifecycleService.updateSubscriptionStatus` routes the outcome per tenant:
+
+- **open `ETGO_SUBSCRIPTION` row** → `SubscriptionService.applyLifecycleStatus` writes `STATUS`
+  (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`) and `CURRENT_PERIOD_END` (the
+  applier's grace anchor, the end of the paid period; `null` clears it);
+- **no open row** → the preference projection, as before (`ETP-5046-TRANSITIONAL-FALLBACK`).
+
+`readSubscriptionState` reads the same store the write goes to, and `resolve` reads the row first,
+so the access policy, `resolvePlan` and the environment list all agree. Things that follow from it:
+
+- **`canceled` makes the tenant `free`** for `resolvePlan` (only `active`/`past_due` are
+  productive). The environment keeps its `ETGO_EnvironmentType = PRODUCTIVE` marker, so the access
+  policy still sees a productive environment and applies `EXPIRED`. Watch §3.4: onboarding a
+  canceled tenant again would now run `forceTestModeForFreeTenant` on it.
+- **`canceled` does not close the row** (`END_DATE` stays null). Closing a row is how a plan change
+  opens its successor (ETP-5053); a later re-subscription of the same tenant is not modelled yet —
+  `openSubscription` returns the existing open row untouched.
+- **The event-ordering watermark (`ETGO_SubscriptionEventAt`) stays a preference for both
+  routes.** It is webhook-stream metadata, not subscription state, and the row has no column for
+  it. Moving it onto the row needs a new AD column.
+- `CURRENT_PERIOD_END` on the row now means "grace anchor" as the applier computes it, not Stripe's
+  rolling billing window (§4 of the design doc). Nothing else writes it today; ETP-5047 should
+  decide whether to split the two.
+- The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the row too,
+  or it would stop affecting every tenant that has one.
+
 ## 4. Known issues
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
@@ -487,15 +495,14 @@ Re-pricing a plan does **not** re-price existing subscribers — the subscriptio
 current row (`END_DATE`) and inserts a successor, preserving price history. `PENDING_PLAN_ID` and
 `PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
 
-### 🟠 5.4 Known gaps: no plan-change path, lifecycle not on the table
+### 🟠 5.4 Known gaps: no plan-change path, a partial lifecycle on the table
 
 - **No plan change exists.** `SubscriptionService` can open a row and read it; nothing closes one
   and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
   moving to the first real plan — until ETP-5053. `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay
   unread.
-- **Stripe lifecycle webhooks do not touch `ETGO_SUBSCRIPTION`.** They exist since develop's
-  ETP-5443 (`invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`,
-  `customer.subscription.deleted`) but write only the preference projection. See §1.3.
+- **Lifecycle webhooks update the row's status and grace anchor only** (§3.7): no period window,
+  no event watermark on the row, no closing on cancel, no re-subscription. ETP-5047 owns the rest.
 
 ---
 

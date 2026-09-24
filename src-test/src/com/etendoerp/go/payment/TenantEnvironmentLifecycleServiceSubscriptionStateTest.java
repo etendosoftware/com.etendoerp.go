@@ -45,8 +45,14 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
   private static final Instant DUE_AT = Instant.parse("2026-10-31T00:00:00Z");
   private static final Instant EVENT_AT = Instant.parse("2026-11-01T12:30:00Z");
 
+  /**
+   * A tenant with no open subscription row, so these specs exercise the preference projection.
+   * A mocked {@code findOpen} answers {@code Optional.empty()} by default; the row route has its
+   * own specs.
+   */
+  private final SubscriptionService subscriptionService = mock(SubscriptionService.class);
   private final TenantEnvironmentLifecycleService service =
-      new TenantEnvironmentLifecycleService(mock(TenantPlanService.class));
+      new TenantEnvironmentLifecycleService(mock(TenantPlanService.class), subscriptionService);
 
   @Test
   public void blankClientReadsAsTheEmptyProjectionWithoutTouchingTheDal() {

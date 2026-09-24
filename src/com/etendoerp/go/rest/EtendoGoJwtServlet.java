@@ -1400,6 +1400,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * ignored before any lookup, and once against the environment's stored projection, which makes
    * an out-of-order older event stale and keeps an authoritative {@code PAST_DUE} due date.
    *
+   * <p>The outcome lands on the tenant's open {@code ETGO_SUBSCRIPTION} row when it has one, and on
+   * the preference projection otherwise (see
+   * {@link TenantEnvironmentLifecycleService#updateSubscriptionStatus}); the stored state the
+   * event is evaluated against is read from the same place.
+   *
    * <p>The status, due date and event instant are written in the session that
    * {@code markApplied} commits, so they land together. When a write fails the session is rolled
    * back before the row is marked {@code FAILED}; otherwise that commit would persist a partial

@@ -5,6 +5,7 @@
  */
 package com.etendoerp.go.payment;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Date;
@@ -262,6 +263,84 @@ public class SubscriptionService {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Applies a Stripe lifecycle outcome to the tenant's open subscription row.
+   *
+   * <p>The lifecycle webhooks ({@code invoice.paid}, {@code invoice.payment_failed},
+   * {@code customer.subscription.updated/deleted}) are interpreted by
+   * {@link SubscriptionLifecycleApplier}; this is where their result lands when the tenant has an
+   * {@code ETGO_SUBSCRIPTION} row, so the row stays the single answer to "is this tenant paying and
+   * until when". A tenant with no open row keeps the older preference projection instead — see
+   * {@link TenantEnvironmentLifecycleService#updateSubscriptionStatus}.
+   *
+   * <ul>
+   *   <li>{@code STATUS}: {@code CURRENT → active}, {@code PAST_DUE → past_due},
+   *       {@code EXPIRED → canceled}. {@code canceled} does not close the row ({@code END_DATE}
+   *       stays null): closing a row is how a plan change opens its successor (ETP-5053), and a
+   *       cancellation is not one.</li>
+   *   <li>{@code CURRENT_PERIOD_END}: the outcome's grace anchor — for {@code PAST_DUE} the end of
+   *       the period the customer already paid for, which is what the access policy counts the
+   *       grace days from. {@code null} clears it, exactly as it clears the preference projection's
+   *       due date, so both stores produce the same access decision.</li>
+   * </ul>
+   *
+   * <p>Does not commit: the webhook handler commits it together with the event's ledger row, and
+   * rolls both back on failure.
+   *
+   * @param environmentClientId {@code AD_CLIENT_ID} of the tenant
+   * @param status the access-policy status the event maps to; {@code CURRENT}, {@code PAST_DUE} or
+   *     {@code EXPIRED}
+   * @param graceAnchor the end of the paid period, or null to clear it
+   * @return true when an open row was found and updated; false when the tenant has none
+   * @throws IllegalArgumentException for a status no lifecycle event produces
+   */
+  public boolean applyLifecycleStatus(String environmentClientId,
+      EnvironmentAccessPolicy.SubscriptionStatus status, Instant graceAnchor) {
+    String storedStatus = storedStatusOf(status);
+    Optional<Subscription> open = findOpen(environmentClientId);
+    if (open.isEmpty()) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    openSystemContextWhenAbsent();
+    try {
+      Subscription subscription = open.get();
+      subscription.setSubscriptionStatus(storedStatus);
+      Date periodEnd = graceAnchor == null ? null : Date.from(graceAnchor);
+      if (periodEnd != null && subscription.getCurrentPeriodStart() != null
+          && periodEnd.before(subscription.getCurrentPeriodStart())) {
+        // ETGO_SUB_PERIOD_CHK: a start after the anchor would reject the whole event. The start is
+        // not written by anything today, so dropping it loses nothing the policy reads.
+        subscription.setCurrentPeriodStart(null);
+      }
+      subscription.setCurrentPeriodEnd(periodEnd);
+      OBDal.getInstance().save(subscription);
+      log.info("Subscription of tenant {} moved to '{}' by a lifecycle event",
+          environmentClientId, storedStatus);
+      return true;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Maps an access-policy status onto the {@code ETGO_SUBSCRIPTION.STATUS} vocabulary. The
+   * inverse of {@code TenantEnvironmentLifecycleService.subscriptionStatusOf}; the two must be
+   * edited together with {@code ETGO_SUB_STATUS_CHK}.
+   */
+  static String storedStatusOf(EnvironmentAccessPolicy.SubscriptionStatus status) {
+    if (status == EnvironmentAccessPolicy.SubscriptionStatus.CURRENT) {
+      return STATUS_ACTIVE;
+    }
+    if (status == EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE) {
+      return STATUS_PAST_DUE;
+    }
+    if (status == EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED) {
+      return STATUS_CANCELED;
+    }
+    throw new IllegalArgumentException("No subscription status is stored for " + status);
   }
 
   /**
