@@ -719,7 +719,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           clientName, origin, selection.demoClientId, selection.transferProducts,
           selection.transferContacts,
           requestId -> recordDemoDataTransferSelection(body, requestId, selection));
-      addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""));
+      addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""),
+          selection.demoClientId);
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (IllegalStateException e) {
       if (!CheckoutConfiguration.isConfigured()) {
@@ -821,7 +822,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           writeCompletedBillingPurchase(response, account, activePurchase, result);
           return;
         }
-        addDemoDataTransferSelectionBestEffort(result, activePurchase.getRequest());
+        addDemoDataTransferSelectionBestEffort(result, activePurchase.getRequest(),
+            activePurchase.getDemoClient() == null ? null : activePurchase.getDemoClient().getId());
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (HostedCheckoutService.OriginalPriceUnavailableException e) {
         writeError(response, HttpServletResponse.SC_CONFLICT, "PURCHASE_PRICE_UNAVAILABLE",
@@ -882,7 +884,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           result.put(FIELD_DEMO_CLIENT_ID, checkoutRequest.getDemoClient().getId());
         }
       }
-      if (checkoutRequest != null) addDemoDataTransferSelection(result, requestId);
+      if (checkoutRequest != null && checkoutRequest.getDemoClient() != null) {
+        addDemoDataTransferSelection(result, requestId, checkoutRequest.getDemoClient().getId());
+      }
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
   }
@@ -1077,7 +1081,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String createdClientId = purchase.getCreatedClient() == null
         ? null : purchase.getCreatedClient().getId();
     result.put("clientId", createdClientId == null ? JSONObject.NULL : createdClientId);
-    addDemoDataTransferSelection(result, purchase.getRequest());
+    if (purchase.getDemoClient() != null) {
+      addDemoDataTransferSelection(result, purchase.getRequest(), purchase.getDemoClient().getId());
+    }
     if (purchase.getCreatedClient() != null) {
       result.put("createdClientId", createdClientId);
     }
@@ -2947,8 +2953,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void addDemoDataTransferSelection(JSONObject result, String requestId)
+  private void addDemoDataTransferSelection(JSONObject result, String requestId, String demoClientId)
       throws JSONException {
+    if (StringUtils.isBlank(demoClientId)) return;
     boolean enabled = DemoDataTransferFlag.isEnabled();
     result.put("dataTransferEnabled", enabled);
     if (!enabled) return;
@@ -2957,9 +2964,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /** A projection failure after Stripe has created a session must not masquerade as provider 502. */
-  private void addDemoDataTransferSelectionBestEffort(JSONObject result, String requestId) {
+  private void addDemoDataTransferSelectionBestEffort(JSONObject result, String requestId,
+      String demoClientId) {
     try {
-      addDemoDataTransferSelection(result, requestId);
+      addDemoDataTransferSelection(result, requestId, demoClientId);
     } catch (RuntimeException | JSONException e) {
       log.error("Checkout {} was created but its transfer selection could not be projected",
           requestId, e);

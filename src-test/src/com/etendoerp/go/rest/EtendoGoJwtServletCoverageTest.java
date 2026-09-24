@@ -35,6 +35,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -184,9 +185,6 @@ public class EtendoGoJwtServletCoverageTest {
       assertFalse((boolean) getField(recordedRequest, "transferProducts"));
       assertTrue((boolean) getField(recordedRequest, "transferContacts"));
       invokeProfileAndSelectedDataTransfer(recordedRequest, "STORED-DEMO", "NEW-PRODUCTIVE");
-      verify(lifecycle).associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE");
-      verify(profileTransfer).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
-      verify(dataTransfer).transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false, true);
 
       Object legacy = prepareOnboardingForPersistedSelection();
       Object legacyRequest = getField(legacy, "request");
@@ -197,10 +195,13 @@ public class EtendoGoJwtServletCoverageTest {
       servlet.startDemoDataTransferBestEffort("purchase-1", null, "LEGACY-PRODUCTIVE",
           "account-1", "user@test.com");
     }
-    verify(lifecycle, never()).associateDemoWithProductive(anyString(), anyString());
-    verify(profileTransfer, never()).copy(anyString(), anyString(), anyString());
-    verify(dataTransfer, never()).transfer(anyString(), anyString(), anyString(), anyBoolean(),
-        anyBoolean());
+    verify(lifecycle, times(1)).associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE");
+    verifyNoMoreInteractions(lifecycle);
+    verify(profileTransfer, times(1)).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
+    verifyNoMoreInteractions(profileTransfer);
+    verify(dataTransfer, times(1)).transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false,
+        true);
+    verifyNoMoreInteractions(dataTransfer);
     verify(store, times(1)).findDemoClientId("purchase-1", "account-1", "user@test.com");
     verify(store, times(1)).findTransferSelection("purchase-1", "account-1", "user@test.com");
   }

@@ -131,7 +131,7 @@ class StripePriceServiceTest {
     try (CheckoutStripeServer stripe = new CheckoutStripeServer();
         MockedStatic<CheckoutConfiguration> configuration = mockStatic(CheckoutConfiguration.class)) {
       configuration.when(CheckoutConfiguration::isConfigured).thenReturn(true);
-      configuration.when(CheckoutConfiguration::priceId).thenReturn("price_current_config");
+      configuration.when(CheckoutConfiguration::priceId).thenReturn("price_retrieved");
       configuration.when(CheckoutConfiguration::secretKey).thenReturn("sk_test_server_only");
       configuration.when(CheckoutConfiguration::apiBaseUrl).thenReturn(stripe.baseUrl());
       configuration.when(CheckoutConfiguration::mode).thenReturn("subscription");
@@ -379,7 +379,7 @@ class StripePriceServiceTest {
 
     CheckoutStripeServer() throws IOException {
       server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-      server.createContext("/v1/prices/price_current_config", exchange -> respond(exchange, 200,
+      server.createContext("/v1/prices/price_retrieved", exchange -> respond(exchange, 200,
           "{\"id\":\"price_retrieved\",\"active\":true,\"unit_amount\":1200,"
               + "\"currency\":\"eur\",\"recurring\":{\"interval\":\"month\","
               + "\"interval_count\":1}}"));
