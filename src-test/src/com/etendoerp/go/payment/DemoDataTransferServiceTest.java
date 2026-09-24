@@ -23,14 +23,17 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.math.BigDecimal;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -52,6 +55,7 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -62,6 +66,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.plm.ProductCategory;
 import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.financialmgmt.tax.TaxCategory;
 import org.openbravo.model.materialmgmt.cost.Costing;
@@ -92,11 +97,13 @@ class DemoDataTransferServiceTest {
   @Mock private OBDal obDal;
   @Mock private OBProvider obProvider;
   @Mock private OBQuery<Preference> preferenceQuery;
+  @Mock private SessionHandler sessionHandler;
 
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<OBProvider> obProviderStatic;
   private MockedStatic<OBContext> contextStatic;
   private MockedStatic<Preferences> preferencesStatic;
+  private MockedStatic<SessionHandler> sessionHandlerStatic;
   private DemoDataTransferService service;
 
   @BeforeEach
@@ -105,6 +112,8 @@ class DemoDataTransferServiceTest {
     obProviderStatic = mockStatic(OBProvider.class);
     contextStatic = mockStatic(OBContext.class);
     preferencesStatic = mockStatic(Preferences.class);
+    sessionHandlerStatic = mockStatic(SessionHandler.class);
+    sessionHandlerStatic.when(SessionHandler::getInstance).thenReturn(sessionHandler);
     obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
     obProviderStatic.when(OBProvider::getInstance).thenReturn(obProvider);
     service = new DemoDataTransferService();
@@ -112,6 +121,7 @@ class DemoDataTransferServiceTest {
 
   @AfterEach
   void tearDown() {
+    sessionHandlerStatic.close();
     preferencesStatic.close();
     contextStatic.close();
     obProviderStatic.close();
@@ -312,6 +322,48 @@ class DemoDataTransferServiceTest {
     verify(targetProduct).setUOM(unit);
     verify(targetProduct).setTaxCategory(tax);
     verify(obDal).save(targetProduct);
+    // Totals, then one commit per product: status reads see the progress while the job runs.
+    verify(sessionHandler, times(2)).commitAndStart();
+    verify(obDal).createQuery(eq(Product.class), contains("p.active = true"));
+  }
+
+  @Test
+  void aDemoProductCategoryIsCopiedWithItsMandatoryPlannedMargin() throws Exception {
+    Client source = client(SOURCE_ID);
+    Client target = client(TARGET_ID);
+    Organization targetOrg = mock(Organization.class);
+    Product sourceProduct = mock(Product.class);
+    Product targetProduct = mock(Product.class);
+    Client system = client(SYSTEM_ID);
+    UOM unit = mock(UOM.class);
+    TaxCategory tax = mock(TaxCategory.class);
+    ProductCategory sourceCategory = mock(ProductCategory.class);
+    ProductCategory copiedCategory = mock(ProductCategory.class);
+    when(unit.getClient()).thenReturn(system);
+    when(tax.getClient()).thenReturn(system);
+    when(sourceCategory.getClient()).thenReturn(source);
+    when(sourceCategory.getName()).thenReturn("Bebidas");
+    when(sourceCategory.getPlannedMargin()).thenReturn(BigDecimal.ZERO);
+    when(sourceProduct.getUOM()).thenReturn(unit);
+    when(sourceProduct.getTaxCategory()).thenReturn(tax);
+    when(sourceProduct.getProductCategory()).thenReturn(sourceCategory);
+    when(sourceProduct.getSearchKey()).thenReturn("SKU-001");
+
+    OBQuery<Product> sourceProducts = queryWithList(List.of(sourceProduct));
+    OBQuery<Product> existingTarget = queryWithUniqueResult(targetProduct);
+    OBQuery<ProductCategory> noTargetCategory = queryWithUniqueResult(null);
+    OBQuery<ProductPrice> prices = queryWithList(Collections.emptyList());
+    OBQuery<Costing> costs = queryWithList(Collections.emptyList());
+    when(obDal.createQuery(eq(Product.class), anyString())).thenReturn(sourceProducts, existingTarget);
+    when(obDal.createQuery(eq(ProductCategory.class), anyString())).thenReturn(noTargetCategory);
+    when(obDal.createQuery(eq(ProductPrice.class), anyString())).thenReturn(prices);
+    when(obDal.createQuery(eq(Costing.class), anyString())).thenReturn(costs);
+    when(obProvider.get(ProductCategory.class)).thenReturn(copiedCategory);
+
+    invokeCopy("copyProducts", Client.class, Client.class, Organization.class, source, target, targetOrg);
+
+    verify(copiedCategory).setPlannedMargin(BigDecimal.ZERO);
+    verify(targetProduct).setProductCategory(copiedCategory);
   }
 
   @Test
@@ -348,6 +400,7 @@ class DemoDataTransferServiceTest {
     when(sourcePrice.getPriceListVersion()).thenReturn(sourceVersion);
     when(sourceVersion.getPriceList()).thenReturn(sourceList);
     when(sourceList.isSalesPriceList()).thenReturn(true);
+    when(sourceList.isDefault()).thenReturn(true);
     OBQuery<ProductPrice> sourcePrices = queryWithList(List.of(sourcePrice));
     when(obDal.createQuery(eq(ProductPrice.class), anyString()))
         .thenReturn(sourcePrices);
@@ -361,6 +414,30 @@ class DemoDataTransferServiceTest {
     InvocationTargetException error = assertThrows(InvocationTargetException.class,
         () -> method.invoke(service, sourceProduct, targetProduct, targetClient, targetOrg));
     assertTrue(error.getCause().getMessage().contains("sales price list version is missing"));
+    verify(obProvider, never()).get(ProductPrice.class);
+  }
+
+  @Test
+  void aPriceOnANonDefaultPriceListIsNotMigrated() throws Exception {
+    Product sourceProduct = mock(Product.class);
+    ProductPrice sourcePrice = mock(ProductPrice.class);
+    PriceListVersion sourceVersion = mock(PriceListVersion.class);
+    PriceList secondaryList = mock(PriceList.class);
+    when(sourceProduct.getId()).thenReturn("source-product");
+    when(sourcePrice.getPriceListVersion()).thenReturn(sourceVersion);
+    when(sourceVersion.getPriceList()).thenReturn(secondaryList);
+    when(secondaryList.isSalesPriceList()).thenReturn(true);
+    when(secondaryList.isDefault()).thenReturn(false);
+    OBQuery<ProductPrice> sourcePrices = queryWithList(List.of(sourcePrice));
+    when(obDal.createQuery(eq(ProductPrice.class), anyString())).thenReturn(sourcePrices);
+    Method method = DemoDataTransferService.class.getDeclaredMethod("copyPrices",
+        Product.class, Product.class, Client.class, Organization.class);
+    method.setAccessible(true);
+
+    method.invoke(service, sourceProduct, mock(Product.class), client(TARGET_ID),
+        mock(Organization.class));
+
+    verify(obDal, never()).createCriteria(PriceListVersion.class);
     verify(obProvider, never()).get(ProductPrice.class);
   }
 
@@ -397,6 +474,10 @@ class DemoDataTransferServiceTest {
     verify(targetContact).setSearchKey("CONTACT-001");
     verify(targetContact).setTaxID("");
     verify(obDal).save(targetContact);
+    // The organization's fiscal address shares the table: only contact addresses are reusable.
+    verify(obDal).createQuery(eq(org.openbravo.model.common.geography.Location.class),
+        contains("BusinessPartnerLocation"));
+    verify(sessionHandler, times(2)).commitAndStart();
   }
 
   @Test

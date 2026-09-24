@@ -14,6 +14,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -379,6 +380,16 @@ public class DemoDataTransferService {
 
   void progress(Client client, String attribute, int value) {
     setClientPreference(attribute, String.valueOf(value), client);
+  }
+
+  /**
+   * Commits the work copied so far, keeping the session and its loaded entities open, so the
+   * progress counters are visible to status reads while the job runs. A later failure rolls back
+   * only the item in progress; a retry re-runs every item through the same upserts, which is what
+   * makes committing per item safe.
+   */
+  void checkpoint() {
+    SessionHandler.getInstance().commitAndStart();
   }
 
   private boolean selected(String selection, int index) { return selection.length() > index && selection.charAt(index) == 'Y'; }

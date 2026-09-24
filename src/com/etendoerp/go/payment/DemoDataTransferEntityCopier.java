@@ -48,10 +48,12 @@ final class DemoDataTransferEntityCopier {
   }
 
   void copyProducts(Client source, Client target, Organization targetOrg) {
-    List<Product> products = owner.query(Product.class, "as p where p.client.id = :clientId", source.getId());
+    List<Product> products = owner.query(Product.class,
+        "as p where p.client.id = :clientId and p.active = true", source.getId());
     owner.progress(target, PRODUCTS_TOTAL, products.size());
     int completed = 0;
     owner.progress(target, PRODUCTS_DONE, completed);
+    owner.checkpoint();
     for (Product product : products) {
       Product targetProduct = owner.unique(Product.class, "as p where p.client.id = :clientId and p.searchKey = :key",
           target.getId(), product.getSearchKey());
@@ -68,7 +70,7 @@ final class DemoDataTransferEntityCopier {
       copyPrices(product, targetProduct, target, targetOrg);
       copyCurrentCost(product, targetProduct, target, targetOrg);
       owner.progress(target, PRODUCTS_DONE, ++completed);
-      OBDal.getInstance().flush();
+      owner.checkpoint();
     }
   }
 
@@ -78,6 +80,7 @@ final class DemoDataTransferEntityCopier {
     owner.progress(target, CONTACTS_TOTAL, contacts.size());
     int completed = 0;
     owner.progress(target, CONTACTS_DONE, completed);
+    owner.checkpoint();
     for (BusinessPartner contact : contacts) {
       BusinessPartner targetContact = owner.unique(BusinessPartner.class,
           "as bp where bp.client.id = :clientId and bp.searchKey = :key", target.getId(), contact.getSearchKey());
@@ -94,7 +97,7 @@ final class DemoDataTransferEntityCopier {
           contact, targetContact, target, targetOrg);
       copyBusinessPartnerPersons(contact, targetContact, target, targetOrg, targetLocations);
       owner.progress(target, CONTACTS_DONE, ++completed);
-      OBDal.getInstance().flush();
+      owner.checkpoint();
     }
   }
 
@@ -143,14 +146,22 @@ final class DemoDataTransferEntityCopier {
     if (existing != null) return existing;
     ProductCategory copy = OBProvider.getInstance().get(ProductCategory.class);
     copy.setClient(target); copy.setOrganization(targetOrg);
-    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY);
+    // PlannedMargin is mandatory with no default in AD or DB: omitting it fails the insert.
+    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY,
+        "PlannedMargin");
     OBDal.getInstance().save(copy);
     return copy;
   }
 
-  /** Copies the source product's displayed sales and purchase prices onto the target defaults. */
+  /**
+   * Copies the source product's prices from the demo's default sales and purchase price lists onto
+   * the target defaults. Prices on any other list are not migrated: without a rule to map a
+   * secondary list, picking one would be arbitrary. The newest version of each list wins.
+   */
   void copyPrices(Product source, Product target, Client targetClient, Organization targetOrg) {
-    List<ProductPrice> prices = owner.query(ProductPrice.class, "as pp where pp.product.id = :clientId", source.getId());
+    List<ProductPrice> prices = owner.query(ProductPrice.class,
+        "as pp where pp.product.id = :clientId order by pp.priceListVersion.validFromDate desc",
+        source.getId());
     boolean copiedSales = false;
     boolean copiedPurchase = false;
     for (ProductPrice sourcePrice : prices) {
@@ -158,6 +169,7 @@ final class DemoDataTransferEntityCopier {
       if (salesPriceList.isEmpty()) {
         throw new IllegalStateException("Cannot classify source product price list");
       }
+      if (!sourcePrice.getPriceListVersion().getPriceList().isDefault()) continue;
       boolean sales = salesPriceList.get();
       boolean alreadyCopied = sales ? copiedSales : copiedPurchase;
       if (copyPriceIfNeeded(sourcePrice, target, targetClient, targetOrg, sales, alreadyCopied)) {
@@ -278,9 +290,12 @@ final class DemoDataTransferEntityCopier {
         "as l where l.businessPartner.id = :clientId", source.getId());
     List<Location> targetLocations = owner.query(Location.class,
         "as l where l.businessPartner.id = :clientId", target.getId());
+    // Only addresses already used by contact locations may be reused: the organization's fiscal
+    // address lives in the same table, and sharing its row would let a contact edit rewrite it.
     List<org.openbravo.model.common.geography.Location> targetAddresses = owner.query(
         org.openbravo.model.common.geography.Location.class,
-        "as l where l.client.id = :clientId", targetClient.getId());
+        "as l where l.client.id = :clientId and exists (select 1 from BusinessPartnerLocation bl"
+            + " where bl.locationAddress = l)", targetClient.getId());
     Map<String, Location> sourceToTarget = new HashMap<>();
 
     for (Location sourceLocation : sourceLocations) {

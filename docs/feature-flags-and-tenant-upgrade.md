@@ -347,10 +347,19 @@ that purchase. If setup is already running, the response says to refresh its sta
 again. Once an attempt is marked failed, retrying the same paid request is allowed; a stale worker
 cannot mark the newer attempt complete.
 
-The paid flow starts the durable transfer after provisioning commits. Products, their
-sales/purchase prices and current cost, and contacts are copied under target client references; global units and tax categories remain global references. Missing
-required target references fail the job with a visible reason. Existing target search keys and
-price/cost rows are updated so a retry does not duplicate them.
+The paid flow starts the durable transfer after provisioning commits. Active products, their
+current cost and their prices, and active contacts are copied under target client references;
+global units and tax categories remain global references. Only prices on the demo's **default**
+sales and purchase price lists are migrated (the newest version of each), onto the target's
+default lists; prices on any other list are left behind. A contact address reuses only an
+address row already used by another contact, never the organization's fiscal address. Missing
+required target references fail the job with a visible reason.
+
+Each product and each contact is committed on its own, so the First Steps counters move while
+the job runs. A failure therefore rolls back only the item in progress and leaves the earlier
+ones copied; a retry re-runs every item through the same upserts (existing target search keys,
+price and cost rows are updated, never duplicated), so it completes the job without duplicating
+what was already copied.
 
 ### Company profile transfer during paid provisioning (ETP-5443)
 
