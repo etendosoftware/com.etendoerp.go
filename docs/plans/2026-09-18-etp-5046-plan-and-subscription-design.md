@@ -297,6 +297,15 @@ UTC shape `Instant.toString()` writes; anything else becomes NULL, mirroring the
 "ignore an invalid due timestamp", so a cosmetic value never fails a tenant. `CURRENT_PERIOD_START`
 stays NULL, so `ETGO_SUB_PERIOD_CHK` can never reject the insert.
 
+**Time zone assumption.** `CURRENT_PERIOD_END` is a `TIMESTAMP` without zone. The
+`CAST(... AS timestamptz)` fixes the instant, and storing it renders that instant in the **database
+session's** time zone (the server `timezone` setting, for the data-fix runner); Java reads it back
+through `Date`/`Timestamp` in the **Tomcat JVM's** default zone. The two agree only when the DB
+server `timezone` equals the JVM zone — an assumption Etendo already makes for every `TIMESTAMP`
+column, and the one the webhook's own `Date.from(Instant)` write relies on. Where they differ, the
+seeded grace anchor is off by the offset between the zones (a UTC server under a UTC-3 JVM shifts
+the end of the paid period by 3 hours). The runner is deliberately not changed for this.
+
 Unlike the plan marker (§7.1), both lifecycle preferences are **owned** by the tenant
 (`AD_CLIENT_ID = tenant`, written by `setPreferenceValue` with `setClient(tenant)` and read back
 through `PROPERTY_CLIENT`), so R37 reads them by `ad_client_id`. It does not delete them:
