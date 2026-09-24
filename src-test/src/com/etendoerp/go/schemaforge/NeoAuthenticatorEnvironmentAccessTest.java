@@ -53,6 +53,8 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -89,6 +91,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
   private NeoAuthenticator authenticator;
   private GoSessionAuthenticator sessionAuthenticator;
   private TenantEnvironmentLifecycleService lifecycleService;
+  private GoSessionRoleReconciler roleReconciler;
 
   private MockedStatic<OBContext> obContextStatic;
   private MockedStatic<SecureWebServicesUtils> swsStatic;
@@ -103,6 +106,9 @@ class NeoAuthenticatorEnvironmentAccessTest {
     lifecycleService = mock(TenantEnvironmentLifecycleService.class);
     setField(authenticator, "sessionAuthenticator", sessionAuthenticator);
     setField(authenticator, "environmentLifecycleService", lifecycleService);
+    // ETP-5395 — the role check hits the database; by default it reports the role as still valid.
+    roleReconciler = mock(GoSessionRoleReconciler.class);
+    setField(authenticator, "sessionRoleReconciler", roleReconciler);
 
     obContextStatic = mockStatic(OBContext.class);
     swsStatic = mockStatic(SecureWebServicesUtils.class);
@@ -187,6 +193,47 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertTrue(authenticated, "a legacy tenant with no lifecycle metadata must not be refused");
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
+  }
+
+  /**
+   * ETP-5395 — a user promoted or demoted after entering the environment must be authorized with
+   * the role they hold now, not the one the session was opened with.
+   */
+  @Test
+  void cookieSessionIsAuthorizedWithTheReboundRole() throws Exception {
+    GoSessionRecord sessionRecord = validRecord(CLIENT_ID);
+    when(sessionAuthenticator.authenticate(any())).thenReturn(
+        GoSessionAuthResult.authenticated(sessionRecord));
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+    when(roleReconciler.reconcile(sessionRecord)).thenAnswer(invocation -> {
+      sessionRecord.setRoleId("REBOUND_ROLE");
+      return true;
+    });
+
+    boolean authenticated = authenticator.authenticateRequest(cookieRequest(),
+        mock(HttpServletResponse.class));
+
+    assertTrue(authenticated);
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, "REBOUND_ROLE", ORG_ID,
+        WAREHOUSE_ID, CLIENT_ID));
+  }
+
+  @Test
+  void cookieSessionWhoseUserHoldsNoRoleIsRejected() throws Exception {
+    GoSessionRecord sessionRecord = validRecord(CLIENT_ID);
+    when(sessionAuthenticator.authenticate(any())).thenReturn(
+        GoSessionAuthResult.authenticated(sessionRecord));
+    when(roleReconciler.reconcile(sessionRecord))
+        .thenThrow(new SessionRoleRevokedException("no role left"));
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean authenticated = authenticator.authenticateRequest(cookieRequest(), response);
+
+    assertFalse(authenticated);
+    verify(servlet).sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "no role left");
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(anyString(), anyString(),
+        anyString(), any(), anyString()), never());
   }
 
   // ===================== Legacy Bearer (USE_LEGACY_BEARER) path is unchanged =====================
