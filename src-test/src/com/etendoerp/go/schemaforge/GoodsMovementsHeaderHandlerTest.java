@@ -17,15 +17,16 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,10 +34,17 @@ import java.sql.Connection;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
@@ -48,163 +56,346 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 /**
  * Unit tests for {@link GoodsMovementsHeaderHandler}.
  *
- * <p>The handler is a POST pre-hook that materializes the {@code DocumentNo_M_Movement} sequence
- * into the create body when the caller has no real value. These tests lock down every branch:
- * the method/body guards, the "real value wins" short-circuit, the three no-value variants
- * (absent / JSON-null / blank / {@code <preview>}) that trigger materialization, the blank-sequence
- * fallback that leaves the field untouched, and the swallow-on-error path.
+ * <p>The handler is a create-only pre-hook that materializes the movement DocumentNo into the
+ * create body when the caller has no real value. Aligned with classic, the number always comes
+ * from the generic {@code DocumentNo_M_Movement} table sequence
+ * ({@code Utility.getDocumentNoConnection(..., "M_Movement", true)}); the doc-type overload of
+ * {@code Utility.getDocumentNo} is never used.
+ *
+ * <p>ETP-5491 regression coverage: the number must be consumed exactly once per movement, i.e.
+ * ONLY on a CRUD {@code POST} create ({@code recordId == null}). The "Procesar" button
+ * ({@code POST /{entity}/{id}/action/processNow}) and any update must never consume a number.
+ *
+ * <p>All statics ({@link OBDal}, {@link OBContext}, {@link Utility},
+ * {@link GoodsMovementProcessGuard}) are mocked for every test, so a
+ * test that expects "no number consumed" really reaches the sequence call when the guard is
+ * missing — it cannot pass by accident through a swallowed NPE.
  */
-public class GoodsMovementsHeaderHandlerTest {
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
+class GoodsMovementsHeaderHandlerTest {
+
+  private static final String DOCUMENT_NO = "documentNo";
+  private static final String POST = "POST";
+  private static final String PATCH = "PATCH";
+  private static final String CLIENT_ID = "client-1";
+  private static final String TABLE_M_MOVEMENT = "M_Movement";
+  private static final String RECORD_ID = "MOVEMENT-1";
+  private static final String PROCESS_NOW = "processNow";
+
+  @Mock
+  private NeoContext ctx;
+  @Mock
+  private OBDal dal;
+  @Mock
+  private Connection conn;
+  @Mock
+  private OBContext obContext;
+  @Mock
+  private Client client;
+  @Mock
+  private DocumentPostingService postingService;
+
+  private MockedStatic<OBDal> dalMock;
+  private MockedStatic<OBContext> obContextMock;
+  private MockedStatic<Utility> utilMock;
+  private MockedStatic<GoodsMovementProcessGuard> guardMock;
+  private MockedConstruction<DalConnectionProvider> providerConstruction;
 
   private final GoodsMovementsHeaderHandler handler = new GoodsMovementsHeaderHandler();
 
-  private NeoContext context(String method, JSONObject body) {
-    NeoContext ctx = mock(NeoContext.class);
+  @BeforeEach
+  void setUp() {
+    dalMock = Mockito.mockStatic(OBDal.class);
+    obContextMock = Mockito.mockStatic(OBContext.class);
+    utilMock = Mockito.mockStatic(Utility.class);
+    // Default answer: validateBeforeProcess -> null (no stock rejection).
+    guardMock = Mockito.mockStatic(GoodsMovementProcessGuard.class);
+    providerConstruction = Mockito.mockConstruction(DalConnectionProvider.class);
+
+    dalMock.when(OBDal::getInstance).thenReturn(dal);
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(dal.getConnection()).thenReturn(conn);
+    obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    when(client.getId()).thenReturn(CLIENT_ID);
+  }
+
+  @AfterEach
+  void tearDown() {
+    providerConstruction.close();
+    guardMock.close();
+    utilMock.close();
+    obContextMock.close();
+    dalMock.close();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------------------------
+
+  /** Stubs the class-level context as a CRUD request (create when {@code recordId} is null). */
+  private NeoContext crudContext(String method, String recordId, JSONObject body) {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
     when(ctx.getHttpMethod()).thenReturn(method);
+    when(ctx.getRecordId()).thenReturn(recordId);
     when(ctx.getRequestBody()).thenReturn(body);
     return ctx;
   }
+
+  /** Stubs the class-level context as a CRUD create ({@code POST}, no record id). */
+  private NeoContext createContext(JSONObject body) {
+    return crudContext(POST, null, body);
+  }
+
+  private void stubGenericSequence(String value) {
+    utilMock.when(() -> Utility.getDocumentNoConnection(any(), any(), eq(CLIENT_ID),
+        eq(TABLE_M_MOVEMENT), eq(true))).thenReturn(value);
+  }
+
+  /** Asserts that no overload of the document-number API was invoked (no number consumed). */
+  private void verifyNoDocumentNoConsumed() {
+    utilMock.verify(() -> Utility.getDocumentNoConnection(any(), any(), any(), any(), anyBoolean()),
+        never());
+    utilMock.verify(() -> Utility.getDocumentNo(any(), any(), any(), any(), any(), any(), any(),
+        anyBoolean(), anyBoolean()), never());
+    utilMock.verify(() -> Utility.getDocumentNo(any(), any(), any(), any(), any(), any(),
+        anyBoolean(), anyBoolean()), never());
+    utilMock.verify(() -> Utility.getDocumentNo(any(), anyString(), anyString(), anyBoolean()),
+        never());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Guards — pre-existing behavior
+  // ---------------------------------------------------------------------------------------------
 
   /**
    * Non-POST requests fall straight through without consuming the sequence.
    */
   @Test
-  public void nonPostMethodIsSkipped() {
+  void testNonPostMethodIsSkipped() {
     JSONObject body = new JSONObject();
-    try (MockedStatic<Utility> util = Mockito.mockStatic(Utility.class)) {
-      assertNull(handler.handle(context("PATCH", body)));
-      util.verify(() -> Utility.getDocumentNoConnection(any(), any(), any(), any(), anyBoolean()), never());
-    }
+    assertNull(handler.handle(crudContext(PATCH, null, body)));
+    verifyNoDocumentNoConsumed();
   }
 
   /**
    * A null body is a no-op (no NPE, no sequence consumption).
    */
   @Test
-  public void nullBodyIsSkipped() {
-    try (MockedStatic<Utility> util = Mockito.mockStatic(Utility.class)) {
-      assertNull(handler.handle(context("POST", null)));
-      util.verify(() -> Utility.getDocumentNoConnection(any(), any(), any(), any(), anyBoolean()), never());
-    }
+  void testNullBodyIsSkipped() {
+    assertNull(handler.handle(createContext(null)));
+    verifyNoDocumentNoConsumed();
   }
 
   /**
    * A real caller-supplied DocumentNo always wins — the sequence is never touched.
    */
   @Test
-  public void realDocumentNoWins() throws JSONException {
-    JSONObject body = new JSONObject().put("documentNo", "MANUAL-1");
-    try (MockedStatic<Utility> util = Mockito.mockStatic(Utility.class)) {
-      assertNull(handler.handle(context("POST", body)));
-      assertEquals("MANUAL-1", body.getString("documentNo"));
-      util.verify(() -> Utility.getDocumentNoConnection(any(), any(), any(), any(), anyBoolean()), never());
-    }
+  void testRealDocumentNoWins() throws JSONException {
+    stubGenericSequence("SHOULD-NOT-BE-USED");
+    JSONObject body = new JSONObject().put(DOCUMENT_NO, "MANUAL-1");
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("MANUAL-1", body.getString(DOCUMENT_NO));
+    verifyNoDocumentNoConsumed();
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5491 — a number is consumed only on CRUD create
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * ETP-5491 (double increment): the "Procesar" button sends
+   * {@code POST /{entity}/{id}/action/processNow} with {@code {fieldValues:{processNow:'Y'}}}.
+   * That is an ACTION on an existing record, not a create — it must not consume a number and the
+   * body must reach the process untouched.
+   */
+  @Test
+  void testProcessNowActionPostDoesNotConsumeDocumentNo() throws JSONException {
+    stubGenericSequence("10000011");
+    JSONObject body = new JSONObject().put("fieldValues",
+        new JSONObject().put(PROCESS_NOW, "Y"));
+    String before = body.toString();
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getHttpMethod()).thenReturn(POST);
+    when(ctx.getRecordId()).thenReturn(RECORD_ID);
+    when(ctx.getFieldName()).thenReturn(PROCESS_NOW);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+
+    assertFalse(body.has(DOCUMENT_NO));
+    assertEquals(before, body.toString());
+    verifyNoDocumentNoConsumed();
+  }
+
+  /**
+   * ETP-5491: a CRUD update ({@code PUT} on an existing record) never consumes a number.
+   */
+  @Test
+  void testCrudPutUpdateDoesNotConsumeDocumentNo() {
+    stubGenericSequence("10000012");
+    JSONObject body = new JSONObject();
+
+    assertNull(handler.handle(crudContext("PUT", RECORD_ID, body)));
+
+    assertFalse(body.has(DOCUMENT_NO));
+    verifyNoDocumentNoConsumed();
+  }
+
+  /**
+   * ETP-5491: a CRUD {@code POST} addressed to an existing record ({@code recordId} set) is not a
+   * create and must not consume a number either.
+   */
+  @Test
+  void testCrudPostWithRecordIdDoesNotConsumeDocumentNo() {
+    stubGenericSequence("10000013");
+    JSONObject body = new JSONObject();
+
+    assertNull(handler.handle(crudContext(POST, RECORD_ID, body)));
+
+    assertFalse(body.has(DOCUMENT_NO));
+    verifyNoDocumentNoConsumed();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5491 — create consumes exactly one number from DocumentNo_M_Movement (classic alignment)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * ETP-5491: a CRUD create consumes exactly one number from the generic
+   * {@code DocumentNo_M_Movement} sequence (updateNext=true) and never calls the doc-type
+   * overload of {@code Utility.getDocumentNo}.
+   */
+  @Test
+  void testCreateConsumesExactlyOneGenericSequenceNumber() throws JSONException {
+    stubGenericSequence("10000017");
+    JSONObject body = new JSONObject();
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000017", body.getString(DOCUMENT_NO));
+    utilMock.verify(() -> Utility.getDocumentNoConnection(any(), any(), eq(CLIENT_ID),
+        eq(TABLE_M_MOVEMENT), eq(true)), times(1));
+    utilMock.verify(() -> Utility.getDocumentNo(any(), any(), any(), any(), any(), any(), any(),
+        anyBoolean(), anyBoolean()), never());
+  }
+
+  /**
+   * ETP-5491: the {@code <1000>} preview placeholder is replaced by the generic sequence value.
+   */
+  @Test
+  void testPreviewPlaceholderIsReplacedByGenericSequence() throws JSONException {
+    stubGenericSequence("10000018");
+    JSONObject body = new JSONObject().put(DOCUMENT_NO, "<1000>");
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000018", body.getString(DOCUMENT_NO));
+  }
+
+  /**
+   * ETP-5491: a blank sequence result leaves the body exactly as the caller sent it.
+   */
+  @Test
+  void testBlankSequenceLeavesBodyUnchanged() throws JSONException {
+    stubGenericSequence("");
+    JSONObject body = new JSONObject().put(DOCUMENT_NO, "<1000>");
+    String before = body.toString();
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals(before, body.toString());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // No-value variants, blank sequence and error path
+  // ---------------------------------------------------------------------------------------------
 
   /**
    * The {@code <preview>} placeholder is replaced by the real sequence value.
    */
   @Test
-  public void previewPlaceholderIsMaterialized() throws JSONException {
-    JSONObject body = new JSONObject().put("documentNo", "<10000003>");
-    runWithSequence(body, "10000003", false);
-    assertEquals("10000003", body.getString("documentNo"));
+  void testPreviewPlaceholderIsMaterialized() throws JSONException {
+    stubGenericSequence("10000003");
+    JSONObject body = new JSONObject().put(DOCUMENT_NO, "<10000003>");
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000003", body.getString(DOCUMENT_NO));
   }
 
   /**
    * An absent DocumentNo is materialized.
    */
   @Test
-  public void absentDocumentNoIsMaterialized() throws JSONException {
+  void testAbsentDocumentNoIsMaterialized() throws JSONException {
+    stubGenericSequence("10000004");
     JSONObject body = new JSONObject();
-    runWithSequence(body, "10000004", false);
-    assertEquals("10000004", body.getString("documentNo"));
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000004", body.getString(DOCUMENT_NO));
   }
 
   /**
    * A JSON-null DocumentNo is materialized.
    */
   @Test
-  public void jsonNullDocumentNoIsMaterialized() throws JSONException {
-    JSONObject body = new JSONObject().put("documentNo", JSONObject.NULL);
-    runWithSequence(body, "10000005", false);
-    assertEquals("10000005", body.getString("documentNo"));
+  void testJsonNullDocumentNoIsMaterialized() throws JSONException {
+    stubGenericSequence("10000005");
+    JSONObject body = new JSONObject().put(DOCUMENT_NO, JSONObject.NULL);
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000005", body.getString(DOCUMENT_NO));
   }
 
   /**
    * A blank DocumentNo is materialized.
    */
   @Test
-  public void blankDocumentNoIsMaterialized() throws JSONException {
-    JSONObject body = new JSONObject().put("documentNo", "   ");
-    runWithSequence(body, "10000006", false);
-    assertEquals("10000006", body.getString("documentNo"));
+  void testBlankDocumentNoIsMaterialized() throws JSONException {
+    stubGenericSequence("10000006");
+    JSONObject body = new JSONObject().put(DOCUMENT_NO, "   ");
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000006", body.getString(DOCUMENT_NO));
   }
 
   /**
-   * When the sequence yields a blank value, the field is left unset and no error is raised.
+   * When every sequence yields a blank value, the field is left unset and no error is raised.
    */
   @Test
-  public void blankSequenceLeavesDocumentNoUnset() {
+  void testBlankSequenceLeavesDocumentNoUnset() {
+    stubGenericSequence("");
     JSONObject body = new JSONObject();
-    runWithSequence(body, "", false);
-    assertFalse(body.has("documentNo"));
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertFalse(body.has(DOCUMENT_NO));
   }
 
   /**
    * Any failure during materialization is swallowed; the create still proceeds.
    */
   @Test
-  public void errorDuringMaterializationIsSwallowed() {
+  void testErrorDuringMaterializationIsSwallowed() {
+    utilMock.when(() -> Utility.getDocumentNoConnection(any(), any(), eq(CLIENT_ID),
+        eq(TABLE_M_MOVEMENT), eq(true))).thenThrow(new RuntimeException("boom"));
     JSONObject body = new JSONObject();
-    runWithSequence(body, null, true);
-    assertFalse(body.has("documentNo"));
+
+    assertNull(handler.handle(createContext(body)));
+
+    assertFalse(body.has(DOCUMENT_NO));
   }
 
-  /**
-   * Runs {@link GoodsMovementsHeaderHandler#handle} with the full static-mock stack
-   * ({@link OBDal}, {@link OBContext}, {@link Utility}) and the {@link DalConnectionProvider}
-   * constructor stubbed out.
-   *
-   * @param body
-   *     the create body passed to the handler
-   * @param sequenceValue
-   *     value returned by {@code Utility.getDocumentNoConnection} (ignored when
-   *     {@code throwOnSequence} is {@code true})
-   * @param throwOnSequence
-   *     when {@code true}, the sequence call throws to exercise the catch path
-   */
-  private void runWithSequence(JSONObject body, String sequenceValue, boolean throwOnSequence) {
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(
-        OBDal.class); MockedStatic<OBContext> ctxMock = Mockito.mockStatic(
-        OBContext.class); MockedStatic<Utility> utilMock = Mockito.mockStatic(
-        Utility.class); MockedConstruction<DalConnectionProvider> ignored = Mockito.mockConstruction(
-        DalConnectionProvider.class)) {
-
-      OBDal dal = mock(OBDal.class);
-      Connection conn = mock(Connection.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection(false)).thenReturn(conn);
-
-      OBContext obContext = mock(OBContext.class);
-      Client client = mock(Client.class);
-      when(client.getId()).thenReturn("client-1");
-      when(obContext.getCurrentClient()).thenReturn(client);
-      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
-
-      if (throwOnSequence) {
-        utilMock.when(
-            () -> Utility.getDocumentNoConnection(any(), any(), eq("client-1"), eq("M_Movement"), eq(true))).thenThrow(
-            new RuntimeException("boom"));
-      } else {
-        utilMock.when(
-            () -> Utility.getDocumentNoConnection(any(), any(), eq("client-1"), eq("M_Movement"), eq(true))).thenReturn(
-            sequenceValue);
-      }
-
-      assertNull(handler.handle(context("POST", body)));
-    }
-  }
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5436 — posting service and process guard ordering
+  // ---------------------------------------------------------------------------------------------
 
   /**
    * ETP-5436: a matched post/unpost action delegates to the injected
@@ -212,33 +403,31 @@ public class GoodsMovementsHeaderHandlerTest {
    * before the documentNo materialization logic.
    */
   @Test
-  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    NeoContext ctx = mock(NeoContext.class);
+  void testHandleReturnsPostingResponseWhenServiceHandlesAction() {
     NeoResponse sentinel = NeoResponse.ok(new JSONObject());
-    when(service.handleAction(ctx)).thenReturn(sentinel);
-
-    handler.setPostingService(service);
+    when(postingService.handleAction(ctx)).thenReturn(sentinel);
+    handler.setPostingService(postingService);
 
     assertSame(sentinel, handler.handle(ctx));
+    verifyNoDocumentNoConsumed();
   }
 
   /**
    * ETP-5436: when the posting service does not claim the action (returns {@code null}),
-   * the handler falls through to its pre-existing documentNo materialization exactly as
-   * before — the posting check is purely additive.
+   * the handler falls through to its documentNo materialization exactly as before — the posting
+   * check is purely additive.
    */
   @Test
-  public void postingServiceReturningNullDoesNotBlockDocumentNoMaterialization() throws JSONException {
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    when(service.handleAction(any())).thenReturn(null);
-    handler.setPostingService(service);
-
+  void testPostingServiceReturningNullDoesNotBlockDocumentNoMaterialization() throws JSONException {
+    when(postingService.handleAction(any())).thenReturn(null);
+    handler.setPostingService(postingService);
+    stubGenericSequence("10000099");
     JSONObject body = new JSONObject();
-    runWithSequence(body, "10000099", false);
 
-    assertEquals("10000099", body.getString("documentNo"));
-    verify(service).handleAction(any());
+    assertNull(handler.handle(createContext(body)));
+
+    assertEquals("10000099", body.getString(DOCUMENT_NO));
+    verify(postingService).handleAction(any());
   }
 
   /**
@@ -247,42 +436,31 @@ public class GoodsMovementsHeaderHandlerTest {
    * interfering with each other.
    */
   @Test
-  public void postingServiceReturningNull_nonPostMethodStillSkipsDocumentNoMaterialization() {
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    when(service.handleAction(any())).thenReturn(null);
-    handler.setPostingService(service);
-
+  void testPostingServiceReturningNullNonPostMethodStillSkipsDocumentNoMaterialization() {
+    when(postingService.handleAction(any())).thenReturn(null);
+    handler.setPostingService(postingService);
     JSONObject body = new JSONObject();
-    try (MockedStatic<Utility> util = Mockito.mockStatic(Utility.class)) {
-      assertNull(handler.handle(context("PATCH", body)));
-      util.verify(() -> Utility.getDocumentNoConnection(any(), any(), any(), any(), anyBoolean()), never());
-    }
-    verify(service).handleAction(any());
+
+    assertNull(handler.handle(crudContext(PATCH, null, body)));
+
+    verifyNoDocumentNoConsumed();
+    verify(postingService).handleAction(any());
   }
 
   /**
    * ETP-5436 (order matters): {@link GoodsMovementProcessGuard}'s rejection must
    * short-circuit {@link GoodsMovementsHeaderHandler#handle} BEFORE the posting service is
-   * ever consulted. Mocks the guard's static method directly (same package, package-private
-   * method — plain Mockito static mocking, Mockito's default inline mock maker supports
-   * final classes with no extra setup, same as the Utility/OBDal/OBContext statics already
-   * mocked above in this file).
+   * ever consulted.
    */
   @Test
-  public void processGuardRejectionShortCircuitsBeforePostingServiceIsConsulted() {
-    DocumentPostingService service = mock(DocumentPostingService.class);
-    handler.setPostingService(service);
-
-    NeoContext ctx = mock(NeoContext.class);
+  void testProcessGuardRejectionShortCircuitsBeforePostingServiceIsConsulted() {
+    handler.setPostingService(postingService);
     NeoResponse guardRejection = NeoResponse.error(400, "insufficient stock");
+    guardMock.when(() -> GoodsMovementProcessGuard.validateBeforeProcess(ctx))
+        .thenReturn(guardRejection);
 
-    try (MockedStatic<GoodsMovementProcessGuard> guardMock =
-        Mockito.mockStatic(GoodsMovementProcessGuard.class)) {
-      guardMock.when(() -> GoodsMovementProcessGuard.validateBeforeProcess(ctx))
-          .thenReturn(guardRejection);
+    assertSame(guardRejection, handler.handle(ctx));
 
-      assertSame(guardRejection, handler.handle(ctx));
-    }
-    verify(service, never()).handleAction(any());
+    verify(postingService, never()).handleAction(any());
   }
 }
