@@ -10,7 +10,9 @@ measurement), ETP-5046 (Subscription Plan Catalog + subscriptions), and what the
 
 **This register carries only what is still live.** A topic is deleted once it is fixed or settled —
 it does not graduate to a "closed" section. The history stays in the commit that resolved it, which
-is the only copy that cannot drift from the code.
+is the only copy that cannot drift from the code. **Section numbers are stable**: other documents
+cite them (`§3.7`, `§4.8`), so a deleted topic leaves a gap in the numbering rather than shifting
+its neighbours.
 
 ---
 
@@ -68,7 +70,9 @@ it, never 500), and a checkout naming `legacy-productive` — or no plan — sel
 records `legacy-productive` plus the charged price id on the request.
 
 **Retirement is automatic.** The first priced plan makes the predicate false on the next request:
-no redeploy, no property change. The property can be removed afterwards at leisure.
+no redeploy, no property change. The property can be removed afterwards, with one visible effect:
+`GET /sws/go/billing/offers` still reads it and then answers `503 BILLING_OFFER_UNAVAILABLE` (see
+the price-source bullet below). The step-by-step operator procedure is the design doc's §6.2.
 
 Things to know while it is active:
 
@@ -83,10 +87,14 @@ Things to know while it is active:
   ("Legacy Productive (grandfathered)"); edit the row if buyers should see something else. Its
   `description` is always sent **empty**: the row's `DESCRIPTION` is operator documentation that
   names `etendo.go.checkout.price.id`, so it is never shown to a buyer (the row is kept as is).
-- **Two price sources can disagree.** The typed billing offer (`etendo.go.billing.offer.*`,
-  `GET /sws/go/billing/offers`) is a separate configuration from the Stripe price. The upgrade page
-  quotes the catalog (Stripe) and uses the offer only when the catalog cannot answer, but any other
-  consumer of the offer can show an amount different from what checkout charges.
+- **`GET /sws/go/billing/offers` quotes the legacy price, never the plan catalog.** Since develop's
+  ETP-5463 the offer has no typed configuration of its own: `BillingOfferConfiguration` derives it
+  from the configured Stripe price (`retrieveConfiguredPrice()`). While the fallback is active that
+  is exactly the charged price. Once a priced plan retires the fallback the offer keeps quoting the
+  legacy price — a different amount from what checkout now charges — and once the property is
+  removed it answers `503`. The upgrade page quotes the plan catalog and uses the offer only while
+  that lookup is in flight or has failed; any other consumer of the offer is exposed to the
+  difference. Pointing the offer at the plan catalog belongs with the plan-selection UI (ETP-5049).
 - On an environment with neither a priced plan nor the property, checkout answers
   `PLAN_NOT_AVAILABLE` for the legacy key / no key, and `GET /sws/go/plans` is empty.
 
@@ -312,8 +320,15 @@ not an unapplied one. The consequence had it shipped: every paying tenant left o
 preference, with §3.2's end condition never reached.
 
 **Before merging any branch that carries a data-fix, re-check its timestamp against the newest fix
-in the target branch** — and re-date it if it is not strictly newer. A catalog test asserting that
-no two fix timestamps are equal would have caught half of this one.
+in the target branch** — and re-date it if it is not strictly newer.
+
+**Guard since ETP-5046:** `schema_forge/cli/test/data-fixes-catalog-ordering.test.js` fails the
+build when two fixes share a timestamp prefix (the seven already-applied pairs are frozen by exact
+file name in `APPLIED_SHARED_TIMESTAMPS` — a third file on one of those stamps still fails) and
+pins R37 strictly after `NEWEST_DEVELOP_FIX_AT_MERGE`. That catches the equal-stamp half of this
+trap. The other half — a fix dated *before* the newest fix an environment has already processed —
+is invisible to a catalog test, so the rule above stays the author's job; `sql/README.md` "Choosing
+the timestamp" states it where fixes are written.
 
 ### 🟠 3.7 Lifecycle webhooks write the open subscription row — preferences only without one
 
@@ -515,7 +530,8 @@ The plan catalog and the checkout request never carry a provider price id (`buil
 `api.js`: "the server never sends a provider price id"). Two develop-owned responses still do:
 
 - `HostedCheckoutService.buildResult` / `createProviderSession` put `priceId` into the
-  `POST /checkout/session` answer (develop's ETP-5463 shape, kept by the merge);
+  `POST /sws/go/checkout/sessions` and `POST /sws/go/billing/purchases` answers (develop's
+  ETP-5463 shape, kept by the merge);
 - `GET /sws/go/billing/offers` returns `offer.getPriceId()`.
 
 Neither is exploitable in the sense that matters — checkout has no request field for a price, so a
@@ -531,6 +547,22 @@ once per request. The price for a given id is effectively immutable, so a small 
 short TTL (minutes) would remove that round-trip and the dependency of the plans page on Stripe
 latency; the checkout path must keep failing closed on a lookup error rather than serving a stale
 miss. Raised in the ETP-5046 review (S1); not implemented.
+
+### 🟡 4.10 `ETARC_VECTOR_SOURCE.DISTANCE_METRIC` is exported by this module before its column exists
+
+Cross-repo inconsistency found during the ETP-5046 develop merge; owner **ETP-5118 / ETP-5335**,
+not this block. This module's `src-db/database/sourcedata/ETARC_VECTOR_SOURCE.xml` on `develop`
+(`dbf7317c`, ETP-5335, "Refresh exported database metadata after the regen") sets
+`DISTANCE_METRIC` on its vector-source rows. The table belongs to `com.etendoerp.db.extended`, and
+that column exists there only on the unmerged `origin/feature/ETP-5118` (`b528ac4`, "Add filter
+column and distance metric to vector source") — not on its `develop`, `main` or `epic/ETP-3504` (as
+of 2026-09-24). An environment whose `db.extended` lacks ETP-5118 has no column to hold the value,
+so its next `export.database` rewrites the XML **without** those values — a silent diff in this
+module's sourcedata that looks like someone deleted them.
+
+Until ETP-5118 merges: do not commit an `ETARC_VECTOR_SOURCE.xml` export that drops
+`DISTANCE_METRIC` — revert that file from the export instead. Resolved when ETP-5118 lands in
+`db.extended` `develop`, or when ETP-5335 re-exports without the column.
 
 ## 5. Handed forward to later tickets
 

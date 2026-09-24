@@ -222,8 +222,8 @@ While it holds:
 
 - `GET /sws/go/plans` lists exactly `legacy-productive`, with `displayPrice` / `currency` /
   `billingInterval` read from Stripe via `StripePriceService.retrieveConfiguredPrice()` — never
-  from the typed billing offer. If Stripe cannot quote it, the plan is left out (logged), never a
-  500. Its `description` is sent **empty**: the row's `DESCRIPTION` documents the fallback for
+  from `GET /sws/go/billing/offers`. If Stripe cannot quote it, the plan is left out (logged),
+  never a 500. Its `description` is sent **empty**: the row's `DESCRIPTION` documents the fallback for
   operators (it names `etendo.go.checkout.price.id`) and is not buyer copy; the row is unchanged.
 - A checkout naming `legacy-productive`, or naming no plan, is sold at that configured price, and
   the request records `legacy-productive` as its plan and the configured price id as its
@@ -245,10 +245,40 @@ together" — no longer hold while a legacy price is configured: a deployment wi
 keeps selling, and an app-shell older than the module (which sends no `planKey`) still buys.
 They return only on an environment that has neither a priced plan nor the legacy property.
 
-**What it costs**, recorded in `open-and-notable-topics.md`: fallback buyers land on
+**What it costs**, recorded in `open-and-notable-topics.md` §2.1: fallback buyers land on
 `legacy-productive`, which has no quota rows and is therefore **unlimited**; the plan list shows the
-grandfathered plan's own name (with an empty description, see above); and the typed billing offer
-(`etendo.go.billing.offer.*`) can disagree with the Stripe price the checkout actually charges.
+grandfathered plan's own name (with an empty description, see above); and
+`GET /sws/go/billing/offers` always quotes the configured legacy price
+(`BillingOfferConfiguration` → `retrieveConfiguredPrice()`), never the plan catalog — identical to
+the charged price while the fallback is active, a different price once a priced plan has retired it,
+and a `503 BILLING_OFFER_UNAVAILABLE` once the property is removed. The upgrade page quotes the plan
+catalog and falls back to the offer only while that lookup is in flight or has failed.
+
+### 6.2 Going live — operator checklist
+
+The order below is the whole procedure; nothing else has to be redeployed.
+
+1. **Deploy the module** (`update.database`). It ships the `legacy-productive` row as sourcedata;
+   no plan carries a price yet.
+2. **Keep selling as before.** With `etendo.go.checkout.secret.key`,
+   `etendo.go.checkout.webhook.secret` and `etendo.go.checkout.price.id` set, and no priced plan,
+   the legacy price fallback (§6.1) is active: `GET /sws/go/plans` lists `legacy-productive` at the
+   configured Stripe price and checkout sells exactly that. No `ETGO_PLAN` edit is needed for this.
+3. **Run R37 after the deploy, never before** (§8.3):
+   `make data-fixes DRY_RUN=1` in `schema_forge` to preview, then `make data-fixes`. Re-verify the
+   R37 `@report` pre-check (production Stripe checkout has not gone live since 2026-08-27) against
+   the **target** environment first — `open-and-notable-topics.md` §2.4.
+4. **Switch to the plan catalog when ready.** In the Classic **Plans** window, create (or activate)
+   a plan and enter its **Provider Price ID** — an active, recurring Stripe price with
+   `interval_count = 1`. Display price, currency, billing interval and sync time are derived from
+   Stripe on save (§5); a typed value is reverted, and an unverifiable price refuses the save. The
+   next request retires the fallback: the plan list shows the priced plan(s), and
+   `legacy-productive` / a request with no plan answers `400 PLAN_NOT_AVAILABLE`.
+5. **Afterwards**, `etendo.go.checkout.price.id` may be removed. Its remaining reader is
+   `GET /sws/go/billing/offers`, which then answers `503 BILLING_OFFER_UNAVAILABLE` — harmless for
+   the upgrade page (it quotes the catalog), visible to any other consumer of the offer. Buyers who
+   purchased through the fallback stay on `legacy-productive` (unlimited, their charged price id
+   snapshotted) until a plan change exists (ETP-5053).
 
 ## 7. Backfill
 
@@ -335,8 +365,6 @@ for rows that pass the qual.
 The guard exists because an error records `FAILED`, which does **not** advance the watermark, so
 the tenant is retried. Inserting zero rows would record `APPLIED` and lose the tenant forever.
 
----
-
 ### 7.3 The file date is load-bearing
 
 The runner applies, per tenant, only fixes **strictly newer** than the newest `PROCESSED` fix
@@ -345,8 +373,17 @@ merged, develop carried fixes up to `20260922T130000Z`, one of them
 (`R38-org-legalentity-pointer`) with the *identical* `20260918T120000Z`. On any environment that
 had processed those, R37 would have been skipped silently — no ledger row, no error. It was renamed
 to `20260924T150000Z` before reaching a shared environment (renaming an *unapplied* fix is allowed;
-`sql/README.md` rule 3 forbids it only once applied). The regression test pins it strictly after
-the newest develop fix at merge time.
+`sql/README.md` rule 3 forbids it only once applied).
+
+`schema_forge/cli/test/data-fixes-catalog-ordering.test.js` guards it from two sides: R37 must sort
+strictly after `NEWEST_DEVELOP_FIX_AT_MERGE` (`20260922T130000Z__R39-document-sequence-clear-descriptions`,
+frozen — later fixes are expected to land after R37), and no two fixes in the catalog may share a
+timestamp prefix, except seven already-applied pairs frozen by exact file name
+(`APPLIED_SHARED_TIMESTAMPS`; applied fixes can never be renamed). The guard cannot see a fix dated
+*before* the newest one already processed on some environment — that part of the trap is still the
+author's job, see `sql/README.md` "Choosing the timestamp".
+
+---
 
 ## 8. Cutover: per-tenant retirement, not a flag day
 

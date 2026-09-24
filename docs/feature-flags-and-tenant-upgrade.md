@@ -422,6 +422,13 @@ payment Stripe's webhook confirmed:
 | Any other value, including one merely *shaped* like the retired mock token | `PAYMENT_DECLINED` |
 | absent / blank | `PAYMENT_REQUIRED` |
 
+**What is sold comes from the Subscription Plan Catalog (ETP-5046).** The browser names a plan by
+`planKey` (listed by `GET /sws/go/plans`), never a price; the server resolves the plan's Stripe
+price. While no plan carries a provider price, the **legacy price fallback** keeps selling the
+grandfathered `legacy-productive` plan at `etendo.go.checkout.price.id`, and the first priced plan
+retires it with no redeploy. Rules: `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`
+§6–§6.1; operator go-live procedure: §6.2.
+
 The token is server-generated and correlated server-side, so a browser cannot turn a successful
 return URL into authorization. `CheckoutRequestStore.isPaidFor` matches on the request id **plus**
 the account email **plus** the environment name (the paywall always passes one; the status endpoint
@@ -500,6 +507,12 @@ hypothetical preconditions for a future gateway:
   before provisioning and captured only after it succeeds, or a compensating refund on failure.
 
 ## 3. The plan marker
+
+> **Since ETP-5046 the marker is no longer the source of truth.** A tenant is productive when it has
+> an open `ETGO_SUBSCRIPTION` row in status `active` or `past_due`; the `ETGO_TenantPlan`
+> preference described below is written only when that subscription write fails, is retired per
+> tenant, and is read only as a transitional fallback — see "Transitional read fallback" at the end
+> of this section.
 
 A tenant created through the paid flow is marked **productive**; every other tenant is **free**.
 
