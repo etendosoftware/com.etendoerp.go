@@ -351,6 +351,12 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   decide whether to split the two.
 - The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the row too,
   or it would stop affecting every tenant that has one.
+- **The webhook installs its own system context.** It runs with `OBContext == null`; develop only
+  worked because two stores leaked a system context, and the ETP-5045/5046 fixes that restore the
+  caller's context broke every correlated lifecycle event (NPE in the preference write → `FAILED`,
+  500). `applySubscriptionLifecycle` now captures/sets/restores a system context and
+  `setPreference` runs in admin mode; `CheckoutWebhookEndpointIntegrationTest` pins both routes.
+  Design doc §8.4 has the full story — the lesson generalises to any context-less caller.
 
 ## 4. Known issues
 
@@ -448,7 +454,7 @@ line below is the result of reading the code, not of counting matches.
 |---|---|
 | `payment/CheckoutRequestStore` | ✅ fixed on ETP-5045; the account-id lookups develop added afterwards reintroduced raw installs and were routed through `runAsSystem` in the 2026-09-24 develop merge |
 | `payment/BillingEventStore` | ✅ fixed on ETP-5046 |
-| `payment/SubscriptionService` | ✅ correct by design — `openSystemContextWhenAbsent()` sets a context only when there is none, and its javadoc already spells out this hazard |
+| `payment/SubscriptionService` | ✅ admin mode only, never replaces the caller's context; the old `openSystemContextWhenAbsent()` was dead (admin mode had already installed a context) and was removed |
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
 | `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |

@@ -400,9 +400,31 @@ lookups (`find(requestId, accountId, email)`, `findForAccount`, `findSubscriptio
 `findActiveForAccountAndClientName`, the provider-id finders) that had reintroduced the raw
 install; the merge routes those through `runAsSystem` too, so the store has one context site.
 
-ETP-5046's own workaround stays harmless: the subscription path still reads the checkout request
-through a capture-and-restore helper, and `SubscriptionService` opens a system context only when
-`OBContext.getOBContext()` is null.
+**Restoring the context is not free — it removed a context callers had been living on.** The
+Stripe webhook is matched before the authentication chain and runs with `OBContext == null`. On
+develop it only ever applied a lifecycle event because `BillingEventStore.claim` and the
+`CheckoutRequestStore` finders *leaked* a system context onto the thread before the handler ran.
+With both stores restoring the caller's (null) context, the first preference write
+(`TenantEnvironmentLifecycleService.setPreference`, an `OBQuery` outside admin mode) threw an NPE
+and every correlated lifecycle event ended `FAILED` with a 500 — on both routes, row and
+preference. Fixed twice over, so neither half depends on the other:
+
+- `EtendoGoJwtServlet.applySubscriptionLifecycle` installs the system context explicitly (capture
+  the previous one, `setOBContext("0","0","0","0")` + admin mode, leave admin mode, restore) around
+  everything it does;
+- `setPreference` runs in admin mode, mirroring ETP-5488's `readPreference`.
+
+`CheckoutWebhookEndpointIntegrationTest` pins it with a signed, correlated
+`invoice.payment_failed` delivered with no context, once for a tenant with an `ETGO_SUBSCRIPTION`
+row and once without, and asserts the thread comes back with no context.
+
+`SubscriptionService` used to "open a system context only when there is none". That branch never
+fired — the `setAdminMode(true)` just before it installs an admin context — so it was removed; the
+service runs in admin mode and never replaces the caller's context. The onboarding path still
+reads the checkout request through a capture-and-restore helper, which is now merely redundant.
+
+**Any new caller with no user context (webhooks, background processes) must install and restore
+its own system context. Do not rely on a store to have left one behind.**
 
 Out of scope here: usage capture and reporting, overage pricing, quota *evaluation* and
 enforcement (ETP-5051), the rest of the subscription lifecycle (ETP-5047 — since the develop

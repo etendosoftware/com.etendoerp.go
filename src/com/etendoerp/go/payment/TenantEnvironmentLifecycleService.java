@@ -509,7 +509,22 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
+  /**
+   * Writes a lifecycle preference, in admin mode for the same reason {@link #readPreference} reads
+   * in it: these are system flags, and the callers include the Stripe webhook, which is matched
+   * before the authentication chain and has no user context of its own. Admin mode is what lets
+   * the lookup and the save run there without depending on a context some earlier call leaked.
+   */
   private void setPreference(String attribute, String value, Client client) {
+    OBContext.setAdminMode();
+    try {
+      setPreferenceValue(attribute, value, client);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void setPreferenceValue(String attribute, String value, Client client) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
             + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID

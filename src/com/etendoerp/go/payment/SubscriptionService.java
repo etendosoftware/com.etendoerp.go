@@ -48,12 +48,12 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * parameter instead. Precedent: {@link TenantPlanService}'s preference lookup, which reads a
  * client-{@code 0} preference row about another tenant for exactly the same reason.
  *
- * <p>Following {@link CheckoutRequestStore}, each method makes sure it runs in admin mode — which is
- * also what lets the NEO access check read a tenant's row as a user whose role cannot read
- * {@code ETGO_SUBSCRIPTION}, the same concern ETP-5488 fixed for the lifecycle preferences — and
- * opens a system {@link OBContext} <em>only when there is none</em> — the webhook path is matched
- * before the authentication chain and has no context at all, while the environment-list and
- * onboarding callers already hold one that must survive the call unchanged.
+ * <p>Each method runs in admin mode — which is what lets the NEO access check read a tenant's row
+ * as a user whose role cannot read {@code ETGO_SUBSCRIPTION}, the same concern ETP-5488 fixed for
+ * the lifecycle preferences — and never replaces the caller's {@link OBContext}. It used to open a
+ * system context "when there was none", but {@code setAdminMode} had already installed an admin
+ * context by then, so that branch never fired; it was removed. A caller with no context at all
+ * (the Stripe webhook) installs and restores its own system context around the call.
  */
 public class SubscriptionService {
 
@@ -93,7 +93,6 @@ public class SubscriptionService {
       return Optional.empty();
     }
     OBContext.setAdminMode(true);
-    openSystemContextWhenAbsent();
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
           "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
@@ -136,7 +135,6 @@ public class SubscriptionService {
       return byClientId;
     }
     OBContext.setAdminMode(true);
-    openSystemContextWhenAbsent();
     try {
       for (List<String> chunk : chunks(ids)) {
         for (Subscription subscription : queryOpenForChunk(chunk)) {
@@ -230,7 +228,6 @@ public class SubscriptionService {
           "A subscription needs both a tenant and a plan to be opened");
     }
     OBContext.setAdminMode(true);
-    openSystemContextWhenAbsent();
     try {
       Optional<Subscription> existing = findOpen(environmentClientId);
       if (existing.isPresent()) {
@@ -306,7 +303,6 @@ public class SubscriptionService {
       return false;
     }
     OBContext.setAdminMode(true);
-    openSystemContextWhenAbsent();
     try {
       Subscription subscription = open.get();
       subscription.setSubscriptionStatus(storedStatus);
@@ -345,19 +341,4 @@ public class SubscriptionService {
     throw new IllegalArgumentException("No subscription status is stored for " + status);
   }
 
-  /**
-   * Opens a system {@link OBContext} only when the calling thread has none.
-   *
-   * <p>The webhook and background paths reach this class with no context at all and need one to
-   * query. The environment-list and onboarding paths arrive holding a context the rest of their
-   * work depends on, and {@code OBContext.setOBContext(...)} has no stack of its own —
-   * {@code restorePreviousMode()} pops the admin-mode stack and nothing else — so overwriting it
-   * unconditionally would silently hand the caller a system context it never asked for, for the
-   * remainder of the request.
-   */
-  private static void openSystemContextWhenAbsent() {
-    if (OBContext.getOBContext() == null) {
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    }
-  }
 }
