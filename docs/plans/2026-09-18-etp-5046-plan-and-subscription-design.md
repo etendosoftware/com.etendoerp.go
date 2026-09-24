@@ -252,8 +252,11 @@ grandfathered plan's own name and description; and the typed billing offer
 ## 7. Backfill
 
 Every tenant carrying the `productive` preference gets one open subscription row on the
-grandfathered `legacy-productive` plan, with Stripe ids copied from its `ETGO_CHECKOUT_REQUEST`
-row where one exists, **and retires that tenant's now-stale `ETGO_TenantPlan` preference in the
+grandfathered `legacy-productive` plan, with the Stripe customer and subscription ids — and the
+Stripe price id actually charged (`STRIPE_PRICE_ID`, recorded on requests since develop's ETP-5463)
+into `PROVIDER_PRICE_ID` — copied from its latest paid `ETGO_CHECKOUT_REQUEST` row where one
+exists (NULL otherwise; `SNAPSHOT_AMOUNT`/`SNAPSHOT_CURRENCY` always stay NULL, since the request
+stores no amount), **and retires that tenant's now-stale `ETGO_TenantPlan` preference in the
 same transaction** (§8). Delivered as `20260924T150000Z__R37-tenant-subscription-backfill.sql`
 under `schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop
 merge, see §7.3. Re-running creates zero rows and retires nothing;

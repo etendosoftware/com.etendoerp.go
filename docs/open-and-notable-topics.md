@@ -161,10 +161,11 @@ the two edits sat in different regions so git saw no conflict. Always build afte
 definition and a no-op for the price-derivation handler. It is purchasable only through the legacy
 price fallback (§2.1), and never on a price of its own.
 
-A backfilled subscription is therefore **not a billing record**. Its two jobs are **access control**
-(`resolvePlan` reads productive) and **webhook correlation** (ETP-5047 matches on
+A backfilled subscription is therefore **not a full billing record**. Its two jobs are **access
+control** (`resolvePlan` reads productive) and **webhook correlation** (ETP-5047 matches on
 `stripe_subscription_id`, which the backfill copies where a checkout request exists). Neither needs
-a price.
+a price. Where the checkout request recorded one, the charged Stripe price id is copied into
+`PROVIDER_PRICE_ID` anyway (NULL otherwise); no amount or currency is ever snapshotted.
 
 This is acceptable *only because* every existing Stripe subscription is Test Mode. If production
 checkout has gone live, the answer is not a priceless row — it is the adoption step: read each real
@@ -326,18 +327,25 @@ Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice
 - **no open row** → the preference projection, as before (`ETP-5046-TRANSITIONAL-FALLBACK`).
 
 `readSubscriptionState` reads the same store the write goes to, and `resolve` reads the row first,
-so the access policy, `resolvePlan` and the environment list all agree. Things that follow from it:
+so the access policy, `resolvePlan` and the environment list all agree. Every read on both routes
+runs in admin mode — the preference reads since ETP-5488, the row reads because
+`SubscriptionService` enters admin mode itself, and the transitional `ETGO_TenantPlan` fallback since
+the second develop merge — because the NEO access check runs as the calling user and a non-admin
+role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
 
-- **`canceled` makes the tenant `free`** for `resolvePlan` (only `active`/`past_due` are
-  productive). The environment keeps its `ETGO_EnvironmentType = PRODUCTIVE` marker, so the access
-  policy still sees a productive environment and applies `EXPIRED`. Watch §3.4: onboarding a
-  canceled tenant again would now run `forceTestModeForFreeTenant` on it.
+**Decided behaviour (Martin, 2026-09-24), not an open question:**
+
+- **`canceled` makes the tenant `free` immediately** for `resolvePlan` (only `active`/`past_due`
+  are productive). The environment keeps its `ETGO_EnvironmentType = PRODUCTIVE` marker, so the
+  access policy still sees a productive environment and applies `EXPIRED`. Watch §3.4: onboarding a
+  canceled tenant again would run `forceTestModeForFreeTenant` on it.
 - **`canceled` does not close the row** (`END_DATE` stays null). Closing a row is how a plan change
   opens its successor (ETP-5053); a later re-subscription of the same tenant is not modelled yet —
   `openSubscription` returns the existing open row untouched.
 - **The event-ordering watermark (`ETGO_SubscriptionEventAt`) stays a preference for both
   routes.** It is webhook-stream metadata, not subscription state, and the row has no column for
-  it. Moving it onto the row needs a new AD column.
+  it. Follow-up for ETP-5047: it could move onto `ETGO_SUBSCRIPTION` as its own column (new AD
+  column), which would let the row route drop its last preference read.
 - `CURRENT_PERIOD_END` on the row now means "grace anchor" as the applier computes it, not Stripe's
   rolling billing window (§4 of the design doc). Nothing else writes it today; ETP-5047 should
   decide whether to split the two.
