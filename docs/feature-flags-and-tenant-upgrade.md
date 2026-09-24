@@ -201,6 +201,34 @@ The web client evaluates the same flags for presentation only — which pages an
 decision about permissions, data or processes is made server-side. The paywall below holds
 regardless of what the client believes.
 
+### `demo-data-transfer` (ETP-5443) — backend-only, off by default
+
+Gates the ETP-5364 demo-to-productive data transfer. Evaluated in exactly one place,
+`DemoDataTransferFlag.isEnabled()`, with an account-less context (the endpoints are routed before
+any credential is read, so every toggle point must resolve the same answer). Locally:
+`etendo.go.flags.demo-data-transfer=true` / `ETGO_FLAG_DEMO_DATA_TRANSFER=true`.
+
+| Toggle point (`EtendoGoJwtServlet`) | Flag off — the pre-ETP-5364 behaviour |
+|---|---|
+| `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | 404 `Unknown endpoint: <path>`, identical to a path that does not exist |
+| `recordDemoDataTransferSelection` (checkout / purchase) | the body's `dataTransfer` selection is ignored |
+| `startDemoDataTransferBestEffort` (paid onboarding commit) | no asynchronous transfer started |
+
+The worker thread is created on first submission, so an instance with the flag off never starts
+one. No key exists in the web client's `flag-keys.js`: the First Steps row appears only when the
+status read answers 2xx, so the browser follows this evaluator instead of running a second one.
+With the flag off, paid onboarding retains its older synchronous grid-import transfer when the
+browser explicitly selected products or contacts. With the flag on, that synchronous path is
+disabled: only the server-recorded asynchronous job copies data. Source and target client IDs
+must differ in both paths.
+
+With the flag on, checkout records `{products, contacts}` under its request ID before contacting
+Stripe. The first selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and
+the billing overview include `dataTransferEnabled` and include `dataTransfer` only when a
+server-side selection exists. A flag-on older purchase with no selection therefore remains
+`NOT_REQUESTED`; the browser must not guess its choice. The recovery procedure is in
+[`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
+
 ## 2. The onboarding paywall
 
 `POST /sws/go/onboarding` gains a payment gate.
@@ -261,15 +289,44 @@ scoped to the authenticated account and expose only the local purchase status, e
 and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
 a second payment ledger.
 
-`GET /sws/go/billing/offers` supplies the display offer from the server-owned billing configuration
-(`etendo.go.billing.offer.amount.minor`, currency, and interval). The initial default is 4900 minor
-units in EUR per month. The browser uses this projection for display; the purchase boundary remains
-the authority for validation and checkout selection.
+`GET /sws/go/billing/offers` retrieves the Stripe Price identified by the same
+`CheckoutConfiguration.priceId()` used by hosted checkout. Amount, currency, and recurring interval
+therefore come from the chargeable price itself. The endpoint returns 503 when Stripe cannot be
+reached or the configured price is missing, inactive, or has an unsupported shape; it never shows an
+independent configured price as a fallback.
 
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
-the same account and environment name. A duplicate submission returns HTTP 409 with the existing
-purchase ID and status, so a retry cannot create a second provider checkout. An unresolved `CREATING`
-row therefore remains visible for reconciliation rather than being silently replaced.
+the same account and environment name. A duplicate submission returns the existing purchase only
+when it matches the original immutable demo selection; a conflicting choice returns HTTP 409. A
+retry cannot change the source during a payment/webhook race or create a second provider checkout.
+An unresolved `CREATING` row therefore remains visible for reconciliation rather than being silently
+replaced.
+
+For an existing unpaid request, checkout reuses its stored Stripe Price ID. If its recorded Stripe
+Checkout Session is still open, the same session URL is returned. A replacement session is created
+only after Stripe confirms that the previous session expired, using a stable idempotency key tied to
+the expired session; the replacement ID is then saved on the same request. This prevents two active
+sessions from charging the same purchase and preserves the original price and environment choice.
+
+Demo selection is valid only when the request is made from an authenticated free/demo environment
+linked to the account. A productive environment cannot supply a demo selection. When one or more
+free/demo environments are linked to the account, include the chosen environment's
+`AD_CLIENT_ID` as `demoClientId` in the checkout request. Selection is required in this case. The
+backend validates that it is a free/demo environment
+linked to the authenticated account and stores it on the checkout request before redirecting to the
+payment provider. The account-scoped purchase response returns the same `demoClientId`, while
+`GET /sws/go/environments` returns each environment's `clientId`. The UI can therefore keep the
+selection synchronized by matching these IDs; names are for display only. Onboarding uses the ID
+saved with the paid request and ignores a `demoClientId` sent in its body. New checkout rows mark
+the selection as recorded even when the user has no demo to select, so a later retry cannot mistake
+that deliberate empty choice for an older checkout.
+
+When a purchase starts from an authenticated productive environment, the backend derives the
+current client from the authenticated session or signed environment token and verifies that the
+account owns it. That purchase records an explicit empty demo selection and ignores browser-supplied
+demo and transfer choices. It creates a separate productive environment: no demo is inferred,
+associated or revoked, and no company profile or demo data is copied. A demo-to-productive conversion
+continues to require the explicit demo selection described above.
 
 Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
 taken from `PAID`; if the row has remained `PROVISIONING` longer than
@@ -277,7 +334,67 @@ taken from `PAID`; if the row has remained `PROVISIONING` longer than
 reclaimed, its attempt number is incremented, and its timestamp is renewed. The initial lease is
 30 minutes. Completion is an atomic status update guarded by that attempt number, so an old worker
 cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
-and stale workers recoverable without a schema migration or a second payment.
+and stale workers recoverable without a second payment.
+
+The selected `demoClientId` is read from that same account-scoped paid request before a provisioning
+claim starts. Every retry therefore associates and copies data from the same demo, even if the
+account has created or selected another environment since the original checkout. A recorded empty
+selection also stays empty on retry. Older checkout rows without a saved demo selection resume the
+original purchase and checkout session; provisioning creates a new productive environment without
+demo profile/data copy, demo access revocation, or transfer. Reopening an existing purchase resumes
+it silently instead of asking the user to choose a demo again. Onboarding does not infer a demo for
+that purchase. If setup is already running, the response says to refresh its status before trying
+again. Once an attempt is marked failed, retrying the same paid request is allowed; a stale worker
+cannot mark the newer attempt complete.
+
+With `demo-data-transfer` enabled, the paid flow starts the durable transfer after provisioning
+commits. Products, their sales/purchase prices and current cost, and contacts are copied under
+target client references; global units and tax categories remain global references. Missing
+required target references fail the job with a visible reason. Existing target search keys and
+price/cost rows are updated so a retry does not duplicate them. With the flag disabled, the older
+synchronous NEO grid-import path remains available for an explicit browser selection.
+
+### Company profile transfer during paid provisioning (ETP-5443)
+
+The billing request stores the selected demo client ID in `ETGO_CHECKOUT_REQUEST.DEMO_CLIENT_ID`
+before the browser leaves for checkout. The authenticated account's current free/demo environments
+are checked when checkout is created. After payment, onboarding loads that ID from the account-scoped
+checkout request and uses it for profile copy, demo access revocation, and optional data transfer.
+The onboarding body cannot change the saved choice. A retry therefore uses the same demo even if
+the browser has lost state or another demo environment has since been created.
+
+For new purchases, a recorded empty selection means that this purchase has no demo source; onboarding
+does not infer one. A saved demo ID that is no longer linked to the account or is no longer free/demo
+is rejected before provisioning starts. Legacy purchases with no saved selection marker resume the
+original purchase/session and provision without associating, copying, revoking, or transferring from
+a demo. Reopening those purchases does not prompt for a new demo choice.
+
+The selected demo's unique active business organization is the profile source. The profile is copied
+to the exact organization created for the productive client in this paid onboarding attempt. If that
+source has zero or multiple active business organizations, paid provisioning fails rather than
+silently continuing with a partial profile.
+
+When a source organization exists, the copied profile comprises its name, trade name, and business
+type (`AD_Org.Name`, `AD_Org.Social_Name`, and `AD_Org.ETGO_Business_Type`); tax ID and fiscal
+address including its country (`AD_OrgInfo.TaxID` and the linked location); and company logo
+(`AD_OrgInfo.Your_Company_Document_Image`). The logo is copied to a new `AD_Image` row owned by the
+target client, so the productive organization does not depend on an image row owned by the demo
+client. The target is identified by the productive client created in this paid onboarding attempt,
+not by organization name. This keeps the profile on the intended target even when another
+organization has the same name.
+
+After a paid productive environment created from an explicitly selected demo has been provisioned
+successfully and the demo environment has been associated with it, the account loses access to that
+demo environment. This does not revoke access to the successfully provisioned productive
+environment. An independent purchase from an existing productive environment has no demo to
+associate or revoke.
+
+When a source demo organization exists, this profile setup is required for paid productive
+provisioning. It does not depend on whether the account selected product or contact transfer, and it
+is not gated by the optional `demo-data-transfer` feature flag. That flag controls the optional
+demo-data transfer described above; turning it off must not suppress the company profile copy. The
+target's currency is retained from paid onboarding and its ledger configuration; currency is not
+copied from the demo organization.
 
 ### The plan is derived from the payment, not from the decision
 
@@ -613,4 +730,5 @@ must never break the session.
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
+| Demo data transfer gate / worker | `com.etendoerp.go.payment.DemoDataTransferFlag`, `DemoDataTransferService` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |

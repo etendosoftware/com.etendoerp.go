@@ -60,6 +60,7 @@ class HostedCheckoutSessionPlanTest {
   private PlanCatalogService planCatalogService;
   private CheckoutRequestStore checkoutRequestStore;
   private StripeApiClient stripeApiClient;
+  private StripePriceService stripePriceService;
 
   @BeforeEach
   void setUp() {
@@ -75,7 +76,9 @@ class HostedCheckoutSessionPlanTest {
     planCatalogService = mock(PlanCatalogService.class);
     checkoutRequestStore = mock(CheckoutRequestStore.class);
     stripeApiClient = mock(StripeApiClient.class);
+    stripePriceService = mock(StripePriceService.class);
     service = new HostedCheckoutService();
+    service.stripePriceService = stripePriceService;
     service.planCatalogService = planCatalogService;
     service.checkoutRequestStore = checkoutRequestStore;
     service.stripeApiClient = stripeApiClient;
@@ -96,7 +99,12 @@ class HostedCheckoutSessionPlanTest {
   }
 
   private void givenTheProviderAccepts() throws Exception {
-    when(stripeApiClient.postForm(anyString(), anyString()))
+    // The plan's price is validated against the provider before anything is recorded.
+    when(stripePriceService.retrievePrice(PRICE_ID)).thenReturn(StripePriceService.parsePrice(
+        new JSONObject().put("id", PRICE_ID).put("active", true).put("unit_amount", 2900)
+            .put("currency", "eur")
+            .put("recurring", new JSONObject().put("interval", "month").put("interval_count", 1))));
+    when(stripeApiClient.postForm(anyString(), anyString(), anyString()))
         .thenReturn(new StripeResponse(200,
             new JSONObject().put("id", "cs_test_1").put("url", "https://checkout.test/s").toString()));
   }
@@ -113,7 +121,7 @@ class HostedCheckoutSessionPlanTest {
 
     assertEquals("https://checkout.test/s", result.getString("checkoutUrl"));
     ArgumentCaptor<String> form = ArgumentCaptor.forClass(String.class);
-    verify(stripeApiClient).postForm(anyString(), form.capture());
+    verify(stripeApiClient).postForm(anyString(), form.capture(), anyString());
     assertTrue(form.getValue().contains("line_items%5B0%5D%5Bprice%5D=" + PRICE_ID),
         form.getValue());
   }
@@ -129,7 +137,8 @@ class HostedCheckoutSessionPlanTest {
 
     // The subscription opened after payment reads its plan off this row, so it records what the
     // buyer actually saw rather than whatever the plan catalog holds by the time provisioning runs.
-    verify(checkoutRequestStore).recordRequested(anyString(), any(), any(), any(), any(Plan.class));
+    verify(checkoutRequestStore).recordRequested(anyString(), any(), any(), any(), any(),
+        any(Plan.class));
   }
 
   @Test
@@ -152,8 +161,8 @@ class HostedCheckoutSessionPlanTest {
     // The durable row is evidence that someone tried to buy something real. A rejected key is not
     // that, and the provider is never contacted for it either.
     verify(checkoutRequestStore, never())
-        .recordRequested(anyString(), any(), any(), any(), any());
-    verify(stripeApiClient, never()).postForm(anyString(), anyString());
+        .recordRequested(anyString(), any(), any(), any(), any(), any());
+    verify(stripeApiClient, never()).postForm(anyString(), anyString(), anyString());
   }
 
   @Test
@@ -170,8 +179,8 @@ class HostedCheckoutSessionPlanTest {
         () -> service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY));
 
     verify(checkoutRequestStore, never())
-        .recordRequested(anyString(), any(), any(), any(), any());
-    verify(stripeApiClient, never()).postForm(anyString(), anyString());
+        .recordRequested(anyString(), any(), any(), any(), any(), any());
+    verify(stripeApiClient, never()).postForm(anyString(), anyString(), anyString());
   }
 
   @Test

@@ -1,0 +1,88 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_PRODUCT_COST">
+    <function name="ETGO_PRODUCT_COST" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_m_product_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_cost NUMBER;
+BEGIN
+  -- ETP-5446. Current cost of the product, as the costing engine records it in
+  -- M_Costing. Feeds EM_ETGO_Cost (Computation_Mode = 'S', Refresh_Mode = 'S').
+  --
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction
+  -- that wrote M_Costing (a cost line saved from the Product window, or a costing
+  -- background run), so ANY exception raised here would roll that transaction back.
+  -- Every edge case below resolves to a value, never to an error.
+  --
+  -- Definition - follows the cost types and datefrom/dateto ordering of core's
+  -- "latest cost" selection (M_GET_NO_TRX_PRD_COST_LATEST, core Issue #641), but
+  -- ranks started rows (datefrom <= now()) first and differs on the warehouse
+  -- tie-break (see edge case 3 below):
+  --   * cost types STA (standard) and AVA (average) only - the two types the
+  --     current costing engine writes; legacy ST/AV rows predate it;
+  --   * non-null cost, datefrom and dateto (core's own predicates reject nulls);
+  --   * rows that have already started (datefrom <= now()) before future-dated
+  --     ones, then the most recent datefrom, then the longest-lived dateto.
+  -- Same rule as the purchase/sale price columns (ETGO_PRODUCT_PURCHASE_PRICE
+  -- orders by validfrom <= now() first): the cost in force today wins over a cost
+  -- scheduled for a later date. A future-dated row is only picked when no row of
+  -- the product has started yet (a scheduled cost beats an empty cell). A row
+  -- closed with an expiry date (dateto) and no successor is still shown.
+  --
+  -- Known, accepted staleness - the only clock read is that now(), and a stored
+  -- value is recomputed only when an M_Costing row of the product changes. If a
+  -- future-dated cost reaches its start date and nothing touches that product's
+  -- costing, the column keeps the previous cost until the next M_Costing change
+  -- (or an ad_scd_rebuild). The same behavior the purchase/sale price columns
+  -- already accept. The engine's own rows always start at the transaction date,
+  -- so this only affects manual costs dated in the future.
+  --
+  -- The value is per product, not per organization or warehouse, and it is the raw
+  -- M_Costing.Cost in the row's own currency (no conversion - a conversion depends on
+  -- a rate date and would add a second, unwatched clock dependency).
+
+  -- Edge case 1 - null target id. Cannot happen through the engine (it always
+  -- passes a PK); answer "no cost" rather than let the NULL travel.
+  IF p_m_product_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  -- Edge case 2 - no cost row at all (TC3): SELECT ... INTO assigns NULL for zero
+  -- rows and does not raise (no INTO STRICT on purpose). The list shows it empty.
+  -- Edge case 3 - several rows. LIMIT 1 keeps it single-valued, and the tail of the
+  -- ORDER BY makes the pick DETERMINISTIC: the engine writes rows that share the
+  -- same datefrom/dateto, and it writes the value unconditionally on every
+  -- recompute, so an arbitrary pick would make ad_scd_check report phantom drift.
+  -- An organization-wide row (no warehouse) is preferred over a warehouse-specific
+  -- one because this value has no warehouse context. This is the OPPOSITE of core,
+  -- which puts warehouse rows first on a datefrom/dateto tie - intentional.
+  -- Filters through M_COSTING_PRODUCT_DATE (m_product_id, ...); the leading
+  -- now() key means that product's rows are sorted instead of read in index
+  -- order, which is bounded by the per-product row count.
+  SELECT c.cost INTO v_cost
+  FROM   m_costing c
+  WHERE  c.m_product_id = p_m_product_id
+    AND  c.costtype IN ('STA', 'AVA')
+    AND  c.cost IS NOT NULL
+    AND  c.datefrom IS NOT NULL
+    AND  c.dateto IS NOT NULL
+  ORDER  BY (c.datefrom <= now()) DESC,
+            c.datefrom DESC,
+            c.dateto DESC,
+            CASE WHEN c.m_warehouse_id IS NULL THEN 0 ELSE 1 END,
+            c.created DESC,
+            c.m_costing_id DESC
+  LIMIT 1;
+
+  RETURN v_cost;
+
+-- Belt and braces. Nothing above should be able to raise, but an unforeseen runtime
+-- error must not take a cost save or a costing run down with it. "No cost" is
+-- visible and recoverable (ad_scd_rebuild); a failed save is not.
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN NULL;
+END ETGO_PRODUCT_COST
+]]></body>
+    </function>
+  </database>

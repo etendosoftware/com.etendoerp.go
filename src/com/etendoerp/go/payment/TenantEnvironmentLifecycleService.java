@@ -19,9 +19,10 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
-import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
@@ -42,6 +43,7 @@ public class TenantEnvironmentLifecycleService {
   public static final String DEMO_TRIAL_STARTED_ATTRIBUTE = "ETGO_DemoTrialStartedAt";
   public static final String SUBSCRIPTION_STATUS_ATTRIBUTE = "ETGO_SubscriptionStatus";
   public static final String SUBSCRIPTION_DUE_AT_ATTRIBUTE = "ETGO_SubscriptionDueAt";
+  public static final String SUBSCRIPTION_EVENT_AT_ATTRIBUTE = "ETGO_SubscriptionEventAt";
   public static final String LEGACY_TRANSITION_STARTED_ATTRIBUTE = "ETGO_LegacyTransitionStartedAt";
   public static final String ASSOCIATED_DEMO_ATTRIBUTE = "ETGO_AssociatedDemoClientId";
   public static final String ASSOCIATED_PRODUCTIVE_ATTRIBUTE = "ETGO_AssociatedProductiveClientId";
@@ -59,6 +61,7 @@ public class TenantEnvironmentLifecycleService {
 
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
+  private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
 
   private final TenantPlanService tenantPlanService;
@@ -154,6 +157,7 @@ public class TenantEnvironmentLifecycleService {
         return null;
       }
       String associatedProductiveClientId = readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId);
+      boolean associatedWithProductive = StringUtils.isNotBlank(associatedProductiveClientId);
       EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus =
           EnvironmentAccessPolicy.SubscriptionStatus.NONE;
       Instant renewalDueAt = null;
@@ -166,7 +170,7 @@ public class TenantEnvironmentLifecycleService {
         }
       }
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.DEMO,
-          Instant.parse(startedAt), subscriptionStatus, renewalDueAt);
+          Instant.parse(startedAt), subscriptionStatus, renewalDueAt, associatedWithProductive);
     } catch (RuntimeException e) {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
@@ -183,26 +187,40 @@ public class TenantEnvironmentLifecycleService {
    * and the Subscription Plan Catalog disagree about the same tenant, which is precisely what
    * this unification exists to prevent.
    *
+   * <p><b>One exception, from the develop merge.</b> The Stripe lifecycle webhooks
+   * ({@code customer.subscription.*}, {@code invoice.*}) write their outcome into the preference
+   * projection and never into the subscription row. For a tenant that has received one
+   * ({@code ETGO_SubscriptionEventAt} is set) the projection is therefore newer than the row, and
+   * it answers. See {@code docs/open-and-notable-topics.md} for the decision owed.
+   *
    * @param clientId environment client id, already known to be productive
    * @return the productive snapshot, never null
    */
   private EnvironmentSnapshot productiveSnapshot(String clientId) {
     Optional<Subscription> openSubscription = subscriptionService.findOpen(clientId);
-    if (openSubscription.isPresent()) {
+    // The subscription lifecycle webhooks (ETP-5443) still project into the preferences and do not
+    // update ETGO_SUBSCRIPTION.STATUS yet, so once one has been applied to this tenant the
+    // projection is the only live answer: reading the table's opening 'active' instead would keep
+    // a cancelled or unpaid subscription CURRENT forever. Until a webhook arrives the table wins.
+    // Moving the applier's writes onto the table (ETP-5047) retires this branch.
+    boolean lifecycleEventApplied = StringUtils.isNotBlank(
+        readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId));
+    if (openSubscription.isPresent() && !lifecycleEventApplied) {
       Subscription subscription = openSubscription.get();
       Instant renewalDueAt = subscription.getCurrentPeriodEnd() == null ? null
           : subscription.getCurrentPeriodEnd().toInstant();
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-          subscriptionStatusOf(subscription.getSubscriptionStatus()), renewalDueAt);
+          subscriptionStatusOf(subscription.getSubscriptionStatus()), renewalDueAt, false);
     }
-    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant yet. Delete this block
-    // together with the rest of the fallback in Phase F, once every productive tenant has one.
+    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant yet. Delete this part
+    // of the condition together with the rest of the fallback in Phase F, once every productive
+    // tenant has one.
     EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
         readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId),
         EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
     Instant renewalDueAt = parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
     return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-        subscriptionStatus, renewalDueAt);
+        subscriptionStatus, renewalDueAt, false);
   }
 
   /**
@@ -284,14 +302,48 @@ public class TenantEnvironmentLifecycleService {
         return false;
       }
       setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, status.name(), client);
-      if (renewalDueAt != null) {
-        setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, renewalDueAt.toString(), client);
-      }
+      setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+          renewalDueAt == null ? "" : renewalDueAt.toString(), client);
       return true;
     } catch (RuntimeException e) {
       log.error("Could not update subscription projection for client {}", clientId, e);
       return false;
     }
+  }
+
+  /**
+   * Reads the stored subscription projection the lifecycle applier decides against.
+   * @param clientId environment client id
+   * @return stored status, grace anchor and last applied event instant; empty when none is stored
+   */
+  public SubscriptionLifecycleApplier.StoredState readSubscriptionState(String clientId) {
+    if (StringUtils.isBlank(clientId)) {
+      return SubscriptionLifecycleApplier.StoredState.NONE;
+    }
+    return new SubscriptionLifecycleApplier.StoredState(
+        parseSubscriptionStatus(readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId), null),
+        parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId)),
+        parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId)));
+  }
+
+  /**
+   * Records the provider creation instant of the last applied lifecycle event, so an older event
+   * delivered later can be recognised as stale.
+   *
+   * <p>Not committed here: the caller commits it with the status write, in one transaction.
+   * Failures propagate so the caller can roll both back.
+   * @param clientId environment client id
+   * @param eventAt provider {@code created} instant; null leaves the stored value untouched
+   */
+  public void recordSubscriptionEventAt(String clientId, Instant eventAt) {
+    if (StringUtils.isBlank(clientId) || eventAt == null) {
+      return;
+    }
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    if (client == null) {
+      throw new IllegalStateException("Client not found while recording a subscription event");
+    }
+    setPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, eventAt.toString(), client);
   }
 
   /**
@@ -350,8 +402,13 @@ public class TenantEnvironmentLifecycleService {
       if (demo == null || productive == null) {
         return false;
       }
-      setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
-      setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+      OBContext.setAdminMode();
+      try {
+        setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
+        setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
       return true;
     } catch (RuntimeException e) {
       log.error("Could not associate demo {} with productive {}", demoClientId, productiveClientId,
@@ -372,6 +429,16 @@ public class TenantEnvironmentLifecycleService {
       Instant now) {
     EnvironmentSnapshot snapshot = resolve(clientId);
     if (snapshot == null) {
+      // A legacy demo can have an association marker without a lifecycle start timestamp. The
+      // association itself is enough to revoke demo access; a null snapshot would otherwise take
+      // the compatibility path that allows tenants predating lifecycle metadata.
+      if (StringUtils.isNotBlank(clientId)
+          && StringUtils.isNotBlank(readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId))) {
+        EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();
+        return policy.evaluate(EnvironmentAccessPolicy.Environment.associatedDemo(null, null),
+            activeMembership, EnvironmentAccessPolicy.SubscriptionStatus.NONE, now,
+            configuration());
+      }
       return null;
     }
     EnvironmentAccessPolicy.Environment environment = snapshot.toPolicyEnvironment();
@@ -407,14 +474,34 @@ public class TenantEnvironmentLifecycleService {
   }
 
   private void setPreference(String attribute, String value, Client client) {
-    Preferences.setPreferenceValue(attribute, value, false, client, null, null, null, null, null);
+    OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
+        "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
+    query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
+    query.setNamedParameter(PARAM_CLIENT_ID, client.getId());
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    Preference preference = query.uniqueResult();
+    if (preference == null) {
+      preference = OBProvider.getInstance().get(Preference.class);
+      preference.setClient(client);
+      preference.setOrganization(null);
+      preference.setActive(true);
+      preference.setPropertyList(false);
+      preference.setAttribute(attribute);
+      preference.setSelected(true);
+    }
+    preference.setSearchKey(StringUtils.trimToEmpty(value));
+    OBDal.getInstance().save(preference);
   }
 
   private String readPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-            + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :" + PARAM_CLIENT_ID
-            + " and pref." + Preference.PROPERTY_ACTIVE + " = true");
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
     query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setFilterOnReadableClients(false);
@@ -430,13 +517,16 @@ public class TenantEnvironmentLifecycleService {
     private final Instant trialStartedAt;
     private final EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus;
     private final Instant renewalDueAt;
+    private final boolean associatedWithProductive;
 
     EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType type, Instant trialStartedAt,
-        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus, Instant renewalDueAt) {
+        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus, Instant renewalDueAt,
+        boolean associatedWithProductive) {
       this.type = type;
       this.trialStartedAt = trialStartedAt;
       this.subscriptionStatus = subscriptionStatus;
       this.renewalDueAt = renewalDueAt;
+      this.associatedWithProductive = associatedWithProductive;
     }
 
     public EnvironmentAccessPolicy.EnvironmentType getType() {
@@ -455,14 +545,21 @@ public class TenantEnvironmentLifecycleService {
       return renewalDueAt;
     }
 
+    public boolean isAssociatedWithProductive() {
+      return associatedWithProductive;
+    }
+
     /**
      * Converts the stored projection to the provider-neutral policy input.
      *
      * @return the provider-neutral policy environment
      */
     public EnvironmentAccessPolicy.Environment toPolicyEnvironment() {
-      return type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
-          ? EnvironmentAccessPolicy.Environment.productive(renewalDueAt)
+      if (type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE) {
+        return EnvironmentAccessPolicy.Environment.productive(renewalDueAt);
+      }
+      return associatedWithProductive
+          ? EnvironmentAccessPolicy.Environment.associatedDemo(trialStartedAt, renewalDueAt)
           : EnvironmentAccessPolicy.Environment.demo(trialStartedAt, renewalDueAt);
     }
   }

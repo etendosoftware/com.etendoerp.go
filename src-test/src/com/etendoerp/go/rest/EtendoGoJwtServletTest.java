@@ -68,6 +68,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
@@ -1290,7 +1291,7 @@ public class EtendoGoJwtServletTest {
     when(account.getPasswordHash()).thenReturn(testPasswordHash("old-pass"));
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
@@ -1319,7 +1320,7 @@ public class EtendoGoJwtServletTest {
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
@@ -1986,8 +1987,20 @@ public class EtendoGoJwtServletTest {
     when(account.getId()).thenReturn("ACC-1");
     when(account.getEmail()).thenReturn("user@test.com");
 
+    // A missing key reaches the checkout service as null, which refuses it exactly like an unknown
+    // key: one answer for both, so the endpoint discloses nothing about which keys exist.
+    HostedCheckoutService checkoutService = mock(HostedCheckoutService.class);
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), any(), isNull(),
+        any(HostedCheckoutService.SessionOptions.class)))
+        .thenThrow(new PlanNotAvailableException(null));
+    servlet.hostedCheckoutService = checkoutService;
+
+    // No purchase in flight for this environment name, so a new checkout is opened.
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
+
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
@@ -1998,10 +2011,8 @@ public class EtendoGoJwtServletTest {
       servlet.doPost(req, resp.response);
     }
 
-    // planKey is REQUIRED and has no default: there is no fallback price property to bridge a
-    // version skew, so the module and the app-shell ship together.
     assertEquals(400, resp.status);
-    assertEquals("INVALID_REQUEST",
+    assertEquals("PLAN_NOT_AVAILABLE",
         new JSONObject(resp.body()).getJSONObject("error").getString("code"));
   }
 
@@ -2017,12 +2028,16 @@ public class EtendoGoJwtServletTest {
     when(account.getEmail()).thenReturn("user@test.com");
 
     HostedCheckoutService checkoutService = mock(HostedCheckoutService.class);
-    when(checkoutService.createSession(anyString(), anyString(), anyString(), anyString(),
-        eq("tampered-key"))).thenThrow(new PlanNotAvailableException("tampered-key"));
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), any(),
+        eq("tampered-key"), any(HostedCheckoutService.SessionOptions.class))).thenThrow(new PlanNotAvailableException("tampered-key"));
     servlet.hostedCheckoutService = checkoutService;
 
+    // No purchase in flight for this environment name, so a new checkout is opened.
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
+
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
@@ -2054,12 +2069,17 @@ public class EtendoGoJwtServletTest {
     when(account.getEmail()).thenReturn("user@test.com");
 
     HostedCheckoutService checkoutService = mock(HostedCheckoutService.class);
-    when(checkoutService.createSession(anyString(), anyString(), anyString(), anyString(),
-        anyString())).thenThrow(new IllegalStateException("no provider price id"));
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), any(),
+        anyString(), any(HostedCheckoutService.SessionOptions.class)))
+        .thenThrow(new HostedCheckoutService.CheckoutNotConfiguredException("no provider price id"));
     servlet.hostedCheckoutService = checkoutService;
 
+    // No purchase in flight for this environment name, so a new checkout is opened.
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
+
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
@@ -2097,12 +2117,16 @@ public class EtendoGoJwtServletTest {
     JSONObject created = new JSONObject();
     created.put("requestId", "REQ-1");
     created.put("checkoutUrl", "https://checkout.test/s");
-    when(checkoutService.createSession(anyString(), anyString(), anyString(), anyString(),
-        anyString())).thenReturn(created);
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), any(),
+        anyString(), any(HostedCheckoutService.SessionOptions.class))).thenReturn(created);
     servlet.hostedCheckoutService = checkoutService;
 
+    // No purchase in flight for this environment name, so a new checkout is opened.
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
+
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<PublicUrlResolver> urls = mockStatic(PublicUrlResolver.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
@@ -2117,7 +2141,8 @@ public class EtendoGoJwtServletTest {
     // The session is created from the plan key alone. createSession has no price parameter at
     // all, which is the structural half of the guarantee; this verify is the behavioural half.
     verify(checkoutService).createSession(eq("ACC-1"), eq("user@test.com"),
-        eq("Acme Productive"), anyString(), eq("productive-monthly"));
+        eq("Acme Productive"), any(), eq("productive-monthly"),
+        any(HostedCheckoutService.SessionOptions.class));
   }
 
   // ===================== GET /plans =====================

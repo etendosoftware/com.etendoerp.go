@@ -26,14 +26,15 @@ import static org.junit.Assert.assertTrue;
 
 import java.sql.Timestamp;
 import java.util.Date;
+import java.util.List;
 import java.util.UUID;
 
-import org.hibernate.query.NativeQuery;
 import org.junit.After;
 import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.test.base.OBBaseTest;
@@ -71,7 +72,7 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * leave a session at the provider that nothing on this side can name. The consequence for tests is
  * that {@link OBDal#rollbackAndClose()} cleans up nothing: the rows are already durable. Every
  * fixture therefore carries the {@code etp5045-it-} marker in its {@code REQUEST_ID} and account
- * e-mail, and {@link #deleteCommittedFixtures()} removes them with native SQL in FK order
+ * e-mail, and {@link #deleteCommittedFixtures()} removes them with DAL in FK order
  * (requests first, then accounts).
  *
  * <p><b>Two consequences of committing that shape the code below.</b> A commit closes the
@@ -88,9 +89,8 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * and not harmless at all for {@code applyPaidUpgradeSideEffects}, which calls in from the middle
  * of onboarding and whose every later step depends on the context it established.
  *
- * <p>Assertions on committed values go through native SQL rather than DAL getters, so they read
- * the database instead of Hibernate's first-level cache — which has no way to know a bulk HQL
- * update changed rows out from under it.
+ * <p>Assertions on committed values load fresh DAL entities rather than retaining objects from a
+ * previous session, so they read committed state after bulk HQL updates.
  */
 public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
@@ -170,6 +170,167 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   }
 
   /**
+   * The chosen demo is durable checkout intent: after Stripe redirects back and onboarding claims
+   * the payment (including a later retry), the source must remain the same client selected before
+   * checkout. Re-discovering a free client from account e-mail can choose a different tenant when
+   * the account owns more than one trial.
+   */
+  @Test
+  public void testSelectedDemoClientIdSurvivesProvisioningRetryAndIsAccountScoped() {
+    String email = newEmail("selected-demo-owner");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    String selectedDemoClientId = ZERO;
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(selectedDemoClientId, true, true, false, null));
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+    CheckoutRequest retriedCheckout = store.findActiveForAccountAndClientName(
+        accountId, email, ENVIRONMENT);
+    assertNotNull("Retry by the same environment name must resolve the original purchase",
+        retriedCheckout);
+    assertEquals("Retry reuses the original purchase id", requestId, retriedCheckout.getRequest());
+    store.recordSessionCreated(requestId, "cs_duplicate_" + requestId);
+    assertEquals("Repeated checkout callbacks must not replace the Stripe session",
+        "cs_" + requestId, store.find(requestId, accountId, email).getStripeSession());
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+
+    assertEquals("The stored selection is returned only for the authenticated account",
+        selectedDemoClientId, store.findDemoClientId(requestId, accountId, email));
+    assertTrue("A retry may continue only with the demo selected before checkout",
+        store.matchesDemoSelection(requestId, accountId, email, selectedDemoClientId));
+    assertFalse("A later conflicting demo choice must not replace the checkout selection",
+        store.matchesDemoSelection(requestId, accountId, email, "TRIAL-OTHER"));
+    CheckoutRequestStore.TransferSelection originalTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertTrue("Product transfer intent is stored with the purchase", originalTransfer.isProducts());
+    assertFalse("Contact transfer intent is stored with the purchase", originalTransfer.isContacts());
+
+    assertTrue("The paid request can be claimed for its first provisioning attempt",
+        store.claimForProvisioning(requestId, accountId, email));
+    assertEquals("Claiming provisioning must not replace the checkout's selected source",
+        selectedDemoClientId, store.findDemoClientId(requestId, accountId, email));
+    store.recordFailureReason(requestId, "transient provisioning failure");
+    assertTrue("A failed paid attempt can be retried",
+        store.claimForProvisioning(requestId, accountId, email));
+    assertEquals("A retry must recover the exact source selected before checkout",
+        selectedDemoClientId, store.findDemoClientId(requestId, accountId, email));
+    CheckoutRequestStore.TransferSelection retriedTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertTrue("Retry preserves the products transfer choice", retriedTransfer.isProducts());
+    assertFalse("Retry preserves the contacts transfer choice", retriedTransfer.isContacts());
+    assertNull("Another account cannot read the selected source for this payment",
+        store.findDemoClientId(requestId, createAccount(newEmail("selected-demo-intruder")), email));
+  }
+
+  /** A productive-origin checkout persists an explicit empty source, not a legacy missing value. */
+  @Test
+  public void testRecordedEmptyDemoSelectionStaysEmptyAcrossProvisioningRetries() {
+    String email = newEmail("empty-demo-owner");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, null));
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+
+    assertTrue("An empty selection must be distinguishable from a legacy request",
+        store.hasRecordedDemoSelection(requestId, accountId, email));
+    assertNull("The productive checkout has no source demo", store.findDemoClientId(
+        requestId, accountId, email));
+    assertTrue("The original empty selection is a valid retry identity",
+        store.matchesDemoSelection(requestId, accountId, email, null));
+    assertFalse("A demo added after checkout cannot become a retry source",
+        store.matchesDemoSelection(requestId, accountId, email, "TRIAL-ADDED-LATER"));
+    CheckoutRequestStore.TransferSelection originalTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertFalse(originalTransfer.isProducts());
+    assertFalse(originalTransfer.isContacts());
+
+    assertTrue("The paid request can be claimed for its first attempt",
+        store.claimForProvisioning(requestId, accountId, email));
+    store.recordFailureReason(requestId, "transient provisioning failure");
+    assertTrue("A failed paid request can be claimed for retry",
+        store.claimForProvisioning(requestId, accountId, email));
+
+    assertTrue("Retry preserves the explicit-empty marker",
+        store.hasRecordedDemoSelection(requestId, accountId, email));
+    assertNull("Retry must not infer any of the account's later demos", store.findDemoClientId(
+        requestId, accountId, email));
+    assertFalse("Retry cannot substitute a newly available demo",
+        store.matchesDemoSelection(requestId, accountId, email, "TRIAL-ADDED-LATER"));
+    CheckoutRequestStore.TransferSelection retriedTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertFalse("Productive-origin retry keeps product transfer disabled",
+        retriedTransfer.isProducts());
+    assertFalse("Productive-origin retry keeps contact transfer disabled",
+        retriedTransfer.isContacts());
+  }
+
+  @Test
+  public void testStripePriceIsDurableAndAStaleRetryCannotReplaceItsSession() {
+    String email = newEmail("stripe-price-cas");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    String savedPriceId = "price_etp5463_saved";
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, savedPriceId));
+
+    assertEquals("The configured provider price must survive the committed write",
+        savedPriceId, store.findStripePriceId(requestId));
+
+    store.recordSessionCreated(requestId, "cs_initial");
+    try {
+      store.recordSessionCreated(requestId, "cs_stale", "cs_replacement");
+      org.junit.Assert.fail(
+          "A stale retry must not replace a session created by another attempt");
+    } catch (IllegalStateException expected) {
+      // The compare-and-set mismatch is the behavior under test; the message is not API.
+    }
+
+    assertEquals("The first session remains the purchase's correlation anchor",
+        "cs_initial", store.findStripeSessionId(requestId));
+    assertEquals("A failed compare-and-set leaves the saved price unchanged",
+        savedPriceId, store.findStripePriceId(requestId));
+  }
+
+  /** Unpaid rows must be filtered before applying the billing overview's 20-row limit. */
+  @Test
+  public void testFindForAccountFiltersUnpaidRowsBeforeApplyingRecentPurchaseLimit() {
+    String email = newEmail("overview-status-filter");
+    String accountId = createAccount(email);
+    String olderPaidRequestId = createPaidRequest(accountId, email);
+    List<String> newerUnpaidRequestIds = new java.util.ArrayList<>();
+
+    for (int index = 0; index < 21; index++) {
+      String unpaidRequestId = createRequest(accountId, email);
+      store.recordSessionCreated(unpaidRequestId, "cs_" + unpaidRequestId);
+      newerUnpaidRequestIds.add(unpaidRequestId);
+    }
+
+    List<CheckoutRequest> purchases = store.findForAccount(accountId, email);
+
+    assertTrue("An older confirmed purchase must remain visible when newer unpaid attempts exceed "
+        + "the page limit", purchases.stream().anyMatch(purchase -> olderPaidRequestId
+            .equals(purchase.getRequest())));
+    for (String unpaidRequestId : newerUnpaidRequestIds) {
+      assertFalse("Unpaid checkout attempts must not appear in billing overview",
+          purchases.stream().anyMatch(purchase -> unpaidRequestId.equals(purchase.getRequest())));
+    }
+  }
+
+  @Test
+  public void testLegacyRequestWithoutSelectionMarkerIsNotMistakenForExplicitEmpty() {
+    String email = newEmail("legacy-demo-owner");
+    String accountId = createAccount(email);
+    String requestId = createRequest(accountId, email);
+
+    assertFalse("Legacy requests have no recorded demo selection",
+        store.hasRecordedDemoSelection(requestId, accountId, email));
+    assertFalse("A missing selection marker must not be read as explicit empty",
+        store.matchesDemoSelection(requestId, accountId, email, null));
+  }
+
+  /**
    * E-mail is a case-insensitive identifier in practice — a browser autofills what the user typed
    * at signup, which is not necessarily how the account was stored. If the {@code lower()} on both
    * sides of the predicate is ever dropped, a paying customer who typed {@code Owner@…} instead of
@@ -193,6 +354,17 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * thing standing between one account and another's checkout — and its Stripe customer and
    * subscription ids.
    */
+  @Test
+  public void testFindRequiresTheImmutableAccountIdInAdditionToTheEmail() {
+    String ownerEmail = newEmail("same-email-owner");
+    String ownerId = createAccount(ownerEmail);
+    String requestId = createRequest(ownerId, ownerEmail);
+    String differentAccountId = createAccount(newEmail("same-email-intruder"));
+
+    assertNull("A matching email must not compensate for a different authenticated account id",
+        store.find(requestId, differentAccountId, ownerEmail));
+  }
+
   @Test
   public void testFindReturnsNullForADifferentAccountsEmail() {
     String ownerEmail = newEmail("victim");
@@ -347,9 +519,9 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * retry must not reset it. A stale lease is the explicit exception and is covered below. The
    * retry count lives in {@code PROVISIONING_ATTEMPTS}, which is the value that moves for a retry.
    *
-   * <p>The row is pushed back to {@code PAID} with native SQL because that is the only way to
-   * reach the "a second claim actually matches" state deterministically — in production it is a
-   * failed provisioning run that puts it back.
+   * <p>The row is pushed back to {@code PAID} through DAL because that is the only way to reach
+   * the "a second claim actually matches" state deterministically — in production it is a failed
+   * provisioning run that puts it back.
    */
   @Test
   public void testProvisioningAtIsFirstWriteWinsWhileTheAttemptCounterAdvances() throws Exception {
@@ -391,6 +563,21 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertEquals("Reclaiming must advance the fencing token", 2L, rawAttempts(requestId));
     assertTrue("Reclaiming must renew the lease timestamp",
         rawTimestamp(requestId, "PROVISIONING_AT").after(DISTANT_PAST));
+  }
+
+  /** A failed provisioning run must be retryable immediately, without waiting for the lease. */
+  @Test
+  public void testFailedProvisioningClaimCanBeReclaimedBeforeTheLeaseExpires() {
+    String email = newEmail("claim-failed-retry");
+    String accountId = createAccount(email);
+    String requestId = createPaidRequest(accountId, email);
+
+    assertTrue(store.claimForProvisioning(requestId, email));
+    forceFailureReason(requestId, "Provisioning failed");
+
+    assertTrue("A recorded provisioning failure must be retryable immediately",
+        store.claimForProvisioning(requestId, email));
+    assertEquals("A failed retry must claim the request again", 2L, rawAttempts(requestId));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -519,8 +706,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String unknown = MARKER + "never-issued-" + UUID.randomUUID();
     assertFalse("An unknown correlation id must be reported, not silently treated as applied",
         store.recordPaid(unknown, "cus_x", "sub_x"));
-    assertNull("And it must certainly not have created a request", rawColumn(unknown,
-        "CHECKOUT_STATUS"));
+    assertNull("And it must certainly not have created a request", rawStatus(unknown));
 
     assertFalse("A null correlation id names nothing", store.recordPaid(null, "cus_x", "sub_x"));
     assertFalse("A blank correlation id names nothing", store.recordPaid("   ", "cus_x",
@@ -558,7 +744,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
 
     // No plan: this fixture exercises context restoration, which does not read one.
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT, null);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     assertSame("recordRequested must give the caller's context back", caller,
         OBContext.getOBContext());
 
@@ -658,7 +845,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     try {
       // No plan: the call is expected to fail on the unknown account before reaching it.
       store.recordRequested(newRequestId(), UNKNOWN_ACCOUNT_ID, newEmail("ctx-throwing"),
-          ENVIRONMENT, null);
+          ENVIRONMENT, new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     } catch (RuntimeException e) {
       failure = e;
     }
@@ -735,7 +922,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   private String createRequest(String accountId, String email) {
     String requestId = newRequestId();
     // No plan: these specs exercise the lifecycle transitions, which do not read one.
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT, null);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     return requestId;
   }
 
@@ -758,7 +946,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Committed-state readers and cleanup (native SQL — never the first-level cache)
+  // Committed-state readers and cleanup (DAL — never a native query)
   // ---------------------------------------------------------------------------------------------
 
   /**
@@ -766,7 +954,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * @return the committed {@code CHECKOUT_STATUS}
    */
   private String rawStatus(String requestId) {
-    return (String) rawColumn(requestId, "CHECKOUT_STATUS");
+    CheckoutRequest request = findCommittedRequest(requestId);
+    return request == null ? null : request.getCheckoutRequestStatus();
   }
 
   /**
@@ -774,7 +963,9 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * @return the committed {@code PROVISIONING_ATTEMPTS}
    */
   private long rawAttempts(String requestId) {
-    return ((Number) rawColumn(requestId, "PROVISIONING_ATTEMPTS")).longValue();
+    CheckoutRequest request = findCommittedRequest(requestId);
+    return request == null || request.getProvisioningAttempts() == null ? 0L
+        : request.getProvisioningAttempts();
   }
 
   /**
@@ -783,28 +974,24 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * @return the committed value, or null
    */
   private Timestamp rawTimestamp(String requestId, String column) {
-    return (Timestamp) rawColumn(requestId, column);
+    CheckoutRequest request = findCommittedRequest(requestId);
+    if (request == null) {
+      return null;
+    }
+    Date value = "PAID_AT".equals(column) ? request.getPaidAt() : request.getProvisioningAt();
+    return value == null ? null : new Timestamp(value.getTime());
   }
 
-  /**
-   * Reads one committed column straight from the database. Deliberately native SQL: after a bulk
-   * HQL update Hibernate's first-level cache still holds the pre-update entity, so a DAL getter
-   * could report the value the test wrote rather than the value the store committed.
-   *
-   * @param requestId correlation id
-   * @param column column name; always a literal from this class, never test input
-   * @return the raw column value
-   */
-  @SuppressWarnings("rawtypes")
-  private Object rawColumn(String requestId, String column) {
+  private CheckoutRequest findCommittedRequest(String requestId) {
     OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
     OBContext.setAdminMode(true);
     try {
-      NativeQuery query = OBDal.getInstance()
-          .getSession()
-          .createNativeQuery("SELECT " + column + " FROM ETGO_CHECKOUT_REQUEST "
-              + "WHERE REQUEST_ID = :requestId");
-      query.setParameter("requestId", requestId);
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as request where request.request = :requestId");
+      query.setNamedParameter("requestId", requestId);
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
       return query.uniqueResult();
     } finally {
       OBContext.restorePreviousMode();
@@ -821,18 +1008,17 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * @param column a timestamp column name; always a literal from this class
    * @param value the instant to force
    */
-  @SuppressWarnings("rawtypes")
   private void forceTimestamp(String requestId, String column, Timestamp value) {
     OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
     OBContext.setAdminMode(true);
     try {
-      NativeQuery update = OBDal.getInstance()
-          .getSession()
-          .createNativeQuery("UPDATE ETGO_CHECKOUT_REQUEST SET " + column + " = :value "
-              + "WHERE REQUEST_ID = :requestId");
-      update.setParameter("value", value);
-      update.setParameter("requestId", requestId);
-      update.executeUpdate();
+      CheckoutRequest request = findCommittedRequest(requestId);
+      if ("PAID_AT".equals(column)) {
+        request.setPaidAt(value);
+      } else {
+        request.setProvisioningAt(value);
+      }
+      OBDal.getInstance().save(request);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
     } finally {
@@ -848,19 +1034,27 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * @param requestId correlation id
    * @param status the status to force
    */
-  @SuppressWarnings("rawtypes")
   private void forceStatus(String requestId, String status) {
     OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
     OBContext.setAdminMode(true);
     try {
-      NativeQuery update = OBDal.getInstance()
-          .getSession()
-          .createNativeQuery("UPDATE ETGO_CHECKOUT_REQUEST SET CHECKOUT_STATUS = :status, "
-              + "UPDATED = :now WHERE REQUEST_ID = :requestId");
-      update.setParameter("status", status);
-      update.setParameter("now", new Date());
-      update.setParameter("requestId", requestId);
-      update.executeUpdate();
+      CheckoutRequest request = findCommittedRequest(requestId);
+      request.setCheckoutRequestStatus(status);
+      OBDal.getInstance().save(request);
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void forceFailureReason(String requestId, String reason) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      CheckoutRequest request = findCommittedRequest(requestId);
+      request.setFailureReason(reason);
+      OBDal.getInstance().save(request);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
     } finally {
@@ -876,23 +1070,28 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * left behind by a test that died mid-way are cleaned up too. Requests go first: they carry the
    * FK to {@code ETGO_ACCOUNT}.
    */
-  @SuppressWarnings("rawtypes")
   private void deleteCommittedFixtures() {
     OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
     OBContext.setAdminMode(true);
     try {
-      NativeQuery deleteRequests = OBDal.getInstance()
-          .getSession()
-          .createNativeQuery(
-              "DELETE FROM ETGO_CHECKOUT_REQUEST WHERE REQUEST_ID LIKE :marker");
-      deleteRequests.setParameter("marker", MARKER + "%");
-      deleteRequests.executeUpdate();
+      OBQuery<CheckoutRequest> requests = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as request where request.request like :marker");
+      requests.setNamedParameter("marker", MARKER + "%");
+      requests.setFilterOnReadableClients(false);
+      requests.setFilterOnReadableOrganization(false);
+      List<CheckoutRequest> requestRows = requests.list();
+      for (CheckoutRequest request : requestRows) {
+        OBDal.getInstance().remove(request);
+      }
 
-      NativeQuery deleteAccounts = OBDal.getInstance()
-          .getSession()
-          .createNativeQuery("DELETE FROM ETGO_ACCOUNT WHERE EMAIL LIKE :marker");
-      deleteAccounts.setParameter("marker", MARKER + "%");
-      deleteAccounts.executeUpdate();
+      OBQuery<Account> accounts = OBDal.getInstance().createQuery(Account.class,
+          "as account where account.email like :marker");
+      accounts.setNamedParameter("marker", MARKER + "%");
+      accounts.setFilterOnReadableClients(false);
+      accounts.setFilterOnReadableOrganization(false);
+      for (Account account : accounts.list()) {
+        OBDal.getInstance().remove(account);
+      }
 
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();

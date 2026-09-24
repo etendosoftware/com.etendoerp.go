@@ -68,8 +68,10 @@ class HostedCheckoutServiceTest {
   }
 
   private static String form() throws UnsupportedEncodingException {
+    // The mode is derived from the price interval in production; here it is read from the same
+    // property the specs below toggle, so each one can pin the branch it is about.
     return HostedCheckoutService.buildSessionForm(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN,
-        PRICE_ID, PLAN_KEY);
+        PRICE_ID, PLAN_KEY, CheckoutConfiguration.mode());
   }
 
   @Test

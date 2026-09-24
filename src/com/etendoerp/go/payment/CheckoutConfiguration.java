@@ -29,6 +29,22 @@ public final class CheckoutConfiguration {
   }
 
   /**
+   * Returns the configured legacy fallback price identifier.
+   *
+   * <p>Since ETP-5046 what can be bought comes from the Subscription Plan Catalog, and this
+   * property is read for one purpose only: the <em>legacy price fallback</em>. While no active
+   * plan catalog row carries a provider price, a non-blank value here keeps checkout selling at this
+   * price under the grandfathered {@code legacy-productive} plan; the moment the first priced plan
+   * exists the fallback retires itself and this value is ignored. See
+   * {@link PlanCatalogService#isLegacyFallbackActive()}, the one predicate that decides it.
+   *
+   * @return configured price identifier, or an empty string
+   */
+  public static String priceId() {
+    return GoRuntimeProperties.readValue("etendo.go.checkout.price.id", "ETGO_CHECKOUT_PRICE_ID", "");
+  }
+
+  /**
    * Returns the normalized checkout mode, defaulting to subscription.
    * @return {@code payment} or {@code subscription}
    */
@@ -66,20 +82,19 @@ public final class CheckoutConfiguration {
   }
 
   /**
-   * Returns whether all mandatory checkout settings are present.
+   * Returns whether the provider credentials checkout needs are present.
    *
    * <p>This used to also require a configured price id, so a true answer additionally proved that
-   * <em>a purchasable thing existed</em>. That guarantee has moved: what is purchasable now comes
-   * from the Subscription Plan Catalog — a plan row carrying a non-null provider price id —
-   * and there is
-   * deliberately no configured fallback price, because a fallback is a price nobody reviewed,
-   * selected exactly when the intended configuration is missing. The two conditions map onto the
-   * same {@code CHECKOUT_NOT_CONFIGURED} response for that reason: from the caller's side
-   * "checkout has no credentials" and "there is nothing to sell" are the same unavailability.
+   * <em>a purchasable thing existed</em>. That guarantee has moved to the Subscription Plan
+   * Catalog: a plan row carrying a provider price id, or — only while no such row exists — the
+   * legacy price fallback ({@link #priceId()}). A checkout that finds neither answers
+   * {@code CHECKOUT_NOT_CONFIGURED} or {@code PLAN_NOT_AVAILABLE} on its own; this method proves
+   * credentials and nothing else.
    *
    * @return true when checkout can be used
    */
   public static boolean isConfigured() {
     return !secretKey().trim().isEmpty() && !webhookSecret().trim().isEmpty();
   }
+
 }

@@ -33,7 +33,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -58,6 +60,9 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductAccounts;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.materialmgmt.transaction.InventoryCount;
+import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
+import org.openbravo.model.materialmgmt.transaction.MaterialTransaction;
 import org.openbravo.model.procurement.ReceiptInvoiceMatch;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -464,6 +469,85 @@ public class DocumentPostingServiceTest {
       assertFalse(r.ok());
       assertEquals("Period is closed.", r.message());
       msgMock.verify(() -> OBMessageUtils.messageBD("InvalidAccount"), never());
+    }
+  }
+
+  /**
+   * ETP-5436: {@code STATUS_DocumentDisabled} ('D') on a Goods Movement
+   * ({@code acct.tableName == "M_Movement"}) is rewritten to the same
+   * {@code NotCalculatedCost} {@code AD_MESSAGE} text ETP-5360 already uses for Physical
+   * Inventory — reused as-is rather than a second, hand-written EN/ES pair (see
+   * {@link DocumentPostingService}'s {@code MSG_NOT_CALCULATED_COST} javadoc). No separate
+   * EN/ES test needed here: the message text now comes entirely from the mocked
+   * {@code OBMessageUtils.messageBD} call, which already follows {@code OBContext}'s language
+   * (proven generically by ETP-5360's own tests) — this test only needs to prove the rewrite
+   * itself fires for this status/table pair.
+   */
+  @Test
+  public void postRewritesDocumentDisabledMessageForMovementWithNotCalculatedCost() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "M_Movement";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+    }
+  }
+
+  /**
+   * ETP-5436 scoping guard: {@code STATUS_DocumentDisabled} on a NON-M_Movement table must
+   * NOT be rewritten — core's own message passes through untouched, proving the
+   * {@code TABLE_M_MOVEMENT} check actually scopes the rewrite.
+   */
+  @Test
+  public void postDoesNotRewriteDocumentDisabledMessageForNonMovementTable() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "C_Invoice";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Document disabled", r.message());
     }
   }
 
@@ -2057,6 +2141,231 @@ public class DocumentPostingServiceTest {
       assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
           + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
           + "Desviación Pr. Factura.", r.message());
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5360 (review finding B1): isUncalculatedCostInventory pre-check + its integration into
+  // post(). See the method's javadoc in DocumentPostingService for the full rationale (why the
+  // check is scoped to M_Inventory only, and why it fails OPEN on lookup error).
+  // ---------------------------------------------------------------------------------------------
+
+  /** Arbitrary test AD_Table_ID standing in for the M_Inventory table (fully mocked, never looked up live). */
+  private static final String TABLE_ID_M_INVENTORY = "321";
+
+  /** Stubs {@code OBDal.getInstance().get(Table.class, tableId)} to resolve to a table with the given DB name. */
+  private static Table stubTableWithDbName(OBDal obDal, String tableId, String dbTableName) {
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(dbTableName);
+    when(obDal.get(Table.class, tableId)).thenReturn(table);
+    return table;
+  }
+
+  /**
+   * Stubs {@code OBDal.getInstance().get(InventoryCount.class, recordId)} to resolve to a single
+   * {@code InventoryCountLine} whose {@code MaterialTransaction} list has one transaction per
+   * entry in {@code costCalculatedFlags} (in order), with {@code isCostCalculated()} returning
+   * that entry (a {@code null} entry stubs a null/unset flag).
+   */
+  private static void stubInventoryCountWithTransactions(OBDal obDal, String recordId,
+      Boolean... costCalculatedFlags) {
+    List<MaterialTransaction> transactions = new ArrayList<>();
+    for (Boolean flag : costCalculatedFlags) {
+      MaterialTransaction transaction = mock(MaterialTransaction.class);
+      when(transaction.isCostCalculated()).thenReturn(flag);
+      transactions.add(transaction);
+    }
+    InventoryCountLine line = mock(InventoryCountLine.class);
+    when(line.getMaterialMgmtMaterialTransactionList()).thenReturn(transactions);
+
+    InventoryCount inventoryCount = mock(InventoryCount.class);
+    when(inventoryCount.getMaterialMgmtInventoryCountLineList()).thenReturn(List.of(line));
+    when(obDal.get(InventoryCount.class, recordId)).thenReturn(inventoryCount);
+  }
+
+  /**
+   * ETP-5360 (B1) — the core regression this whole ticket fixes: an {@code M_Inventory} document
+   * with at least one line transaction whose cost has not been calculated must be blocked BEFORE
+   * {@code acct.post()} (and even before {@code AcctServer.get()}) is ever invoked, returning the
+   * plain, generic {@code NotCalculatedCost} message instead of letting core's accounting engine
+   * throw its bare, swallowed {@code IllegalStateException}.
+   */
+  @Test
+  public void postBlocksMInventoryWhenCostNotCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    AcctServer acct = mock(AcctServer.class);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, TABLE_ID_M_INVENTORY, "M_Inventory");
+    stubInventoryCountWithTransactions(obDal, "inv-1", Boolean.FALSE);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+      verify(acct, never()).post(anyString(), eq(false), any(), any(), any());
+      acctStatic.verify(
+          () -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)), never());
+      verify(conn, never()).getTransactionConnection();
+    }
+  }
+
+  /**
+   * ETP-5360: a {@code null} {@code isCostCalculated()} flag on any line transaction is treated as
+   * not-calculated (the check is the null-safe {@code !Boolean.TRUE.equals(...)}), blocking exactly
+   * like an explicit {@code false} — even when another transaction on the same document IS
+   * calculated, proving the "ANY" semantics.
+   */
+  @Test
+  public void postBlocksMInventoryWhenAnyTransactionHasNullCostCalculatedFlag() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    AcctServer acct = mock(AcctServer.class);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, TABLE_ID_M_INVENTORY, "M_Inventory");
+    stubInventoryCountWithTransactions(obDal, "inv-3", Boolean.TRUE, null);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-3", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+      verify(acct, never()).post(anyString(), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5360: when every line transaction on an {@code M_Inventory} document already has its cost
+   * calculated, the pre-check is a no-op and posting proceeds through the normal {@code
+   * acct.post()} path exactly as it did before this ticket.
+   */
+  @Test
+  public void postProceedsNormallyWhenMInventoryCostIsFullyCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("inv-2"), eq(false), any(), any(), any())).thenReturn(true);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, TABLE_ID_M_INVENTORY, "M_Inventory");
+    stubInventoryCountWithTransactions(obDal, "inv-2", Boolean.TRUE, Boolean.TRUE);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(
+              () -> AcctServer.get(eq(TABLE_ID_M_INVENTORY), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-2", conn);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(acct).post(eq("inv-2"), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5360: on a non-{@code M_Inventory} document the pre-check resolves the table but bails out
+   * immediately on the {@code !TABLE_M_INVENTORY.equals(...)} branch — normal posting proceeds
+   * unaffected. Extends the pre-existing non-Inventory coverage (tables "259"/"318"/"999", which
+   * exercise this pre-check with an UNRESOLVED/null table) with an explicit assertion that a
+   * RESOLVED, non-M_Inventory table name is itself just as much a no-op.
+   */
+  @Test
+  public void postIsUnaffectedByPreCheckForResolvedNonInventoryTable() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(true);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, "318", "M_InOut");
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(() -> AcctServer.get(eq("318"), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertTrue(r.ok());
+      verify(acct).post(eq("rec-1"), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5360: the pre-check fails OPEN — when the lookup itself throws (e.g. a Hibernate/mapping
+   * error resolving the table), the exception is caught and logged, and posting falls through to
+   * the normal {@code acct.post()} path exactly as if the pre-check had never run. Pins the
+   * deliberate fail-open behavior (see the method's javadoc) so a future refactor cannot silently
+   * flip it to fail-closed without a test failing.
+   */
+  @Test
+  public void postFailsOpenWhenCostCheckLookupThrows() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("inv-4"), eq(false), any(), any(), any())).thenReturn(true);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Table.class, TABLE_ID_M_INVENTORY)).thenThrow(new RuntimeException("mapping error"));
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(
+              () -> AcctServer.get(eq(TABLE_ID_M_INVENTORY), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-4", conn);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(acct).post(eq("inv-4"), eq(false), any(), any(), any());
     }
   }
 }

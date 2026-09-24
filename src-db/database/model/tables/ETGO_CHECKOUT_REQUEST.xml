@@ -101,6 +101,26 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="DEMO_CLIENT_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="DEMO_SELECTION_RECORDED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault><![CDATA[N]]></onCreateDefault>
+      </column>
+      <column name="TRANSFER_PRODUCTS" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault><![CDATA[N]]></onCreateDefault>
+      </column>
+      <column name="TRANSFER_CONTACTS" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault><![CDATA[N]]></onCreateDefault>
+      </column>
+      <column name="STRIPE_PRICE_ID" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="ETGO_ACCOUNT" name="ETGO_CHKREQ_ACCOUNT_FK">
         <reference local="ETGO_ACCOUNT_ID" foreign="ETGO_ACCOUNT_ID"/>
       </foreign-key>
@@ -109,6 +129,9 @@
       </foreign-key>
       <foreign-key foreignTable="AD_USER" name="ETGO_CHKREQ_CREATEDBY_FK">
         <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_CHKREQ_DEMO_FK">
+        <reference local="DEMO_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_ORG" name="ETGO_CHKREQ_ORG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
@@ -135,7 +158,10 @@
       <unique name="ETGO_CHKREQ_SESSION_UQ">
         <unique-column name="STRIPE_SESSION_ID"/>
       </unique>
+      <check name="ETGO_CHKREQ_DEMOSEL_CHK"><![CDATA[DEMO_SELECTION_RECORDED IN ('Y', 'N')]]></check>
       <check name="ETGO_CHKREQ_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_CHKREQ_STATUS_CHK"><![CDATA[CHECKOUT_STATUS IN ('CREATING', 'CREATED', 'PAID', 'PROVISIONING', 'PROVISIONED')]]></check>
+      <check name="ETGO_CHKREQ_TRANS_CONT_CHK"><![CDATA[TRANSFER_CONTACTS IN ('Y', 'N')]]></check>
+      <check name="ETGO_CHKREQ_TRANS_PROD_CHK"><![CDATA[TRANSFER_PRODUCTS IN ('Y', 'N')]]></check>
     </table>
   </database>

@@ -40,14 +40,28 @@ public class HttpUrlConnectionStripeApiClient implements StripeApiClient {
 
   @Override
   public StripeResponse postForm(String path, String formBody) throws StripeTransportException {
-    return execute("POST", path, formBody == null ? "" : formBody);
+    return postForm(path, formBody, null);
+  }
+
+  @Override
+  public StripeResponse postForm(String path, String formBody, String idempotencyKey)
+      throws StripeTransportException {
+    return execute("POST", path, formBody == null ? "" : formBody, idempotencyKey);
   }
 
   private StripeResponse execute(String method, String path, String formBody)
       throws StripeTransportException {
+    return execute(method, path, formBody, null);
+  }
+
+  private StripeResponse execute(String method, String path, String formBody,
+      String idempotencyKey) throws StripeTransportException {
     String url = CheckoutConfiguration.apiBaseUrl() + path;
     HttpURLConnection connection = open(url, method);
     try {
+      if (idempotencyKey != null) {
+        connection.setRequestProperty("Idempotency-Key", idempotencyKey);
+      }
       if (formBody != null) {
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");

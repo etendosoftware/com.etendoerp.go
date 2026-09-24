@@ -95,7 +95,8 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
    * never re-run, so a tenant needing both ends at R38's value. This table asserts the FINAL
    * expected state, which is R38's.</p>
    *
-   * <p>ETP-5285 also gives five of these sequences a {@code PREFIX}; that is asserted separately by
+   * <p>ETP-5285 gives five of these sequences a {@code PREFIX} and ETP-5364 adds a sixth series,
+   * {@code AP Invoice} / {@code FC}; the prefixes are asserted separately by
    * {@code testTheProductSeriesShipWithTheirPrefix()}.</p>
    */
   private static final Map<String, String> EXPECTED_SEQUENCE_START = new LinkedHashMap<>();
@@ -113,18 +114,22 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
     EXPECTED_SEQUENCE_START.put("DocumentNo_M_InOut", "10000000");
     EXPECTED_SEQUENCE_START.put("DocumentNo_M_Movement", "10000000");
     EXPECTED_SEQUENCE_START.put("DocumentNo_A_Asset", "10000000");
+    // ETP-5364's new purchase-invoice series — born unused like the rest.
+    EXPECTED_SEQUENCE_START.put("AP Invoice", "1000000");
   }
 
   // ─── Document sequences (ETP-5079, gap N1) ─────────────────────────────────
 
   /**
-   * Each of the eleven appears exactly once in the dataset.
+   * Each of the twelve appears exactly once in the dataset.
    *
    * <p>Guarded because the assertions below match on {@code NAME}: a second row under the same name
-   * would let a wrong one hide behind a right one. (The dataset separately ships duplicated
+   * would let a wrong one hide behind a right one. (The tenant used to end up with duplicated
    * {@code DocumentNo_*} rows at RUNTIME — Core's {@code InitialClientSetup} creates them at T+0 and
-   * the dataset import re-creates them seconds later — but that is a tenant-side duplication, not an
-   * XML one, and is out of scope here.)</p>
+   * the dataset import re-created them seconds later. That was always a tenant-side duplication and
+   * never an XML one, so it was out of scope here; ETP-5364 closed it in
+   * {@code OnboardingDatasetNormalizer.TableCounterSequenceFilter}, which drops those rows at
+   * import while leaving this file — and therefore these assertions — untouched.)</p>
    */
   @Test
   public void testTheCorrectedSequencesAppearExactlyOnce() throws Exception {
@@ -150,7 +155,7 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
    * captured from the source instance during the export, so every tenant inherited that instance's
    * usage instead of starting clean.</p>
    *
-   * <p>SCOPE: exactly these eleven. The dataset carries 15 FURTHER sequences that still have a
+   * <p>SCOPE: exactly these twelve. The dataset carries 15 FURTHER sequences that still have a
    * non-zero delta today (GL Journal, Quotation, Proposal, Credit Order, POS Order, AR Credit Memo,
    * MM Shipment Indirect, Purchase Requisition, Settlement, Manual Settlement, Depreciation, Debt
    * Payment Management, Prepay Order, Return Material, Warehouse Order). They are deliberately NOT
@@ -179,7 +184,7 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
           + " STARTNO (" + expected + "), otherwise a new tenant inherits the source instance's"
           + " document counter instead of starting clean", expected, currentNext);
     }
-    assertEquals("all eleven corrected sequences must be present in AD_SEQUENCE.xml",
+    assertEquals("all twelve corrected sequences must be present in AD_SEQUENCE.xml",
         EXPECTED_SEQUENCE_START.keySet().size(), seen.size());
   }
 
@@ -323,7 +328,7 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
   // ─── Document series prefixes (ETP-5285) ───────────────────────────────────
 
   /**
-   * The five document series the product defines ship with their prefix, so a new tenant can tell
+   * The six document series the product defines ship with their prefix, so a new tenant can tell
    * an order from an invoice by its number alone.
    *
    * <p>Before ETP-5285 three of these shipped with NO prefix at all and the two rectificativas
@@ -336,10 +341,14 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
    * window itself refuses to re-save, leaving the user stuck on an unsaveable form. That is
    * asserted here rather than assumed.</p>
    *
-   * <p>The sixth series ETP-5285 names, {@code FC} (Factura de compra), has no {@code AD_Sequence}
-   * to carry it: {@code AP Invoice} is {@code IsDocNoControlled='N'} with no sequence in 76 of 76
-   * doctypes, because a purchase invoice is numbered by the supplier. Do not add it here without
-   * first flipping that doctype, which is a product decision.</p>
+   * <p><b>The sixth series, {@code FC}, arrived with ETP-5364.</b> ETP-5285 could not ship it:
+   * stock Openbravo gives {@code AP Invoice} {@code IsDocNoControlled='N'} and no sequence, because
+   * a purchase invoice is numbered by the supplier, and changing that is a product decision rather
+   * than a dataset correction. ETP-5364 took it — {@code AD_SEQUENCE.xml} now carries an
+   * {@code AP Invoice} sequence and {@code C_DOCTYPE.xml} points the doctype at it with
+   * {@code ISDOCNOCONTROLLED='Y'}. The two halves must move together: this assertion covers the
+   * sequence, and {@code testTheApInvoiceDoctypeIsNumberedByItsOwnSeries} below covers the
+   * doctype, because a series nothing points at configures nothing.</p>
    *
    * <p>The regression path is the same as every other assertion in this class: a dataset re-export
    * from an instance where someone cleared the field silently reverts the row.</p>
@@ -351,6 +360,7 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
     expectedPrefix.put("Standard Order", "PV");
     expectedPrefix.put("AR Invoice", "FV");
     expectedPrefix.put("Factura Rectificativa (Ventas)", "FVR");
+    expectedPrefix.put("AP Invoice", "FC");
     expectedPrefix.put("Factura Rectificativa (Compras)", "FCR");
 
     List<String> seen = new ArrayList<>();
@@ -381,8 +391,99 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
           Pattern.compile("[^A-Z0-9-]").matcher(prefix).find());
     }
 
-    assertEquals("all five product series must be present in AD_SEQUENCE.xml",
+    assertEquals("all six product series must be present in AD_SEQUENCE.xml",
         expectedPrefix.size(), seen.size());
+  }
+
+  /**
+   * ETP-5364 — the {@code AP Invoice} doctype is numbered by the {@code AP Invoice} sequence.
+   *
+   * <p>The other half of the change asserted above, and the half that actually decides how a
+   * purchase invoice is numbered. Stock Openbravo ships this doctype {@code IsDocNoControlled='N'}
+   * with no sequence: the number comes from the supplier, and Etendo only proposes one from the
+   * shared {@code DocumentNo_C_Invoice} fallback counter. Etendo GO numbers it from the tenant's
+   * own {@code FC} series instead.</p>
+   *
+   * <p><b>Either half alone is a silent no-op</b>, which is why this is asserted separately rather
+   * than trusted: a sequence nothing points at shows a configurable prefix in the Document Sequence
+   * window that governs no numbering at all, and a doctype flipped to {@code 'Y'} with no sequence
+   * to read keeps using the fallback. Same regression path as the rest of this class — a dataset
+   * re-export from an instance where someone reverted the doctype silently undoes it.</p>
+   */
+  @Test
+  public void testTheApInvoiceDoctypeIsNumberedByItsOwnSeries() throws Exception {
+    String sequenceId = null;
+    for (Element row : rows("AD_SEQUENCE.xml", "AD_SEQUENCE")) {
+      if ("AP Invoice".equals(childText(row, "NAME"))) {
+        sequenceId = childText(row, "AD_SEQUENCE_ID");
+      }
+    }
+    assertNotNull("AD_SEQUENCE.xml must ship the 'AP Invoice' series (ETP-5364)", sequenceId);
+
+    List<String> seen = new ArrayList<>();
+    for (Element row : rows("C_DOCTYPE.xml", "C_DOCTYPE")) {
+      if (!"AP Invoice".equals(childText(row, "NAME"))) {
+        continue;
+      }
+      seen.add("AP Invoice");
+      assertEquals("the AP Invoice doctype must be document-number controlled, otherwise the FC"
+          + " series configures nothing and the number still comes from the shared"
+          + " DocumentNo_C_Invoice fallback (ETP-5364)",
+          "Y", childText(row, "ISDOCNOCONTROLLED"));
+      assertEquals("the AP Invoice doctype must point at the 'AP Invoice' sequence (ETP-5364)",
+          sequenceId, childText(row, "DOCNOSEQUENCE_ID"));
+    }
+    assertEquals("C_DOCTYPE.xml must ship exactly one doctype named 'AP Invoice'",
+        1, seen.size());
+  }
+
+  /**
+   * ETP-5364 — none of the six product series ships an internal, ticket-tagged description.
+   *
+   * <p>{@code artifacts/document-sequence/decisions.json} declares {@code description} as an
+   * EDITABLE column of the "Secuencia de documentos" window, so whatever sits in
+   * {@code AD_Sequence.Description} is product copy the tenant reads next to its own series — not
+   * an engineering note. Three rows carried one: both rectificativas shipped
+   * {@code "ETP-4737: sequence for the unified ... rectificative invoice"} and the new
+   * purchase-invoice series briefly shipped {@code "ETP-5364: sequence for the purchase invoice
+   * series"}.</p>
+   *
+   * <p>The guard is deliberately a ticket-key prefix rather than "must be absent": a description
+   * is a legitimate field and a future series may want real user-facing copy there. What must
+   * never ship is a {@code ETP-NNNN:} note. The corrective half for already-provisioned tenants is
+   * the {@code R39-document-sequence-clear-descriptions} data-fix, which matches on the same
+   * {@code ETP-} prefix so a tenant-authored description survives.</p>
+   *
+   * <p>Same regression path as the rest of this class — a dataset re-export from an instance where
+   * someone pasted a ticket reference into the field silently reintroduces it.</p>
+   */
+  @Test
+  public void testTheProductSeriesShipWithoutAnInternalDescription() throws Exception {
+    List<String> productSeries = new ArrayList<>();
+    productSeries.add("Purchase Order");
+    productSeries.add("Standard Order");
+    productSeries.add("AR Invoice");
+    productSeries.add("AP Invoice");
+    productSeries.add("Factura Rectificativa (Ventas)");
+    productSeries.add("Factura Rectificativa (Compras)");
+
+    List<String> seen = new ArrayList<>();
+    for (Element row : rows("AD_SEQUENCE.xml", "AD_SEQUENCE")) {
+      String name = childText(row, "NAME");
+      if (!productSeries.contains(name)) {
+        continue;
+      }
+      seen.add(name);
+
+      String description = childText(row, "DESCRIPTION");
+      assertFalse("series '" + name + "' ships a ticket-tagged DESCRIPTION (" + description
+          + "); that column is editable and visible in the Document Sequence window, so the"
+          + " tenant reads it as product copy (ETP-5364)",
+          description != null && description.trim().startsWith("ETP-"));
+    }
+
+    assertEquals("all six product series must be present in AD_SEQUENCE.xml",
+        productSeries.size(), seen.size());
   }
 
   // ─── Starter tariffs (ETP-5190) ────────────────────────────────────────────

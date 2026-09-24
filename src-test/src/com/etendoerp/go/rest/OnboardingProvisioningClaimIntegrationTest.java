@@ -384,8 +384,10 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
   private String createPaidRequest(String email, String clientName) {
     String accountId = accountIdFor(email);
     String requestId = MARKER + UUID.randomUUID().toString().replace("-", "");
-    // No plan: this fixture exercises the provisioning claim, which does not read one.
-    fixtureStore.recordRequested(requestId, accountId, email, clientName, null);
+    // No plan: this fixture exercises the provisioning claim, which does not read one. A current
+    // purchase always records its environment source; this one has no demo source.
+    fixtureStore.recordRequested(requestId, accountId, email, clientName,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, null));
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
     fixtureStore.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
     return requestId;

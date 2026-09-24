@@ -169,6 +169,41 @@ public class OnboardingDatasetReferentialIntegrityTest {
     }
   }
 
+  /**
+   * ETP-5364 — the {@code DocumentNo_<table>} counters stay DEFINED by the dataset, even though no
+   * onboarded tenant receives them.
+   *
+   * <p>Exactly the same split as the demo master data above, for a different reason. Openbravo's
+   * {@code InitialClientSetup} writes these 97 rows for every client it creates, so the dataset
+   * re-inserting 96 of the same names gave each tenant two copies — 9888 surplus rows across 103
+   * of 125 clients. They are therefore dropped at import time by
+   * {@code OnboardingDatasetNormalizer.TableCounterSequenceFilter}.
+   *
+   * <p><b>Deleting them from the source instead is the mistake this test exists to catch, and it
+   * is a quiet one.</b> Unlike ETP-5079's deletion it produces no dangling foreign key, so
+   * {@link #testEveryReferenceToADatasetOwnedTableResolves()} stays green. What breaks is the
+   * OTHER consumer: {@code install.source} seeds the GOClient sample client from these files
+   * wholesale and never runs {@code InitialClientSetup}, so the XML is its only source of these
+   * counters — the sample client would simply be unable to number a document, and nothing would
+   * say so until someone tried.</p>
+   */
+  @Test
+  public void testTheTableCounterSequencesStayInTheSourceDatasetForGoClient() throws Exception {
+    Map<String, Path> datasetFiles = datasetFilesByTable();
+    List<Element> sequences = rows(datasetFiles.get("AD_SEQUENCE"), "AD_SEQUENCE");
+
+    long tableCounters = sequences.stream()
+        .map(row -> childText(row, "NAME"))
+        .filter(name -> name != null && name.startsWith("DocumentNo_"))
+        .count();
+
+    assertEquals("AD_SEQUENCE.xml must keep its DocumentNo_* counters — GOClient's sample client is"
+        + " seeded from the source dataset by install.source and never runs InitialClientSetup, so"
+        + " these are its only source of them. The rows an onboarded tenant must not receive are"
+        + " dropped at import time by OnboardingDatasetNormalizer, not deleted here (ETP-5364)",
+        98L, tableCounters);
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   private void collectDanglingReferences(String sourceTable, Element row, Set<String> datasetTables,

@@ -979,7 +979,8 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
   private String createRequest(String accountId, String email) {
     String requestId = REQUEST_MARKER + UUID.randomUUID().toString().replace("-", "");
     // No plan: this fixture exercises event idempotency, which does not read one.
-    requestStore.recordRequested(requestId, accountId, email, ENVIRONMENT, null);
+    requestStore.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     return requestId;
   }
 
