@@ -1592,6 +1592,33 @@ public class McpToolRouter {
    */
   private static JSONObject reportSpecActionsSchema(String specName, JSONObject args)
       throws JSONException {
+    SFSpec spec = actionReportSpec(specName);
+    if (spec == null) {
+      return null;
+    }
+    String requested = args != null
+        ? StringUtils.trimToNull(args.optString(McpConstants.PARAM_ENTITY, null)) : null;
+    SFEntity target = requested != null
+        ? McpToolRouterSupport.findIncludedEntity(spec.getId(), requested)
+        : soleActionEntity(spec);
+    Map<String, NeoActionContract> contracts =
+        target != null ? declaredActionsOf(target) : java.util.Collections.emptyMap();
+    if (target == null || contracts.isEmpty()) {
+      return null;
+    }
+    return wrapAsTextContent(
+        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts));
+  }
+
+  /**
+   * The active report spec named {@code specName} when it declares named actions (ETP-5468), or
+   * {@code null} otherwise — including a lookup failure, a missing/non-report spec, or a report
+   * spec whose handler declares none. Only a spec that actually declares actions is handled here.
+   * Every other report spec returns before any entity lookup, so its {@code neo_schema} answer
+   * stays exactly the generic path's (e.g. the 422 pointing at its {@code generate_*} tool) —
+   * BUG-4.
+   */
+  private static SFSpec actionReportSpec(String specName) {
     SFSpec spec;
     try {
       spec = McpToolRouterSupport.findActiveSpecByName(specName);
@@ -1601,38 +1628,27 @@ public class McpToolRouter {
     if (spec == null || !"R".equals(spec.getSpecType())) {
       return null;
     }
-    // Only a spec that actually declares actions is handled here. Every other report spec returns
-    // before any entity lookup, so its neo_schema answer stays exactly the generic path's (e.g.
-    // the 422 pointing at its generate_* tool) — BUG-4.
     if (!NeoActionContract.resolve(spec).isPresent()) {
       return null;
     }
-    String requested = args != null
-        ? StringUtils.trimToNull(args.optString(McpConstants.PARAM_ENTITY, null)) : null;
+    return spec;
+  }
+
+  /**
+   * The spec's single included entity whose handler declares named actions (ETP-5468), or
+   * {@code null} when none or several do — the ambiguous cases are left for the caller to refuse
+   * rather than guessing which entity was meant.
+   */
+  private static SFEntity soleActionEntity(SFSpec spec) {
     SFEntity target = null;
-    Map<String, NeoActionContract> contracts = java.util.Collections.emptyMap();
-    if (requested != null) {
-      target = McpToolRouterSupport.findIncludedEntity(spec.getId(), requested);
-      contracts = target != null ? declaredActionsOf(target) : contracts;
-    } else {
-      int declaring = 0;
-      for (SFEntity candidate : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
-        Map<String, NeoActionContract> c = declaredActionsOf(candidate);
-        if (!c.isEmpty()) {
-          declaring++;
-          target = candidate;
-          contracts = c;
-        }
-      }
-      if (declaring != 1) {
-        return null;
+    int declaring = 0;
+    for (SFEntity candidate : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
+      if (!declaredActionsOf(candidate).isEmpty()) {
+        declaring++;
+        target = candidate;
       }
     }
-    if (target == null || contracts.isEmpty()) {
-      return null;
-    }
-    return wrapAsTextContent(
-        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts));
+    return declaring == 1 ? target : null;
   }
 
   /**
