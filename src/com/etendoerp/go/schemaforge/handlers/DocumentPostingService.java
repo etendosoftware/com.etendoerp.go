@@ -87,6 +87,13 @@ public class DocumentPostingService {
   private static final String LANGUAGE_ES_ES = "es_ES";
 
   /**
+   * {@code AcctServer#tableName} value for Goods Movements (ETP-5436) — matches the literal
+   * {@code acct.tableName = "M_Movement"} assignment in {@code AcctServer.get()}'s {@code case
+   * 323} branch (core {@code AcctServer.java}), which is the only place this string is defined.
+   */
+  private static final String TABLE_M_MOVEMENT = "M_Movement";
+
+  /**
    * DB table name (not {@code AD_Table_ID} — resolved from the table's own record, see
    * {@link #post(String, String, ConnectionProvider)}) for Physical Inventory, the only document
    * type this pre-check applies to (ETP-5360).
@@ -100,6 +107,14 @@ public class DocumentPostingService {
    * Resolved via {@link OBMessageUtils#messageBD}, which already follows {@code OBContext}'s
    * language like the rest of this file (see {@link #MSG_INVALID_ACCOUNT_BASE} and
    * {@link #errorMessageOf}).
+   *
+   * <p>Reused as-is for {@code STATUS_DocumentDisabled} on a Goods Movement ({@link
+   * #TABLE_M_MOVEMENT}, ETP-5436) instead of a second, hand-written message: the wording is
+   * table-agnostic ("...in the document", not Inventory-specific), and {@code
+   * DocMovement#getDocumentConfirmation} sets 'D' for the same underlying condition this message
+   * already describes — no {@code MaterialTransaction} on the document's lines has a calculated
+   * cost yet. Reusing a real, already-translated core {@code AD_MESSAGE} beats a hardcoded EN/ES
+   * pair maintained only in Java.</p>
    */
   private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
 
@@ -416,6 +431,16 @@ public class DocumentPostingService {
       String localizedBase = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BASE);
       if (StringUtils.isNotBlank(localizedBase)) {
         message = localizedBase;
+      }
+    }
+    // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
+    // MSG_NOT_CALCULATED_COST already describes (see its javadoc) — reuse it rather than a
+    // second hardcoded message.
+    if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
+        && TABLE_M_MOVEMENT.equals(acct.tableName)) {
+      String localizedNotCalculated = OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST);
+      if (StringUtils.isNotBlank(localizedNotCalculated)) {
+        message = localizedNotCalculated;
       }
     }
     return enrichWithFailingEntity(acct, message);

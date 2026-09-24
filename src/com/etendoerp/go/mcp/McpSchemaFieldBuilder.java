@@ -938,12 +938,17 @@ final class McpSchemaFieldBuilder {
   private static final Map<String, WritableVia> WRITABLE_VIA_BY_COMPUTATION_FUNCTION =
       buildWritableViaMap();
 
+  private static final String PRODUCT_SPEC = "product";
+
   private static Map<String, WritableVia> buildWritableViaMap() {
     Map<String, WritableVia> map = new HashMap<>();
-    map.put("etgo_product_sale_price", new WritableVia("product", "price",
+    map.put("etgo_product_sale_price", new WritableVia(PRODUCT_SPEC, "price",
         "Set on the sale price list (M_ProductPrice where issopricelist='Y')."));
-    map.put("etgo_product_purchase_price", new WritableVia("product", "price",
+    map.put("etgo_product_purchase_price", new WritableVia(PRODUCT_SPEC, "price",
         "Set on the purchase price list (M_ProductPrice where issopricelist='N')."));
+    map.put("etgo_product_cost", new WritableVia(PRODUCT_SPEC, "costing",
+        "Record a standard cost line on the product (M_Costing); average costs are "
+            + "calculated by the costing engine and cannot be written."));
     map.put("etgo_product_stock", new WritableVia("physical-inventory", "inventoryLine",
         "Create a physical-inventory/inventory header, add this line with the counted "
             + "quantity, then process the document — stock is never written directly."));

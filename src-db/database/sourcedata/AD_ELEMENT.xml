@@ -1612,6 +1612,20 @@
 <!--8650E6C189E84A06BF49CC43232AEA45-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--8650E6C189E84A06BF49CC43232AEA45--></AD_ELEMENT>
 
+<!--869CDED1C0014C678F687937A0CE32A1--><AD_ELEMENT>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <AD_ELEMENT_ID><![CDATA[869CDED1C0014C678F687937A0CE32A1]]></AD_ELEMENT_ID>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <COLUMNNAME><![CDATA[EM_ETGO_Cost]]></COLUMNNAME>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <NAME><![CDATA[Cost]]></NAME>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <PRINTNAME><![CDATA[Cost]]></PRINTNAME>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <DESCRIPTION><![CDATA[Current cost of the product recorded by the costing engine (M_Costing), maintained by Etendo GO.]]></DESCRIPTION>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the standard (STA) or average (AVA) M_Costing row of the product currently in force: rows whose starting date has already been reached come first, then the most recent starting date, preferring the organization-wide row on ties. A future-dated cost is only shown when no cost has started yet. Recomputed whenever a cost row of the product changes, so a future-dated cost that reaches its starting date is picked up on the next change to that product's costing (same behavior as the purchase and sale price columns). Feeds list views, sorting and filtering without a per-row fetch. Empty when the product has no cost.]]></HELP>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--869CDED1C0014C678F687937A0CE32A1--></AD_ELEMENT>
+
 <!--8771C3444D544984A6D0FBF8BC656B8E--><AD_ELEMENT>
 <!--8771C3444D544984A6D0FBF8BC656B8E-->  <AD_ELEMENT_ID><![CDATA[8771C3444D544984A6D0FBF8BC656B8E]]></AD_ELEMENT_ID>
 <!--8771C3444D544984A6D0FBF8BC656B8E-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>

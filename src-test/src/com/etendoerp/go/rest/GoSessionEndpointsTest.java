@@ -48,15 +48,18 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import org.codehaus.jettison.json.JSONArray;
 import org.mockito.ArgumentCaptor;
 import org.openbravo.dal.service.OBDal;
@@ -83,6 +86,14 @@ public class GoSessionEndpointsTest {
   private final EtendoGoSsoProviderRegistry ssoRegistry = mock(EtendoGoSsoProviderRegistry.class);
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(
       mock(TransactionalAuthEmailSender.class), ssoRegistry, goSessionService);
+  // ETP-5395 — the restore reconciles the session role against the database; these tests have
+  // none, so by default the reconciler reports the role as still valid (a no-op).
+  private final GoSessionRoleReconciler roleReconciler = mock(GoSessionRoleReconciler.class);
+
+  @Before
+  public void injectRoleReconciler() {
+    servlet.sessionRoleReconciler = roleReconciler;
+  }
 
   @Test
   public void createSetsHostCookieAndDoesNotLeakTokenInBody() throws Exception {
@@ -323,6 +334,69 @@ public class GoSessionEndpointsTest {
     assertEquals("R1", env.getString("roleId"));
     assertEquals("O1", env.getString("orgId"));
     assertEquals("R1", body.getJSONArray("roleList").getJSONObject(0).getString("id"));
+  }
+
+  private GoSessionRecord environmentSession() {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    sessionRecord.setUserId("U1");
+    sessionRecord.setRoleId("R1");
+    sessionRecord.setCtxClientId("C1");
+    sessionRecord.setCtxOrgId("O1");
+    sessionRecord.setWarehouseId("W1");
+    return sessionRecord;
+  }
+
+  private CapturedResponse restore(GoSessionRecord sessionRecord) throws Exception {
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
+        null, new JSONArray().put(new JSONObject().put("id", "R2")));
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      support.when(() -> EtendoGoJwtSupport.loadRoleListData("U1")).thenReturn(roleListData);
+      servlet.doGet(getRequest("/session", "tok"), resp.response);
+    }
+    return resp;
+  }
+
+  /**
+   * ETP-5395 — a user promoted/demoted since entering the environment must get back the role
+   * they hold now; before, the restore returned the revoked role and the app landed on
+   * "no access".
+   */
+  @Test
+  public void restoreReportsTheRoleTheSessionWasReboundTo() throws Exception {
+    GoSessionRecord sessionRecord = environmentSession();
+    doAnswer(invocation -> {
+      invocation.<GoSessionRecord>getArgument(0).setRoleId("R2");
+      return true;
+    }).when(roleReconciler).reconcile(sessionRecord);
+
+    CapturedResponse resp = restore(sessionRecord);
+
+    assertEquals(200, resp.status);
+    JSONObject env = new JSONObject(resp.body.toString()).getJSONObject("environment");
+    assertEquals("R2", env.getString("roleId"));
+    verify(roleReconciler).reconcile(sessionRecord);
+  }
+
+  @Test
+  public void restoreRejectsASessionWhoseUserHoldsNoRoleAnyMore() throws Exception {
+    GoSessionRecord sessionRecord = environmentSession();
+    when(roleReconciler.reconcile(sessionRecord))
+        .thenThrow(new SessionRoleRevokedException("no role left"));
+
+    CapturedResponse resp = restore(sessionRecord);
+
+    assertEquals(401, resp.status);
   }
 
   private static HttpServletRequest getRequest(String path, String cookieValue) {

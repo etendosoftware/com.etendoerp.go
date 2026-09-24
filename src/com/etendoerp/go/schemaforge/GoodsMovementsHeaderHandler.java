@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
@@ -26,6 +27,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * Hooks for the Goods Movements (M_Movement) header entity.
@@ -46,6 +49,13 @@ import org.openbravo.service.db.DalConnectionProvider;
  * {@link NeoResponse} error when any (product, source warehouse) pair across the movement's
  * lines would exceed on-hand stock — before the request ever reaches the classic completion
  * process. See {@link GoodsMovementProcessGuard} for details.
+ *
+ * <p><b>Post / Unpost (ETP-5436):</b> the {@code post}/{@code unpost} kebab and bulk-list actions
+ * are declared in {@code decisions.json} as plain {@code menuActions}, not as an
+ * {@code AD_Column} button — so the generic {@code NeoButtonActionHelper} dispatcher can never
+ * resolve them and every request 404s with "Action not found: post". Routed here, after the stock
+ * guard and before the documentNo materialization, exactly like {@link GoodsReceiptHeaderHandler}
+ * and {@link GoodsShipmentHeaderHandler}.
  */
 @Named("goodsMovementsHeaderHandler")
 public class GoodsMovementsHeaderHandler implements NeoHandler {
@@ -54,11 +64,23 @@ public class GoodsMovementsHeaderHandler implements NeoHandler {
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String TABLE_M_MOVEMENT = "M_Movement";
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse processRejection = GoodsMovementProcessGuard.validateBeforeProcess(context);
     if (processRejection != null) {
       return processRejection;
+    }
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
     }
     if (!"POST".equalsIgnoreCase(context.getHttpMethod())) {
       return null;
