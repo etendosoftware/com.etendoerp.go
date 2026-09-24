@@ -270,6 +270,34 @@ per-tenant `@check` would return 0 rows, the runner would record `SKIPPED_NOT_NE
 that **advances the watermark** — and every paying tenant would be silently and permanently
 reclassified as free.
 
+### 7.0 Status and grace anchor are carried over, not reset
+
+A backfilled row is not always `active`. Until the row exists, develop's lifecycle webhooks
+(ETP-5443) project a productive tenant's billing state into two preferences —
+`ETGO_SubscriptionStatus` (`CURRENT` / `PAST_DUE` / `EXPIRED`) and `ETGO_SubscriptionDueAt` (an
+`Instant.toString()` value, the end of the paid period). Once the row exists it **wins** over both
+(`TenantEnvironmentLifecycleService#productiveSnapshot` reads the row first), so a flat `active`
+would silently turn a past-due or expired tenant back into a paying one. R37 therefore seeds:
+
+| `ETGO_SubscriptionStatus` | `STATUS` written | read back as |
+|---|---|---|
+| `CURRENT` | `active` | `CURRENT` |
+| `PAST_DUE` | `past_due` | `PAST_DUE` |
+| `EXPIRED` | `canceled` (still open, `END_DATE` NULL — §3.7 of the open-topics register) | `EXPIRED` |
+| absent, blank or unknown | `active` | `CURRENT` (the preference reader's own fallback is `LEGACY_ENTITLEMENT`, also entitled) |
+
+`CURRENT_PERIOD_END` comes from `ETGO_SubscriptionDueAt`, cast only when the value has the ISO-8601
+UTC shape `Instant.toString()` writes; anything else becomes NULL, mirroring the Java reader's
+"ignore an invalid due timestamp", so a cosmetic value never fails a tenant. `CURRENT_PERIOD_START`
+stays NULL, so `ETGO_SUB_PERIOD_CHK` can never reject the insert.
+
+Unlike the plan marker (§7.1), both lifecycle preferences are **owned** by the tenant
+(`AD_CLIENT_ID = tenant`, written by `setPreferenceValue` with `setClient(tenant)` and read back
+through `PROPERTY_CLIENT`), so R37 reads them by `ad_client_id`. It does not delete them:
+`ETGO_SubscriptionEventAt` (the webhook ordering watermark) stays a preference by decision, and the
+status/due-at pair is simply no longer read once the row exists. Pinned by
+`SubscriptionBackfillIdempotencyIntegrationTest` (runs the real SQL) and the R37 source test.
+
 ### 7.1 The preference is NOT scoped by `AD_CLIENT_ID`
 
 `Preferences.setPreferenceValue` writes the `ETGO_TenantPlan` row at `ad_client_id = '0'` and puts

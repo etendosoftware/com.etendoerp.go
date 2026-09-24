@@ -29,6 +29,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -344,6 +346,86 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
         reportText(withRequest).contains("stripe ids copied from etgo_checkout_request"));
     assertTrue("@report must say the ids were deliberately left NULL",
         reportText(withoutRequest).contains("stripe ids left NULL"));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 3b — status and grace anchor carried over from the lifecycle preferences (ETP-5443)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The row must carry the billing state the preferences already hold.
+   *
+   * <p>Until the row exists, the Stripe lifecycle webhooks project a productive tenant's state into
+   * {@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt}. Once it exists it wins over
+   * both, so a flat {@code 'active'} would turn a past-due or expired tenant back into a paying one.
+   * Each status is asserted twice: as the stored value, and through the reader's own mapping, which
+   * must hand back the very status the preference held.
+   */
+  @Test
+  public void testTheBackfillSeedsStatusAndPeriodEndFromTheLifecyclePreferences() {
+    String dueAt = "2026-10-01T00:00:00Z";
+    String pastDue = createTenant("life-pastdue", true);
+    createLifecyclePreference(pastDue, "ETGO_SubscriptionStatus", "PAST_DUE");
+    createLifecyclePreference(pastDue, "ETGO_SubscriptionDueAt", dueAt);
+    String expired = createTenant("life-expired", true);
+    createLifecyclePreference(expired, "ETGO_SubscriptionStatus", "EXPIRED");
+    createLifecyclePreference(expired, "ETGO_SubscriptionDueAt", dueAt);
+    String current = createTenant("life-current", true);
+    createLifecyclePreference(current, "ETGO_SubscriptionStatus", " current ");
+
+    for (String tenant : new String[] { pastDue, expired, current }) {
+      assertEquals(1, apply(tenant));
+    }
+
+    assertSeeded(pastDue, SubscriptionService.STATUS_PAST_DUE,
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, Instant.parse(dueAt));
+    assertSeeded(expired, SubscriptionService.STATUS_CANCELED,
+        EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, Instant.parse(dueAt));
+    assertSeeded(current, SubscriptionService.STATUS_ACTIVE,
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+    assertEquals("A canceled row stays open: canceled means free now, with no END_DATE", 1,
+        rawOpenCount(expired));
+    assertEquals("The lifecycle preferences are left in place; only the plan marker is retired",
+        2L, rawLifecyclePreferenceCount(pastDue));
+  }
+
+  /**
+   * A tenant with no lifecycle preference, or with values the reader would itself ignore, is
+   * backfilled as {@code active} with no grace anchor — never failed over a cosmetic value.
+   */
+  @Test
+  public void testAbsentOrUnreadableLifecyclePreferencesFallBackToActiveWithNoPeriodEnd() {
+    String absent = createTenant("life-absent", true);
+    String unreadable = createTenant("life-unreadable", true);
+    createLifecyclePreference(unreadable, "ETGO_SubscriptionStatus", "SOMETHING_NEW");
+    createLifecyclePreference(unreadable, "ETGO_SubscriptionDueAt", "not-a-date");
+
+    assertEquals(1, apply(absent));
+    assertEquals(1, apply(unreadable));
+
+    assertSeeded(absent, SubscriptionService.STATUS_ACTIVE,
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+    assertSeeded(unreadable, SubscriptionService.STATUS_ACTIVE,
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+  }
+
+  private void assertSeeded(String tenant, String expectedRowStatus,
+      EnvironmentAccessPolicy.SubscriptionStatus expectedReaderStatus, Instant expectedPeriodEnd) {
+    String subscriptionId = (String) uniqueResult("SELECT ETGO_SUBSCRIPTION_ID "
+        + "FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant", "tenant", tenant);
+    assertNotNull(subscriptionId);
+    String rowStatus = (String) rawColumn(subscriptionId, "STATUS");
+    assertEquals(expectedRowStatus, rowStatus);
+    assertEquals(expectedReaderStatus,
+        TenantEnvironmentLifecycleService.subscriptionStatusOf(rowStatus));
+    assertNull("The period start is never seeded, so ETGO_SUB_PERIOD_CHK cannot reject the row",
+        rawColumn(subscriptionId, "CURRENT_PERIOD_START"));
+    Object periodEnd = rawColumn(subscriptionId, "CURRENT_PERIOD_END");
+    if (expectedPeriodEnd == null) {
+      assertNull(periodEnd);
+    } else {
+      assertEquals(expectedPeriodEnd, ((Timestamp) periodEnd).toInstant());
+    }
   }
 
   /**
@@ -759,6 +841,20 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
     return requestId;
   }
 
+  /**
+   * Writes a lifecycle preference the way develop's
+   * {@code TenantEnvironmentLifecycleService#setPreferenceValue} does: OWNED by the tenant
+   * ({@code AD_CLIENT_ID}), with no visibility scope — unlike the plan marker.
+   */
+  private void createLifecyclePreference(String tenantId, String attribute, String value) {
+    nativeUpdateCommitted("INSERT INTO AD_PREFERENCE (AD_PREFERENCE_ID, AD_CLIENT_ID, AD_ORG_ID, "
+            + "ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ATTRIBUTE, VALUE, "
+            + "ISPROPERTYLIST, SELECTED) "
+            + "VALUES (:id, :tenant, '0', 'Y', now(), '0', now(), '0', :attribute, :value, "
+            + "'N', 'Y')",
+        "id", newId(), "tenant", tenantId, "attribute", attribute, "value", value);
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Committed-state readers (native SQL — never the first-level cache)
   // ---------------------------------------------------------------------------------------------
@@ -772,6 +868,12 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   private long rawTotalCount(String tenantId) {
     return ((Number) uniqueResult("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION "
         + "WHERE ENVIRONMENT_CLIENT_ID = :tenant", "tenant", tenantId)).longValue();
+  }
+
+  private long rawLifecyclePreferenceCount(String tenantId) {
+    return ((Number) uniqueResult("SELECT COUNT(*) FROM AD_PREFERENCE "
+        + "WHERE ATTRIBUTE LIKE 'ETGO_Subscription%' AND AD_CLIENT_ID = :tenant",
+        "tenant", tenantId)).longValue();
   }
 
   private long rawSubscriptionTotal() {
@@ -850,6 +952,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
       for (String sql : new String[] {
           "DELETE FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID IN " + tenants,
           "DELETE FROM AD_PREFERENCE WHERE VISIBLEAT_CLIENT_ID IN " + tenants,
+          "DELETE FROM AD_PREFERENCE WHERE AD_CLIENT_ID IN " + tenants,
           "DELETE FROM ETGO_CHECKOUT_REQUEST WHERE REQUEST_ID LIKE :marker",
           "DELETE FROM ETGO_ACCOUNT WHERE EMAIL LIKE lower(:marker)",
           "DELETE FROM AD_SEQUENCE WHERE AD_CLIENT_ID IN " + tenants,

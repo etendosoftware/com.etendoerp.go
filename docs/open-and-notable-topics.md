@@ -357,6 +357,11 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   500). `applySubscriptionLifecycle` now captures/sets/restores a system context and
   `setPreference` runs in admin mode; `CheckoutWebhookEndpointIntegrationTest` pins both routes.
   Design doc §8.4 has the full story — the lesson generalises to any context-less caller.
+- **The backfill carries the preference state onto the row.** R37 seeds `STATUS` from
+  `ETGO_SubscriptionStatus` (same mapping as above, absent/unknown → `active`) and
+  `CURRENT_PERIOD_END` from `ETGO_SubscriptionDueAt`, reading both by `AD_CLIENT_ID` (they are
+  owned by the tenant, unlike the plan marker of §3.3). Without that, the row — which wins once it
+  exists — would have reset every past-due or expired tenant to paying. Design doc §7.0.
 
 ## 4. Known issues
 
