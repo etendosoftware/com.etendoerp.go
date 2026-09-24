@@ -80,6 +80,19 @@ public class OnboardingDatasetDefinitionTest {
     assertTrue(OnboardingDatasetDefinition.shouldIncludeTable("C_ELEMENTVALUE_OPERAND"));
   }
 
+  /**
+   * ETP-5481: {@code AEATSII_CAUSE_EXEMPTION} (the AEAT "Causa de Exencion" IVA catalog,
+   * E1-E6) is shipped in GOClient's sampledata but was missing from this allowlist, so
+   * every tenant other than the GOClient demo client itself was born with zero rows in
+   * the table and an empty selector on the invoice SIF tab. Same class of bug as
+   * {@link #testIncludesElementValueOperandTable}. Regression guard against the table
+   * being dropped from {@code INCLUDED_TABLES} again.
+   */
+  @Test
+  public void testIncludesAeatsiiCauseExemptionTable() {
+    assertTrue(OnboardingDatasetDefinition.shouldIncludeTable("AEATSII_CAUSE_EXEMPTION"));
+  }
+
   @Test
   public void testExcludedTableIsNotIncluded() {
     assertFalse(OnboardingDatasetDefinition.shouldIncludeTable("AD_ORG"));
