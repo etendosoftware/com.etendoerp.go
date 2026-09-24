@@ -3597,8 +3597,21 @@ resolved via whichever mechanism its own NEO handler actually gates on:
 |---|---|---|
 | `tax-report` | Classic `AD_Process_Access` (`TaxReportHandler` → `NeoAccessHelper#hasProcessAccess`) | `8C1331B9EC14CED7E040007F010119A0` |
 | `aging-receivable` / `aging-payable` | OBUIAPP `ProcessAccess` (`AgingReportHandler`, receivable/payable tiers) | `0D37A9F6109549DEB058373EF2DAEB6A` / `EB4C4053F3B94A17A08D1DD7E89CEB7E` |
-| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`, `report-trial-balance` (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
+| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`, `report-trial-balance`* (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
 | `inventory-stock-report` | `AD_Window_Access` on a tab-less pseudo-window | `6346B88619F948F9A42224BDB0B239FA` |
+
+\* `report-trial-balance` (ETP-5483 slice 2) is the one row of the 5 that ALSO has its own
+`ETGO_SF_SPEC`/`ETGO_SF_ENTITY` row and its own MCP report tool, `generate_report_trial_balance`,
+served by `TrialBalanceReportHandler` (`@Named("trialBalanceReportHandler")`) — a faithful Java
+port of the SAME `artifacts/report-trial-balance/report-contract.json` SQL the two Node report
+engines (`schema_forge`'s Vite dev plugin and `schema_forge_core`'s production `report-server`)
+already run for the SPA. `TrialBalanceReportHandler.isAccessibleForCurrentRole()` gates on the
+exact same `FINANCIAL_REPORTS_WINDOW_ID` anchor this table already uses — adding the spec/entity
+row did not change this report's access boundary, only added a second, MCP-reachable way to run
+it. **Drift risk:** this is now a dual implementation (Node/SQL-placeholder for the SPA, Java/bind-
+parameter for MCP) of the same query AND the same `report-grouping.js` row-folding post-processing
+(ported as `TrialBalanceFolding`). The two are not structurally linked — see
+`TrialBalanceReportHandler`'s own class javadoc for what must be mirrored by hand on either side.
 
 This resolution logic lives in `com.etendoerp.go.schemaforge.util.ReportAccessCatalog` — a shared
 utility, NOT duplicated per-webhook, because `SFSystemRoleTemplates` (§8f) needs the exact same

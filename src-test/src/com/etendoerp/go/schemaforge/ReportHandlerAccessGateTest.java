@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 
 /**
  * Access gate of the three NEO report handlers (ETP-5335).
@@ -332,6 +333,61 @@ class ReportHandlerAccessGateTest {
       NeoResponse response = handler.handle(context("POST"));
 
       assertEquals(403, response.getHttpStatus());
+    }
+  }
+
+  // ── report-trial-balance (ETP-5483 slice 2) ─────────────────────────────
+
+  @Nested
+  @DisplayName("TrialBalanceReportHandler")
+  class TrialBalanceReport {
+
+    private final TrialBalanceReportHandler handler = new TrialBalanceReportHandler();
+
+    @Test
+    @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
+    void declaresWindowGrant() {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+          .thenReturn(true);
+      assertTrue(handler.isAccessibleForCurrentRole());
+
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+          .thenReturn(false);
+      assertFalse(handler.isAccessibleForCurrentRole());
+    }
+
+    @Test
+    @DisplayName("POST without the grant is refused with 403")
+    void postWithoutGrantIsRefused() {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
+
+      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("GET without the grant does not leak the description")
+    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
+
+      NeoResponse response = handler.handle(context("GET"));
+
+      assertEquals(403, response.getHttpStatus());
+    }
+
+    /**
+     * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
+     * ask the overridable declaration, not repeat the grant check inline.
+     */
+    @Test
+    @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
+    void handleDelegatesToTheDeclaration() {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      TrialBalanceReportHandler spied = spy(new TrialBalanceReportHandler());
+      doReturn(false).when(spied).isAccessibleForCurrentRole();
+
+      assertEquals(403, spied.handle(context("POST")).getHttpStatus());
     }
   }
 }
