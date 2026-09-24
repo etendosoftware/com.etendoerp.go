@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -50,6 +51,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.session.GoSessionRecord;
 
 /**
  * Unit tests for {@link McpServlet} covering CORS, authentication, JSON-RPC
@@ -104,6 +106,93 @@ public class McpServletTest {
   private String getResponseBody() {
     writer.flush();
     return responseBody.toString();
+  }
+
+  // ── authenticate: credential schemes (ETP-4576) ─────────────────────────
+
+  private McpServlet.AuthIdentity invokeAuthenticate() throws Exception {
+    Method authenticate = McpServlet.class.getDeclaredMethod("authenticate",
+        HttpServletRequest.class, HttpServletResponse.class);
+    authenticate.setAccessible(true);
+    return (McpServlet.AuthIdentity) authenticate.invoke(servlet, request, response);
+  }
+
+  private McpServlet.AuthIdentity invokeSessionIdentity(GoSessionRecord session) throws Exception {
+    Method sessionIdentity = McpServlet.class.getDeclaredMethod("sessionIdentity",
+        HttpServletRequest.class, HttpServletResponse.class, GoSessionRecord.class);
+    sessionIdentity.setAccessible(true);
+    return (McpServlet.AuthIdentity) sessionIdentity.invoke(servlet, request, response, session);
+  }
+
+  private static GoSessionRecord sessionRecord(String userId, String roleId, String clientId,
+      String orgId) {
+    GoSessionRecord session = new GoSessionRecord();
+    session.setUserId(userId);
+    session.setRoleId(roleId);
+    session.setCtxClientId(clientId);
+    session.setCtxOrgId(orgId);
+    return session;
+  }
+
+  /**
+   * The pre-existing contract: a request that already carries a validated OAuth2 credential is
+   * resolved from the filter's attributes and never reaches the cookie path. Adding the cookie
+   * scheme must not change what an MCP client (Claude, the IDE) sees.
+   */
+  @Test
+  public void authenticateStillResolvesTheOAuth2FilterIdentity() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+
+    McpServlet.AuthIdentity identity = invokeAuthenticate();
+
+    assertNotNull(identity);
+    assertEquals("user1", identity.userId);
+    assertEquals("neo:read", identity.scopes);
+  }
+
+  /**
+   * And the other half of "nothing changed": no Bearer header AND no session cookie still ends in
+   * the same 401, so an MCP client's OAuth discovery keeps being triggered exactly as before.
+   */
+  @Test
+  public void authenticateWithNoCredentialOfEitherSchemeStillReturns401() throws Exception {
+    when(request.getHeader("Authorization")).thenReturn(null);
+    when(request.getCookies()).thenReturn(null);
+
+    assertNull(invokeAuthenticate());
+
+    verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    assertTrue(getResponseBody().contains("Missing Authorization"));
+  }
+
+  /**
+   * ETP-4576 — a resolved cookie session yields the same identity shape and the same scope set as
+   * the validated legacy JWT path. Granting less would make one user see a different tool catalog
+   * depending only on which credential scheme the backend happened to issue.
+   */
+  @Test
+  public void sessionIdentityBuildsTheIdentityFromAResolvedCookieSession() throws Exception {
+    McpServlet.AuthIdentity identity =
+        invokeSessionIdentity(sessionRecord("user1", "role1", "client1", "org1"));
+
+    assertNotNull(identity);
+    assertEquals("user1", identity.userId);
+    assertEquals("role1", identity.roleId);
+    assertEquals("client1", identity.clientId);
+    assertEquals("org1", identity.orgId);
+    assertEquals("neo:read neo:write neo:process neo:report", identity.scopes);
+  }
+
+  /**
+   * The tenant scope is what every downstream query is filtered by, so a session that has not
+   * selected an environment is rejected rather than defaulted.
+   */
+  @Test
+  public void sessionIdentityRejectsASessionWithNoEnvironmentSelected() throws Exception {
+    assertNull(invokeSessionIdentity(sessionRecord("user1", "role1", null, null)));
+
+    verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    assertTrue(getResponseBody().contains("no environment selected"));
   }
 
   // ── doOptions ───────────────────────────────────────────────────────────

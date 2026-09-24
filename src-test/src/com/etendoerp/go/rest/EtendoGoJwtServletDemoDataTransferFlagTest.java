@@ -26,11 +26,13 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 
 import javax.servlet.http.HttpServletRequest;
@@ -42,6 +44,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
+import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 
@@ -59,16 +62,20 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   private static final String STATUS_PATH = "/demo-data-transfer";
   private static final String RETRY_PATH = "/demo-data-transfer/retry";
   private static final String CLIENT_ID = "productive-client";
+  private static final String ACCOUNT_ID = "account-id";
   private static final String ACCOUNT_EMAIL = "owner@example.test";
+  private static final String DEMO_CLIENT_ID = "selected-demo-client";
   private static final String REQUEST_ID = "checkout-request";
 
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
   private final DemoDataTransferService transferService = mock(DemoDataTransferService.class);
+  private final CheckoutRequestStore checkoutRequestStore = mock(CheckoutRequestStore.class);
   private MockedStatic<DemoDataTransferFlag> flag;
 
   @BeforeEach
   void setUp() {
     servlet.demoDataTransferService = transferService;
+    servlet.checkoutRequestStore = checkoutRequestStore;
     flag = mockStatic(DemoDataTransferFlag.class);
   }
 
@@ -121,7 +128,7 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   void flagOffCheckoutSelectionIsNotRecorded() throws Exception {
     flagIs(false);
 
-    servlet.recordDemoDataTransferSelection(selectionBody(), checkoutResult());
+    recordSelection(DEMO_CLIENT_ID, true, false);
 
     verifyNoInteractions(transferService);
   }
@@ -130,7 +137,7 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   void flagOnCheckoutSelectionIsRecordedUnderTheCheckoutRequest() throws Exception {
     flagIs(true);
 
-    servlet.recordDemoDataTransferSelection(selectionBody(), checkoutResult());
+    recordSelection(DEMO_CLIENT_ID, true, false);
 
     verify(transferService).recordSelection(REQUEST_ID, true, false);
   }
@@ -141,7 +148,7 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
     JSONObject body = new JSONObject().put("dataTransfer",
         new JSONObject().put("products", false).put("contacts", false));
 
-    servlet.recordDemoDataTransferSelection(body, checkoutResult());
+    recordSelection(body, DEMO_CLIENT_ID);
 
     verify(transferService).recordSelection(REQUEST_ID, false, false);
   }
@@ -150,7 +157,7 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   void checkoutWithoutAChoiceDoesNotInventOne() throws Exception {
     flagIs(true);
 
-    servlet.recordDemoDataTransferSelection(new JSONObject(), checkoutResult());
+    recordSelection(new JSONObject(), DEMO_CLIENT_ID);
 
     verifyNoInteractions(transferService);
   }
@@ -182,24 +189,22 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
-  void flagOffPaidOnboardingStartsNoTransferAndLooksUpNoDemo() {
+  void flagOffPaidOnboardingStartsNoTransferAndDoesNotReadPurchaseSelection() {
     flagIs(false);
-    try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
-      servlet.startDemoDataTransferBestEffort(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_ID);
-      dal.verifyNoInteractions();
-    }
+    servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
+        ACCOUNT_ID, ACCOUNT_EMAIL);
+    verifyNoInteractions(checkoutRequestStore);
     verifyNoInteractions(transferService);
   }
 
   @Test
-  void flagOnPaidOnboardingStartsTheTransferFromTheAccountsDemo() {
+  void flagOnPaidOnboardingStartsFromTheExactDemoIdPersistedOnThePurchase() {
     flagIs(true);
-    try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dal.when(() -> EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(ACCOUNT_EMAIL))
-          .thenReturn("demo-client");
-      servlet.startDemoDataTransferBestEffort(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_ID);
-    }
-    verify(transferService).start(REQUEST_ID, "demo-client", CLIENT_ID);
+    servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
+        ACCOUNT_ID, ACCOUNT_EMAIL);
+    verify(checkoutRequestStore).findTransferSelection(REQUEST_ID, ACCOUNT_ID, ACCOUNT_EMAIL);
+    verify(transferService).start(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID);
+    verifyNoMoreInteractions(checkoutRequestStore, transferService);
   }
 
   @Test
@@ -224,13 +229,21 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   void flagOnAFailedStartNeverReachesTheOnboardingCaller() {
     flagIs(true);
     doThrow(new IllegalStateException("boom")).when(transferService)
-        .start(REQUEST_ID, "demo-client", CLIENT_ID);
-    try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dal.when(() -> EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(ACCOUNT_EMAIL))
-          .thenReturn("demo-client");
-      servlet.startDemoDataTransferBestEffort(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_ID);
-    }
-    verify(transferService).start(REQUEST_ID, "demo-client", CLIENT_ID);
+        .start(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID);
+    servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
+        ACCOUNT_ID, ACCOUNT_EMAIL);
+    verify(transferService).start(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID);
+  }
+
+  @Test
+  void flagOnProductivePurchaseDoesNotRecordOrStartDemoTransfer() throws Exception {
+    flagIs(true);
+
+    recordSelection(null, false, false);
+    servlet.startDemoDataTransferBestEffort(REQUEST_ID, null, CLIENT_ID, ACCOUNT_ID,
+        ACCOUNT_EMAIL);
+
+    verifyNoInteractions(transferService, checkoutRequestStore);
   }
 
   private static String errorMessage(ResponseCapture resp) throws Exception {
@@ -239,9 +252,9 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
 
   private void projectSelection(JSONObject purchase) throws Exception {
     Method method = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "addDemoDataTransferSelection", JSONObject.class, String.class);
+        "addDemoDataTransferSelection", JSONObject.class, String.class, String.class);
     method.setAccessible(true);
-    method.invoke(servlet, purchase, REQUEST_ID);
+    method.invoke(servlet, purchase, REQUEST_ID, DEMO_CLIENT_ID);
   }
 
   private static JSONObject selectionBody() throws Exception {
@@ -251,6 +264,29 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
 
   private static JSONObject checkoutResult() throws Exception {
     return new JSONObject().put("requestId", REQUEST_ID);
+  }
+
+  private void recordSelection(JSONObject body, String demoClientId) throws Exception {
+    invokeRecordSelection(body, demoClientId, false, false);
+  }
+
+  private void recordSelection(String demoClientId, boolean products,
+      boolean contacts) throws Exception {
+    invokeRecordSelection(selectionBody(), demoClientId, products, contacts);
+  }
+
+  private void invokeRecordSelection(JSONObject body, String demoClientId, boolean products,
+      boolean contacts) throws Exception {
+    Class<?> selectionClass = Class.forName(
+        "com.etendoerp.go.rest.EtendoGoJwtServlet$CheckoutSelection");
+    Constructor<?> constructor = selectionClass.getDeclaredConstructor(String.class,
+        boolean.class, boolean.class);
+    constructor.setAccessible(true);
+    Object selection = constructor.newInstance(demoClientId, products, contacts);
+    Method method = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "recordDemoDataTransferSelection", JSONObject.class, JSONObject.class, selectionClass);
+    method.setAccessible(true);
+    method.invoke(servlet, body, checkoutResult(), selection);
   }
 
   private static HttpServletRequest request(String pathInfo) {
