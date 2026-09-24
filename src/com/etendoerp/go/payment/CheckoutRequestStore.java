@@ -116,6 +116,12 @@ abstract class CheckoutRequestStoreQuerySupport {
       return Objects.hash(demoClientId, demoSelectionRecorded, transferProducts,
           transferContacts, stripePriceId);
     }
+
+    String getDemoClientId() { return demoClientId; }
+    boolean isDemoSelectionRecorded() { return demoSelectionRecorded; }
+    boolean isTransferProducts() { return transferProducts; }
+    boolean isTransferContacts() { return transferContacts; }
+    String getStripePriceId() { return stripePriceId; }
   }
 
   /**
@@ -248,6 +254,13 @@ abstract class CheckoutRequestStoreQuerySupport {
   protected abstract <T> T runAsSystem(Supplier<T> body);
 }
 
+/**
+ * Persists hosted-checkout requests and their payment and provisioning lifecycle.
+ *
+ * <p>Each operation runs in a system context while restoring the caller's original context.
+ * The inherited query helpers keep account-scoped lookups and provider-id lookups together with
+ * this store's durable request operations.
+ */
 public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   private static final Logger log = LogManager.getLogger();
 
@@ -330,12 +343,13 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       request.setEtendoGoAccount(OBDal.getInstance().get(Account.class, accountId));
       request.setAccountEmail(StringUtils.trimToEmpty(accountEmail));
       request.setClientName(StringUtils.trimToEmpty(clientName));
-      request.setDemoClient(StringUtils.isBlank(requestOptions.demoClientId) ? null
-          : OBDal.getInstance().get(Client.class, StringUtils.trimToEmpty(requestOptions.demoClientId)));
-      request.setDemoSelectionRecorded(requestOptions.demoSelectionRecorded);
-      request.setTransferProducts(requestOptions.transferProducts);
-      request.setTransferContacts(requestOptions.transferContacts);
-      request.setStripePrice(StringUtils.trimToNull(requestOptions.stripePriceId));
+      request.setDemoClient(StringUtils.isBlank(requestOptions.getDemoClientId()) ? null
+          : OBDal.getInstance().get(Client.class,
+              StringUtils.trimToEmpty(requestOptions.getDemoClientId())));
+      request.setDemoSelectionRecorded(requestOptions.isDemoSelectionRecorded());
+      request.setTransferProducts(requestOptions.isTransferProducts());
+      request.setTransferContacts(requestOptions.isTransferContacts());
+      request.setStripePrice(StringUtils.trimToNull(requestOptions.getStripePriceId()));
       request.setCheckoutRequestStatus(STATUS_CREATING);
       request.setCreatingAt(new Date());
       request.setProvisioningAttempts(0L);
@@ -359,7 +373,14 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
     recordSessionCreated(requestId, null, stripeSessionId);
   }
 
-  /** Advances the persisted provider session only from the expected predecessor. */
+  /**
+   * Advances the persisted provider session only from the expected predecessor.
+   *
+   * @param requestId server-generated checkout correlation id
+   * @param expectedSessionId previously persisted provider session id expected by this retry,
+   *     or {@code null} when no prior session is expected
+   * @param stripeSessionId provider session id accepted for this checkout
+   */
   public void recordSessionCreated(String requestId, String expectedSessionId,
       String stripeSessionId) {
     runAsSystem(() -> {

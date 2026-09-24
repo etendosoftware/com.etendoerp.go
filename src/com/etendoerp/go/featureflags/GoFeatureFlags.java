@@ -35,7 +35,6 @@ import dev.openfeature.sdk.FeatureProvider;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.MutableContext;
 import dev.openfeature.sdk.OpenFeatureAPI;
-import dev.openfeature.sdk.Reason;
 
 /**
  * Backend feature-flag entry point for Etendo Go.
@@ -207,12 +206,12 @@ public final class GoFeatureFlags {
     if (details == null) {
       return;
     }
-    Reason reason = details.getReason();
+    String reason = details.getReason();
     Object errorCode = details.getErrorCode();
-    if (errorCode == null && reason != Reason.DEFAULT && reason != Reason.ERROR) {
+    if (errorCode == null && !"DEFAULT".equals(reason) && !"ERROR".equals(reason)) {
       return;
     }
-    String fallbackReason = reason == null ? "unknown" : reason.name();
+    String fallbackReason = reason == null ? "unknown" : reason;
     String fallbackError = errorCode == null ? "none" : errorCode.toString();
     String deduplicationKey = flagKey + '|' + fallbackReason + '|' + fallbackError;
     if (loggedFallbacks.add(deduplicationKey)) {

@@ -80,8 +80,30 @@ public class HostedCheckoutService {
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, String demoClientId, boolean transferProducts, boolean transferContacts)
       throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, demoClientId,
+        transferProducts, transferContacts, requestId -> { });
+  }
+
+  /**
+   * Creates a checkout and runs a callback after persisting its request and before contacting Stripe.
+   * @param accountId authenticated account id, correlated on the durable request row
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param origin public application origin for return URLs
+   * @param demoClientId immutable selected demo client id, or {@code null} when no demo is selected
+   * @param transferProducts whether products should be copied from the demo
+   * @param transferContacts whether contacts should be copied from the demo
+   * @param beforeProvider callback invoked with the request id before contacting the provider
+   * @return checkout request id, URL, and mode
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
+  @SuppressWarnings("java:S107")
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin, String demoClientId, boolean transferProducts, boolean transferContacts,
+      Consumer<String> beforeProvider) throws IOException, JSONException {
     return createSession(accountId, accountEmail, clientName, origin,
-        new SessionOptions(demoClientId, transferProducts, transferContacts, requestId -> { }));
+        new SessionOptions(demoClientId, transferProducts, transferContacts, beforeProvider));
   }
 
   /**
