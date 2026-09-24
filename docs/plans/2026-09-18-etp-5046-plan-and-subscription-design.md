@@ -285,7 +285,12 @@ would silently turn a past-due or expired tenant back into a paying one. R37 the
 | `CURRENT` | `active` | `CURRENT` |
 | `PAST_DUE` | `past_due` | `PAST_DUE` |
 | `EXPIRED` | `canceled` (still open, `END_DATE` NULL — §3.7 of the open-topics register) | `EXPIRED` |
-| absent, blank or unknown | `active` | `CURRENT` (the preference reader's own fallback is `LEGACY_ENTITLEMENT`, also entitled) |
+| `NONE` | `canceled` | `EXPIRED` — same access decision as `NONE` (`SUBSCRIPTION_REQUIRED`) |
+| absent, blank, `LEGACY_ENTITLEMENT` or unknown | `active` | `CURRENT` (the preference reader's own fallback is `LEGACY_ENTITLEMENT`, also entitled) |
+
+The rule behind every line: **the backfill preserves the tenant's current effective access, it
+never improves it.** `NONE` locks a tenant out, so it becomes the row status that still locks it
+out; mapping it to `active` would silently re-open that tenant.
 
 `CURRENT_PERIOD_END` comes from `ETGO_SubscriptionDueAt`, cast only when the value has the ISO-8601
 UTC shape `Instant.toString()` writes; anything else becomes NULL, mirroring the Java reader's

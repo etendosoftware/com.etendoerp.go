@@ -351,7 +351,10 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   rolling billing window (§4 of the design doc). Nothing else writes it today; ETP-5047 should
   decide whether to split the two.
 - The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the row too,
-  or it would stop affecting every tenant that has one.
+  or it would stop affecting every tenant that has one. **`NONE` and `LEGACY_ENTITLEMENT` have no
+  row status, so once a tenant has a row the tool's choice of either is ignored:** it is written
+  to the preference, which the row route no longer reads, and the tenant keeps the row's status.
+  Noted by QA; accepted for a development-only tool rather than inventing row statuses for them.
 - **The webhook installs its own system context.** It runs with `OBContext == null`; develop only
   worked because two stores leaked a system context, and the ETP-5045/5046 fixes that restore the
   caller's context broke every correlated lifecycle event (NPE in the preference write → `FAILED`,
@@ -359,7 +362,8 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   `setPreference` runs in admin mode; `CheckoutWebhookEndpointIntegrationTest` pins both routes.
   Design doc §8.4 has the full story — the lesson generalises to any context-less caller.
 - **The backfill carries the preference state onto the row.** R37 seeds `STATUS` from
-  `ETGO_SubscriptionStatus` (same mapping as above, absent/unknown → `active`) and
+  `ETGO_SubscriptionStatus` (same mapping as above, plus `NONE → canceled` so a locked-out tenant
+  stays locked out; absent/`LEGACY_ENTITLEMENT`/unknown → `active`) and
   `CURRENT_PERIOD_END` from `ETGO_SubscriptionDueAt`, reading both by `AD_CLIENT_ID` (they are
   owned by the tenant, unlike the plan marker of §3.3). Without that, the row — which wins once it
   exists — would have reset every past-due or expired tenant to paying. Design doc §7.0.
