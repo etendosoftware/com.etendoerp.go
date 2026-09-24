@@ -4834,6 +4834,35 @@ that may have changed the caller's own `Default_Ad_Role_ID`) and swap the stored
 the returned one before the next NEO request, instead of forcing the user through a full
 re-login.
 
+**Cookie sessions: the role is reconciled server-side (ETP-5395).** A cookie session (ADR-0001)
+has no JWT for the client to swap: its role lives in the `ETGO_GO_SESSION` record, bound at
+environment entry (`POST /sws/go/session/environment`). The token this endpoint mints is useless
+to a cookie client. So the server keeps the session's role current itself:
+`session/GoSessionRoleReconciler` runs before the `OBContext` is built on every
+cookie-authenticated request. It runs in `NeoAuthenticator#applySessionContext` (every NEO request,
+this endpoint included), `EtendoGoJwtServlet#handleSessionRestore` (`GET /sws/go/session`, a
+reload) and `OAuth2RequestAuthenticator#authenticateAuthorizeRequest` (MCP consent must not grant a
+revoked role).
+
+- **Still valid:** no write. A role is valid under the same rule as the R5 check above: the role
+  is active, it belongs to the session's client, and the user has an active `AD_User_Roles` row for
+  it. The rule is mirrored in native SQL (`DalRoleDirectory`). A template-composition change on the
+  same role id stays valid, because permissions are already resolved live per role id.
+- **Revoked:** the record is rebound in place (`GoSessionStore.update`, no rotation, so the cookie
+  and the CSRF token stay the same and other tabs keep working). The new role is
+  `Default_Ad_Role_ID` if valid, else the first valid role in `loadRoleListData` order. The session
+  org is kept when the new role can access it. Otherwise org and warehouse come from the same
+  derivation environment entry uses.
+- **No valid role left:** `SessionRoleRevokedException` → `401` on NEO and `GET /sws/go/session`,
+  `403` on OAuth2 authorize.
+
+The `{ "unchanged": true, "roleList": [...] }` response, returned when the caller's role did not
+change, now also carries `selectedRoleId` / `selectedOrgId`: the role and org this request was
+authorized with (from `OBContext`, so after any rebind). This field is additive. A cookie client
+has no token to read them from; `schema_forge_core`'s `reconcileSessionRefresh` uses them to move
+an open tab to the rebound role on the next focus/poll refresh (see `docs/auth-session-refresh.md`
+there).
+
 ---
 
 ---

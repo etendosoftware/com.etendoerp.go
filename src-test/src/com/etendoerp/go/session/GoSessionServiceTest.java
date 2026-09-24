@@ -22,6 +22,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -73,6 +74,89 @@ public class GoSessionServiceTest {
 
     assertNotNull(resolved);
     assertEquals(issued.getRecord().getId(), resolved.getId());
+  }
+
+  @Test
+  public void resolveIsReadOnlyEvenNearIdleExpiry() {
+    IssuedGoSession issued = service.create(ACCOUNT_ID, "password", null, null);
+    Instant originalExpiresAt = Instant.now().plusSeconds(60);
+    issued.getRecord().setExpiresAt(originalExpiresAt);
+
+    GoSessionRecord resolved = service.resolve(issued.getSessionToken());
+
+    assertNotNull(resolved);
+    assertEquals(originalExpiresAt, resolved.getExpiresAt());
+    assertEquals(0, store.touchCount);
+  }
+
+  @Test
+  public void renewNearIdleExpirySlidesTheIdleWindow() {
+    IssuedGoSession issued = service.create(ACCOUNT_ID, "password", null, null);
+    Instant originalExpiresAt = Instant.now().plusSeconds(60);
+    issued.getRecord().setExpiresAt(originalExpiresAt);
+    GoSessionRecord resolved = service.resolve(issued.getSessionToken());
+
+    service.renewIdleExpiry(resolved);
+
+    assertTrue(resolved.getExpiresAt().isAfter(originalExpiresAt));
+    assertNotNull("the renewed session must still resolve",
+        service.resolve(issued.getSessionToken()));
+  }
+
+  @Test
+  public void renewDoesNotTouchWhenTheIdleWindowHasPlentyOfTimeRemaining() {
+    IssuedGoSession issued = service.create(ACCOUNT_ID, "password", null, null);
+    Instant originalExpiresAt = Instant.now().plus(Duration.ofMinutes(20));
+    issued.getRecord().setExpiresAt(originalExpiresAt);
+    GoSessionRecord resolved = service.resolve(issued.getSessionToken());
+
+    service.renewIdleExpiry(resolved);
+
+    assertEquals(originalExpiresAt, resolved.getExpiresAt());
+    assertEquals(0, store.touchCount);
+  }
+
+  @Test
+  public void renewNeverSlidesPastTheAbsoluteExpiry() {
+    IssuedGoSession issued = service.create(ACCOUNT_ID, "password", null, null);
+    Instant absoluteExpiresAt = Instant.now().plusSeconds(60);
+    issued.getRecord().setExpiresAt(Instant.now().plusSeconds(10));
+    issued.getRecord().setAbsoluteExpiresAt(absoluteExpiresAt);
+    GoSessionRecord resolved = service.resolve(issued.getSessionToken());
+
+    service.renewIdleExpiry(resolved);
+
+    assertEquals(absoluteExpiresAt, resolved.getExpiresAt());
+  }
+
+  @Test
+  public void renewKeepsTheObservedExpiryWhenAConcurrentRequestWonTheRace() {
+    IssuedGoSession issued = service.create(ACCOUNT_ID, "password", null, null);
+    Instant observedExpiresAt = Instant.now().plusSeconds(60);
+    issued.getRecord().setExpiresAt(observedExpiresAt);
+    // A stale copy, as another request would hold after reading the row before it was renewed.
+    GoSessionRecord staleCopy = copyOf(issued.getRecord());
+    Instant renewedByOther = Instant.now().plus(Duration.ofMinutes(29));
+    issued.getRecord().setExpiresAt(renewedByOther);
+
+    service.renewIdleExpiry(staleCopy);
+
+    assertEquals("the losing request must not overwrite the winner's expiry",
+        renewedByOther, issued.getRecord().getExpiresAt());
+    assertEquals(observedExpiresAt, staleCopy.getExpiresAt());
+  }
+
+  @Test
+  public void renewIgnoresNullAndIncompleteRecords() {
+    service.renewIdleExpiry(null);
+    GoSessionRecord withoutExpiry = new GoSessionRecord();
+    withoutExpiry.setId("S1");
+    service.renewIdleExpiry(withoutExpiry);
+    withoutExpiry.setExpiresAt(Instant.now().plusSeconds(10));
+    service.renewIdleExpiry(withoutExpiry);
+
+    assertNull(withoutExpiry.getAbsoluteExpiresAt());
+    assertEquals(0, store.touchCount);
   }
 
   @Test
@@ -177,10 +261,20 @@ public class GoSessionServiceTest {
   /**
    * Minimal in-memory {@link GoSessionStore} for unit tests.
    */
+  private static GoSessionRecord copyOf(GoSessionRecord source) {
+    GoSessionRecord copy = new GoSessionRecord();
+    copy.setId(source.getId());
+    copy.setExpiresAt(source.getExpiresAt());
+    copy.setAbsoluteExpiresAt(source.getAbsoluteExpiresAt());
+    copy.setRevoked(source.isRevoked());
+    return copy;
+  }
+
   private static final class InMemoryGoSessionStore implements GoSessionStore {
 
     private final List<GoSessionRecord> records = new ArrayList<>();
     private boolean rejectNextRotation;
+    private int touchCount;
 
     @Override
     public void save(GoSessionRecord sessionRecord) {
@@ -190,6 +284,25 @@ public class GoSessionServiceTest {
     @Override
     public void update(GoSessionRecord sessionRecord) {
       // Records are held by reference, so mutations are already visible; no-op for the fake.
+    }
+
+    @Override
+    public synchronized boolean touchExpiresAt(String sessionId, Instant expectedExpiresAt,
+        Instant nextExpiresAt) {
+      touchCount++;
+      GoSessionRecord sessionRecord = records.stream()
+          .filter(candidate -> sessionId.equals(candidate.getId()))
+          .findFirst()
+          .orElse(null);
+      if (sessionRecord == null || sessionRecord.isRevoked()
+          || !expectedExpiresAt.equals(sessionRecord.getExpiresAt())) {
+        return false;
+      }
+      if (!sessionRecord.getAbsoluteExpiresAt().isAfter(Instant.now())) {
+        return false;
+      }
+      sessionRecord.setExpiresAt(nextExpiresAt);
+      return true;
     }
 
     @Override
