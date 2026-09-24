@@ -229,6 +229,15 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     root.put("rectifications", rectifArr);
     root.put("orgNif",   orgNif != null ? orgNif : "");
     root.put("orgName",  org.getName());
+    // ETP-5456 — read-only fallback values for FileGenModal's "Persona de contacto"/"Teléfono de
+    // contacto" fields, so the frontend can tell whether leaving them blank would actually resolve
+    // to something at generation time (and block the modal when it wouldn't). Reuses the EXACT
+    // same resolution {@link #applyContactParams} already falls back to server-side — never
+    // duplicated, just exposed — so this can never drift from what a blank field actually does.
+    String contactFallback = resolveCurrentUserContactName();
+    String phoneFallback   = resolveOrgPhone(orgId);
+    root.put("contactFallback", contactFallback != null ? contactFallback : "");
+    root.put("phoneFallback",   phoneFallback   != null ? phoneFallback   : "");
     return root;
   }
 
@@ -705,10 +714,20 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       phone = resolveOrgPhone(orgId);
     }
     if (contact == null || contact.isEmpty()) {
-      contact = OBContext.getOBContext().getUser().getName();
+      contact = resolveCurrentUserContactName();
     }
     if (phone   != null && !phone.isEmpty())   inputParams.put("Phone",   phone);
     if (contact != null && !contact.isEmpty()) inputParams.put("Contact", contact);
+  }
+
+  /**
+   * The current session's AD_User display name — the {@code contact} fallback both
+   * {@link #applyContactParams} (generation time) and {@link #computeOperators}'s
+   * {@code contactFallback} (read-only, for the frontend's pre-generation validation) resolve to.
+   * Extracted so both call sites share the exact same one-liner instead of each repeating it.
+   */
+  private static String resolveCurrentUserContactName() {
+    return OBContext.getOBContext().getUser().getName();
   }
 
   // FormerStatement/RepresentativeTaxId are TEXT parameters — classic omits empty TEXT
