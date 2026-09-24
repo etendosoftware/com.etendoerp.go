@@ -357,6 +357,43 @@ class NeoAuthenticatorEnvironmentAccessTest {
   }
 
   /**
+   * OAuth2 client-credentials is a supported authentication scheme, not the legacy JWT bridge.
+   * Once the migration flag turns off, a valid opaque OAuth2 token must keep reaching its
+   * persisted identity while a legacy JWT remains disabled.
+   */
+  @Test
+  void oauth2AuthenticatesWhenLegacyBearerIsDisabled() throws Exception {
+    System.setProperty(LEGACY_BEARER_PROPERTY, "false");
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2Token(CLIENT_ID);
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+
+    boolean authenticated = authenticator.authenticateRequest(oauth2Request(),
+        mock(HttpServletResponse.class));
+
+    assertTrue(authenticated, "an OAuth2 token must not depend on the legacy JWT flag");
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, ROLE_ID, ORG_ID,
+        null, CLIENT_ID));
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+  }
+
+  @Test
+  void legacyJwtRemainsDisabledWhenAnOAuth2LookupDoesNotResolveIt() throws Exception {
+    System.setProperty(LEGACY_BEARER_PROPERTY, "false");
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    oauth2FilterStatic.when(() -> OAuth2Filter.validateToken(BEARER_TOKEN)).thenReturn(null);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean authenticated = authenticator.authenticateRequest(bearerRequest(), response);
+
+    assertFalse(authenticated, "disabling legacy Bearer must still reject a JWT");
+    verify(servlet).sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
+        "Missing or invalid Authorization header");
+    swsStatic.verify(() -> SecureWebServicesUtils.decodeToken(BEARER_TOKEN), never());
+  }
+
+  /**
    * A resolved identity with an insufficient scope for the request method (here {@code neo:read}
    * on a {@code POST}) is refused by {@code hasRequiredScope} before {@code enforceEnvironmentAccess}
    * runs — same guarantee as the missing-identity case above.

@@ -63,7 +63,8 @@ through a later list or update request. Rotation invalidates the previous secret
 - Inactive, deleted, or revoked credentials cannot issue new tokens.
 
 The `client_credentials` grant returns an opaque token. `/sws/neo/*` accepts it through
-`NeoAuthenticator`'s existing `OAuth2Filter.validateToken` fallback, so the resolved identity,
-expiry, revocation, and `neo:read`/`neo:write` checks remain server-side. End-to-end consumption
-still requires a healthy local Etendo deployment and tenant/user fixtures; unit tests alone do not
-claim that flow.
+`NeoAuthenticator`'s `OAuth2Filter.validateToken` lookup even after the temporary legacy-JWT
+Bearer flag is disabled. The resolved user, role, organization, client, expiry, revocation, and
+scope checks remain server-side: `neo:read` is required for `GET`/`HEAD`; `neo:write` (or
+`neo:*`) is required for create, update, and delete. End-to-end consumption still requires a
+healthy local Etendo deployment and tenant/user fixtures; unit tests alone do not claim that flow.
