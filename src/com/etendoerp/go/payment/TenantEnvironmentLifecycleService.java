@@ -533,7 +533,21 @@ public class TenantEnvironmentLifecycleService {
     OBDal.getInstance().save(preference);
   }
 
+  /**
+   * Reads a lifecycle preference. These are system flags about the environment, not the caller's
+   * data, and the access check reads them on every NEO request as the calling user: without admin
+   * mode a role that cannot read {@code AD_Preference} (any non-admin role) fails here.
+   */
   private String readPreference(String attribute, String clientId) {
+    OBContext.setAdminMode();
+    try {
+      return readPreferenceValue(attribute, clientId);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private String readPreferenceValue(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
             + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID

@@ -56,7 +56,10 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
 
   @Test
   public void blankClientReadsAsTheEmptyProjectionWithoutTouchingTheDal() {
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       assertSame(SubscriptionLifecycleApplier.StoredState.NONE,
           service.readSubscriptionState(null));
       assertSame(SubscriptionLifecycleApplier.StoredState.NONE,
@@ -74,7 +77,10 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
         EVENT_AT.toString());
     OBDal dalInstance = preferencesDal(stored);
 
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
       SubscriptionLifecycleApplier.StoredState state = service.readSubscriptionState(CLIENT_ID);
 
@@ -91,7 +97,10 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
     stored.put(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE, "not-an-instant");
     OBDal dalInstance = preferencesDal(stored);
 
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
       SubscriptionLifecycleApplier.StoredState state = service.readSubscriptionState(CLIENT_ID);
 
@@ -103,7 +112,10 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
 
   @Test
   public void recordingWithoutAnInstantOrClientWritesNothing() {
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       service.recordSubscriptionEventAt(CLIENT_ID, null);
       service.recordSubscriptionEventAt(null, EVENT_AT);
       service.recordSubscriptionEventAt(" ", EVENT_AT);
@@ -115,7 +127,10 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
   public void recordingForAMissingClientFails() {
     OBDal dalInstance = mock(OBDal.class);
     when(dalInstance.get(Client.class, CLIENT_ID)).thenReturn(null);
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
       service.recordSubscriptionEventAt(CLIENT_ID, EVENT_AT);
     }
