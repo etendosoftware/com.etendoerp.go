@@ -68,6 +68,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
 | `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
+| `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -228,6 +229,16 @@ the billing overview include `dataTransferEnabled` and include `dataTransfer` on
 server-side selection exists. A flag-on older purchase with no selection therefore remains
 `NOT_REQUESTED`; the browser must not guess its choice. The recovery procedure is in
 [`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
+
+### `onboarding-tenant-pool` (ETP-5389) — backend-only, off by default
+
+Switches onboarding between the classic from-scratch path (off) and claiming a pre-provisioned
+tenant from `ETGO_TENANT_POOL` (on). Evaluated through `TenantPoolConfig.isEnabled(accountEmail)`
+at two points: the onboarding claim (with the signup's account, so ConfigCat can target it per
+account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
+claim never touches the pool and the filler run does nothing — onboarding is byte-for-byte the
+classic path. The pool size and the other knobs are plain runtime properties, not flags. Full
+reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
 
 ## 2. The onboarding paywall
 
