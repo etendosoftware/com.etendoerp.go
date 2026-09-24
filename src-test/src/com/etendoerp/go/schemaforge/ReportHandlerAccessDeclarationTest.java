@@ -97,7 +97,8 @@ class ReportHandlerAccessDeclarationTest {
       InventoryStockReportHandler.class.getName(),
       AgingReportHandler.class.getName(),
       AgingPayableReportHandler.class.getName(),
-      TrialBalanceReportHandler.class.getName());
+      TrialBalanceReportHandler.class.getName(),
+      JournalEntriesReportHandler.class.getName());
 
   @Test
   @DisplayName("every report handler overrides isAccessibleForCurrentRole")
@@ -272,6 +273,6 @@ class ReportHandlerAccessDeclarationTest {
   void declaresDistinguishesOverrideFromDefault() {
     assertTrue(declares(TaxReportHandler.class, ACCESS_METHOD));
     assertFalse(declares(((NeoHandler) context -> null).getClass(), ACCESS_METHOD));
-    assertEquals(5, KNOWN_REPORT_HANDLERS.size());
+    assertEquals(6, KNOWN_REPORT_HANDLERS.size());
   }
 }

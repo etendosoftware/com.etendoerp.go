@@ -3597,21 +3597,55 @@ resolved via whichever mechanism its own NEO handler actually gates on:
 |---|---|---|
 | `tax-report` | Classic `AD_Process_Access` (`TaxReportHandler` → `NeoAccessHelper#hasProcessAccess`) | `8C1331B9EC14CED7E040007F010119A0` |
 | `aging-receivable` / `aging-payable` | OBUIAPP `ProcessAccess` (`AgingReportHandler`, receivable/payable tiers) | `0D37A9F6109549DEB058373EF2DAEB6A` / `EB4C4053F3B94A17A08D1DD7E89CEB7E` |
-| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`, `report-trial-balance`* (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
+| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`*, `report-trial-balance`* (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
 | `inventory-stock-report` | `AD_Window_Access` on a tab-less pseudo-window | `6346B88619F948F9A42224BDB0B239FA` |
 
-\* `report-trial-balance` (ETP-5483 slice 2) is the one row of the 5 that ALSO has its own
-`ETGO_SF_SPEC`/`ETGO_SF_ENTITY` row and its own MCP report tool, `generate_report_trial_balance`,
-served by `TrialBalanceReportHandler` (`@Named("trialBalanceReportHandler")`) — a faithful Java
-port of the SAME `artifacts/report-trial-balance/report-contract.json` SQL the two Node report
-engines (`schema_forge`'s Vite dev plugin and `schema_forge_core`'s production `report-server`)
-already run for the SPA. `TrialBalanceReportHandler.isAccessibleForCurrentRole()` gates on the
-exact same `FINANCIAL_REPORTS_WINDOW_ID` anchor this table already uses — adding the spec/entity
-row did not change this report's access boundary, only added a second, MCP-reachable way to run
-it. **Drift risk:** this is now a dual implementation (Node/SQL-placeholder for the SPA, Java/bind-
-parameter for MCP) of the same query AND the same `report-grouping.js` row-folding post-processing
-(ported as `TrialBalanceFolding`). The two are not structurally linked — see
-`TrialBalanceReportHandler`'s own class javadoc for what must be mirrored by hand on either side.
+\* `report-trial-balance` (ETP-5483 slice 2) and `report-journal-entries` (ETP-5483 slice 3) are
+the two rows of the 5 that ALSO have their own `ETGO_SF_SPEC`/`ETGO_SF_ENTITY` row and their own
+MCP report tool — `generate_report_trial_balance` (`TrialBalanceReportHandler`, `@Named(
+"trialBalanceReportHandler")`) and `generate_report_journal_entries` (`JournalEntriesReportHandler`,
+`@Named("journalEntriesReportHandler")`) — each a faithful Java port of the SAME
+`artifacts/report-trial-balance/report-contract.json` / `artifacts/report-journal-entries/
+report-contract.json` SQL the two Node report engines (`schema_forge`'s Vite dev plugin and
+`schema_forge_core`'s production `report-server`) already run for the SPA. Both handlers'
+`isAccessibleForCurrentRole()` gate on the exact same `FINANCIAL_REPORTS_WINDOW_ID` anchor this
+table already uses — adding either spec/entity row did not change that report's access boundary,
+only added a second, MCP-reachable way to run it. **Drift risk:** each is now a dual implementation
+(Node/SQL-placeholder for the SPA, Java/bind-parameter for MCP) of the same query. `report-trial-
+balance` additionally ports `report-grouping.js`'s row-folding post-processing (as
+`TrialBalanceFolding`); `report-journal-entries` nests its own flat SQL result into one object per
+journal entry via `JournalEntriesGrouping` — a shape this handler defines for the MCP response
+(the SPA's own nesting for this report's `grouped-listing` contract type lives entirely in the
+report templates, not in a shared JS module, so there is nothing to port there). Neither Java
+class is structurally linked to its Node counterpart — see each handler's own class javadoc for
+what must be mirrored by hand on either side.
+
+`generate_report_journal_entries`'s response nests one object per journal entry
+(`fact_acct_group_id`) with header fields (`entry_no`, `dateacct` as `yyyy-MM-dd`,
+`document_type`, `docbasetype`, `isreturn`, `doc_window`, `doc_record_id`, `doc_query_key`,
+`doc_query_value`, `record_id`, `ad_table_id`, and `entry_description` when `showEntryDescription`
+is true) and a `lines` array (`account_no`, `account_name`, `amtacctdr`, `amtacctcr`, plus
+`bpname`/`productname`/`projectname`/`costcentername` when `showDimensions` is true). `doc_window`
+is the NEO spec name of the entry's source document, so an MCP caller reads it with
+`neo_get(spec: doc_window, id: doc_record_id)`.
+
+`document_type` is Etendo's own `ad_ref_list` (reference 183) name for `docbasetype`, translated to
+the session language — NOT the SPA's printed "Detail" label. The SPA relabels a few docbasetypes
+and the MMR/MMS return variants through a hand-maintained dictionary in
+`schema_forge_core/cli/src/report-i18n.js` (`DOC_TYPE_LABEL_OVERRIDES`, `RETURN_LABELS`); that
+dictionary is deliberately not copied into Java. A caller that needs the distinction reads
+`docbasetype` plus `isreturn` instead (`MMR` + `isreturn` is a vendor return, `MMS` + `isreturn` a
+customer return).
+Because a full period can carry far more lines than are safe to return in one call, the entries
+(never lines) are capped via `limit` (default 200, hard max 1000) applied AT THE SQL LEVEL against
+the query's own `DENSE_RANK()`-based `entry_no`, so a cap never splits an entry across a
+truncation boundary; `meta.truncated`/`meta.totalEntries`/`meta.hint` tell the caller when to
+narrow the request. See `JournalEntriesReportHandler`'s own class javadoc for the full parameter
+list, the entry-type toggle fallback (all five `show*Entries` toggles false falls back to regular
+entries only, matching the report contract's own SQL), and the multi-value id parameters
+(`bPartnerId`/`productId`/`projectId`/`costCenterId`), which — unlike an early assumption — the
+live Node `applyPlaceholders` genuinely supports via its own comma-to-`IN` rewrite, so this Java
+port needed no deviation from a faithful multi-id port.
 
 This resolution logic lives in `com.etendoerp.go.schemaforge.util.ReportAccessCatalog` — a shared
 utility, NOT duplicated per-webhook, because `SFSystemRoleTemplates` (§8f) needs the exact same

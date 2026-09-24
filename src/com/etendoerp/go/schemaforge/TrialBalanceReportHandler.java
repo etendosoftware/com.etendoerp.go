@@ -269,6 +269,23 @@ public class TrialBalanceReportHandler implements NeoHandler {
       LocalDate dateFrom = LocalDate.parse(body.optString(PARAM_DATE_FROM, ""), DATE_FORMATTER);
       LocalDate dateTo = LocalDate.parse(body.optString(PARAM_DATE_TO, ""), DATE_FORMATTER);
 
+      // Pure input checks run before anything touches OBContext or the database, so a malformed
+      // request is refused without a single query.
+      String accountLevel = body.optString(PARAM_ACCOUNT_LEVEL, LEVEL_SUBACCOUNT);
+      if (!List.of("C", "D", "E", "S").contains(accountLevel)) {
+        return actionableError(400, "account_level_invalid",
+            "accountLevel '" + accountLevel + "' is not one of C, D, E, S.",
+            "Use one of: C (Account), D (Breakdown), E (Heading), S (Subaccount).");
+      }
+
+      String groupBy = body.optString(PARAM_GROUP_BY, "");
+      if (!groupBy.isEmpty() && !GROUP_BY_HAS_ID.containsKey(groupBy)) {
+        return actionableError(400, "group_by_invalid",
+            "groupBy '" + groupBy + "' is not one of " + GROUP_BY_HAS_ID.keySet() + ".",
+            "Use one of: bpartner, product, project, costcenter, or omit groupBy for no breakdown.");
+      }
+      boolean grouped = !groupBy.isEmpty();
+
       String orgId = resolveOrgId(body);
       if (!orgId.isEmpty() && !isValidId(orgId)) {
         return actionableError(400, "org_id_invalid",
@@ -291,21 +308,6 @@ public class TrialBalanceReportHandler implements NeoHandler {
             "Check that the organization (or an ancestor in its tree) has a general ledger "
                 + "configured, or pass acctSchemaId explicitly.");
       }
-
-      String accountLevel = body.optString(PARAM_ACCOUNT_LEVEL, LEVEL_SUBACCOUNT);
-      if (!List.of("C", "D", "E", "S").contains(accountLevel)) {
-        return actionableError(400, "account_level_invalid",
-            "accountLevel '" + accountLevel + "' is not one of C, D, E, S.",
-            "Use one of: C (Account), D (Breakdown), E (Heading), S (Subaccount).");
-      }
-
-      String groupBy = body.optString(PARAM_GROUP_BY, "");
-      if (!groupBy.isEmpty() && !GROUP_BY_HAS_ID.containsKey(groupBy)) {
-        return actionableError(400, "group_by_invalid",
-            "groupBy '" + groupBy + "' is not one of " + GROUP_BY_HAS_ID.keySet() + ".",
-            "Use one of: bpartner, product, project, costcenter, or omit groupBy for no breakdown.");
-      }
-      boolean grouped = !groupBy.isEmpty();
 
       boolean openingEntryAmount = body.optBoolean(PARAM_OPENING_ENTRY_AMOUNT, true);
 
