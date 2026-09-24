@@ -152,7 +152,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(EtendoGoJwtServlet.class);
-  private final StripePriceService stripePriceService = new StripePriceService();
+  private final StripePriceService stripePriceService;
 
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final int SALT_BYTES = 16;
@@ -410,9 +410,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender,
       EtendoGoSsoProviderRegistry ssoProviderRegistry, GoSessionService goSessionService) {
+    this(authEmailSender, ssoProviderRegistry, goSessionService, new StripePriceService());
+  }
+
+  EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender,
+      EtendoGoSsoProviderRegistry ssoProviderRegistry, GoSessionService goSessionService,
+      StripePriceService stripePriceService) {
     this.authEmailSender = authEmailSender;
     this.ssoProviderRegistry = ssoProviderRegistry;
     this.goSessionService = goSessionService;
+    this.stripePriceService = stripePriceService;
     this.companyInvitationService = new CompanyInvitationService(authEmailSender);
   }
 
@@ -804,21 +811,36 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
       CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
-    if (!checkoutRequestStore.hasRecordedDemoSelection(activePurchase.getRequest(),
-        account.getId(), account.getEmail())) {
-      writeError(response, HttpServletResponse.SC_CONFLICT, "PURCHASE_SELECTION_UNAVAILABLE",
-          "This purchase predates the saved environment selection. Start a new purchase to continue.",
-          "This purchase predates the saved environment selection. Start a new purchase to continue.");
-      return;
-    }
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
             account.getEmail(), activePurchase.getClientName(), origin);
+        if ("complete".equals(result.optString("providerStatus", ""))) {
+          boolean paymentReceived = result.optBoolean("paymentComplete", false);
+          if (paymentReceived) {
+            checkoutRequestStore.recordPaid(activePurchase.getRequest(),
+                result.optString("stripeCustomer", ""),
+                result.optString("stripeSubscription", ""));
+          }
+          CheckoutRequest currentPurchase = checkoutRequestStore.find(activePurchase.getRequest(),
+              account.getId(), account.getEmail());
+          JSONObject purchaseResult = buildBillingPurchaseJson(
+              currentPurchase == null ? activePurchase : currentPurchase);
+          purchaseResult.put("paymentReceived", paymentReceived);
+          purchaseResult.put("message", paymentReceived
+              ? "Payment received. We are finishing your environment setup."
+              : "Checkout completed. We are confirming your payment before setup continues.");
+          writeResponse(response, HttpServletResponse.SC_OK, purchaseResult);
+          return;
+        }
         addDemoDataTransferSelectionBestEffort(result, activePurchase.getRequest());
         writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (HostedCheckoutService.OriginalPriceUnavailableException e) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, "PURCHASE_PRICE_UNAVAILABLE",
+            "This purchase cannot be resumed. Please contact support.",
+            "This purchase cannot be resumed. Please contact support.");
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
@@ -2814,7 +2836,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException {
     String sessionClientId = currentSessionClientId(request, response, authenticated);
     if (sessionClientId == null) return null;
-    if (StringUtils.isNotBlank(sessionClientId) && isProductiveClient(sessionClientId)) {
+    if (StringUtils.isBlank(sessionClientId) || ZERO_ID.equals(sessionClientId)) {
+      return new CheckoutSelection(null, false, false);
+    }
+    if (isProductiveClient(sessionClientId)) {
       return new CheckoutSelection(null, false, false);
     }
     String demoClientId = optionalDemoClientId(body);
@@ -2915,51 +2940,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       this.transferProducts = transferProducts;
       this.transferContacts = transferContacts;
     }
-  }
-
-  private boolean validateCheckoutDemoSelection(HttpServletResponse response, String accountEmail,
-      String demoClientId, boolean requireSelectionWhenAvailable) throws IOException {
-    Set<String> freeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
-    if (StringUtils.isBlank(demoClientId)
-        && (!requireSelectionWhenAvailable || freeDemoClientIds.isEmpty())) {
-      return true;
-    }
-    if (StringUtils.isNotBlank(demoClientId) && freeDemoClientIds.contains(demoClientId)) return true;
-    String errorMessage = StringUtils.isBlank(demoClientId)
-            ? "Choose a demo environment before continuing with payment."
-            : "The selected demo environment is not available for this account. Refresh the environment list and try again.";
-    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_DEMO_SELECTION",
-        errorMessage, errorMessage);
-    return false;
-  }
-
-  /**
-   * Determines whether this purchase starts from an authenticated productive environment.
-   * The browser cannot nominate the origin: only the authenticated session record or signed JWT
-   * context is considered, and the client is verified against the account before classification.
-   * A null return means the authenticated context named a client the account does not own.
-   */
-  private Boolean isAuthenticatedProductiveOrigin(HttpServletRequest request,
-      HttpServletResponse response, AuthenticatedAccount authenticated, Account account)
-      throws IOException {
-    String clientId = authenticated.sessionRecord == null ? null
-        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
-    if (clientId == null) {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) clientId = StringUtils.trimToNull(
-            jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
-      } catch (Exception e) {
-        log.debug("Authenticated platform token has no environment client claim");
-      }
-    }
-    if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) return Boolean.FALSE;
-    if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, account.getEmail())) {
-      writeError(response, HttpServletResponse.SC_FORBIDDEN,
-          "The authenticated environment is not owned by this account");
-      return null;
-    }
-    return !findFreeDemoClientIdsForAccount(account.getEmail()).contains(clientId);
   }
 
   private void addDemoDataTransferSelection(JSONObject result, String requestId)
@@ -3459,30 +3439,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (paidUpgrade) {
       boolean selectionRecorded = checkoutRequestStore.hasRecordedDemoSelection(
           onboardingRequest.paymentToken, accountId, accountEmail);
-      if (!selectionRecorded) {
-        writeError(response, HttpServletResponse.SC_CONFLICT,
-            "PURCHASE_SELECTION_UNAVAILABLE",
-            "This purchase predates the saved environment selection. Start a new purchase to continue.",
-            "This purchase predates the saved environment selection. Start a new purchase to continue.");
-        return null;
+      if (selectionRecorded) {
+        String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
+            onboardingRequest.paymentToken, accountId, accountEmail);
+        Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
+        try {
+          onboardingRequest.demoClientId = resolvePaidDemoClientId(true,
+              persistedDemoClientId, currentFreeDemoClientIds);
+        } catch (IllegalArgumentException e) {
+          writeError(response, HttpServletResponse.SC_CONFLICT, "DEMO_SELECTION_REQUIRED",
+              e.getMessage(), e.getMessage());
+          return null;
+        }
+        CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
+            .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
+        onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
+            && transferSelection != null && transferSelection.isProducts();
+        onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
+            && transferSelection != null && transferSelection.isContacts();
+      } else {
+        // Legacy paid requests never saved a source or transfer intent. Resume them as a new
+        // productive environment without inferring a demo or copying/revoking any tenant.
+        onboardingRequest.demoClientId = null;
+        onboardingRequest.transferProducts = false;
+        onboardingRequest.transferContacts = false;
       }
-      String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
-          onboardingRequest.paymentToken, accountId, accountEmail);
-      Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
-      try {
-        onboardingRequest.demoClientId = resolvePaidDemoClientId(selectionRecorded,
-            persistedDemoClientId, currentFreeDemoClientIds);
-      } catch (IllegalArgumentException e) {
-        writeError(response, HttpServletResponse.SC_CONFLICT, "DEMO_SELECTION_REQUIRED",
-            e.getMessage(), e.getMessage());
-        return null;
-      }
-      CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
-          .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
-      onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
-          && transferSelection != null && transferSelection.isProducts();
-      onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
-          && transferSelection != null && transferSelection.isContacts();
     }
     Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountId,
         accountEmail, response);
@@ -3493,10 +3474,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         paidUpgrade, provisioningClaim);
   }
 
-  /** Resolves a paid purchase's fixed demo source and rejects missing or stale selections. */
+  /** Resolves a paid purchase's fixed demo source, or null for a legacy purchase without one. */
   static String resolvePaidDemoClientId(boolean selectionRecorded, String persistedDemoClientId) {
     if (!selectionRecorded) {
-      throw new IllegalStateException("Paid purchase has no recorded demo selection");
+      return null;
     }
     return StringUtils.trimToNull(persistedDemoClientId);
   }
@@ -3505,14 +3486,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Set<String> currentFreeDemoClientIds) {
     String selected = resolvePaidDemoClientId(selectionRecorded, persistedDemoClientId);
     if (selected == null) return null;
-    if (selected != null) {
-      if (currentFreeDemoClientIds == null || !currentFreeDemoClientIds.contains(selected)) {
-        throw new IllegalArgumentException(
-            "The demo selected for this paid setup is no longer available. Contact support before retrying.");
-      }
-      return selected;
+    if (currentFreeDemoClientIds == null || !currentFreeDemoClientIds.contains(selected)) {
+      throw new IllegalArgumentException(
+          "The demo selected for this paid setup is no longer available. Contact support before retrying.");
     }
-    return null;
+    return selected;
   }
 
   private Set<String> findFreeDemoClientIdsForAccount(String accountEmail) {

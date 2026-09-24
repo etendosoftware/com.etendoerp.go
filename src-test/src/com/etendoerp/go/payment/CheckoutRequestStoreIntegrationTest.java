@@ -265,6 +265,33 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
         retriedTransfer.isContacts());
   }
 
+  @Test
+  public void testStripePriceIsDurableAndAStaleRetryCannotReplaceItsSession() {
+    String email = newEmail("stripe-price-cas");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    String savedPriceId = "price_etp5463_saved";
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT, null, true,
+        false, false, savedPriceId);
+
+    assertEquals("The configured provider price must survive the committed write",
+        savedPriceId, store.findStripePriceId(requestId));
+
+    store.recordSessionCreated(requestId, "cs_initial");
+    try {
+      store.recordSessionCreated(requestId, "cs_stale", "cs_replacement");
+      org.junit.Assert.fail(
+          "A stale retry must not replace a session created by another attempt");
+    } catch (IllegalStateException expected) {
+      // The compare-and-set mismatch is the behavior under test; the message is not API.
+    }
+
+    assertEquals("The first session remains the purchase's correlation anchor",
+        "cs_initial", store.findStripeSessionId(requestId));
+    assertEquals("A failed compare-and-set leaves the saved price unchanged",
+        savedPriceId, store.findStripePriceId(requestId));
+  }
+
   /** Unpaid rows must be filtered before applying the billing overview's 20-row limit. */
   @Test
   public void testFindForAccountFiltersUnpaidRowsBeforeApplyingRecentPurchaseLimit() {

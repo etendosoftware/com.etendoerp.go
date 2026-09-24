@@ -19,6 +19,15 @@ import org.codehaus.jettison.json.JSONObject;
 public class HostedCheckoutService {
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
 
+  /** A persisted purchase cannot be resumed when its original Stripe Price ID is missing. */
+  public static final class OriginalPriceUnavailableException extends IllegalStateException {
+    private static final long serialVersionUID = 1L;
+
+    private OriginalPriceUnavailableException() {
+      super("The original checkout price is unavailable");
+    }
+  }
+
   /**
    * Creates a provider-hosted Checkout Session bound to the authenticated account.
    * @param accountId authenticated account id, correlated on the durable request row
@@ -107,34 +116,51 @@ public class HostedCheckoutService {
   public JSONObject reopenSession(String requestId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
+    String sessionId = checkoutRequestStore.findStripeSessionId(requestId);
+    if (sessionId != null) {
+      JSONObject existing = retrieveSession(sessionId);
+      if (!sessionId.equals(existing.optString("id", ""))) {
+        throw new IOException("Stripe returned a different existing checkout session");
+      }
+      String sessionStatus = existing.optString("status", "");
+      if ("open".equals(sessionStatus)) {
+        String originalMode = existing.optString("mode", "");
+        if (originalMode.isEmpty()) {
+          throw new IOException("Stripe returned an existing session without its checkout mode");
+        }
+        return buildResult(requestId, existing.optString("url", ""),
+            checkoutRequestStore.findStripePriceId(requestId), originalMode);
+      }
+      if ("complete".equals(sessionStatus)) {
+        return buildCompletedResult(requestId, existing);
+      }
+      if (!"expired".equals(sessionStatus)) {
+        throw new IllegalStateException("The existing checkout session is not reopenable");
+      }
+    }
+
     String priceId = checkoutRequestStore.findStripePriceId(requestId);
     if (priceId == null) {
-      throw new IllegalStateException("The original checkout price is unavailable");
-    }
-    String sessionId = checkoutRequestStore.findStripeSessionId(requestId);
-    if (sessionId == null) {
-      StripePriceService.Price price = new StripePriceService().retrievePrice(priceId);
-      return createProviderSession(requestId, accountEmail, clientName, origin, price,
-          initialIdempotencyKey(requestId), null);
-    }
-    JSONObject existing = retrieveSession(sessionId);
-    if (!sessionId.equals(existing.optString("id", ""))) {
-      throw new IOException("Stripe returned a different existing checkout session");
-    }
-    String sessionStatus = existing.optString("status", "");
-    if ("open".equals(sessionStatus)) {
-      String originalMode = existing.optString("mode", "");
-      if (originalMode.isEmpty()) {
-        throw new IOException("Stripe returned an existing session without its checkout mode");
-      }
-      return buildResult(requestId, existing.optString("url", ""), priceId, originalMode);
-    }
-    if (!"expired".equals(sessionStatus)) {
-      throw new IllegalStateException("The existing checkout session is not reopenable");
+      throw new OriginalPriceUnavailableException();
     }
     StripePriceService.Price price = new StripePriceService().retrievePrice(priceId);
     return createProviderSession(requestId, accountEmail, clientName, origin, price,
-        replacementIdempotencyKey(requestId, sessionId), sessionId);
+        sessionId == null ? initialIdempotencyKey(requestId)
+            : replacementIdempotencyKey(requestId, sessionId), sessionId);
+  }
+
+  private JSONObject buildCompletedResult(String requestId, JSONObject session)
+      throws JSONException {
+    String paymentStatus = session.optString("payment_status", "");
+    JSONObject result = new JSONObject();
+    result.put("requestId", requestId);
+    result.put("providerStatus", "complete");
+    result.put("paymentStatus", paymentStatus);
+    result.put("paymentComplete", "paid".equals(paymentStatus)
+        || "no_payment_required".equals(paymentStatus));
+    result.put("stripeCustomer", session.optString("customer", ""));
+    result.put("stripeSubscription", session.optString("subscription", ""));
+    return result;
   }
 
   private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
@@ -196,7 +222,7 @@ public class HostedCheckoutService {
     result.put("requestId", requestId);
     result.put("checkoutUrl", checkoutUrl);
     result.put("mode", mode);
-    result.put("priceId", priceId);
+    if (priceId != null) result.put("priceId", priceId);
     return result;
   }
 

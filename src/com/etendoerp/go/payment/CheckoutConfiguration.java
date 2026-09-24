@@ -61,8 +61,4 @@ public final class CheckoutConfiguration {
     return !secretKey().trim().isEmpty() && !priceId().trim().isEmpty() && !webhookSecret().trim().isEmpty();
   }
 
-  /** Returns whether the server can retrieve the configured price, independently of webhooks. */
-  public static boolean isPriceLookupConfigured() {
-    return !secretKey().trim().isEmpty() && !priceId().trim().isEmpty();
-  }
 }

@@ -308,7 +308,9 @@ only after Stripe confirms that the previous session expired, using a stable ide
 the expired session; the replacement ID is then saved on the same request. This prevents two active
 sessions from charging the same purchase and preserves the original price and environment choice.
 
-When one or more free/demo environments are linked to the account, include the chosen environment's
+Demo selection is valid only when the request is made from an authenticated free/demo environment
+linked to the account. A productive environment cannot supply a demo selection. When one or more
+free/demo environments are linked to the account, include the chosen environment's
 `AD_CLIENT_ID` as `demoClientId` in the checkout request. Selection is required in this case. The
 backend validates that it is a free/demo environment
 linked to the authenticated account and stores it on the checkout request before redirecting to the
@@ -337,12 +339,13 @@ and stale workers recoverable without a second payment.
 The selected `demoClientId` is read from that same account-scoped paid request before a provisioning
 claim starts. Every retry therefore associates and copies data from the same demo, even if the
 account has created or selected another environment since the original checkout. A recorded empty
-selection also stays empty on retry. Older checkout rows without a selection marker are rejected
-before provisioning, including when exactly one free/demo environment currently exists. Start a new
-purchase to record an explicit choice; onboarding never infers the source for a paid request. If
-setup is already running, the response says to refresh its status before trying again. Once an
-attempt is marked failed, retrying the same paid request is allowed; a stale worker cannot mark the
-newer attempt complete.
+selection also stays empty on retry. Older checkout rows without a saved demo selection resume the
+original purchase and checkout session; provisioning creates a new productive environment without
+demo profile/data copy, demo access revocation, or transfer. Reopening an existing purchase resumes
+it silently instead of asking the user to choose a demo again. Onboarding does not infer a demo for
+that purchase. If setup is already running, the response says to refresh its status before trying
+again. Once an attempt is marked failed, retrying the same paid request is allowed; a stale worker
+cannot mark the newer attempt complete.
 
 With `demo-data-transfer` enabled, the paid flow starts the durable transfer after provisioning
 commits. Products, their sales/purchase prices and current cost, and contacts are copied under
@@ -360,10 +363,11 @@ checkout request and uses it for profile copy, demo access revocation, and optio
 The onboarding body cannot change the saved choice. A retry therefore uses the same demo even if
 the browser has lost state or another demo environment has since been created.
 
-Paid onboarding requires a recorded selection marker. A recorded empty selection means that this
-purchase has no demo source; onboarding does not infer one. A paid request without the marker is
-rejected before provisioning, and a saved demo ID that is no longer linked to the account or is no
-longer free/demo is rejected before provisioning starts.
+For new purchases, a recorded empty selection means that this purchase has no demo source; onboarding
+does not infer one. A saved demo ID that is no longer linked to the account or is no longer free/demo
+is rejected before provisioning starts. Legacy purchases with no saved selection marker resume the
+original purchase/session and provision without associating, copying, revoking, or transferring from
+a demo. Reopening those purchases does not prompt for a new demo choice.
 
 The selected demo's unique active business organization is the profile source. The profile is copied
 to the exact organization created for the productive client in this paid onboarding attempt. If that
