@@ -34,6 +34,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -78,6 +79,7 @@ import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.BillingOfferConfiguration;
+import com.etendoerp.go.payment.StripeCurrencyScale;
 import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
@@ -212,7 +214,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
   private static final String FIELD_PLAN_KEY = "planKey";
   private static final String CODE_PLAN_NOT_AVAILABLE = "PLAN_NOT_AVAILABLE";
-  private static final String PLAN_NOT_AVAILABLE_MESSAGE = "The selected plan is not available";
+  private static final String PLAN_NOT_AVAILABLE_MESSAGE =
+      "The selected plan is no longer available. Reload the page to see the current plans.";
   private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
   private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
@@ -688,22 +691,69 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * is nothing on sale" is an answer, not a failure, and the caller has to render the same
    * "checkout unavailable" state for it either way.
    *
-   * @see #handleCheckoutSession the endpoint this exists to feed, which requires a plan key
+   * <p><b>Legacy price fallback.</b> While {@link PlanCatalogService#isLegacyFallbackActive()}
+   * holds — a legacy price is configured and no plan carries a provider price — the list is exactly
+   * the grandfathered {@code legacy-productive} plan, quoted from the configured Stripe price. That
+   * is the same predicate checkout decides on, so the list never offers something checkout refuses.
+   * If Stripe cannot quote the price, the plan is left out (logged) rather than answering 500.
+   *
+   * @see #handleCheckoutSession the endpoint this exists to feed
    */
   private void handlePlans(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithAuthenticatedAccount(request, response, "list plans", account -> {
       JSONArray plans = new JSONArray();
-      for (Plan plan : planCatalogService.listPurchasablePlans()) {
-        JSONObject item = buildPlanJson(plan);
+      Optional<Plan> legacyFallback = planCatalogService.findLegacyFallbackPlan();
+      if (legacyFallback.isPresent()) {
+        JSONObject item = buildLegacyFallbackPlanJson(legacyFallback.get());
         if (item != null) {
           plans.put(item);
+        }
+      } else {
+        for (Plan plan : planCatalogService.listPurchasablePlans()) {
+          JSONObject item = buildPlanJson(plan);
+          if (item != null) {
+            plans.put(item);
+          }
         }
       }
       JSONObject result = new JSONObject();
       result.put("plans", plans);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /**
+   * Projects the grandfathered plan onto the browser's view of it, quoting the configured legacy
+   * Stripe price — the one checkout will charge under the fallback.
+   *
+   * <p>The price comes from Stripe, never from the typed billing offer
+   * ({@code etendo.go.billing.offer.*}), so the amount shown is the amount charged. A failed lookup
+   * leaves the plan out: offering a plan whose price nobody could verify is the one thing this list
+   * must not do, and a 500 would break the page for a problem the buyer cannot act on.
+   *
+   * @param legacy the active grandfathered plan row
+   * @return the JSON view, or null when the configured price cannot be quoted
+   */
+  private JSONObject buildLegacyFallbackPlanJson(Plan legacy) throws JSONException {
+    StripePriceService.Price price;
+    try {
+      price = stripePriceService.retrieveConfiguredPrice();
+    } catch (IOException | JSONException | RuntimeException e) {
+      log.warn("Legacy price fallback is active but the configured price could not be quoted; "
+          + "leaving plan '{}' out of the plan catalog response", legacy.getSearchKey(), e);
+      return null;
+    }
+    BigDecimal displayPrice = BigDecimal.valueOf(price.getAmountMinor())
+        .movePointLeft(StripeCurrencyScale.exponent(price.getCurrency()));
+    JSONObject item = new JSONObject();
+    item.put(FIELD_PLAN_KEY, legacy.getSearchKey());
+    item.put("name", StringUtils.defaultString(legacy.getName()));
+    item.put("description", StringUtils.defaultString(legacy.getDescription()));
+    item.put("displayPrice", displayPrice.toPlainString());
+    item.put(FIELD_CURRENCY, price.getCurrency());
+    item.put("billingInterval", StringUtils.defaultString(price.getInterval()));
+    return item;
   }
 
   /**
@@ -745,8 +795,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * POST /sws/go/checkout/sessions — starts a provider-hosted checkout for a plan catalog plan.
    *
-   * <p>{@code planKey} names the Subscription Plan Catalog row being bought; see
-   * {@link #createHostedCheckoutSession} for the refusals.
+   * <p>{@code planKey} names the Subscription Plan Catalog row being bought; a missing key asks for
+   * the legacy price fallback. See {@link #createHostedCheckoutSession} for the refusals.
    */
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -809,9 +859,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * validated</em> — rejecting it would imply the server might otherwise have honoured it. Two
    * refusals, deliberately different:
    * <ul>
-   *   <li>{@code 400 PLAN_NOT_AVAILABLE} — the key names no active plan catalog row. Unknown and
-   *       inactive are answered identically, because the endpoint must not confirm which keys
-   *       exist; same non-disclosure discipline as {@link #handleCheckoutStatus}.</li>
+   *   <li>{@code 400 PLAN_NOT_AVAILABLE} — the key names no active plan catalog row, or asks for
+   *       the grandfathered plan (or names none) while the legacy price fallback is inactive.
+   *       Unknown and inactive are answered identically, because the endpoint must not confirm
+   *       which keys exist; same non-disclosure discipline as {@link #handleCheckoutStatus}. The
+   *       usual innocent cause is a plan list the browser loaded before it changed, so the user
+   *       message says to reload.</li>
    *   <li>{@code 503 CHECKOUT_NOT_CONFIGURED} — checkout has no credentials, or the plan exists
    *       but carries no provider price id. Both are "there is nothing sellable here", which is a
    *       deployment state rather than a bad request.</li>
@@ -820,8 +873,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void createHostedCheckoutSession(HttpServletResponse response, Account account,
       JSONObject body, String clientName, CheckoutSelection selection,
       boolean accountBillingPurchase) throws IOException {
-    // Optional on the wire: a blank key is refused by the checkout service with the same
-    // PLAN_NOT_AVAILABLE an unknown key gets, so a missing field discloses nothing either.
+    // Optional on the wire: a blank key asks for the legacy price fallback, and is refused with
+    // the same PLAN_NOT_AVAILABLE an unknown key gets once that fallback is inactive.
     String planKey = StringUtils.trimToNull(body.optString(FIELD_PLAN_KEY, ""));
     // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
     final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
@@ -3382,8 +3435,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             maskEmail(accountEmail));
         return false;
       }
+      // The price the checkout actually charged, which under the legacy price fallback is the
+      // configured legacy price rather than anything on the (priceless) grandfathered plan.
       subscriptionService.openSubscription(clientId, plan, checkoutRequest.getEtendoGoAccount(),
-          checkoutRequest.getStripeCustomer(), checkoutRequest.getStripeSubscription());
+          checkoutRequest.getStripeCustomer(), checkoutRequest.getStripeSubscription(),
+          checkoutRequest.getStripePrice());
       return true;
     } catch (RuntimeException e) {
       log.error("Paid environment '{}' (client {}) for account {} could not have its subscription "

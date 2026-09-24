@@ -1844,10 +1844,12 @@ public class EtendoGoJwtServletCoverageTest {
     when(checkoutRequest.getPlan()).thenReturn(mock(Plan.class));
     when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(checkoutRequest);
     if (subscriptionOpens) {
-      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any()))
+      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any(),
+          any()))
           .thenReturn(mock(Subscription.class));
     } else {
-      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any()))
+      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any(),
+          any()))
           .thenThrow(new IllegalStateException("subscription write failed"));
     }
     servlet.checkoutRequestStore = fixture.checkoutRequestStore;
@@ -1879,7 +1881,7 @@ public class EtendoGoJwtServletCoverageTest {
     applyPaidUpgrade();
 
     verify(fixture.subscriptionService)
-        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any());
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
     // The whole point: no parallel truth is written any more.
     verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
     // ...and whatever marker this tenant still carried is retired, so it is immediately in the
@@ -1951,7 +1953,7 @@ public class EtendoGoJwtServletCoverageTest {
       // The upgrade completed all the same: the subscription was written and the fiscal test-mode
       // override was still reverted.
       verify(fixture.subscriptionService)
-          .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any());
+          .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
       verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
       // And the failed retirement must NOT make the servlet fall back to writing the marker: the
       // subscription exists, so the tenant is recorded.

@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -25,6 +26,13 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * interval), and the checkout mode derives from that price's interval. The chosen price id is
  * stored on the checkout request together with the plan, so a reopened checkout charges the price
  * the buyer was originally shown even if the plan catalog has been re-priced since.
+ *
+ * <p><b>Legacy price fallback.</b> While no active plan carries a provider price and
+ * {@code etendo.go.checkout.price.id} is configured
+ * ({@link PlanCatalogService#isLegacyFallbackActive()}), a request that names the grandfathered
+ * {@link PlanCatalogService#LEGACY_PLAN_KEY} plan — or names no plan at all — is sold at that
+ * configured price and recorded under the grandfathered plan. Once the first priced plan exists the
+ * same request is refused as {@code PLAN_NOT_AVAILABLE}, like any unknown key.
  */
 public class HostedCheckoutService {
 
@@ -119,6 +127,17 @@ public class HostedCheckoutService {
     }
   }
 
+  /** A plan together with the validated provider price a checkout charges for it. */
+  private static final class PricedPlan {
+    private final Plan plan;
+    private final StripePriceService.Price price;
+
+    PricedPlan(Plan plan, StripePriceService.Price price) {
+      this.plan = plan;
+      this.price = price;
+    }
+  }
+
   /**
    * Creates a provider-hosted Checkout Session with no demo source.
    *
@@ -126,9 +145,10 @@ public class HostedCheckoutService {
    * @param accountEmail authenticated account email
    * @param clientName requested environment name
    * @param origin public application origin for return URLs
-   * @param planKey plan catalog key of the plan being bought
+   * @param planKey plan catalog key of the plan being bought; blank asks for the legacy fallback
    * @return checkout request id, URL, mode and price id
-   * @throws PlanNotAvailableException when the key names no active plan catalog row
+   * @throws PlanNotAvailableException when the key names no active plan catalog row, or asks for
+   *     the legacy plan while the legacy price fallback is inactive
    * @throws CheckoutNotConfiguredException when checkout has no credentials, or the plan carries
    *     no provider price id and therefore cannot be charged for
    * @throws IOException when the provider cannot be reached or rejects the request or the price
@@ -145,17 +165,19 @@ public class HostedCheckoutService {
    * demo source and transfer selection, and the price of the named plan.
    *
    * <p>The price is never an argument. The caller names a <em>plan key</em>, this method resolves
-   * it against the Subscription Plan Catalog, and the provider price id comes off that row and is
-   * validated against the provider before anything is recorded.
+   * it against the Subscription Plan Catalog, and the provider price id comes off that row — or,
+   * under the legacy price fallback, off the configured legacy price — and is validated against
+   * the provider before anything is recorded.
    *
    * @param accountId authenticated account id, correlated on the durable request row
    * @param accountEmail authenticated account email
    * @param clientName requested environment name
    * @param origin public application origin for return URLs
-   * @param planKey plan catalog key of the plan being bought
+   * @param planKey plan catalog key of the plan being bought; blank asks for the legacy fallback
    * @param options demo source, transfer selection and pre-provider callback
    * @return checkout request id, URL, mode and price id
-   * @throws PlanNotAvailableException when the key names no active plan catalog row
+   * @throws PlanNotAvailableException when the key names no active plan catalog row, or asks for
+   *     the legacy plan while the legacy price fallback is inactive
    * @throws CheckoutNotConfiguredException when checkout has no credentials, or the plan carries
    *     no provider price id and therefore cannot be charged for
    * @throws IOException when the provider cannot be reached or rejects the request or the price
@@ -165,8 +187,9 @@ public class HostedCheckoutService {
       String origin, String planKey, SessionOptions options) throws IOException, JSONException {
     requireConfigured();
     SessionOptions sessionOptions = options == null ? SessionOptions.none() : options;
-    Plan plan = resolvePurchasablePlan(planKey);
-    StripePriceService.Price price = stripePriceService.retrievePrice(plan.getProviderPriceID());
+    PricedPlan offer = resolvePricedPlan(planKey);
+    Plan plan = offer.plan;
+    StripePriceService.Price price = offer.price;
     String requestId = UUID.randomUUID().toString();
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
     // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
@@ -180,6 +203,42 @@ public class HostedCheckoutService {
     sessionOptions.beforeProvider.accept(requestId);
     return createProviderSession(requestId, accountEmail, clientName, origin, price,
         plan.getSearchKey(), initialIdempotencyKey(requestId), null);
+  }
+
+  /**
+   * Resolves the plan and the validated price a checkout charges, or refuses with the answer the
+   * buyer gets.
+   *
+   * <p>A key naming the grandfathered plan (or no key at all) is served by the legacy price
+   * fallback while it is active. Otherwise it is refused as {@code PLAN_NOT_AVAILABLE} — the same
+   * answer as an unknown key — unless an operator has attached a price to the legacy plan itself,
+   * in which case it is sold like any other priced plan.
+   *
+   * @param planKey plan catalog key the browser named, may be blank
+   * @return the plan to record and the price to charge
+   * @throws PlanNotAvailableException when nothing may be sold under this key
+   * @throws CheckoutNotConfiguredException when a non-legacy plan carries no provider price id
+   * @throws IOException when the provider rejects the price or cannot be reached
+   * @throws JSONException when the provider response is not valid JSON
+   */
+  private PricedPlan resolvePricedPlan(String planKey) throws IOException, JSONException {
+    if (PlanCatalogService.namesLegacyPlan(planKey)) {
+      Optional<Plan> fallback = planCatalogService.findLegacyFallbackPlan();
+      if (fallback.isPresent()) {
+        return new PricedPlan(fallback.get(), stripePriceService.retrieveConfiguredPrice());
+      }
+      Plan legacy = StringUtils.isBlank(planKey) ? null
+          : planCatalogService.findPurchasablePlan(planKey).orElse(null);
+      if (!planCatalogService.hasProviderPrice(legacy)) {
+        // Fallback inactive and the legacy plan has no price of its own: nothing is for sale under
+        // this key. Same answer as an unknown key, so the plan list the browser holds is simply
+        // stale — the page tells the buyer to reload it.
+        throw new PlanNotAvailableException(planKey);
+      }
+      return new PricedPlan(legacy, stripePriceService.retrievePrice(legacy.getProviderPriceID()));
+    }
+    Plan plan = resolvePurchasablePlan(planKey);
+    return new PricedPlan(plan, stripePriceService.retrievePrice(plan.getProviderPriceID()));
   }
 
   /**

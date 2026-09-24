@@ -198,6 +198,30 @@ public class SubscriptionService {
    */
   public Subscription openSubscription(String environmentClientId, Plan plan, Account account,
       String stripeCustomerId, String stripeSubscriptionId) {
+    return openSubscription(environmentClientId, plan, account, stripeCustomerId,
+        stripeSubscriptionId, null);
+  }
+
+  /**
+   * Opens a subscription for a tenant that has just paid, snapshotting the price actually charged.
+   *
+   * <p>The checkout request records the Stripe price it charged, which is not always the plan's:
+   * under the legacy price fallback the grandfathered plan has no price of its own and the buyer
+   * was charged the configured legacy price. That charged price id is snapshotted into
+   * {@code PROVIDER_PRICE_ID}; the amount and currency are copied from the plan only when the plan
+   * still names that same price, because a plan's display amount describes the plan's price and
+   * nothing else. A null charged price falls back to the plan's price, as before.
+   *
+   * @param environmentClientId {@code AD_CLIENT_ID} of the tenant the subscription is for
+   * @param plan the purchased plan
+   * @param account the Etendo Go account that paid, may be null
+   * @param stripeCustomerId {@code cus_...}, may be null
+   * @param stripeSubscriptionId {@code sub_...}, may be null
+   * @param chargedPriceId the Stripe price id stored on the checkout request, may be null
+   * @return the open subscription for the tenant, created or pre-existing
+   */
+  public Subscription openSubscription(String environmentClientId, Plan plan, Account account,
+      String stripeCustomerId, String stripeSubscriptionId, String chargedPriceId) {
     if (StringUtils.isBlank(environmentClientId) || plan == null) {
       throw new IllegalArgumentException(
           "A subscription needs both a tenant and a plan to be opened");
@@ -223,9 +247,14 @@ public class SubscriptionService {
       subscription.setEndDate(null);
       subscription.setStripeCustomer(StringUtils.trimToNull(stripeCustomerId));
       subscription.setStripeSubscription(StringUtils.trimToNull(stripeSubscriptionId));
-      subscription.setProviderPriceID(StringUtils.trimToNull(plan.getProviderPriceID()));
-      subscription.setSnapshotAmount(plan.getDisplayPrice());
-      subscription.setSnapshotCurrency(StringUtils.trimToNull(plan.getCurrencyCode()));
+      String planPriceId = StringUtils.trimToNull(plan.getProviderPriceID());
+      String charged = StringUtils.defaultIfBlank(StringUtils.trimToNull(chargedPriceId),
+          planPriceId);
+      subscription.setProviderPriceID(charged);
+      if (StringUtils.equals(charged, planPriceId)) {
+        subscription.setSnapshotAmount(plan.getDisplayPrice());
+        subscription.setSnapshotCurrency(StringUtils.trimToNull(plan.getCurrencyCode()));
+      }
       OBDal.getInstance().save(subscription);
       log.info("Opened subscription for tenant {} on plan '{}'", environmentClientId,
           plan.getSearchKey());
