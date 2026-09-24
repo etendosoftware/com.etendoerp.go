@@ -109,9 +109,11 @@ import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -378,6 +380,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
   private final GoSessionService goSessionService;
+  // Package-visible so tests can swap the database-backed role lookups for a fake.
+  GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   /**
    * Creates the default servlet wired to the runtime transactional auth email sender.
@@ -4965,6 +4969,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Rebinds the session to a role its user still holds, when its current one was revoked.
+   *
+   * @return {@code false} when the role was revoked and the user holds no other valid role
+   */
+  private boolean reconcileSessionRole(GoSessionRecord sessionRecord) {
+    try {
+      sessionRoleReconciler.reconcile(sessionRecord);
+      return true;
+    } catch (SessionRoleRevokedException e) {
+      return false;
+    }
+  }
+
+  /**
    * GET /sws/go/session
    * Restores the account and current environment context from the session cookie. Safe method — no
    * CSRF required. Returns { status, account, environment|null, csrfToken }; 401 when there is no
@@ -4984,6 +5002,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       GoSessionRecord sessionRecord = auth.getRecord();
       Account account = EtendoGoJwtDalHelper.findActiveAccountById(sessionRecord.getAccountId());
       if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      // A promote/demote since the environment was entered: report (and persist) the role the
+      // user holds now, or a reload restores a role that is gone and lands on "no access".
+      if (!reconcileSessionRole(sessionRecord)) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
