@@ -3589,10 +3589,10 @@ this section**, which wrongly included 6 rows tied to `ETGO_SF_ENTITY.ad_tab_id`
 account-transactions`, `financial-account-bank-connection`, `financial-accounts-page`) — none of
 which is an actual gallery card — while missing 5 real ones (`balance-sheet`, `profit-loss`,
 `report-general-ledger`, `report-journal-entries`, `report-trial-balance`) that, AT THE TIME,
-had no `ETGO_SF_SPEC` row of their own at all — four of the five (`report-trial-balance`,
-`report-journal-entries`, `balance-sheet`, `profit-loss`) have since gained one as their own MCP
-report tool was added (ETP-5483 slices 2/3/4/5; see the table below). None of the 9 real rows is a
-candidate for the
+had no `ETGO_SF_SPEC` row of their own at all — all five (`report-trial-balance`,
+`report-journal-entries`, `balance-sheet`, `profit-loss`, `report-general-ledger`) have since
+gained one as their own MCP report tool was added (ETP-5483 slices 2/3/4/5/6; see the table
+below). None of the 9 real rows is a candidate for the
 `SPEC_TYPE = 'W'` window resolution above (windowless by construction), so each row's access is
 resolved via whichever mechanism its own NEO handler actually gates on:
 
@@ -3600,22 +3600,24 @@ resolved via whichever mechanism its own NEO handler actually gates on:
 |---|---|---|
 | `tax-report` | Classic `AD_Process_Access` (`TaxReportHandler` → `NeoAccessHelper#hasProcessAccess`) | `8C1331B9EC14CED7E040007F010119A0` |
 | `aging-receivable` / `aging-payable` | OBUIAPP `ProcessAccess` (`AgingReportHandler`, receivable/payable tiers) | `0D37A9F6109549DEB058373EF2DAEB6A` / `EB4C4053F3B94A17A08D1DD7E89CEB7E` |
-| `report-general-ledger` | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; this report has no finer-grained access control of its own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
-| `balance-sheet`*, `profit-loss`*, `report-journal-entries`*, `report-trial-balance`* (4 rows) | `AD_Window_Access` on the SAME "Informes financieros" pseudo-window above, resolved via each handler's own `isAccessibleForCurrentRole()` rather than the shared spec gate (see below) | `D647D118F5014D00AF47A636B2CD0DD3` |
+| `balance-sheet`*, `profit-loss`*, `report-journal-entries`*, `report-trial-balance`*, `report-general-ledger`* (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance — resolved via each handler's own `isAccessibleForCurrentRole()` rather than the shared spec gate (see below) | `D647D118F5014D00AF47A636B2CD0DD3` |
 | `inventory-stock-report` | `AD_Window_Access` on a tab-less pseudo-window | `6346B88619F948F9A42224BDB0B239FA` |
 
 \* `report-trial-balance` (ETP-5483 slice 2), `report-journal-entries` (ETP-5483 slice 3),
-`balance-sheet` (ETP-5483 slice 4) and `profit-loss` (ETP-5483 slice 5) are the four rows that
-ALSO have their own `ETGO_SF_SPEC`/`ETGO_SF_ENTITY` row and their own MCP report tool —
+`balance-sheet` (ETP-5483 slice 4), `profit-loss` (ETP-5483 slice 5) and `report-general-ledger`
+(ETP-5483 slice 6, the last one) are the five rows that ALSO have their own `ETGO_SF_SPEC`/
+`ETGO_SF_ENTITY` row and their own MCP report tool —
 `generate_report_trial_balance` (`TrialBalanceReportHandler`, `@Named(
 "trialBalanceReportHandler")`), `generate_report_journal_entries` (`JournalEntriesReportHandler`,
 `@Named("journalEntriesReportHandler")`), `generate_balance_sheet` (`BalanceSheetReportHandler`,
-`@Named("balanceSheetReportHandler")`) and `generate_profit_loss` (`ProfitLossReportHandler`,
-`@Named("profitLossReportHandler")`) — each a faithful Java port of the SAME
-`artifacts/report-trial-balance/report-contract.json` / `artifacts/report-journal-entries/
-report-contract.json` / `artifacts/balance-sheet/report-contract.json` / `artifacts/profit-loss/
+`@Named("balanceSheetReportHandler")`), `generate_profit_loss` (`ProfitLossReportHandler`,
+`@Named("profitLossReportHandler")`) and `generate_report_general_ledger`
+(`GeneralLedgerReportHandler`, `@Named("generalLedgerReportHandler")`) — each a faithful Java port
+of the SAME `artifacts/report-trial-balance/report-contract.json` / `artifacts/report-journal-
+entries/report-contract.json` / `artifacts/balance-sheet/report-contract.json` /
+`artifacts/profit-loss/report-contract.json` / `artifacts/report-general-ledger/
 report-contract.json` SQL the two Node report engines (`schema_forge`'s Vite dev plugin and
-`schema_forge_core`'s production `report-server`) already run for the SPA. All four handlers'
+`schema_forge_core`'s production `report-server`) already run for the SPA. All five handlers'
 `isAccessibleForCurrentRole()` gate on the exact same `FINANCIAL_REPORTS_WINDOW_ID` anchor this
 table already uses — adding a spec/entity row did not change that report's access boundary, only
 added a second, MCP-reachable way to run it. **Drift risk:** each is now a dual implementation
@@ -3624,14 +3626,18 @@ added a second, MCP-reachable way to run it. **Drift risk:** each is now a dual 
 `TrialBalanceFolding`); `report-journal-entries` nests its own flat SQL result into one object per
 journal entry via `JournalEntriesGrouping` — a shape this handler defines for the MCP response
 (the SPA's own nesting for this report's `grouped-listing` contract type lives entirely in the
-report templates, not in a shared JS module, so there is nothing to port there); `balance-sheet`
-and `profit-loss` BOTH port `report-grouping.js`'s `buildAccountReportTree` (the same roll-up/
-formula-node engine both reports use) as the SAME shared class, `AccountReportTree` —
-`ProfitLossReportHandler` calls `AccountReportTree.build` unchanged, exactly as that class's own
-javadoc anticipated; only the SQL that PRODUCES its input rows differs (period-activity `BETWEEN`
-vs Balance Sheet's cumulative `<=`, `reporttype = 'N'` vs `'Y'`, no `income_summary`/`net_income`
-synthetic row). Neither Java class is structurally linked to its Node counterpart — see each
-handler's own class javadoc for what must be mirrored by hand on either side.
+report templates, not in a shared JS module, so there is nothing to port there); `report-general-
+ledger` ports `report-grouping.js`'s `buildNestedGroups`/`foldOpeningBalance` — the SAME function
+BOTH Node report engines actually call for this report (unlike `report-trial-balance`'s
+`resolveGrouping`, `buildNestedGroups` is NOT gated off for a `grouped-listing` contract type) —
+as `GeneralLedgerGrouping`; `balance-sheet` and `profit-loss` BOTH port `report-grouping.js`'s
+`buildAccountReportTree` (the same roll-up/formula-node engine both reports use) as the SAME
+shared class, `AccountReportTree` — `ProfitLossReportHandler` calls `AccountReportTree.build`
+unchanged, exactly as that class's own javadoc anticipated; only the SQL that PRODUCES its input
+rows differs (period-activity `BETWEEN` vs Balance Sheet's cumulative `<=`, `reporttype = 'N'` vs
+`'Y'`, no `income_summary`/`net_income` synthetic row). No Java class here is structurally linked
+to its Node counterpart — see each handler's own class javadoc for what must be mirrored by hand
+on either side.
 
 `generate_balance_sheet`'s and `generate_profit_loss`'s responses share the exact same shape — a
 flattened, document-ordered list of account-tree rows (`node_id`, `value`, `name`, `element`
@@ -3674,6 +3680,33 @@ entries only, matching the report contract's own SQL), and the multi-value id pa
 (`bPartnerId`/`productId`/`projectId`/`costCenterId`), which — unlike an early assumption — the
 live Node `applyPlaceholders` genuinely supports via its own comma-to-`IN` rewrite, so this Java
 port needed no deviation from a faithful multi-id port.
+
+`generate_report_general_ledger`'s response nests one object per dimension GROUP (`dimensionValue`
+present only when `groupBy` was set), each with a nested `accounts` array — one object per account
+(`account_id`, `value`, `name`, `opening` (an `{amtacctdr, amtacctcr, total}` triple, present only
+when `showOpenBalances` is true — default), a `lines` array (`dateacct` as `yyyy-MM-dd`,
+`fact_acct_group_id`, `groupbyname`, `amtacctdr`, `amtacctcr`, `runningBalance`, plus
+`bpname`/`productname`/`projectname`/`costcentername` when `showDimensions` is true), `subtotal`
+(the same triple, period movements only), `total` (the same triple, `opening + subtotal`),
+`totalLines` and `linesTruncated`). Unlike
+`report-journal-entries`'s single entries cap, this report enforces TWO independent SQL-level
+caps at once — `accountLimit` (default 100, hard max 500; DISTINCT accounts, never cuts one in
+half) and `linesPerAccountLimit` (default 500, hard max 2000; lines within a single account, so
+one extremely active account like a bank account cannot alone blow up the response even when
+`accountLimit` is small) — both via window functions (`DENSE_RANK()`/`ROW_NUMBER()`) on the same
+CTE, never by pulling every row into the JVM first. Critically, `opening`/`subtotal`/`total` are
+ALWAYS computed from a SEPARATE, uncapped SQL aggregate query (never by summing the — possibly
+line-capped — `lines` array), so those numbers stay numerically correct even when
+`linesPerAccountLimit` cut a very active account's line list short; `meta.truncatedAccounts`/
+`meta.totalAccounts`/`meta.accountsReturned` cover the account-level cap, and each account's own
+`totalLines`/`linesTruncated` covers the per-account line cap independently. `groupBy` accepts
+`bpartner`/`product`/`project`/`costcenter` (mirroring the contract's `groupByValue`/
+`groupByField` parameter pairs) and nests accounts inside each dimension group exactly like
+`report-grouping.js`'s `buildNestedGroups` does for the SPA. See `GeneralLedgerReportHandler`'s
+own class javadoc for the full parameter list, the `factaccttype NOT IN ('R', 'C')` scope (the
+contract's own main-query filter — its `openingQuery` deliberately carries NO `factaccttype`
+filter at all, exactly reproduced here), and the org-filter semantics (exact-match, same as
+`report-trial-balance`/`report-journal-entries`).
 
 This resolution logic lives in `com.etendoerp.go.schemaforge.util.ReportAccessCatalog` — a shared
 utility, NOT duplicated per-webhook, because `SFSystemRoleTemplates` (§8f) needs the exact same
