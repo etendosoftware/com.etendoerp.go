@@ -88,13 +88,13 @@ class FinancialAccountHandlerEndpointTypeTest {
   @DisplayName("isCrudRequest is true only for CRUD")
   void isCrudRequestPerType(NeoEndpointType type) {
     assertEquals(type == NeoEndpointType.CRUD,
-        FinancialAccountHandler.isCrudRequest(ctx("POST", type)));
+        NeoEndpointTypes.isCrud(ctx("POST", type)));
   }
 
   @Test
   @DisplayName("isCrudRequest treats a null endpoint type as CRUD (batch / clone callers)")
   void nullIsCrud() {
-    assertTrue(FinancialAccountHandler.isCrudRequest(ctx("POST", null)));
+    assertTrue(NeoEndpointTypes.isCrud(ctx("POST", null)));
   }
 
   // ── handle ─────────────────────────────────────────────────────────────

@@ -31,7 +31,6 @@ import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,7 +48,6 @@ import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
@@ -126,7 +124,7 @@ public class ToolRegistry {
     for (SFSpec spec : specs) {
       processSpec(spec, accessibleWindowSpecs, creatableWindowSpecs, updatableWindowSpecs,
           deletableWindowSpecs, tools, permissions);
-      if (isActionReportSpec(spec)) {
+      if (ToolRegistryActionSpecs.isActionReportSpec(spec)) {
         actionReportSpecs.add(spec.getName());
       }
     }
@@ -266,7 +264,7 @@ public class ToolRegistry {
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
       tools.add(buildDefaultsTool(accessibleWindowSpecs));
-      tools.add(buildSchemaTool(withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
+      tools.add(buildSchemaTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
     if (permissions.canWrite) {
       if (!creatableWindowSpecs.isEmpty()) {
@@ -284,37 +282,8 @@ public class ToolRegistry {
       if (McpConstants.BATCH_TOOL_ENABLED) {
         tools.add(buildBatchTool());
       }
-      tools.add(buildActionTool(withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
+      tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
-  }
-
-  /**
-   * Whether a report spec serves named actions through {@code neo_action} (ETP-5468): its handler
-   * declares {@code NeoHandler#actionContracts()} and the role passes the same report-spec gate the
-   * UI does. Independent of {@link NeoReportCallability}: such a spec is not a report generator
-   * (IMP-19 keeps its {@code generate_*} tool retired) but it does have an action surface.
-   */
-  private static boolean isActionReportSpec(SFSpec spec) {
-    try {
-      return "R".equals(spec.getSpecType())
-          && NeoAccessUtils.hasReportSpecAccess(spec, "GET")
-          && NeoActionContract.resolve(spec).isPresent();
-    } catch (Exception e) {
-      log.warn("Could not probe the action contracts of spec '{}': {}", spec.getName(),
-          e.getMessage());
-      return false;
-    }
-  }
-
-  private static List<String> withActionSpecs(List<String> windowSpecs,
-      List<String> actionReportSpecs) {
-    if (actionReportSpecs == null || actionReportSpecs.isEmpty()) {
-      return windowSpecs;
-    }
-    List<String> merged = new ArrayList<>(windowSpecs);
-    merged.addAll(actionReportSpecs);
-    Collections.sort(merged);
-    return merged;
   }
 
   // ── Amortization plan tool ─────────────────────────────────────────────

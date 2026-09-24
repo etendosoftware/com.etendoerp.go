@@ -205,31 +205,12 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
 
-  /**
-   * Whether this hook invocation is a record write/read on the entity itself, as opposed to one
-   * of its sub-endpoints (a button action, a callout, a display-logic evaluation, a selector).
-   *
-   * <p>ETP-5468: the sub-endpoints also reach this hook with {@code httpMethod=POST} — a REST
-   * {@code POST /account/{id}/action/<button>} and an MCP {@code neo_action} both do — so keying
-   * the create validation on the HTTP method alone ran every button call through
-   * {@link #validateAndEnrichCreate}: an agent had to invent a unique {@code name} and a
-   * {@code currency} before its button even reached the process. A {@code null} endpoint type is
-   * treated as CRUD because several internal callers (batch, clone) build the context without one.</p>
-   *
-   * @param context the hook context
-   * @return {@code true} for the entity's own CRUD, {@code false} for any sub-endpoint
-   */
-  static boolean isCrudRequest(NeoContext context) {
-    NeoEndpointType type = context.getEndpointType();
-    return type == null || NeoEndpointType.CRUD.equals(type);
-  }
-
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!SPEC.equals(context.getSpecName())) {
       return null;
     }
-    if (!isCrudRequest(context)) {
+    if (!NeoEndpointTypes.isCrud(context)) {
       // Button actions, callouts, display logic and selectors are not account writes: let the
       // generic sub-endpoint run untouched. Account create/update/delete rules do not apply.
       return null;
@@ -287,7 +268,7 @@ public class FinancialAccountHandler implements NeoHandler {
     if (METHOD_GET.equals(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return injectHasTransactions(context);
     }
-    if (!METHOD_POST.equals(context.getHttpMethod()) || !isCrudRequest(context)) {
+    if (!METHOD_POST.equals(context.getHttpMethod()) || !NeoEndpointTypes.isCrud(context)) {
       // ETP-5468: a POST to a sub-endpoint (button action, callout) did not create an account,
       // so it must not be provisioned as if it had.
       return null;
