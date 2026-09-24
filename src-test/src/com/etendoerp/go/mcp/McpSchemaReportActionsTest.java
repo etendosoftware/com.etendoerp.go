@@ -248,8 +248,10 @@ class McpSchemaReportActionsTest {
   @Test
   @DisplayName("no entity + exactly one action entity → its catalog")
   void noEntitySingleActionEntity() throws Exception {
+    SFEntity other = entity("other", PLAIN_Q);
+    SFEntity rec = entity(SPEC, REC_Q);
     support.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
-        .thenReturn(List.of(entity("other", PLAIN_Q), entity(SPEC, REC_Q)));
+        .thenReturn(List.of(other, rec));
     assertCatalog(handleSchema(new JSONObject().put("view", "actions")), SPEC);
     assertCatalog(handleSchema(new JSONObject()), SPEC);
   }
@@ -258,8 +260,9 @@ class McpSchemaReportActionsTest {
   @DisplayName("no entity + no action entity → 'Missing required argument: entity'")
   void noEntityZeroActionEntities() {
     specDeclaresNoActions();
+    SFEntity other = entity("other", PLAIN_Q);
     support.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
-        .thenReturn(List.of(entity("other", PLAIN_Q)));
+        .thenReturn(List.of(other));
     McpRoutingException ex = assertThrows(McpRoutingException.class,
         () -> handleSchema(new JSONObject()));
     assertTrue(ex.getMessage().contains("Missing required argument: entity"), ex.getMessage());
@@ -269,8 +272,10 @@ class McpSchemaReportActionsTest {
   @DisplayName("no entity + two action entities → ambiguous → 'Missing required argument: entity'")
   void noEntityTwoActionEntities() {
     resolveEntities.add(entity("second", REC_Q));
+    SFEntity rec = entity(SPEC, REC_Q);
+    SFEntity second = entity("second", REC_Q);
     support.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
-        .thenReturn(List.of(entity(SPEC, REC_Q), entity("second", REC_Q)));
+        .thenReturn(List.of(rec, second));
     McpRoutingException ex = assertThrows(McpRoutingException.class,
         () -> handleSchema(new JSONObject().put("view", "actions")));
     assertTrue(ex.getMessage().contains("Missing required argument: entity"), ex.getMessage());
@@ -279,8 +284,9 @@ class McpSchemaReportActionsTest {
   @Test
   @DisplayName("a blank entity counts as absent")
   void blankEntityCountsAsAbsent() throws Exception {
+    SFEntity rec = entity(SPEC, REC_Q);
     support.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
-        .thenReturn(List.of(entity(SPEC, REC_Q)));
+        .thenReturn(List.of(rec));
     assertCatalog(handleSchema(new JSONObject().put("entity", "  ")), SPEC);
   }
 
