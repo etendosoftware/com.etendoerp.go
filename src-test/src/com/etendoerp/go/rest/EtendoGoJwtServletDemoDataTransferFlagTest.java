@@ -17,6 +17,8 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -29,6 +31,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -133,6 +136,52 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
+  void flagOnPreservesAnExplicitAllFalseSelection() throws Exception {
+    flagIs(true);
+    JSONObject body = new JSONObject().put("dataTransfer",
+        new JSONObject().put("products", false).put("contacts", false));
+
+    servlet.recordDemoDataTransferSelection(body, checkoutResult());
+
+    verify(transferService).recordSelection(REQUEST_ID, false, false);
+  }
+
+  @Test
+  void checkoutWithoutAChoiceDoesNotInventOne() throws Exception {
+    flagIs(true);
+
+    servlet.recordDemoDataTransferSelection(new JSONObject(), checkoutResult());
+
+    verifyNoInteractions(transferService);
+  }
+
+  @Test
+  void purchaseProjectionReturnsThePersistedSelectionForResume() throws Exception {
+    flagIs(true);
+    when(transferService.selection(REQUEST_ID)).thenReturn(
+        new JSONObject().put("products", false).put("contacts", true));
+    JSONObject purchase = checkoutResult();
+
+    projectSelection(purchase);
+
+    assertTrue(purchase.getBoolean("dataTransferEnabled"));
+    assertFalse(purchase.getJSONObject("dataTransfer").getBoolean("products"));
+    assertTrue(purchase.getJSONObject("dataTransfer").getBoolean("contacts"));
+  }
+
+  @Test
+  void flagOffPurchaseProjectionOmitsTheSelection() throws Exception {
+    flagIs(false);
+    JSONObject purchase = checkoutResult();
+
+    projectSelection(purchase);
+
+    assertFalse(purchase.getBoolean("dataTransferEnabled"));
+    assertFalse(purchase.has("dataTransfer"));
+    verifyNoInteractions(transferService);
+  }
+
+  @Test
   void flagOffPaidOnboardingStartsNoTransferAndLooksUpNoDemo() {
     flagIs(false);
     try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -154,6 +203,24 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
+  void flagOnRoutesSelectedPaidDataOnlyThroughTheAsyncWorker() {
+    flagIs(true);
+
+    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, true));
+    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, false));
+  }
+
+  @Test
+  void flagOffKeepsTheExistingSynchronousCopyOnlyForPaidSelectedData() {
+    flagIs(false);
+
+    assertTrue(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, false));
+    assertTrue(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, false, true));
+    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, false, false));
+    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(false, true, true));
+  }
+
+  @Test
   void flagOnAFailedStartNeverReachesTheOnboardingCaller() {
     flagIs(true);
     doThrow(new IllegalStateException("boom")).when(transferService)
@@ -168,6 +235,13 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
 
   private static String errorMessage(ResponseCapture resp) throws Exception {
     return new JSONObject(resp.body()).getJSONObject("error").getString("message");
+  }
+
+  private void projectSelection(JSONObject purchase) throws Exception {
+    Method method = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "addDemoDataTransferSelection", JSONObject.class, String.class);
+    method.setAccessible(true);
+    method.invoke(servlet, purchase, REQUEST_ID);
   }
 
   private static JSONObject selectionBody() throws Exception {
