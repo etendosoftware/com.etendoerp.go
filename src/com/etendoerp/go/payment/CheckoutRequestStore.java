@@ -1010,27 +1010,16 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * handed {@code null}, which is precisely the wanted behaviour — substituting a system context
    * for it would leave the thread more privileged than it was found.
    *
+   * <p>Delegates to {@link SystemContext#call(String, Supplier)}, the one implementation of this
+   * capture / install / unwind sequence.
+   *
    * @param body the work to run as system
    * @param <T> the body's result type
    * @return whatever the body returned
    */
   @Override
   protected <T> T runAsSystem(Supplier<T> body) {
-    OBContext previousContext = OBContext.getOBContext();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return body.get();
-    } finally {
-      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
-      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
-      // and then looks at whichever context is current at that moment, clearing it outright when
-      // the stack empties on the shared admin context. Putting the caller's context back first
-      // would expose that context to the check and could null it out — reintroducing, from the
-      // other end, the very leak this method exists to close.
-      exitAdminModeQuietly();
-      restoreContextQuietly(previousContext);
-    }
+    return SystemContext.call("a checkout-request store operation", body);
   }
 
   /**
@@ -1043,34 +1032,6 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       body.run();
       return null;
     });
-  }
-
-  /**
-   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
-   * would replace the real failure from the body with a misleading one.
-   */
-  private void exitAdminModeQuietly() {
-    try {
-      OBContext.restorePreviousMode();
-    } catch (RuntimeException e) {
-      log.error("Could not leave admin mode after a checkout-request store operation", e);
-    }
-  }
-
-  /**
-   * Reinstates the caller's context without ever throwing, for the same reason as
-   * {@link #exitAdminModeQuietly()}.
-   *
-   * @param previousContext the context captured on entry; {@code null} is a real value and is
-   *     restored as "no context"
-   */
-  private void restoreContextQuietly(OBContext previousContext) {
-    try {
-      OBContext.setOBContext(previousContext);
-    } catch (RuntimeException e) {
-      log.error("Could not restore the caller's OBContext after a checkout-request store operation",
-          e);
-    }
   }
 
   private void flushAndCommit() {

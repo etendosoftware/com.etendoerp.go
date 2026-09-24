@@ -358,7 +358,8 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
 - **The webhook installs its own system context.** It runs with `OBContext == null`; develop only
   worked because two stores leaked a system context, and the ETP-5045/5046 fixes that restore the
   caller's context broke every correlated lifecycle event (NPE in the preference write → `FAILED`,
-  500). `applySubscriptionLifecycle` now captures/sets/restores a system context and
+  500). `applySubscriptionLifecycle` now runs through `SystemContext.run` (capture, install,
+  quiet unwind — shared with `CheckoutRequestStore`/`BillingEventStore`) and
   `setPreference` runs in admin mode; `CheckoutWebhookEndpointIntegrationTest` pins both routes.
   Design doc §8.4 has the full story — the lesson generalises to any context-less caller.
 - **The backfill carries the preference state onto the row.** R37 seeds `STATUS` from
@@ -483,7 +484,7 @@ line below is the result of reading the code, not of counting matches.
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
 | `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |
-| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 22 raw installs against a single capture/restore pair |
+| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 22 raw installs; the lifecycle webhook is the one site now routed through `payment/SystemContext` |
 
 **`CompanyInvitationService` — the real one.** Two sites, both `restorePreviousMode()`-only:
 

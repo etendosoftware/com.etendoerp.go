@@ -89,6 +89,7 @@ import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
+import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
@@ -1422,17 +1423,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Every write below (the subscription row, the lifecycle preferences, the event watermark)
     // needs one, and the stores it calls now give the caller's context back instead of leaking a
     // system one — so the system context is installed explicitly here, and the caller's (null)
-    // context restored afterwards. Same order as CheckoutRequestStore#runAsSystem: admin mode is
-    // left before the context it sits on is taken away.
-    OBContext previousContext = OBContext.getOBContext();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      applySubscriptionLifecycleAsSystem(eventId, type, event);
-    } finally {
-      OBContext.restorePreviousMode();
-      OBContext.setOBContext(previousContext);
-    }
+    // context restored afterwards. SystemContext is the shared implementation the stores use too:
+    // admin mode is left before the context it sits on is taken away, and neither unwinding step
+    // can throw, so a failure leaving admin mode never skips restoring the caller's context.
+    SystemContext.run("a subscription lifecycle event",
+        () -> applySubscriptionLifecycleAsSystem(eventId, type, event));
   }
 
   private void applySubscriptionLifecycleAsSystem(String eventId, String type, JSONObject event) {

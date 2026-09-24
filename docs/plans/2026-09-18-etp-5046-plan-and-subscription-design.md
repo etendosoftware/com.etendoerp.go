@@ -454,7 +454,9 @@ preference. Fixed twice over, so neither half depends on the other:
 
 - `EtendoGoJwtServlet.applySubscriptionLifecycle` installs the system context explicitly (capture
   the previous one, `setOBContext("0","0","0","0")` + admin mode, leave admin mode, restore) around
-  everything it does;
+  everything it does, through `payment/SystemContext` — the one implementation of that sequence,
+  which `CheckoutRequestStore` and `BillingEventStore` now delegate to as well. Both unwinding steps
+  are quiet (logged, never thrown), so a failure leaving admin mode cannot skip the restore;
 - `setPreference` runs in admin mode, mirroring ETP-5488's `readPreference`.
 
 `CheckoutWebhookEndpointIntegrationTest` pins it with a signed, correlated
@@ -467,7 +469,8 @@ service runs in admin mode and never replaces the caller's context. The onboardi
 reads the checkout request through a capture-and-restore helper, which is now merely redundant.
 
 **Any new caller with no user context (webhooks, background processes) must install and restore
-its own system context. Do not rely on a store to have left one behind.**
+its own system context — use `SystemContext.run` / `SystemContext.call`, do not hand-write the
+sequence again. Do not rely on a store to have left one behind.**
 
 Out of scope here: usage capture and reporting, overage pricing, quota *evaluation* and
 enforcement (ETP-5051), the rest of the subscription lifecycle (ETP-5047 — since the develop
