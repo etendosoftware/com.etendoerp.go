@@ -99,10 +99,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
   private final GoSessionService goSessionService;
   private final EnvironmentRequestAuthenticator environmentAuthenticator;
-  // Package-visible so tests can swap the database-backed role lookups for a fake. Only
-  // /oauth2/authorize uses it directly (OAuth2RequestAuthenticator.authenticateAuthorizeRequest);
-  // every other cookie-authenticated endpoint here goes through environmentAuthenticator, which
-  // reconciles the role itself (ETP-5395 folded into the shared pipeline's bind step).
+  // Package-visible so tests can swap the database-backed role lookups for a fake. Only the
+  // authorize endpoint uses it directly, through OAuth2RequestAuthenticator's own helper for
+  // that call: every other cookie-authenticated endpoint here goes through
+  // environmentAuthenticator instead, which reconciles the role itself (ETP-5395 folded into
+  // the shared pipeline's bind step).
   GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   /**
