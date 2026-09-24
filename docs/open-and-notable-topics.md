@@ -48,34 +48,69 @@ counts clients **created** that day (a flow) while the billable quantity is how 
 stock). With no rollup yet the difference does not bite, but **storing a flow under a stock's name
 makes every later reading of it wrong**, including any quota built on it in ETP-5051.
 
-### 🔴 1.3 Blank `planKey` on checkout — which error?
+### 🔴 1.3 Who owns a subscription's lifecycle status — the table or the webhook projection?
 
-A blank `planKey` currently answers `400 INVALID_REQUEST`, mirroring the existing
-`clientName is required` treatment. An *unknown or inactive* key answers `400 PLAN_NOT_AVAILABLE`,
-and deliberately does not distinguish the two so the endpoint cannot be used to enumerate which
-plan keys exist. Open question: collapse blank into `PLAN_NOT_AVAILABLE` for one uniform answer,
-or keep the distinction because blank is a client bug and unknown is a tampering signal.
+Two models met again in the develop merge (2026-09-24). ETP-5046 made `ETGO_SUBSCRIPTION` the
+source of truth for whether a tenant pays (§3.5), but develop's ETP-5443 wired the Stripe lifecycle
+webhooks (`invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated/deleted`) through
+`SubscriptionLifecycleApplier` into the **preference projection** (`ETGO_SubscriptionStatus`,
+`ETGO_SubscriptionDueAt`, `ETGO_SubscriptionEventAt`). Nothing updates `ETGO_SUBSCRIPTION.STATUS`
+or `CURRENT_PERIOD_END` after the row is opened.
+
+Left as it merged, a table-first read would have made those webhooks dead code for every tenant with
+a subscription row: a cancelled or unpaid Stripe subscription would stay `CURRENT` forever. The
+merge therefore resolves `TenantEnvironmentLifecycleService.productiveSnapshot()` as: **the open row
+answers until a lifecycle event has been applied to the tenant (`ETGO_SubscriptionEventAt` set);
+from then on the projection answers.** That keeps develop's lifecycle behaviour intact and the
+table authoritative for tenants that have not received an event.
+
+It is a stop-gap with a known cost — `ETGO_SUBSCRIPTION.STATUS` goes stale for exactly the tenants
+whose status changed — and it is not what either design intended. The decision owed: move the
+applier's writes onto the open subscription row (ETP-5047's job, which then retires this branch),
+including what `canceled` should do to `TenantPlanService.resolvePlan` (it would flip the tenant to
+`free`, with the §3.4 test-mode consequences), or keep the projection as the lifecycle authority and
+drop `STATUS` from the table.
 
 ---
 
 ## 2. Deployment — constraints that are not visible in the code
 
-### 🟠 2.1 A priced plan row must exist BEFORE the code goes live
+### 🟠 2.1 The legacy price fallback — why it exists and when it switches itself off
 
-`etendo.go.checkout.price.id` is deleted, with **no fallback** — a fallback price is a price
-nobody reviewed, selected exactly when the intended configuration is missing. The moment the
-branch deploys, checkout answers `CHECKOUT_NOT_CONFIGURED` until an operator creates an
-`ETGO_PLAN` row carrying a real Stripe price id.
+`etendo.go.checkout.price.id` was deleted "with no fallback" on this branch, which made two deploy
+constraints hard: a priced `ETGO_PLAN` row had to exist before the code went live (no sourcedata
+row can carry a real, environment-specific Stripe price id), and the module and the app-shell had
+to ship together (`planKey` required, no default). The develop merge reinstated the property as a
+**transitional fallback** to remove both.
 
-**No sourcedata row can supply it**, because a real price id is environment-specific (test vs live
-Stripe). This is a pre-deploy step, not a code problem.
+**Activation rule — one predicate, `PlanCatalogService.isLegacyFallbackActive()`:** the property is
+non-blank **and** no active plan carries a provider price id. `GET /sws/go/plans` and checkout both
+call it, so the list never offers what checkout refuses. While active, the list is exactly
+`legacy-productive` quoted from the Stripe price (`retrieveConfiguredPrice()`; a failed lookup omits
+it, never 500), and a checkout naming `legacy-productive` — or no plan — sells that price and
+records `legacy-productive` plus the charged price id on the request.
 
-### 🟠 2.2 The module and the app-shell must ship together
+**Retirement is automatic.** The first priced plan makes the predicate false on the next request:
+no redeploy, no property change. The property can be removed afterwards at leisure.
 
-`planKey` is required on checkout with no default-plan property. The app-shell learns keys from
-`GET /sws/go/plans`. A module deployed ahead of the app-shell breaks the upgrade flow; an
-app-shell deployed ahead of the module sends a field nothing reads. There is no version-skew
-bridge, by design.
+Things to know while it is active:
+
+- **The reload edge case.** A buyer whose page loaded the fallback list before the first priced plan
+  appeared submits `legacy-productive` and gets `400 PLAN_NOT_AVAILABLE`; the page shows
+  `upgradePlanNotAvailable` ("reload the page"). Nothing is charged.
+- **Fallback buyers are unlimited.** They land on `legacy-productive`, which has zero quota rows
+  (§5.1): once ETP-5051 enforces quotas they will not be capped. Their subscription row snapshots
+  the charged price id but no amount/currency (the plan has none). Moving them to a real plan is a
+  plan change (ETP-5053).
+- **The list shows the grandfathered plan's own copy** — `ETGO_PLAN.NAME`/`DESCRIPTION` of
+  `legacy-productive` ("Legacy Productive (grandfathered)"). Edit the row if buyers should see
+  something else.
+- **Two price sources can disagree.** The typed billing offer (`etendo.go.billing.offer.*`,
+  `GET /sws/go/billing/offers`) is a separate configuration from the Stripe price. The upgrade page
+  quotes the catalog (Stripe) and uses the offer only when the catalog cannot answer, but any other
+  consumer of the offer can show an amount different from what checkout charges.
+- On an environment with neither a priced plan nor the property, checkout answers
+  `PLAN_NOT_AVAILABLE` for the legacy key / no key, and `GET /sws/go/plans` is empty.
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before
 
@@ -145,9 +180,9 @@ the two edits sat in different regions so git saw no conflict. Always build afte
 ### 🟠 3.1 The grandfathered plan has no price, deliberately
 
 `legacy-productive` ships as module sourcedata with `PROVIDER_PRICE_ID`, `BILLING_INTERVAL`,
-`DISPLAY_PRICE` and `CURRENCY_CODE` all NULL, and **zero quota rows**. That makes it unpurchasable
-by construction (checkout refuses it), unlimited by definition, and a no-op for the price-derivation
-handler.
+`DISPLAY_PRICE` and `CURRENCY_CODE` all NULL, and **zero quota rows**. That makes it unlimited by
+definition and a no-op for the price-derivation handler. It is purchasable only through the legacy
+price fallback (§2.1), and never on a price of its own.
 
 A backfilled subscription is therefore **not a billing record**. Its two jobs are **access control**
 (`resolvePlan` reads productive) and **webhook correlation** (ETP-5047 matches on
@@ -208,7 +243,7 @@ authority's **test** endpoints. That is a compliance failure, not a config nit.
 Two independent mechanisms prevent it:
 
 - The runner's watermark is a **strict date** (`Math.max` over PROCESSED fix timestamps, "skip
-  everything at or before it, no look-back"). Once `R37` (2026-09-18) is processed, `R31`
+  everything at or before it, no look-back"). Once `R37` (2026-09-24) is processed, `R31`
   (2026-09-01) is skipped forever.
 - If `R31` had `FAILED`, the runner halts that tenant's chain, so `R37` could never run for it.
 
@@ -283,6 +318,24 @@ Phase F cleanup should settle which.
 
 ---
 
+### 🟠 3.6 The data-fix watermark silently skips a fix dated at or below it — R37 was re-dated
+
+`run.js` applies, per tenant, only fixes strictly newer than the newest `PROCESSED` fix
+(`fix.timestamp <= watermark` → skip, no look-back). A fix that waits on a branch while develop
+merges newer fixes is therefore dead on arrival on every environment that already ran them — no
+ledger row, no error, nothing in any report.
+
+R37 was authored as `20260918T120000Z`. At merge time develop carried fixes up to
+`20260922T130000Z`, and `R38-org-legalentity-pointer` had the **identical** `20260918T120000Z`
+(equal is skipped too). It was renamed to `20260924T150000Z__R37-tenant-subscription-backfill.sql`
+before reaching any shared environment; `sql/README.md` rule 3 forbids renaming an *applied* fix,
+not an unapplied one. The consequence had it shipped: every paying tenant left on the retired
+preference, with §3.2's end condition never reached.
+
+**Before merging any branch that carries a data-fix, re-check its timestamp against the newest fix
+in the target branch** — and re-date it if it is not strictly newer. A catalog test asserting that
+no two fix timestamps are equal would have caught half of this one.
+
 ## 4. Known issues
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
@@ -351,14 +404,15 @@ Raised by Martin on 2026-09-18; not yet actioned.
 
 ### 🟡 4.6 `recordRequested` accepts a null plan that production cannot produce
 
-`CheckoutRequestStore.recordRequested(..., Plan plan)` records the Subscription Plan Catalog row being bought, so the
+`CheckoutRequestStore.recordRequested(..., RequestOptions options, Plan plan)` records the Subscription Plan Catalog row being bought, so the
 subscription opened after payment reflects **what the buyer actually saw** rather than whatever the
 plan says by then. `ETGO_CHECKOUT_REQUEST.ETGO_PLAN_ID` is nullable because rows predating ETP-5046
 have no plan.
 
-But the production path cannot pass null: `HostedCheckoutService` resolves the plan with
-`orElseThrow` and then rejects one with no provider price. Null is therefore a **test-only** value —
-six fixtures pass it — and the parameter currently accepts the one thing it exists to prevent. A
+But the production path cannot pass null: `HostedCheckoutService` resolves the plan (or the
+grandfathered plan under the legacy price fallback) before recording. Null is therefore a
+**test-only** value — the plan-less `recordRequested` overloads kept from develop pass it for
+fixtures — and the parameter currently accepts the one thing it exists to prevent. A
 change that dropped the plan on the way in would write a row that is indistinguishable from a legacy
 one, and the subscription would open not knowing what was bought.
 
@@ -376,7 +430,7 @@ line below is the result of reading the code, not of counting matches.
 
 | Class | Verdict |
 |---|---|
-| `payment/CheckoutRequestStore` | ✅ fixed on ETP-5045 |
+| `payment/CheckoutRequestStore` | ✅ fixed on ETP-5045; the account-id lookups develop added afterwards reintroduced raw installs and were routed through `runAsSystem` in the 2026-09-24 develop merge |
 | `payment/BillingEventStore` | ✅ fixed on ETP-5046 |
 | `payment/SubscriptionService` | ✅ correct by design — `openSystemContextWhenAbsent()` sets a context only when there is none, and its javadoc already spells out this hazard |
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
@@ -432,6 +486,16 @@ Re-pricing a plan does **not** re-price existing subscribers — the subscriptio
 `PROVIDER_PRICE_ID` and amount snapshot, never rewritten by a plan edit. A plan change closes the
 current row (`END_DATE`) and inserts a successor, preserving price history. `PENDING_PLAN_ID` and
 `PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
+
+### 🟠 5.4 Known gaps: no plan-change path, lifecycle not on the table
+
+- **No plan change exists.** `SubscriptionService` can open a row and read it; nothing closes one
+  and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
+  moving to the first real plan — until ETP-5053. `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay
+  unread.
+- **Stripe lifecycle webhooks do not touch `ETGO_SUBSCRIPTION`.** They exist since develop's
+  ETP-5443 (`invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`,
+  `customer.subscription.deleted`) but write only the preference projection. See §1.3.
 
 ---
 

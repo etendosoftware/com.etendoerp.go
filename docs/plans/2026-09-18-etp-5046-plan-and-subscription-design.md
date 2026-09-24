@@ -184,41 +184,79 @@ two decimals.
 
 ## 6. Checkout: the browser sends a plan key, never a price
 
-`etendo.go.checkout.price.id` is **deleted, with no fallback.** A fallback price is a price
-nobody reviewed, selected exactly when the intended configuration is missing.
-
 The client sends `planKey`. The server resolves it to a provider price id through
-`PlanCatalogService`. There is no request field for a price and no code path that reads one, so a
-body containing `"priceId"` is *ignored, not validated*.
+`PlanCatalogService`, validates that price against Stripe (`StripePriceService.retrievePrice`:
+active, amount, currency, `interval_count = 1`) and derives the checkout mode from the price's
+interval. There is no request field for a price and no code path that reads one, so a body
+containing `"priceId"` is *ignored, not validated*. The price id actually charged is stored on the
+checkout request (`STRIPE_PRICE_ID`) next to the plan (`ETGO_PLAN_ID`), and a reopened checkout
+charges that stored price — never the plan's current one — through develop's idempotent
+reopen path (initial / replacement `Idempotency-Key`, open session reused, completed session
+reported).
 
 - Unknown or inactive key → `400 PLAN_NOT_AVAILABLE`. The response deliberately does **not**
   distinguish the two: the endpoint must not confirm which keys exist.
-- Valid key with no provider price (the legacy plan) → `503 CHECKOUT_NOT_CONFIGURED`.
+- Valid, active non-legacy key with no provider price → `503 CHECKOUT_NOT_CONFIGURED`.
+- `legacy-productive`, or no key at all → the **legacy price fallback** below, or
+  `400 PLAN_NOT_AVAILABLE` when it is inactive.
 
-`CheckoutConfiguration.isConfigured()` now proves only that Stripe credentials exist. It used to
-also prove that *a purchasable thing existed*; that guarantee moved to the Subscription Plan
-Catalog, which is why both map onto the same `CHECKOUT_NOT_CONFIGURED` response. **This is the
-easiest thing in the ticket to lose silently in review.**
+`CheckoutConfiguration.isConfigured()` proves only that Stripe credentials exist (secret key +
+webhook secret). It used to also prove that *a purchasable thing existed*; that guarantee moved to
+the Subscription Plan Catalog plus the fallback. **This is the easiest thing in the ticket to lose
+silently in review.**
 
-### 6.1 Deploy ordering — a real operational requirement
+### 6.1 The legacy price fallback
 
-Two consequences that are not code problems:
+`etendo.go.checkout.price.id` was originally deleted "with no fallback" — a fallback price is a
+price nobody reviewed, selected exactly when the intended configuration is missing. Merging with
+develop reversed that, deliberately and narrowly: the property survives as a **transitional
+fallback**, and one predicate decides it.
 
-1. The moment this ships, checkout returns `CHECKOUT_NOT_CONFIGURED` until an operator creates an
-   `ETGO_PLAN` row with a real Stripe price id. **No sourcedata row can supply one**, because a
-   real price id is environment-specific (test vs live Stripe). This is a pre-deploy step.
-2. `planKey` is required, so **the module and the app-shell must ship together.** There is no
-   default-plan property to bridge a version skew.
+`PlanCatalogService.isLegacyFallbackActive()` is **true iff**
 
----
+1. `CheckoutConfiguration.priceId()` (`etendo.go.checkout.price.id` / `ETGO_CHECKOUT_PRICE_ID`) is
+   non-blank, **and**
+2. no active plan catalog row carries a provider price id (`listPurchasablePlans()` is empty).
+
+While it holds:
+
+- `GET /sws/go/plans` lists exactly `legacy-productive`, with `displayPrice` / `currency` /
+  `billingInterval` read from Stripe via `StripePriceService.retrieveConfiguredPrice()` — never
+  from the typed billing offer. If Stripe cannot quote it, the plan is left out (logged), never a
+  500.
+- A checkout naming `legacy-productive`, or naming no plan, is sold at that configured price, and
+  the request records `legacy-productive` as its plan and the configured price id as its
+  `STRIPE_PRICE_ID`. The subscription opened after payment snapshots that charged price id (the
+  grandfathered plan has none of its own); its amount/currency snapshot stays empty.
+
+The plan list and checkout call the **same** predicate, so the list can never offer something
+checkout refuses — except across the moment the predicate flips (next paragraph).
+
+**It retires itself.** The first priced plan an operator creates makes condition 2 false on the
+next request: the list shows the priced plan(s), and `legacy-productive` / a missing key answer
+`400 PLAN_NOT_AVAILABLE`. No redeploy, no property change. A buyer holding a page loaded before
+the flip gets that 400; the page maps it to "the plan is no longer available, reload the page"
+(`upgradePlanNotAvailable`).
+
+**What it removes.** The two deploy-ordering requirements this section used to impose — "a priced
+`ETGO_PLAN` row must exist before the code goes live" and "the module and the app-shell must ship
+together" — no longer hold while a legacy price is configured: a deployment with no priced plan
+keeps selling, and an app-shell older than the module (which sends no `planKey`) still buys.
+They return only on an environment that has neither a priced plan nor the legacy property.
+
+**What it costs**, recorded in `open-and-notable-topics.md`: fallback buyers land on
+`legacy-productive`, which has no quota rows and is therefore **unlimited**; the plan list shows the
+grandfathered plan's own name and description; and the typed billing offer
+(`etendo.go.billing.offer.*`) can disagree with the Stripe price the checkout actually charges.
 
 ## 7. Backfill
 
 Every tenant carrying the `productive` preference gets one open subscription row on the
 grandfathered `legacy-productive` plan, with Stripe ids copied from its `ETGO_CHECKOUT_REQUEST`
 row where one exists, **and retires that tenant's now-stale `ETGO_TenantPlan` preference in the
-same transaction** (§8). Delivered as `R37-tenant-subscription-backfill` under
-`schema_forge/cli/src/data-fixes/sql/`. Re-running creates zero rows and retires nothing;
+same transaction** (§8). Delivered as `20260924T150000Z__R37-tenant-subscription-backfill.sql`
+under `schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop
+merge, see §7.3. Re-running creates zero rows and retires nothing;
 `@check` converges to 0 for two independent reasons afterwards, since it requires both a
 productive preference (gone) and no open subscription (present).
 
@@ -252,6 +290,17 @@ The guard exists because an error records `FAILED`, which does **not** advance t
 the tenant is retried. Inserting zero rows would record `APPLIED` and lose the tenant forever.
 
 ---
+
+### 7.3 The file date is load-bearing
+
+The runner applies, per tenant, only fixes **strictly newer** than the newest `PROCESSED` fix
+(`run.js`, `<=` skip, no look-back). R37 was authored as `20260918T120000Z`; by the time ETP-5046
+merged, develop carried fixes up to `20260922T130000Z`, one of them
+(`R38-org-legalentity-pointer`) with the *identical* `20260918T120000Z`. On any environment that
+had processed those, R37 would have been skipped silently — no ledger row, no error. It was renamed
+to `20260924T150000Z` before reaching a shared environment (renaming an *unapplied* fix is allowed;
+`sql/README.md` rule 3 forbids it only once applied). The regression test pins it strictly after
+the newest develop fix at merge time.
 
 ## 8. Cutover: per-tenant retirement, not a flag day
 
@@ -312,8 +361,8 @@ prefix makes lexical order == chronological order) and applies, per tenant, only
 newer than that tenant's watermark — the newest timestamp among its `PROCESSED` ledger rows. So
 for any single tenant:
 
-- within one run, R31 (2026-09-01) is always visited before R37 (2026-09-18);
-- once R37 is `PROCESSED` the watermark is `>= 2026-09-18T12:00:00Z`, so R31 is skipped on every
+- within one run, R31 (2026-09-01) is always visited before R37 (2026-09-24);
+- once R37 is `PROCESSED` the watermark is `>= 2026-09-24T15:00:00Z`, so R31 is skipped on every
   later run — **including** the case where R31 itself `FAILED`, because the watermark is a date,
   not a per-fix flag.
 
@@ -338,26 +387,21 @@ by a new dated file, never edited in place.
   fallback that reads it — before the end condition above is met is the one genuinely unsafe
   action left in this ticket.
 
-### 8.4 Known follow-up: `CheckoutRequestStore` leaks its `OBContext`
+### 8.4 `CheckoutRequestStore` restores the caller's `OBContext`
 
-Every method in `CheckoutRequestStore` does `OBContext.setOBContext("0","0","0","0")` plus
-`setAdminMode(true)`, but its `finally` calls only `restorePreviousMode()` — which pops the
-**admin-mode stack, not the context**. The caller's `OBContext` is silently replaced with the
-system one and never put back.
+Every store method used to install the system context and unwind with `restorePreviousMode()`
+alone, which pops the admin-mode stack but not the context. ETP-5045 fixed that with `runAsSystem`
+(capture, run as system, leave admin mode, restore the caller's context — including a `null` one).
+Develop's own copy of that fix arrived through the merge, together with new account-id-scoped
+lookups (`find(requestId, accountId, email)`, `findForAccount`, `findSubscriptionForAccount`,
+`findActiveForAccountAndClientName`, the provider-id finders) that had reintroduced the raw
+install; the merge routes those through `runAsSystem` too, so the store has one context site.
 
-That is harmless where the store was called before this ticket (the pre-stream paywall path).
-It is **not** harmless from `applyPaidUpgradeSideEffects`, which runs *after* `prepareAdminContext`
-mid-onboarding, where every later provisioning step depends on the context it was given.
-
-ETP-5046 works around it rather than changing the store: the subscription path reads the checkout
-request through a helper that captures and restores the caller's `OBContext`, and
-`SubscriptionService` opens a system context **only when `OBContext.getOBContext()` is null** (the
-webhook case) instead of unconditionally. A spec asserts `setOBContext` is never called when the
-caller already has one.
-
-**The store itself should still be fixed** — the workaround protects this ticket's callers, not
-the next one's. Not done here because it touches a path ETP-5046 does not otherwise change.
+ETP-5046's own workaround stays harmless: the subscription path still reads the checkout request
+through a capture-and-restore helper, and `SubscriptionService` opens a system context only when
+`OBContext.getOBContext()` is null.
 
 Out of scope here: usage capture and reporting, overage pricing, quota *evaluation* and
-enforcement (ETP-5051), subscription lifecycle webhooks (ETP-5047), reconciliation (ETP-5048),
-plan change and proration (ETP-5053).
+enforcement (ETP-5051), moving the subscription lifecycle webhooks onto `ETGO_SUBSCRIPTION`
+(ETP-5047 — develop's ETP-5443 applier still writes the preference projection, see
+`open-and-notable-topics.md`), reconciliation (ETP-5048), plan change and proration (ETP-5053).
