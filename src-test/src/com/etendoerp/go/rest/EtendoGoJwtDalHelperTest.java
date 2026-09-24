@@ -555,10 +555,24 @@ class EtendoGoJwtDalHelperTest {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
     private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
+    private MockedStatic<org.openbravo.base.session.OBPropertiesProvider> propertiesMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
+      // buildEnvironmentJson reaches TenantEnvironmentLifecycleService.resolve/evaluateAccess,
+      // which read runtime configuration (GoRuntimeProperties -> OBPropertiesProvider). The FIRST
+      // real OBPropertiesProvider read in a JVM also initialises OBConfigFileProvider, and under
+      // this class's static OBProvider mock that init NPEs silently and leaves
+      // OBConfigFileProvider.fileLocation null for good — every OBBaseTest forked into the same
+      // JVM afterwards fails in initializeDisabledTestCases. So the provider is stubbed here and
+      // the real one is never touched by this class.
+      org.openbravo.base.session.OBPropertiesProvider propertiesProvider =
+          mock(org.openbravo.base.session.OBPropertiesProvider.class);
+      when(propertiesProvider.getOpenbravoProperties()).thenReturn(new java.util.Properties());
+      propertiesMock = mockStatic(org.openbravo.base.session.OBPropertiesProvider.class);
+      propertiesMock.when(org.openbravo.base.session.OBPropertiesProvider::getInstance)
+          .thenReturn(propertiesProvider);
       // The plan and lifecycle reads enter admin mode (ETP-5046 subscription and fallback reads,
       // ETP-5488 lifecycle preferences), which needs no real session in a unit test.
       contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
@@ -570,6 +584,7 @@ class EtendoGoJwtDalHelperTest {
     void restoreOwnerLookup() {
       ownerSupportMock.close();
       contextMock.close();
+      propertiesMock.close();
     }
 
     @Mock private Client client;
