@@ -34,10 +34,12 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -186,8 +188,38 @@ public class NeoFieldFilter {
    *     the DAL entity name (from adTab.getTable().getName())
    * @return a filter instance, which may be inactive if no fields are configured
    */
-  @SuppressWarnings("unchecked")
   public static NeoFieldFilter forEntity(SFEntity sfEntity, String dalEntityName) {
+    return forEntity(sfEntity, dalEntityName, null);
+  }
+
+  /**
+   * Build a field filter for the given SFEntity, additionally allowlisting whatever the caller
+   * explicitly requested via the classic Openbravo {@code _extraProperties}/{@code
+   * additionalProperties} datasource parameter (GET/list only — see ETP-5432 #6/#7).
+   *
+   * <p>{@link #filterGetResponse} otherwise strips ANY key not already known to {@code
+   * ETGO_SF_FIELD} config, because {@link #isMetadataKey} only recognizes keys that start with
+   * {@code _} or {@code $} — a joined companion key like {@code invoice$salesTransaction}
+   * (produced by {@code DataToJsonConverter} for a caller-requested {@code
+   * invoice.salesTransaction} extra property) starts with the FK property name instead, so it
+   * silently fell through the allowlist and was deleted before ever reaching the client. That
+   * made an explicitly client-requested field behave exactly like a client typo — no error, the
+   * value was just always absent — which is indistinguishable from "not sales" once {@code
+   * isSalesRow} defaults falsy on a missing value. A caller that names a property via {@code
+   * _extraProperties} has already opted into seeing it, the same way {@code selectedProperties}
+   * is an opt-in the filter never second-guesses, so this allowlists it the same way {@link
+   * #includeFkIdentifierVariant} allowlists the {@code $_identifier} variant NEO always adds.
+   *
+   * @param queryParams
+   *     the request's raw query parameters (as {@link
+   *     com.etendoerp.go.schemaforge.NeoContext#getQueryParams()} returns them), or {@code null}
+   *     when there is no request context to consult (write paths, tests, etc. — those should
+   *     keep calling the 2-arg overload instead of passing a write request's params here, since
+   *     {@code included} also gates {@link #filterCreateRequest}).
+   */
+  @SuppressWarnings("unchecked")
+  public static NeoFieldFilter forEntity(SFEntity sfEntity, String dalEntityName,
+      Map<String, String> queryParams) {
     if (sfEntity == null) {
       return inactive();
     }
@@ -238,6 +270,10 @@ public class NeoFieldFilter {
       writable.add("active");
 
       addParentColumnMappings(sfEntity, dalEntity, included, writable);
+
+      // ETP-5432 #6/#7: allowlist whatever the caller explicitly asked for via _extraProperties
+      // (GET/list only — see this overload's javadoc) so filterGetResponse does not delete it.
+      includeRequestedExtraProperties(included, queryParams);
 
       // IMP-37: the three blocks above ("id", "active", link-to-parent columns) grant write
       // permission AFTER processFieldMappings has already classified every field, and clause 2
@@ -322,6 +358,33 @@ public class NeoFieldFilter {
     }
     String defaultValue = adColumn.getDefaultValue();
     return defaultValue != null && !defaultValue.trim().isEmpty();
+  }
+
+  /**
+   * Parses the request's {@code _extraProperties} query parameter (if any) and adds the
+   * resulting keys to {@code included}, converted to the flat, {@code $}-joined shape {@code
+   * DataToJsonConverter} actually emits for a dotted DAL path (e.g. request-side
+   * {@code invoice.salesTransaction} → response-side key {@code invoice$salesTransaction}) —
+   * see {@code DataToJsonConverter#replaceDots} and {@code DalUtil#FIELDSEPARATOR}/{@code DOT}.
+   * A caller naming a property this way has explicitly opted into seeing it, so it is allowlisted
+   * unconditionally, the same way {@link #includeFkIdentifierVariant} allowlists {@code
+   * $_identifier}. No-op when {@code queryParams} is {@code null} or carries no such parameter.
+   */
+  private static void includeRequestedExtraProperties(Set<String> included,
+      Map<String, String> queryParams) {
+    if (queryParams == null) {
+      return;
+    }
+    String extraProperties = queryParams.get(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER);
+    if (extraProperties == null || extraProperties.trim().isEmpty()) {
+      return;
+    }
+    for (String extraProperty : extraProperties.split(",")) {
+      String trimmed = extraProperty.trim();
+      if (!trimmed.isEmpty()) {
+        included.add(trimmed.replace(DalUtil.DOT, DalUtil.FIELDSEPARATOR));
+      }
+    }
   }
 
   /**
