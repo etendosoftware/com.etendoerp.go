@@ -38,3 +38,5 @@ sonar-results.md
 
 # Log directory created when log4j cannot resolve CATALINA_BASE (literal path)
 ${env:CATALINA_BASE}/
+.oguard/**
+oguard**
