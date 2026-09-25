@@ -88,7 +88,7 @@ class AuthenticationEntryPointGuardTest {
   static {
     allow("rest/EtendoGoJwtServlet.java", 3,
         "the account surface's single resolver (extractBearerToken), the tenant claims of an "
-            + "already-resolved legacy JWT (resolveTenantSession), and decoding a JWT this class "
+            + "already-resolved legacy JWT (bearerTenantClaims), and decoding a JWT this class "
             + "just minted to copy its context into the session (handleSessionEnvironment)");
     allow("rest/EtendoGoJwtDalHelper.java", 1,
         "the wide account lookup decodes an environment JWT; only resolveAccount reaches it");
@@ -133,7 +133,7 @@ class AuthenticationEntryPointGuardTest {
 
   /** G-03: the only methods of EtendoGoJwtServlet that may read the Bearer header. */
   private static final Set<String> BEARER_READERS_IN_ACCOUNT_SERVLET = new TreeSet<>(Arrays.asList(
-      "hasAnyCredential", "resolveAccount", "resolveTenantSession", "handleEnvironmentLogin"));
+      "hasAnyCredential", "resolveAccount", "bearerTenantClaims", "handleEnvironmentLogin"));
 
   // ============================== G-01 ==============================
 

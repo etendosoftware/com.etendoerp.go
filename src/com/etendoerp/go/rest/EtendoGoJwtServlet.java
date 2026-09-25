@@ -2868,13 +2868,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String clientId = authenticated.sessionRecord == null ? null
         : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
     if (authenticated.sessionRecord == null) {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) clientId = StringUtils.trimToNull(
-            jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
-      } catch (Exception e) {
-        log.debug("Bearer token carries no environment context for checkout", e);
-      }
+      DecodedJWT jwt = bearerTenantClaims(request);
+      if (jwt != null) clientId = StringUtils.trimToNull(
+          jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
     }
     if (clientId == null) return "";
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
@@ -2981,6 +2977,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * The tenant claims of a legacy bearer caller that has no cookie session: the single place this
+   * servlet decodes an inbound bearer to read its environment ({@code resolveTenantSession} and the
+   * checkout's {@code currentSessionClientId} both go through here, so the credential is read in
+   * one spot — see {@code AuthenticationEntryPointGuardTest}). {@code null} when there is no bearer
+   * or it does not decode.
+   */
+  private DecodedJWT bearerTenantClaims(HttpServletRequest request) {
+    try {
+      return SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+    } catch (Exception e) {
+      log.debug("Bearer token carries no environment claims", e);
+      return null;
+    }
+  }
+
+  /**
    * The tenant behind the presented credential.
    *
    * The onboarding endpoints authenticate an ACCOUNT, which on its own does not say which
@@ -3008,14 +3020,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       clientId = authenticated.sessionRecord.getCtxClientId();
       orgId = authenticated.sessionRecord.getCtxOrgId();
     } else {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) {
-          clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
-          orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
-        }
-      } catch (Exception e) {
-        log.debug("Bearer token carries no NEO session claims", e);
+      DecodedJWT jwt = bearerTenantClaims(request);
+      if (jwt != null) {
+        clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
+        orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
       }
     }
     // ETP-4576 — under the cookie session there is no bearer JWT to read claims from, so the
