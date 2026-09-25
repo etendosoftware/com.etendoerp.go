@@ -192,8 +192,10 @@ A tenant's `ETGO_TenantPlan` preference is deleted **at the moment it gains a li
 in `R37`'s `@apply` (same transaction as the INSERT, guarded on an open subscription existing) and
 in `applyPaidUpgradeSideEffects` (on a successful subscription write).
 
-A **transitional read fallback** (`TenantPlanPreferenceFallback`) covers the gap: no open
-subscription → fall back to the preference, so no paying tenant is ever stranded as free. It applies
+A **transitional read fallback** (`TenantPlanPreferenceFallback`) covers the gap: no subscription
+row at all → fall back to the preference, so no paying tenant is ever stranded as free. (Before
+ETP-5047 the trigger was "no *open* row"; since cancellation closes a row, a tenant with only closed
+rows reads as canceled from its latest row instead — `findLatest`, §3.7.) It applies
 to both resolution paths — the single-tenant one and the `EnvironmentPlanCache` bulk one — because
 if only one had it, the environment list and `resolvePlan` would disagree about the same tenant,
 which is worse than the original bug.
@@ -257,7 +259,10 @@ persistence adapter"* — the exact design ETP-5046 exists to retire). Both emit
 `subscriptionStatus` field in the environment payload, with **different value vocabularies**.
 Martin's call (2026-09-21): unify on the table. `TenantEnvironmentLifecycleService.productiveSnapshot()`
 now reads the open subscription row, and `subscriptionStatusOf()` maps its `STATUS` onto the
-access policy's enum.
+access policy's enum. (Since ETP-5047 the method is `rowSnapshot`, and it reads the tenant's
+*latest* row — open, else the most recently closed one — through
+`SubscriptionService.effectiveStatusOf`, which reads a closed row as `canceled` whatever its
+`STATUS` says; see §3.7.)
 
 | `ETGO_SUBSCRIPTION.STATUS` | `EnvironmentAccessPolicy.SubscriptionStatus` |
 |---|---|
@@ -285,7 +290,9 @@ together or they drift apart in silence.
 
 - `ENVIRONMENT_TYPE` stays a preference. It records DEMO versus PRODUCTIVE, which the subscription
   table does not carry, so `applyPaidUpgradeSideEffects` still marks the lifecycle projection
-  whichever way the payment itself was recorded.
+  whichever way the payment itself was recorded. **Since ETP-5047 it no longer decides for a tenant
+  with a row:** any subscription row makes the tenant productive (§3.7), and a row without the
+  marker only logs a WARN (§3.9).
 - The `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences are still read **when the
   tenant has no subscription row at all** (`ETP-5046-TRANSITIONAL-FALLBACK`). The order matters:
   consulting them first would let the access policy and the Subscription Plan Catalog disagree about the same
@@ -405,10 +412,13 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
     from the invoice **lines** on `invoice.paid` (the invoice's own `period_*` looks back one
     period). An event that reports no period leaves it alone; `invoice.payment_failed` never
     writes one.
-  - `LAST_EVENT_AT` — the `created` instant of the last applied lifecycle event. **The row route
-    reads no preference any more**; `ETGO_SubscriptionEventAt` is read and written only for a
-    tenant with no row. A row that predates the column starts with no watermark (the first event
-    after the deploy is never stale); R37 carries the preference over for the tenants it backfills.
+  - `LAST_EVENT_AT` — the `created` instant of the last applied lifecycle event, forward-only.
+    `ETGO_SubscriptionEventAt` is **written** only for a tenant with no row. On the row route it is
+    still **read**, but only as a read-only fallback while the row's `LAST_EVENT_AT` is NULL — a row
+    that predates the column (`TenantEnvironmentLifecycleService.rowState`), the same pattern as
+    `graceAnchorOf` for the old anchor shape — so the first out-of-order event after the deploy is
+    still recognised as stale. The first applied event writes the column and moves the row off the
+    fallback for good; R37 carries the preference into the column for the tenants it backfills.
 - The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the **open**
   row (`applyLifecycleStatus`, which never closes one). **`NONE` and `LEGACY_ENTITLEMENT` have no
   row status, so once a tenant has a row the tool's choice of either is ignored**, and a tenant
@@ -461,7 +471,8 @@ release** — an SPA older than the backend still parses it.
   enforcing unless the flag resolves to `true` (locally `true`/`Y`/`yes`/`1`, case-insensitive;
   anything else, unset or unreadable keeps enforcing); when on, the would-be denial is logged at
   INFO and allowed, and the environment list reports `accessState` as `ALLOWED` for that tenant.
-  See `feature-flags-and-tenant-upgrade.md` §1.
+  See `feature-flags-and-tenant-upgrade.md` §1 — including "Operating environment-access
+  enforcement": deploy order, switching it off, and what support sees for a blocked tenant.
 - **A new tenant servlet must authenticate through `NeoAuthenticator` or
   `JwtAuthUtils.authenticateOrFail`** to inherit the check; one that builds its own `OBContext`
   from a session or JWT skips it silently. Pay-path endpoints are the exception and must stay
@@ -492,7 +503,7 @@ changed for this** (reviewed and declined in ETP-5047): it is already written, a
 to it would widen a fix whose scope is the subscription backfill. Converges the WARN count to zero;
 the per-tenant WARN is the operator-visible worklist until then.
 
-### 🟠 3.10 A JWT minted before the block keeps working on Copilot until it expires
+### 🔴 3.10 A JWT minted before the block keeps working on Copilot until it expires
 
 The environment-access check (§3.8) runs where a request enters a tenant through this module: NEO,
 MCP, the `JwtAuthUtils` servlets, and `GET /sws/go/login`, which refuses to mint a new token for a
@@ -511,7 +522,7 @@ lifetime so the window closes sooner — cheaper, but it bounds the leak rather 
 affects every client of those tokens. Until then a blocked tenant can keep using Copilot for at
 most one token lifetime after the block.
 
-### 🟠 3.11 Two R37 edge cases found in ETP-5047 QA
+### 🔴 3.11 Two R37 edge cases found in ETP-5047 QA
 
 - **`past_due` with no grace anchor means zero grace — blocked at once.** The access policy grants
   grace only from a non-null anchor (`EnvironmentAccessPolicy.evaluate`), and
@@ -737,10 +748,14 @@ Re-pricing a plan does **not** re-price existing subscribers — the subscriptio
 current row (`END_DATE`) and inserts a successor, preserving price history. `PENDING_PLAN_ID` and
 `PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
 
-### 🟠 5.4 Known gaps: no plan-change path, a partial lifecycle on the table
+### 🟠 5.4 Known gap: no plan-change path
 
-- **No plan change exists.** `SubscriptionService` can open a row and read it; nothing closes one
-  and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
+(The second gap this section listed — a partial lifecycle on the table — was closed by ETP-5047,
+§3.7.)
+
+- **No plan change exists.** `SubscriptionService` can open a row, read it and — since ETP-5047 —
+  close it on cancellation (and close a stale canceled row before a re-subscription opens a fresh
+  one), but nothing closes a row to open a *successor on another plan*. A tenant cannot move between plans — including a legacy-fallback buyer
   moving to the first real plan — until ETP-5053. `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay
   unread.
 
@@ -854,4 +869,10 @@ scope**. Nobody delivers it now. **To decide:** which ticket owns it — it also
 - `plans/2026-09-15-etp-5050-usage-measurement-design.md` — the usage engine design
 - `schema_forge/docs/usage-measurement.md` — §4 is the full flow-versus-stock analysis
 - `schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md` — the governing PRD
-- `feature-flags-and-tenant-upgrade.md` — paywall, plan marker, transitional fallback
+- `feature-flags-and-tenant-upgrade.md` — paywall, plan marker, transitional fallback, the
+  environment-access kill switch and how to operate it (§1, "Operating environment-access
+  enforcement")
+- `schema_forge/docs/stripe-local-testing.md` — lifecycle webhooks, the 402 body and the kill switch
+  exercised locally (matrix SF-STRIPE-LOCAL-10…26)
+- `schema_forge/docs/plans/2026-09-22-etp-5443-subscription-lifecycle-design.md` — the ETP-5443
+  lifecycle design; its storage, correlation and enforcement statements are extended by §3.7/§3.8

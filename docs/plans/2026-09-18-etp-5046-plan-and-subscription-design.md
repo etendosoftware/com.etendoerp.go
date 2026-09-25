@@ -90,6 +90,13 @@ quota row is how an operator *restores* the unlimited state.
 `TenantPlanService.resolvePlan` returns `productive` when the tenant has an open subscription
 whose status is `active` or `past_due`. It does **not** look at the plan's price.
 
+> **ETP-5047.** A cancellation now closes the row, so `resolvePlan` reads the tenant's *latest* row
+> (open, else the most recently closed, `SubscriptionService.findLatest`) and a closed row reads as
+> `canceled` — `free` — whatever its `STATUS` says; the preference fallback answers only for a
+> tenant with no row at all. The rule above is unchanged in effect: only an open `active` /
+> `past_due` row is productive for the plan. For *access*, any row at all makes the environment
+> productive, whatever its `ETGO_EnvironmentType` marker says (`open-and-notable-topics.md` §3.7).
+
 The grandfathered `legacy-productive` plan has **no** `PROVIDER_PRICE_ID` by design. Keying
 "productive" on the presence of a price id would flip every backfilled tenant to free the instant
 it shipped. This is the most dangerous possible mis-implementation of this ticket.
@@ -113,7 +120,9 @@ CREATE UNIQUE INDEX etgo_sub_open_envclient_uq
 ```
 
 ETP-5047 correlates inbound webhooks by `STRIPE_SUBSCRIPTION_ID` and must resolve to the **open**
-row (`END_DATE IS NULL`), not to "the" row.
+row (`END_DATE IS NULL`), not to "the" row. (Implemented in ETP-5047 as
+`TenantEnvironmentLifecycleService.targetForSubscription`; `open-and-notable-topics.md` §3.7 has
+the full resolution order.)
 
 ---
 
@@ -341,9 +350,11 @@ the end of the paid period by 3 hours). The runner is deliberately not changed f
 
 Unlike the plan marker (§7.1), both lifecycle preferences are **owned** by the tenant
 (`AD_CLIENT_ID = tenant`, written by `setPreferenceValue` with `setClient(tenant)` and read back
-through `PROPERTY_CLIENT`), so R37 reads them by `ad_client_id`. It does not delete them:
-`ETGO_SubscriptionEventAt` (the webhook ordering watermark) stays a preference by decision, and the
-status/due-at pair is simply no longer read once the row exists. Pinned by
+through `PROPERTY_CLIENT`), so R37 reads them by `ad_client_id`. It does not delete them: the
+status/due-at pair is simply no longer read once the row exists, and `ETGO_SubscriptionEventAt` is
+read only as the fallback of a row whose `LAST_EVENT_AT` is still NULL. (Before ETP-5047 the
+watermark stayed a preference by decision; ETP-5047 gave it the `LAST_EVENT_AT` column, and R37
+now copies it there.) Pinned by
 `SubscriptionBackfillIdempotencyIntegrationTest` (runs the real SQL) and the R37 source test.
 
 ### 7.1 The preference is NOT scoped by `AD_CLIENT_ID`
@@ -467,7 +478,9 @@ by a new dated file, never edited in place.
 - **Run the data-fix after the deploy, not before.** A tenant provisioned between the schema
   landing and the code shipping gets a preference and no subscription, and reads as free. The
   backfill's `@check` catches exactly that tenant, because it keys on the preference rather than
-  on a date.
+  on a date. **Since ETP-5047 "the deploy" is the ETP-5047 deploy:** R37 writes `GRACE_ANCHOR` and
+  `LAST_EVENT_AT`, columns ETP-5047 adds, so run earlier it fails on every tenant
+  (`open-and-notable-topics.md` §2.3).
 - **`markProductive` survives until Phase F**, because it is now the safety net for the one case
   that still needs it: a paid upgrade whose subscription write failed. Deleting it — or the
   fallback that reads it — before the end condition above is met is the one genuinely unsafe
