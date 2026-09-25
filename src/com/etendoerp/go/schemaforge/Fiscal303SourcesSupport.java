@@ -160,12 +160,13 @@ class Fiscal303SourcesSupport {
       while (sr.next()) {
         InvoiceTax it = (InvoiceTax) sr.get(0);
         Invoice inv   = it.getInvoice();
-        // `boxes` is the rate's NORMAL-operation box pair (rateToBoxes is built once from the tax
-        // rate's static category, with no awareness of whether THIS invoice is corrective);
-        // `displayBoxes` redirects it through the corrective family when the invoice itself is
-        // corrective — see correctiveBoxesFor/isCorrectiveInvoiceTax. displayBoxes is what both
-        // the grouping key and the row's visible "Casillas"/"type" are derived from, since it is
-        // where the money actually lands on the aggregate totals.
+        // The lookup below resolves the rate's normal-operation box pair, built once from the
+        // tax rate's static category and with no awareness of whether this particular invoice
+        // is corrective. Right after, that pair is routed through the corrective-family lookup
+        // whenever the invoice itself turns out to be corrective, producing the pair actually
+        // used for display. That routed pair is what both the grouping key and the row's visible
+        // box list and type end up derived from, since it is where the money actually lands on
+        // the aggregate totals.
         List<Integer> boxes = rateToBoxes.get(it.getTax().getId());
         if (boxes != null) {
           List<Integer> displayBoxes =
