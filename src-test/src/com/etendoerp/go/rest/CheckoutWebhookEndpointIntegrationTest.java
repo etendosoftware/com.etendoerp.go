@@ -18,6 +18,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -758,6 +759,13 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
         ((Timestamp) subscriptionColumn(subscriptionId, "CURRENT_PERIOD_END")).getTime());
     assertEquals(created * 1000L,
         ((Timestamp) subscriptionColumn(subscriptionId, "LAST_EVENT_AT")).getTime());
+    // Review fix W4 — the ledger records the same line period the row got, never the invoice's
+    // own look-back period_*.
+    JSONObject summary = new JSONObject((String) rawEvent(eventId, "PAYLOAD_SUMMARY"));
+    assertEquals(lineStart, summary.getLong("service_period_start"));
+    assertEquals(lineEnd, summary.getLong("service_period_end"));
+    assertFalse(summary.has("period_start"));
+    assertFalse(summary.has("period_end"));
   }
 
   /** ETP-5047 — {@code customer.subscription.updated} writes the provider billing period. */

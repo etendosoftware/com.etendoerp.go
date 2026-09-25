@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.logging.log4j.Level;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -424,14 +425,65 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   }
 
   @Test
-  public void aRowWithNoWatermarkHasNoneEvenWhenThePreferenceHoldsOne() {
-    // A row that predates LAST_EVENT_AT starts with no watermark: the first event after the deploy
-    // is never stale. The preference is not consulted as a stand-in.
+  public void aRowWithNoWatermarkFallsBackToThePreferenceWatermark() {
+    // Review fix W1 — a row written before LAST_EVENT_AT existed has its watermark in the
+    // ETGO_SubscriptionEventAt preference. Reading the column alone would let the first
+    // out-of-order event after the deploy pass as fresh, so a null column falls back, read-only.
     Fixture fixture = new Fixture().withOpenRow("active", null)
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
             EVENT_AT.toString());
 
-    assertNull(fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).lastEventAt());
+    assertEquals(EVENT_AT,
+        fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).lastEventAt());
+  }
+
+  @Test
+  public void anOlderEventIsStaleAgainstThePreferenceWatermarkOfARowWithoutOne()
+      throws Exception {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            EVENT_AT.toString());
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForSubscription(STRIPE_SUBSCRIPTION));
+    SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
+        SubscriptionLifecycleApplier.INVOICE_PAYMENT_FAILED,
+        paymentFailed(EVENT_AT.minusSeconds(60L)), target.storedState());
+
+    assertEquals(EVENT_AT, target.storedState().lastEventAt());
+    assertTrue(outcome.isIgnored());
+    assertEquals("stale event", outcome.reason());
+  }
+
+  @Test
+  public void aRowWithAWatermarkNeverReadsThePreference() {
+    Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            "2020-01-01T00:00:00Z");
+
+    assertEquals(EVENT_AT,
+        fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).lastEventAt());
+    assertFalse(fixture.queriedPreferenceAttributes.contains(
+        TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
+  }
+
+  @Test
+  public void theWatermarkFallbackIsReadOnlyTheWriteGoesToTheRow() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            EVENT_AT.toString());
+    Instant newer = EVENT_AT.plusSeconds(60L);
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR);
+
+    assertTrue(fixture.run(() -> service.applySubscriptionEvent(
+        service.targetForSubscription(STRIPE_SUBSCRIPTION), outcome, newer)));
+
+    verify(fixture.row).setLastEventAt(Date.from(newer));
+    assertTrue("the row route never writes the preference watermark",
+        fixture.savedPreferenceAttributes.isEmpty());
   }
 
   @Test
@@ -555,6 +607,157 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
         fixture.run(() -> service.resolve(CLIENT_ID)).getSubscriptionStatus());
+  }
+
+  // ===================== review fix B1: any row makes the tenant productive =====================
+
+  private static final String LEGACY_ACTIVATION = "2026-01-01T00:00:00Z";
+
+  /** A client id no other spec used: the missing-marker WARN is remembered per tenant and JVM. */
+  private static String freshClientId() {
+    return "B1-" + java.util.UUID.randomUUID();
+  }
+
+  private static void assertNeverEnteredTheDemoPath(Fixture fixture) {
+    assertFalse("the demo trial start must not even be read",
+        fixture.queriedPreferenceAttributes.contains(
+            TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE));
+    assertFalse("ensureLegacyTransitionStart must never be reached",
+        fixture.queriedPreferenceAttributes.contains(
+            TenantEnvironmentLifecycleService.LEGACY_TRANSITION_STARTED_ATTRIBUTE));
+    assertTrue("no preference may be written", fixture.savedPreferenceAttributes.isEmpty());
+    verify(fixture.dal, never()).save(any());
+  }
+
+  private <T> T withLegacyActivation(java.util.function.Supplier<T> body) {
+    // With an activation instant configured, a tenant falling into the legacy path WOULD be given
+    // a transition start: the specs below prove that path is never reached.
+    System.setProperty(TenantEnvironmentLifecycleService.LEGACY_TRANSITION_ACTIVATION_PROPERTY,
+        LEGACY_ACTIVATION);
+    try {
+      return body.get();
+    } finally {
+      System.clearProperty(TenantEnvironmentLifecycleService.LEGACY_TRANSITION_ACTIVATION_PROPERTY);
+    }
+  }
+
+  @Test
+  public void aClosedCanceledRowWithoutTheMarkerIsRefusedAsSubscriptionRequired() {
+    String clientId = freshClientId();
+    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT);
+
+    EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
+        () -> fixture.run(() -> service.evaluateAccess(clientId, true, EVENT_AT)));
+
+    assertEquals(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED, decision);
+    assertNeverEnteredTheDemoPath(fixture);
+    verify(tenantPlanService, never()).resolvePlan(anyString());
+  }
+
+  @Test
+  public void anOpenCanceledRowAsR37WritesItWithoutTheMarkerIsRefusedAsSubscriptionRequired() {
+    // R37 maps NONE / EXPIRED to an OPEN 'canceled' row, and the tenant may carry neither the
+    // ETGO_EnvironmentType marker nor (retired by R37 itself) ETGO_TenantPlan.
+    String clientId = freshClientId();
+    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture().withOpenRow("canceled", null);
+
+    EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
+        () -> fixture.run(() -> service.evaluateAccess(clientId, true, EVENT_AT)));
+
+    assertEquals(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED, decision);
+    assertNeverEnteredTheDemoPath(fixture);
+  }
+
+  @Test
+  public void theDemoPathIsReachedForATenantWithNoRowAndNoMarker() {
+    // Control for the two specs above: without a row the same tenant does take the demo path,
+    // so "never read DEMO_TRIAL_STARTED" there is not vacuous.
+    String clientId = freshClientId();
+    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture();
+
+    fixture.run(() -> service.resolve(clientId));
+
+    assertTrue(fixture.queriedPreferenceAttributes.contains(
+        TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE));
+  }
+
+  @Test
+  public void aMissingMarkerIsReportedOnceATenantAcrossResolves() {
+    String clientId = freshClientId();
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT);
+    TestLogCapture warnings =
+        TestLogCapture.attachTo(TenantEnvironmentLifecycleService.class, Level.WARN);
+    try {
+      fixture.run(() -> service.resolve(clientId));
+      fixture.run(() -> service.resolve(clientId));
+    } finally {
+      warnings.detach();
+    }
+
+    List<String> lines = new ArrayList<>();
+    for (String line : warnings.messagesAt(Level.WARN)) {
+      if (line.contains(clientId)) {
+        lines.add(line);
+      }
+    }
+    assertEquals(lines.toString(), 1, lines.size());
+    assertTrue(lines.get(0), lines.get(0).contains(
+        TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE));
+  }
+
+  @Test
+  public void aTenantWithTheProductiveMarkerIsNeverReported() {
+    String clientId = freshClientId();
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
+        .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+            TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE);
+    TestLogCapture warnings =
+        TestLogCapture.attachTo(TenantEnvironmentLifecycleService.class, Level.WARN);
+    try {
+      fixture.run(() -> service.resolve(clientId));
+      fixture.run(() -> service.resolve(clientId));
+    } finally {
+      warnings.detach();
+    }
+
+    for (String line : warnings.messagesAt(Level.WARN)) {
+      assertFalse(line, line.contains(clientId));
+    }
+  }
+
+  @Test
+  public void anActiveRowWithoutTheMarkerIsAllowed() {
+    String clientId = freshClientId();
+    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture().withOpenRow("active", null);
+
+    EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
+        () -> fixture.run(() -> service.evaluateAccess(clientId, true, EVENT_AT)));
+
+    assertEquals(EnvironmentAccessPolicy.Decision.ALLOWED, decision);
+    assertNeverEnteredTheDemoPath(fixture);
+  }
+
+  @Test
+  public void aTenantWithNoRowButTheProductiveMarkerStillReadsThePreferenceSnapshot() {
+    String clientId = freshClientId();
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+            TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "PAST_DUE")
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+            ANCHOR.toString());
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        fixture.run(() -> service.resolve(clientId));
+
+    assertEquals(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, snapshot.getType());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
+        snapshot.getSubscriptionStatus());
+    assertEquals(ANCHOR, snapshot.getRenewalDueAt());
   }
 
   // ===================== ordering watermark on the row route =====================
