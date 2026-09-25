@@ -123,6 +123,7 @@ row (`END_DATE IS NULL`), not to "the" row.
 |---|---|
 | `START_DATE` / `END_DATE` | Lifetime of **this subscription record**. `END_DATE` null ⇒ this is the open row. A plan change closes one row and opens the next; since ETP-5047 a cancellation closes it too, and a closed row reads as `canceled` whatever its `STATUS` says. |
 | `CURRENT_PERIOD_START` / `CURRENT_PERIOD_END` | Stripe's rolling monthly billing window. Moves every cycle. |
+| `GRACE_ANCHOR` / `LAST_EVENT_AT` | ETP-5047. The end of the paid period the payment grace counts from (set only while `past_due`; it lived in `CURRENT_PERIOD_END` before ETP-5047), and the `created` instant of the last applied lifecycle event (the ordering watermark). |
 | `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` | ETP-5053 only. Shipped nullable and hidden; nothing in ETP-5046 reads or writes them. |
 
 Do not conflate the first two. The record lifetime is not the billing period.
@@ -322,12 +323,14 @@ The rule behind every line: **the backfill preserves the tenant's current effect
 never improves it.** `NONE` locks a tenant out, so it becomes the row status that still locks it
 out; mapping it to `active` would silently re-open that tenant.
 
-`CURRENT_PERIOD_END` comes from `ETGO_SubscriptionDueAt`, cast only when the value has the ISO-8601
-UTC shape `Instant.toString()` writes; anything else becomes NULL, mirroring the Java reader's
-"ignore an invalid due timestamp", so a cosmetic value never fails a tenant. `CURRENT_PERIOD_START`
-stays NULL, so `ETGO_SUB_PERIOD_CHK` can never reject the insert.
+`GRACE_ANCHOR` (ETP-5047; `CURRENT_PERIOD_END` before it) comes from `ETGO_SubscriptionDueAt`, and
+`LAST_EVENT_AT` (ETP-5047) from `ETGO_SubscriptionEventAt`, each cast only when the value has the
+ISO-8601 UTC shape `Instant.toString()` writes; anything else becomes NULL, mirroring the Java
+reader's "ignore an invalid due timestamp", so a cosmetic value never fails a tenant. The billing
+period (`CURRENT_PERIOD_START/END`) stays NULL, so `ETGO_SUB_PERIOD_CHK` can never reject the
+insert.
 
-**Time zone assumption.** `CURRENT_PERIOD_END` is a `TIMESTAMP` without zone. The
+**Time zone assumption.** `GRACE_ANCHOR` is a `TIMESTAMP` without zone. The
 `CAST(... AS timestamptz)` fixes the instant, and storing it renders that instant in the **database
 session's** time zone (the server `timezone` setting, for the data-fix runner); Java reads it back
 through `Date`/`Timestamp` in the **Tomcat JVM's** default zone. The two agree only when the DB

@@ -200,8 +200,7 @@ public class TenantEnvironmentLifecycleService {
     Optional<Subscription> latestSubscription = subscriptionService.findLatest(clientId);
     if (latestSubscription.isPresent()) {
       Subscription subscription = latestSubscription.get();
-      Instant renewalDueAt = subscription.getCurrentPeriodEnd() == null ? null
-          : subscription.getCurrentPeriodEnd().toInstant();
+      Instant renewalDueAt = SubscriptionService.graceAnchorOf(subscription);
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
           subscriptionStatusOf(SubscriptionService.effectiveStatusOf(subscription)), renewalDueAt,
           false);
@@ -295,7 +294,7 @@ public class TenantEnvironmentLifecycleService {
     }
     Subscription subscription = row.get();
     String clientId = subscription.getEnvironmentClient().getId();
-    return LifecycleTarget.row(clientId, subscription, rowState(clientId, subscription));
+    return LifecycleTarget.row(clientId, subscription, rowState(subscription));
   }
 
   /**
@@ -341,21 +340,25 @@ public class TenantEnvironmentLifecycleService {
     if (otherSubscription) {
       return LifecycleTarget.ignored(clientId, "event for another subscription");
     }
-    return LifecycleTarget.row(clientId, subscription, rowState(clientId, subscription));
-  }
-
-  private SubscriptionLifecycleApplier.StoredState rowState(String clientId,
-      Subscription subscription) {
-    return new SubscriptionLifecycleApplier.StoredState(
-        subscriptionStatusOf(subscription.getSubscriptionStatus()),
-        subscription.getCurrentPeriodEnd() == null ? null
-            : subscription.getCurrentPeriodEnd().toInstant(),
-        readEventWatermark(clientId));
+    return LifecycleTarget.row(clientId, subscription, rowState(subscription));
   }
 
   /**
-   * The ordering watermark: the provider {@code created} instant of the last applied lifecycle
-   * event. Still the {@code ETGO_SubscriptionEventAt} preference on both routes.
+   * The stored state of a row target, read from the row alone (ETP-5047): status, the grace
+   * anchor ({@code GRACE_ANCHOR}, with the pre-split fallback of
+   * {@link SubscriptionService#graceAnchorOf}) and the ordering watermark
+   * ({@code LAST_EVENT_AT}). The row route reads no preference.
+   */
+  private static SubscriptionLifecycleApplier.StoredState rowState(Subscription subscription) {
+    return new SubscriptionLifecycleApplier.StoredState(
+        subscriptionStatusOf(subscription.getSubscriptionStatus()),
+        SubscriptionService.graceAnchorOf(subscription),
+        SubscriptionService.lastEventAtOf(subscription));
+  }
+
+  /**
+   * The ordering watermark of a tenant with no subscription row: the
+   * {@code ETGO_SubscriptionEventAt} preference ({@code ETP-5046-TRANSITIONAL-FALLBACK}).
    */
   private Instant readEventWatermark(String clientId) {
     return parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId));
@@ -365,8 +368,9 @@ public class TenantEnvironmentLifecycleService {
    * ETP-5047 — stores an applied lifecycle outcome where {@code target} says it belongs, together
    * with the event's ordering watermark.
    *
-   * <p>A row target is written through {@link SubscriptionService#applyLifecycleOutcome}, which
-   * also closes the row on a terminating event; a preference target keeps the
+   * <p>A row target is written through {@link SubscriptionService#applyLifecycleOutcome} — status,
+   * {@code GRACE_ANCHOR}, the billing period, the {@code LAST_EVENT_AT} watermark, and the close on
+   * a terminating event, all on the row; a preference target keeps the
    * {@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt} projection
    * ({@code ETP-5046-TRANSITIONAL-FALLBACK}). Writing only one store per tenant is what keeps the
    * two from disagreeing.
@@ -378,27 +382,32 @@ public class TenantEnvironmentLifecycleService {
    *     {@link #targetForTenant}
    * @param outcome an applied outcome
    * @param eventAt the event's provider {@code created} instant; null leaves the watermark as is
-   * @return true when the outcome was stored; false when the status write failed (logged). A
-   *     failing watermark write throws instead, so the caller rolls back and the provider retries.
+   * @return true when the outcome was stored; false when the write failed (logged). On the
+   *     preference route a failing watermark write throws instead, so the caller rolls back and
+   *     the provider retries.
    */
   public boolean applySubscriptionEvent(LifecycleTarget target, SubscriptionEventOutcome outcome,
       Instant eventAt) {
     if (target == null || target.isIgnored() || outcome == null || outcome.isIgnored()) {
       return false;
     }
-    if (!storeOutcome(target, outcome)) {
+    if (!storeOutcome(target, outcome, eventAt)) {
       return false;
     }
-    // Outside the status write's catch on purpose: a watermark that cannot be written propagates,
-    // so the webhook answers 500 and the provider redelivers, as before ETP-5047.
-    recordSubscriptionEventAt(target.clientId(), eventAt);
+    if (target.subscription() == null) {
+      // The preference route's watermark. Outside the status write's catch on purpose: a
+      // watermark that cannot be written propagates, so the webhook answers 500 and the provider
+      // redelivers. On the row route the watermark is a column of the same row write.
+      recordSubscriptionEventAt(target.clientId(), eventAt);
+    }
     return true;
   }
 
-  private boolean storeOutcome(LifecycleTarget target, SubscriptionEventOutcome outcome) {
+  private boolean storeOutcome(LifecycleTarget target, SubscriptionEventOutcome outcome,
+      Instant eventAt) {
     try {
       if (target.subscription() != null) {
-        subscriptionService.applyLifecycleOutcome(target.subscription(), outcome);
+        subscriptionService.applyLifecycleOutcome(target.subscription(), outcome, eventAt);
         return true;
       }
       Client client = OBDal.getInstance().get(Client.class, target.clientId());

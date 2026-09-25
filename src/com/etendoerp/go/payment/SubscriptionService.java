@@ -417,7 +417,7 @@ public class SubscriptionService {
    *       {@code EXPIRED → canceled}. This method never closes the row; the webhook uses
    *       {@link #applyLifecycleOutcome}, which does on a terminating event. It stays for the
    *       development lifecycle tool, which must be able to flip a tenant back.</li>
-   *   <li>{@code CURRENT_PERIOD_END}: the outcome's grace anchor — for {@code PAST_DUE} the end of
+   *   <li>{@code GRACE_ANCHOR}: the outcome's grace anchor — for {@code PAST_DUE} the end of
    *       the period the customer already paid for, which is what the access policy counts the
    *       grace days from. {@code null} clears it, exactly as it clears the preference projection's
    *       due date, so both stores produce the same access decision.</li>
@@ -457,8 +457,11 @@ public class SubscriptionService {
    * webhook resolved by {@code STRIPE_SUBSCRIPTION_ID} (or through the checkout request), rather
    * than "whichever row is open for the tenant".
    *
-   * <p>Writes {@code STATUS} and the grace anchor exactly like {@link #applyLifecycleStatus}, and
-   * additionally closes the row ({@code END_DATE}) when the outcome terminates the subscription
+   * <p>Writes {@code STATUS} and {@code GRACE_ANCHOR} exactly like {@link #applyLifecycleStatus};
+   * the provider billing period into {@code CURRENT_PERIOD_START/END} when the event reports one
+   * (an event that reports none leaves the stored period alone); the event's {@code created}
+   * instant into {@code LAST_EVENT_AT}, the ordering watermark; and closes the row
+   * ({@code END_DATE}) when the outcome terminates the subscription
    * ({@code customer.subscription.deleted}, or an update to Stripe's terminal {@code canceled}).
    * A closed canceled row still answers for the tenant — {@link #findLatest} — so the access
    * policy keeps reading it as {@code EXPIRED}, and the next purchase opens a fresh row.
@@ -467,13 +470,17 @@ public class SubscriptionService {
    *
    * @param subscription the row to update, never null
    * @param outcome an applied outcome ({@code CURRENT}, {@code PAST_DUE} or {@code EXPIRED})
+   * @param eventAt the event's provider {@code created} instant; null leaves the watermark as is
    * @throws IllegalArgumentException for a status no lifecycle event produces
    */
-  public void applyLifecycleOutcome(Subscription subscription, SubscriptionEventOutcome outcome) {
+  public void applyLifecycleOutcome(Subscription subscription, SubscriptionEventOutcome outcome,
+      Instant eventAt) {
     String storedStatus = storedStatusOf(outcome.status());
     OBContext.setAdminMode(true);
     try {
       writeStatus(subscription, storedStatus, outcome.dueAt());
+      writePeriod(subscription, outcome);
+      writeEventWatermark(subscription, eventAt);
       if (outcome.closesSubscription() && subscription.getEndDate() == null) {
         close(subscription, outcome.endedAt());
       }
@@ -485,17 +492,82 @@ public class SubscriptionService {
     }
   }
 
+  /**
+   * ETP-5047 — {@code STATUS} and the grace anchor. The anchor has its own column,
+   * {@code GRACE_ANCHOR}; before ETP-5047 it lived in {@code CURRENT_PERIOD_END}, which now holds
+   * the provider billing period only. {@code null} clears the anchor.
+   */
   private static void writeStatus(Subscription subscription, String storedStatus,
       Instant graceAnchor) {
     subscription.setSubscriptionStatus(storedStatus);
-    Date periodEnd = graceAnchor == null ? null : Date.from(graceAnchor);
-    if (periodEnd != null && subscription.getCurrentPeriodStart() != null
-        && periodEnd.before(subscription.getCurrentPeriodStart())) {
-      // ETGO_SUB_PERIOD_CHK: a start after the anchor would reject the whole event. The start is
-      // not written by anything today, so dropping it loses nothing the policy reads.
-      subscription.setCurrentPeriodStart(null);
+    subscription.setGraceAnchor(graceAnchor == null ? null : Date.from(graceAnchor));
+  }
+
+  /**
+   * ETP-5047 — the provider billing period, written as a pair so {@code ETGO_SUB_PERIOD_CHK}
+   * ({@code END >= START}) always holds; {@link SubscriptionEventOutcome#withPeriod} only carries
+   * a whole, ordered period.
+   */
+  private static void writePeriod(Subscription subscription, SubscriptionEventOutcome outcome) {
+    if (outcome.periodStart() == null || outcome.periodEnd() == null) {
+      return;
     }
-    subscription.setCurrentPeriodEnd(periodEnd);
+    subscription.setCurrentPeriodStart(Date.from(outcome.periodStart()));
+    subscription.setCurrentPeriodEnd(Date.from(outcome.periodEnd()));
+  }
+
+  /**
+   * ETP-5047 — the ordering watermark on the row. It only moves forward: the applier already
+   * ignores an older event as stale, and an event from the same second must not move it back.
+   */
+  private static void writeEventWatermark(Subscription subscription, Instant eventAt) {
+    if (eventAt == null) {
+      return;
+    }
+    Date stored = subscription.getLastEventAt();
+    if (stored == null || stored.toInstant().isBefore(eventAt)) {
+      subscription.setLastEventAt(Date.from(eventAt));
+    }
+  }
+
+  /**
+   * ETP-5047 — the grace anchor the access policy counts the grace days from.
+   *
+   * <p>{@code GRACE_ANCHOR} when set. Otherwise, for a {@code past_due} row in the pre-ETP-5047
+   * shape — anchor in {@code CURRENT_PERIOD_END}, {@code CURRENT_PERIOD_START} null, as the old
+   * lifecycle write and the R37 backfill left it — {@code CURRENT_PERIOD_END}. Without that
+   * fallback every such tenant would read as past due with no anchor, which the policy treats as
+   * zero grace: blocked on deploy. The new write never produces that shape (a period is always
+   * written as a pair, a past-due outcome always carries an anchor), so the fallback only ever
+   * sees old data, and the first lifecycle event moves the row off it.
+   *
+   * @param subscription a subscription row, may be null
+   * @return the anchor, or null when the row has none
+   */
+  public static Instant graceAnchorOf(Subscription subscription) {
+    if (subscription == null) {
+      return null;
+    }
+    if (subscription.getGraceAnchor() != null) {
+      return subscription.getGraceAnchor().toInstant();
+    }
+    boolean legacyShape = STATUS_PAST_DUE.equalsIgnoreCase(
+        StringUtils.trimToEmpty(effectiveStatusOf(subscription)))
+        && subscription.getCurrentPeriodStart() == null
+        && subscription.getCurrentPeriodEnd() != null;
+    return legacyShape ? subscription.getCurrentPeriodEnd().toInstant() : null;
+  }
+
+  /**
+   * ETP-5047 — the provider {@code created} instant of the last lifecycle event applied to this
+   * row, or null.
+   *
+   * @param subscription a subscription row, may be null
+   * @return the watermark, or null
+   */
+  public static Instant lastEventAtOf(Subscription subscription) {
+    return subscription == null || subscription.getLastEventAt() == null ? null
+        : subscription.getLastEventAt().toInstant();
   }
 
   /**

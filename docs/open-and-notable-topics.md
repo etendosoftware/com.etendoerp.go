@@ -108,6 +108,11 @@ afterwards.
 The transitional fallback (§3.2) means this ordering is no longer *load-bearing for uptime*, only
 for completeness.
 
+**Since ETP-5047 "the deploy" means the ETP-5047 deploy.** R37 now inserts `GRACE_ANCHOR` and
+`LAST_EVENT_AT`, columns ETP-5047 adds; run before them it fails on every tenant (an error, which
+the runner retries — not a silent skip). If an environment already ran the pre-ETP-5047 R37, its
+rows are read through the `GRACE_ANCHOR` fallback (§3.7) and nothing needs re-running.
+
 ### 🟠 2.4 The sandbox attestation is per-environment and blocks merge
 
 `R37`'s `@report` carries the verbatim outcome of a manual pre-check: *re-verify that production
@@ -351,8 +356,10 @@ Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice
      subscription) or `no open subscription row` (the first event of a new purchase, before
      onboarding opens its row). Neither may revive or overwrite anything.
 
-The row gets `STATUS` (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`) and
-`CURRENT_PERIOD_END` (the applier's grace anchor; `null` clears it). `readSubscriptionState`,
+The row gets `STATUS` (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`),
+`GRACE_ANCHOR` (the applier's grace anchor; `null` clears it), the Stripe billing period in
+`CURRENT_PERIOD_START/END` when the event reports one, and `LAST_EVENT_AT` (the ordering
+watermark, forward-only) — see "Three columns, three jobs" below. `readSubscriptionState`,
 `resolve` and `TenantPlanService.resolvePlan` read the same row, so the access policy, the plan and
 the environment list agree. Every read runs in admin mode (ETP-5488; the NEO check runs as the
 calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`).
@@ -372,15 +379,25 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   event was lost), `openSubscription` closes it and flushes before inserting — Hibernate runs
   inserts before updates, and `etgo_sub_open_envclient_uq` would otherwise reject the new row.
   ETP-5053 closes a row to open its successor with the same flush-first rule.
-- **Still open — the event-ordering watermark is a preference on both routes**
-  (`ETGO_SubscriptionEventAt`). ETP-5047 planned a `LAST_EVENT_AT` column so the row route reads
-  no preference; it is **not landed** (the AD column could not be deployed in the ETP-5047
-  session). Until then the row route reads this one preference.
-- **Still open — `CURRENT_PERIOD_END` on the row means "grace anchor"**, not Stripe's billing
-  period. The applier already extracts the real period (`SubscriptionEventOutcome.periodStart/End`:
-  the subscription or its first item on `customer.subscription.*`, the invoice lines on
-  `invoice.paid`), but nothing writes it until the anchor has its own column (`GRACE_ANCHOR`, not
-  landed — same reason). §5.5.
+- **Three columns, three jobs (ETP-5047).**
+  - `GRACE_ANCHOR` — the end of the period the customer already paid for, set only while
+    `past_due`; the access policy counts the grace days from it. Before ETP-5047 it lived in
+    `CURRENT_PERIOD_END`. **Old-shape rows still work:** `SubscriptionService.graceAnchorOf`
+    falls back to `CURRENT_PERIOD_END` for a `past_due` row with no `GRACE_ANCHOR` and no
+    `CURRENT_PERIOD_START` — the shape the old write and a pre-ETP-5047 R37 left. The new write
+    never produces that shape, and the first lifecycle event moves such a row off it. (The column
+    was first declared with `onCreateDefault = CURRENT_PERIOD_END`; dbsm did not apply it to the
+    existing rows of a nullable column, so the declaration was dropped and the read fallback is
+    the only migration.)
+  - `CURRENT_PERIOD_START/END` — Stripe's billing period, written as a pair: from the
+    subscription (or its first item, `billing_mode: flexible`) on `customer.subscription.*`, and
+    from the invoice **lines** on `invoice.paid` (the invoice's own `period_*` looks back one
+    period). An event that reports no period leaves it alone; `invoice.payment_failed` never
+    writes one.
+  - `LAST_EVENT_AT` — the `created` instant of the last applied lifecycle event. **The row route
+    reads no preference any more**; `ETGO_SubscriptionEventAt` is read and written only for a
+    tenant with no row. A row that predates the column starts with no watermark (the first event
+    after the deploy is never stale); R37 carries the preference over for the tenants it backfills.
 - The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the **open**
   row (`applyLifecycleStatus`, which never closes one). **`NONE` and `LEGACY_ENTITLEMENT` have no
   row status, so once a tenant has a row the tool's choice of either is ignored**, and a tenant
@@ -390,15 +407,17 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   `applySubscriptionLifecycle` runs through `SystemContext.run` (capture, install, quiet unwind —
   shared with `CheckoutRequestStore`/`BillingEventStore`) and `setPreference` runs in admin mode;
   `CheckoutWebhookEndpointIntegrationTest` pins both routes. Design doc §8.4 has the full story.
-  A watermark write that fails still propagates (500, the provider redelivers); a status write
-  that fails marks the event `FAILED`.
+  On the preference route a watermark write that fails propagates (500, the provider
+  redelivers); on the row route the watermark is part of the row write. A status write that fails
+  marks the event `FAILED`.
 - **The backfill carries the preference state onto the row.** R37 seeds `STATUS` from
   `ETGO_SubscriptionStatus` (same mapping as above, plus `NONE → canceled` so a locked-out tenant
-  stays locked out; absent/`LEGACY_ENTITLEMENT`/unknown → `active`) and `CURRENT_PERIOD_END` from
-  `ETGO_SubscriptionDueAt`, reading both by `AD_CLIENT_ID`. Design doc §7.0. **When `GRACE_ANCHOR`
-  lands, R37's anchor must reach it too** — a backfill that runs after that deploy and writes only
-  `CURRENT_PERIOD_END` would leave every backfilled past-due tenant with no anchor, i.e. blocked on
-  the spot.
+  stays locked out; absent/`LEGACY_ENTITLEMENT`/unknown → `active`), `GRACE_ANCHOR` from
+  `ETGO_SubscriptionDueAt` and `LAST_EVENT_AT` from `ETGO_SubscriptionEventAt`, reading all three
+  by `AD_CLIENT_ID`; the billing period stays NULL (the preferences never knew it). Design doc
+  §7.0. **R37 was edited in ETP-5047** (on `feature/ETP-5047` only) and now needs the ETP-5047
+  columns, so it must run after the ETP-5047 deploy — see §2.3. A tenant it reached in its
+  pre-ETP-5047 form (anchor in `CURRENT_PERIOD_END`) reads correctly through the fallback above.
 
 ### 🟠 3.8 One environment-access check, one 402 body, one kill switch (ETP-5047)
 
@@ -645,16 +664,13 @@ current row (`END_DATE`) and inserts a successor, preserving price history. `PEN
   and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
   moving to the first real plan — until ETP-5053. `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay
   unread.
-- **The lifecycle on the row is still partial** (§3.7): correlation by the open row, closing on
-  cancel and re-subscription landed in ETP-5047; the billing period and the event watermark are
-  still not on the row, waiting for the `GRACE_ANCHOR` / `LAST_EVENT_AT` columns.
 
 **Quota definition — owner ETP-5051.**
 
 Facts checked against the DDL, `SubscriptionService` and the PRD on 2026-09-24; the ETP-5051 scope
 is quoted from its Jira text as read that day.
 
-### 🟠 5.5 Consumption window = the subscription billing period — decided, but no row carries one yet
+### 🟠 5.5 Consumption window = the subscription billing period — decided, filled from ETP-5047 on
 
 **Decided, not open.** There is deliberately no period column on `ETGO_PLAN_QUOTA`. The PRD fixes
 the window (§4 decisions table, "Consumption window: the **subscription billing period**, never the
@@ -662,14 +678,12 @@ calendar month"; restated in the invariants table), and ETP-5051 reads it from
 `ETGO_SUBSCRIPTION.CURRENT_PERIOD_START` / `CURRENT_PERIOD_END`. An upgrade does not reset it — the
 Stripe anchor is preserved (PRD §8, ETP-5053).
 
-**What ETP-5051 must know:** today **no subscription row carries a billing period.**
-`SubscriptionService.openSubscription` writes neither column; the lifecycle write only ever
-*nulls* `CURRENT_PERIOD_START` and writes `CURRENT_PERIOD_END` as the lifecycle **grace anchor**
-(set on `PAST_DUE`, cleared to null on `CURRENT` and `EXPIRED` — §3.7). So an `active` row has both
-columns null. ETP-5047 decided the split — the anchor moves to its own `GRACE_ANCHOR` column and
-`CURRENT_PERIOD_START/END` take Stripe's period — and the applier already extracts that period
-(`SubscriptionEventOutcome.periodStart/End`); the new column and the write are not landed yet
-(§3.7). The evaluator cannot be built on these columns until they are.
+**What ETP-5051 must know:** since ETP-5047 `CURRENT_PERIOD_START/END` hold **Stripe's billing
+period and nothing else** — the grace anchor moved to `GRACE_ANCHOR` (§3.7). They are filled by
+the first `customer.subscription.updated` or `invoice.paid` a row receives, so a row is periodless
+until then: `openSubscription` writes neither column, and rows written before ETP-5047 may still
+carry the old grace anchor in `CURRENT_PERIOD_END` with `CURRENT_PERIOD_START` NULL (read that
+shape as "no period"). §5.9 covers the periodless cases.
 
 ### 🔴 5.6 Stock versus flow aggregation over the period — owned by nobody
 
@@ -708,9 +722,10 @@ deferred in PRD §16, yet the schema already accepts them.)
 
 ### 🔴 5.9 A subscription with no current period needs a defined answer
 
-Beyond §5.5's "no row has a period yet", two cases stay periodless by nature: rows backfilled by
-R37 (`CURRENT_PERIOD_START` always NULL, design §7.0) and a `canceled` row (`CURRENT_PERIOD_END`
-cleared; since ETP-5047 the row is also closed, `END_DATE` set — §3.7). **To decide in ETP-5051:** what the evaluator does with no
+Periodless rows (§5.5): a row until its first period-bearing event, rows backfilled by R37
+(period NULL, design §7.0) and rows in the pre-ETP-5047 shape. A `canceled` row keeps its last
+period since ETP-5047 (it is closed, `END_DATE` set — §3.7), so it has a window but no longer a
+current one. **To decide in ETP-5051:** what the evaluator does with no
 window — skip, treat as unlimited, or use the last known period. Latent today only because
 `legacy-productive` has no quota rows (§5.1); the first quota on a plan such a tenant can be on
 makes it live.
