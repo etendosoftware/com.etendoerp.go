@@ -411,6 +411,37 @@ public final class BankStatementsSupport {
     return null;
   }
 
+  /**
+   * Validates the {@code ?action=create} body of {@link BankStatementsHandler}: the financial
+   * account, the name, both header dates ({@link #validateHeaderDates}) and at least one line are
+   * required.
+   *
+   * <p>Moved here from the handler (ETP-5447) for the same reason as {@link #validateHeaderDates}:
+   * that class sits on Sonar's per-class method limit (java:S1448) and needed the room for
+   * {@code actionContracts()}. The body keys and messages stay owned by the handler.
+   *
+   * @param body the request body (non-null)
+   * @return the 400 {@code Missing required field: <field>} / {@code At least one line is
+   *         required} for the first rule the body breaks, or {@code null} when it is valid
+   */
+  public static NeoResponse validateCreateBody(JSONObject body) {
+    if (StringUtils.isBlank(body.optString(BankStatementsHandler.PARAM_ACCOUNT_ID, null))) {
+      return NeoResponse.error(400,
+          BankStatementsHandler.MSG_MISSING_FIELD + BankStatementsHandler.PARAM_ACCOUNT_ID);
+    }
+    if (StringUtils.isBlank(body.optString(BankStatementsHandler.FIELD_NAME, null))) {
+      return NeoResponse.error(400,
+          BankStatementsHandler.MSG_MISSING_FIELD + BankStatementsHandler.FIELD_NAME);
+    }
+    NeoResponse invalidDates = validateHeaderDates(body);
+    if (invalidDates != null) return invalidDates;
+    JSONArray lines = body.optJSONArray(BankStatementsHandler.FIELD_LINES);
+    if (lines == null || lines.length() == 0) {
+      return NeoResponse.error(400, BankStatementsHandler.MSG_LINE_REQUIRED);
+    }
+    return null;
+  }
+
   /** The leading {@code yyyy-MM-dd} of an ISO string, or {@code null} when it has none. */
   private static LocalDate parseCalendarDayPrefix(String iso) {
     try {

@@ -30,6 +30,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateCreateBody;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateHeaderDates;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
 
@@ -45,6 +46,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -67,6 +69,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
@@ -86,21 +89,26 @@ public class BankStatementsHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(BankStatementsHandler.class);
 
   private static final String METHOD_GET = "GET";
-  private static final String METHOD_POST = "POST";
   private static final String ACTION_LINES = "lines";
-  private static final String ACTION_IMPORT = "import";
-  private static final String ACTION_PREVIEW = "preview";
-  private static final String ACTION_CREATE = "create";
-  private static final String ACTION_PROCESS = "process";
-  private static final String ACTION_UPDATE = "update";
-  private static final String ACTION_DELETE = "delete";
-  private static final String ACTION_REACTIVATE = "reactivate";
-  private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
+  // METHOD_POST, the POST `action` values below, the request keys PARAM_ACCOUNT_ID / PARAM_ACTION /
+  // FIELD_ID and the body fields further down are package-private (not private):
+  // BankStatementAgentActions builds the exact request the SPA sends from them, and
+  // BankStatementsSupport#validateCreateBody reads the same keys, instead of either re-declaring
+  // the literals (ETP-5447).
+  static final String METHOD_POST = "POST";
+  static final String ACTION_IMPORT = "import";
+  static final String ACTION_PREVIEW = "preview";
+  static final String ACTION_CREATE = "create";
+  static final String ACTION_PROCESS = "process";
+  static final String ACTION_UPDATE = "update";
+  static final String ACTION_DELETE = "delete";
+  static final String ACTION_REACTIVATE = "reactivate";
+  static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_STATEMENT_ID = "statementId";
   // Plural form used by the CSV export to fetch the lines of several selected
   // statements in one request; comma-separated. Falls back to PARAM_STATEMENT_ID.
   private static final String PARAM_STATEMENT_IDS = "statementIds";
-  private static final String PARAM_ACTION = "action";
+  static final String PARAM_ACTION = "action";
 
   private static final String C43_CLASS_NAME =
       "org.openbravo.module.cuaderno43.es.utility.Cuaderno43";
@@ -110,26 +118,26 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String JSON_RESPONSE = "response";
   private static final String JSON_DATA = "data";
   private static final String KEY_STATEMENT = "statement";
-  private static final String FIELD_FILE_NAME = "fileName";
+  static final String FIELD_FILE_NAME = "fileName";
   private static final String FIELD_LINE_COUNT = "lineCount";
   private static final String FIELD_DESCRIPTION = "description";
   private static final String FIELD_CRAMOUNT = "cramount";
   private static final String FIELD_DRAMOUNT = "dramount";
-  private static final String FIELD_CONTENT_BASE64 = "contentBase64";
-  private static final String FIELD_NAME = "name";
-  private static final String FIELD_NOTES = "notes";
-  private static final String FIELD_LINES = "lines";
+  static final String FIELD_CONTENT_BASE64 = "contentBase64";
+  static final String FIELD_NAME = "name";
+  static final String FIELD_NOTES = "notes";
+  static final String FIELD_LINES = "lines";
   private static final String FIELD_BPARTNER_NAME = "bpartnerName";
   private static final String FIELD_BPARTNER_ID = "bpartnerId";
   private static final String FIELD_GLITEM_ID = "glItemId";
   private static final String FIELD_REFERENCE = "reference";
-  private static final String FIELD_PROCESS = "process";
+  static final String FIELD_PROCESS = "process";
   private static final String FIELD_PROCESSED = "processed";
   // Package-private (not private): BankStatementsSupport#validateHeaderDates reads the same body
   // keys and message prefix this class uses, instead of re-declaring the literals (ETP-5447).
   static final String FIELD_TRANSACTION_DATE = "transactionDate";
   static final String FIELD_IMPORT_DATE = "importDate";
-  private static final String FIELD_ID = "id";
+  static final String FIELD_ID = "id";
   private static final String DEFAULT_REFERENCE = "**";
   static final String MSG_MISSING_FIELD = "Missing required field: ";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
@@ -155,7 +163,7 @@ public class BankStatementsHandler implements NeoHandler {
    */
   private static final String MSG_STATEMENT_BANK_CONNECTED =
       "Statements from a bank-connected account cannot be deleted.";
-  private static final String MSG_LINE_REQUIRED = "At least one line is required";
+  static final String MSG_LINE_REQUIRED = "At least one line is required";
   private static final String MSG_NO_VALID_LINES =
       "The file contains no valid lines to import";
   private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
@@ -343,8 +351,27 @@ public class BankStatementsHandler implements NeoHandler {
     return String.format(LINES_SQL_HEAD, BankStatementsSupport.descriptionExpr()); // NOSONAR java:S2077 — value is a hardcoded SQL expression, never user input
   }
 
+  /**
+   * The bank-statement actions an agent can run through {@code neo_action} (ETP-5447) — see
+   * {@link BankStatementAgentActions}. Declaring them also makes {@link #servesActions()} true and
+   * lists {@code bank-statements} in the {@code neo_action} / {@code neo_schema} enums.
+   *
+   * @return the declared actions by name, in presentation order
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return BankStatementAgentActions.CONTRACTS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    // ETP-5447: purely additive. Only neo_action produces an ACTION context for this spec; the
+    // SPA's ?action= calls arrive as report-spec requests with no endpoint type and never enter
+    // this branch, so their routing below is untouched. The dispatcher re-enters this method with
+    // a context that carries no endpoint type, so it cannot loop back here.
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      return BankStatementAgentActions.dispatch(this, context);
+    }
     String method = context.getHttpMethod();
     String action = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_ACTION)
@@ -519,7 +546,7 @@ public class BankStatementsHandler implements NeoHandler {
    *
    * <p>{@code FIN_Financial_Account_ID}, {@code name}, {@code transactionDate},
    * {@code importDate} and at least one line are required (400
-   * {@code Missing required field: <field>} otherwise, see {@link #validateCreateBody});
+   * {@code Missing required field: <field>} otherwise, see {@link BankStatementsSupport#validateCreateBody});
    * {@code fileName}, {@code notes} and {@code process} are optional.
    *
    * <p>Body shape:
@@ -886,31 +913,11 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * Validates the {@code ?action=create} body. Returns {@code null} when valid,
-   * or the appropriate 400 {@link NeoResponse}. Extracted so {@link #handleCreate}
-   * stays under Sonar's cognitive-complexity threshold.
-   */
-  private static NeoResponse validateCreateBody(JSONObject body) {
-    if (StringUtils.isBlank(body.optString(PARAM_ACCOUNT_ID, null))) {
-      return NeoResponse.error(400, MSG_MISSING_FIELD + PARAM_ACCOUNT_ID);
-    }
-    if (StringUtils.isBlank(body.optString(FIELD_NAME, null))) {
-      return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
-    }
-    NeoResponse invalidDates = validateHeaderDates(body);
-    if (invalidDates != null) return invalidDates;
-    JSONArray lines = body.optJSONArray(FIELD_LINES);
-    if (lines == null || lines.length() == 0) {
-      return NeoResponse.error(400, MSG_LINE_REQUIRED);
-    }
-    return null;
-  }
-
-  /**
    * Builds a {@link FIN_BankStatement} for the manual-create flow from the
    * request body. Same header fields as Classic's manual statement: name,
    * import/transaction dates, file name and notes. Name and both dates are
-   * required — the caller has already run {@link #validateCreateBody}; file name
+   * required — the caller has already run
+   * {@link BankStatementsSupport#validateCreateBody}; file name
    * and notes are optional. The document type is always the account's BSF type.
    */
   FIN_BankStatement newManualBankStatement(FIN_FinancialAccount account, JSONObject body) {

@@ -34,9 +34,10 @@ import javax.inject.Named;
  * required dates of ETP-5447 never reach it), a line's date could not be set, {@code referenceNo}
  * became mandatory, and deleting a statement with lines failed with a Hibernate cascade error
  * because {@code BankStatementLineAggregateHandler} saves the parent while the cascade removes it.
- * The refusal points the caller at the bank-statements actions instead, so an agent can correct
- * itself. The SPA never uses these generic paths — all its statement traffic goes to
- * {@code /sws/neo/bank-statements}.</p>
+ * The refusal names the {@code bank-statements} action that does the job
+ * ({@link BankStatementAgentActions}: createStatement / importStatement, updateStatement,
+ * deleteStatement), so an agent can correct itself. The SPA never uses these generic paths — all
+ * its statement traffic goes to {@code /sws/neo/bank-statements}.</p>
  *
  * <p>Everything else passes through to the generic service untouched: reads (list, get), defaults,
  * selectors and any non-CRUD endpoint. The HTTP method is compared case-insensitively; a request
@@ -57,23 +58,36 @@ public class BankStatementEntityHandler implements NeoHandler {
   private static final Set<String> WRITE_METHODS = Set.of(METHOD_POST, "PUT", "PATCH",
       METHOD_DELETE);
 
-  /** Where a caller finds the supported way to write bank statements. */
-  private static final String ACTIONS_HINT =
-      "the bank-statements actions (neo_schema({spec:\"bank-statements\", view:\"actions\"}))";
+  /**
+   * How a caller reaches the supported write: {@code neo_action} on the {@code bank-statements}
+   * report spec, whose one entity is also named {@code bank-statements}
+   * ({@link BankStatementAgentActions}). Each message below names the concrete action.
+   */
+  private static final String VIA_NEO_ACTION =
+      " via neo_action {spec:\"bank-statements\", entity:\"bank-statements\"";
+  private static final String ID_ACCOUNT = ", id: <financial account id>}";
+  private static final String ID_STATEMENT = ", id: <bank statement id>}";
+  private static final String PARAMETERS_HINT =
+      " (neo_schema({spec:\"bank-statements\", view:\"actions\"}) lists its parameters).";
 
   static final String MSG_STATEMENT_CREATE_DISABLED =
-      "Bank statements are created through " + ACTIONS_HINT + ". Generic create on this entity is"
+      "Bank statements are created with action createStatement (or importStatement from a file)"
+          + VIA_NEO_ACTION + ID_ACCOUNT + PARAMETERS_HINT + " Generic create on this entity is"
           + " disabled because it bypasses the required dates, the BSF document type and line"
           + " validation.";
   static final String MSG_STATEMENT_UPDATE_DISABLED =
-      "Bank statements are changed through " + ACTIONS_HINT + ". Generic update on this entity is"
-          + " disabled because it bypasses the required dates and line validation.";
+      "Bank statements are changed with action updateStatement" + VIA_NEO_ACTION + ID_STATEMENT
+          + PARAMETERS_HINT + " Generic update on this entity is disabled because it bypasses"
+          + " the required dates and line validation.";
   static final String MSG_STATEMENT_DELETE_DISABLED =
-      "Bank statements are deleted through " + ACTIONS_HINT + ". Generic delete on this entity is"
-          + " disabled because it bypasses the draft, matched-line and bank-connection checks.";
+      "Bank statements are deleted with action deleteStatement" + VIA_NEO_ACTION + ID_STATEMENT
+          + PARAMETERS_HINT + " Generic delete on this entity is disabled because it bypasses"
+          + " the draft, matched-line and bank-connection checks.";
   static final String MSG_LINES_WRITE_DISABLED =
-      "Bank statement lines are changed through " + ACTIONS_HINT + ". Generic writes on this"
-          + " entity are disabled because they bypass line validation.";
+      "Bank statement lines are changed with action updateStatement on their statement (its"
+          + " lines parameter replaces the unmatched lines)" + VIA_NEO_ACTION + ID_STATEMENT
+          + PARAMETERS_HINT + " Generic writes on this entity are disabled because they bypass"
+          + " line validation.";
 
   @Override
   public NeoResponse handle(NeoContext context) {
