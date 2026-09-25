@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -51,6 +52,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -409,14 +411,46 @@ class ReportSelectorsServletTest {
       assertEquals(5, json.getInt("totalCount"));
     }
 
+    // ETP-5420 — c_currency is the full ISO catalog; the selector must be scoped to the
+    // tenant's base currency plus currencies with an active conversion rate, and the COUNT
+    // must be scoped the same way (it used to report all ~160 ISO currencies).
     @Test
-    @DisplayName("currency type uses cross-client query with ORDER BY clientId binding")
+    @DisplayName("currency query is scoped to client currency and conversion rates, in both count and data")
     void currencyQuery() throws Exception {
       configureAuthenticatedGet("currency");
 
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      String countSql = sql.getAllValues().get(0);
+      String dataSql = sql.getAllValues().get(1);
+      for (String s : new String[]{ countSql, dataSql }) {
+        assertTrue(s.contains("FROM ad_client WHERE ad_client_id = :clientId"), s);
+        assertTrue(s.contains("FROM c_conversion_rate cr"), s);
+        assertFalse(s.contains(":selectedOrgId"), s);
+      }
+      verify(countQuery).setParameter("clientId", TEST_CLIENT_ID);
+      verify(dataQuery).setParameter("clientId", TEST_CLIENT_ID);
+    }
+
+    @Test
+    @DisplayName("currency query also accepts the selected org's currency and sorts it first")
+    void currencyQueryWithSelectedOrg() throws Exception {
+      configureAuthenticatedGet("currency");
+      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      String dataSql = sql.getAllValues().get(1);
+      assertTrue(dataSql.contains("OR c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)"), dataSql);
+      assertTrue(dataSql.contains("ORDER BY (CASE WHEN c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)"), dataSql);
+      verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
     }
   }
 
