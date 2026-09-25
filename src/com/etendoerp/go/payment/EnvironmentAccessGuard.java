@@ -126,17 +126,45 @@ public class EnvironmentAccessGuard {
    *     switch turned off
    */
   public Denial check(String clientId, String entryPoint) {
-    EnvironmentAccessPolicy.Decision decision = lifecycleService.get().evaluateAccess(clientId,
-        true, Instant.now());
-    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
+    EnvironmentAccessPolicy.Decision refusal = refusalOf(clientId);
+    if (refusal == null) {
       return null;
     }
     if (enforcementSwitchedOff.test(clientId)) {
       log.info("Environment access enforcement is switched off: {} would have refused tenant {}"
-          + " ({}) and allowed it", entryPoint, clientId, decision.name());
+          + " ({}) and allowed it", entryPoint, clientId, refusal.name());
       return null;
     }
-    return new Denial(decision);
+    return new Denial(refusal);
+  }
+
+  /**
+   * ETP-5047 — the decision this guard actually enforces, for a caller that reports it rather
+   * than acting on it (the environment list's {@code accessState}). The policy decision, except
+   * that a refusal the kill switch turned off reads as {@code ALLOWED}: reporting "suspended" for
+   * a tenant whose requests all go through would contradict the product. Same cost profile as
+   * {@link #check}: the flag is read only for a refusal. Logs nothing — it decides no request.
+   *
+   * @param clientId the tenant
+   * @return the enforced decision, or null for a tenant that predates lifecycle metadata (the
+   *     policy's own "no decision", which every entry point allows)
+   */
+  public EnvironmentAccessPolicy.Decision enforcedDecision(String clientId) {
+    EnvironmentAccessPolicy.Decision decision = lifecycleService.get().evaluateAccess(clientId,
+        true, Instant.now());
+    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
+      return decision;
+    }
+    return enforcementSwitchedOff.test(clientId) ? EnvironmentAccessPolicy.Decision.ALLOWED
+        : decision;
+  }
+
+  /** The policy decision when it is a refusal; null when it allows or has no answer. */
+  private EnvironmentAccessPolicy.Decision refusalOf(String clientId) {
+    EnvironmentAccessPolicy.Decision decision = lifecycleService.get().evaluateAccess(clientId,
+        true, Instant.now());
+    return decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED ? null
+        : decision;
   }
 
   /**

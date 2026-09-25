@@ -38,6 +38,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
@@ -105,6 +106,12 @@ final class EtendoGoJwtDalHelper {
   private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
   private static final TenantEnvironmentLifecycleService ENVIRONMENT_LIFECYCLE_SERVICE =
       new TenantEnvironmentLifecycleService();
+  /**
+   * ETP-5047 — reports {@code accessState} as the decision the guard enforces, so the kill switch
+   * that lets a tenant in also stops the picker from showing it as suspended.
+   */
+  private static final EnvironmentAccessGuard ENVIRONMENT_ACCESS_GUARD =
+      new EnvironmentAccessGuard(ENVIRONMENT_LIFECYCLE_SERVICE);
   // ETP-4829: STATUS distinguishes an account that already owns a usable local password
   // ("active", the default for self-registration/SSO) from one an admin created on a user's
   // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
@@ -676,8 +683,11 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_RELATIONSHIP, OwnerSupport.isOwner(environmentUser.getId()) ? "OWNER" : "INVITED");
     TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
         ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
-    EnvironmentAccessPolicy.Decision access = ENVIRONMENT_LIFECYCLE_SERVICE
-        .evaluateAccess(client.getId(), true, Instant.now());
+    // The ENFORCED decision, not the raw policy one: with the kill switch on for this tenant a
+    // refusal reads ALLOWED, matching what NEO and MCP actually do. The subscription status and
+    // trial fields below stay the facts they are.
+    EnvironmentAccessPolicy.Decision access =
+        ENVIRONMENT_ACCESS_GUARD.enforcedDecision(client.getId());
     if (access != null) {
       env.put(FIELD_ACCESS_STATE, access.name());
     }
