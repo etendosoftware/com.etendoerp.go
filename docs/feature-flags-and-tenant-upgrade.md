@@ -243,7 +243,8 @@ Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementS
 called only by `EnvironmentAccessGuard` — the one check NEO (`NeoAuthenticator`), MCP
 (`McpServlet`), the `JwtAuthUtils.authenticateOrFail` servlets (favorites, report selectors,
 survey config, fiscal test mode) and the legacy environment login (`GET /sws/go/login`) share.
-`POST /sws/go/session/environment` evaluates it but never refuses (it reports `accessDecision`), so
+`POST /sws/go/session/environment` evaluates it but never refuses — it reports `accessDecision`,
+which is informational and backend-only (the SPA's blocked screen is driven by the NEO 402) — so
 the blocked customer reaches the pay path. The context is
 account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
 enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request

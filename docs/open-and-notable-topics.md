@@ -371,12 +371,23 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   before `START_DATE`). **A closed row reads as `canceled` whatever its `STATUS` says**
   (`SubscriptionService.effectiveStatusOf`): access `EXPIRED`, plan `free`. `findLatest` /
   `findLatestForClients` answer "open row, else the latest closed one", so a canceled tenant never
-  falls through to the preference fallback nor to `LEGACY_ENTITLEMENT`. The environment keeps its
-  `ETGO_EnvironmentType = PRODUCTIVE` marker, so the access policy still applies `EXPIRED`. Watch
-  §3.4: onboarding a canceled tenant again would run `forceTestModeForFreeTenant` on it.
+  falls through to the preference fallback nor to `LEGACY_ENTITLEMENT`. Watch §3.4: onboarding a
+  canceled tenant again would run `forceTestModeForFreeTenant` on it.
+- **The row, not the marker, makes a tenant productive (ETP-5047 review, B1).**
+  `TenantEnvironmentLifecycleService.resolve` checks for any subscription row (open or closed)
+  **first** and takes the productive path when there is one, whatever `ETGO_EnvironmentType` says.
+  The earlier version decided on the marker or on `resolvePlan`, and failed open: a canceled row
+  makes the plan `free`, and a tenant without the marker — every tenant provisioned before the
+  marker existed (6 of 6 productive tenants on the development database) — fell into the demo path,
+  got a legacy-transition start or no snapshot, and was **allowed**. A tenant with a row now never
+  reaches the demo path, so no demo or legacy-transition preference is ever written for it. A row
+  without the `PRODUCTIVE` marker logs one WARN per tenant and JVM. The marker and `resolvePlan`
+  still decide for a tenant with no row at all (the preference fallback).
 - **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
-  `openSubscription` inserts one. If the open row is `canceled` but was never closed (its delete
-  event was lost), `openSubscription` closes it and flushes before inserting — Hibernate runs
+  `openSubscription` inserts one. If the open row is `canceled` but was never closed — its delete
+  event was lost, or R37 backfilled it (R37 leaves canceled rows open on purpose: its idempotency
+  guard is "no open row", so closing would let a re-run insert a duplicate) — `openSubscription`
+  closes it and flushes before inserting — Hibernate runs
   inserts before updates, and `etgo_sub_open_envclient_uq` would otherwise reject the new row.
   ETP-5053 closes a row to open its successor with the same flush-first rule.
 - **Three columns, three jobs (ETP-5047).**
@@ -441,6 +452,8 @@ release** — an SPA older than the backend still parses it.
   blocked screen and the pages it sends the customer to (`/account`, `/upgrade`) render inside the
   entered environment; refusing entry would lock a blocked customer out of the only place that lets
   them pay. It answers as before plus `accessDecision: "<DECISION>"` when the tenant is blocked.
+  **`accessDecision` is informational and backend-only:** nothing in the SPA reads it; the blocked
+  screen is driven by the NEO 402 on `windowaccessmap`.
   The platform-account endpoints (`runWithPlatformAccount`: billing, portal, purchases, plans)
   never call the guard, and none of them authenticates through `JwtAuthUtils` (checked in ETP-5047:
   `EtendoGoJwtServlet` only reads `JwtAuthUtils`' claim-name constants).
@@ -747,12 +760,13 @@ whom.
 ### 🔴 5.11 Past billing periods cannot be reconstructed locally — cheap now, impossible later
 
 `ETGO_SUBSCRIPTION` has one period slot and no history; once it is filled (§5.5), each renewal
-will overwrite it. **Since ETP-5047 the ledger records the invoice period:** `WebhookPayloadSummary`
-keeps `period_start`/`period_end` (epoch seconds) for `invoice.*` events, so every `invoice.paid`
-row of `ETGO_BILLING_EVENT` carries its period from the deploy onwards. Two caveats for whoever
-reads it: Stripe's invoice-level period on a subscription invoice **looks back one period** (the
-usage period that ended when the invoice was cut — the service period is on the lines, which a
-summary never keeps), and the summary is an abbreviated JSON string, not a queryable column.
+will overwrite it. **Since ETP-5047 the ledger records the billed period:** for `invoice.*`
+events `WebhookPayloadSummary` keeps `service_period_start` / `service_period_end` (epoch seconds),
+so every `invoice.paid` row of `ETGO_BILLING_EVENT` carries the period it paid for from the deploy
+onwards. It is the invoice **line** period — the same extraction
+(`SubscriptionLifecycleApplier.invoiceServicePeriod`) that fills the row — not the invoice's own
+`period_start`/`period_end`, which on a subscription invoice looks back one period. One caveat:
+the summary is an abbreviated JSON string, not a queryable column.
 **Still to decide:** whether that is enough for overage billing of a closed period, or a small
 period-history table is needed. Periods before the ETP-5047 deploy were never recorded and cannot
 be backfilled from local data.

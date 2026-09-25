@@ -1442,6 +1442,10 @@ specs — not a replacement for this one).
 The MCP tool layer (`/sws/mcp`, with `/mcp` as the WebMCP-friendly alias, routed by
 `McpToolRouter`) exposes the same specs described
 above to AI agents as JSON-RPC tools (`neo_discover`, `neo_schema`, `neo_create`, `neo_update`, …).
+A tenant whose commercial access is cut off (demo trial expired, subscription grace elapsed) gets
+**HTTP 402** with the `EnvironmentAccessGuard` JSON body (`error.code = ENVIRONMENT_ACCESS_DENIED`,
+`error.decision`) on every MCP request — a plain HTTP error, not a JSON-RPC error object
+(ETP-5047; `open-and-notable-topics.md` §3.8).
 Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
 exact same responses as before.

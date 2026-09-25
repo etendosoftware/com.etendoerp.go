@@ -315,7 +315,7 @@ would silently turn a past-due or expired tenant back into a paying one. R37 the
 |---|---|---|
 | `CURRENT` | `active` | `CURRENT` |
 | `PAST_DUE` | `past_due` | `PAST_DUE` |
-| `EXPIRED` | `canceled` (left open, `END_DATE` NULL; a cancellation received live closes its row since ETP-5047 — open or closed, a canceled row reads back the same, §3.7 of the open-topics register) | `EXPIRED` |
+| `EXPIRED` | `canceled`, left open (`END_DATE` NULL) on purpose — R37's idempotency guard is "no open row", so a closed row would let a re-run insert a duplicate. A cancellation received live closes its row since ETP-5047; open or closed, a canceled row reads back the same, and a later checkout closes an open one (§3.7 of the open-topics register) | `EXPIRED` |
 | `NONE` | `canceled` | `EXPIRED` — same access decision as `NONE` (`SUBSCRIPTION_REQUIRED`) |
 | absent, blank, `LEGACY_ENTITLEMENT` or unknown | `active` | `CURRENT` (the preference reader's own fallback is `LEGACY_ENTITLEMENT`, also entitled) |
 
