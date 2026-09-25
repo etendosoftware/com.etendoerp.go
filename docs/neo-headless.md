@@ -3894,6 +3894,39 @@ inheritance → confirm `AD_Window_Access` appears on the personal role with the
 {"success": false, "message": "Role is not a template, cannot be composed: ..."}
 ```
 
+**Concurrent writes on the same user (ETP-5278).** Every role-composition WRITE (this webhook
+and `SFPromoteUserRole`, §8i) is serialized per target user by `UserRoleWriteLock`.
+- **The lock.** It is a PostgreSQL transaction-scoped advisory lock,
+  `pg_advisory_xact_lock(5278, hashtext(userId))`, taken through the current Hibernate session.
+  It is released automatically at the end-of-request commit or rollback, because every NEO
+  webhook request is one transaction.
+- **Where it's taken.** It runs first thing in `assignTemplateRoles`/`promoteToAdmin`/
+  `demoteFromAdmin`, right after argument validation and **before any read of the target user**.
+  Anything loaded earlier would stay in Hibernate's first-level cache with its pre-lock state.
+- **What a second request does.** It waits, then reconciles against the first one's committed
+  state (READ COMMITTED). Last writer wins.
+- **Why an advisory lock.** A `SELECT … FOR UPDATE` on `AD_User` would also block unrelated
+  writers of that row, such as the form's own NEO PATCH.
+- **Timeout.** The wait is bounded by `lock_timeout = 30s`, set only for the lock statement and
+  then restored.
+
+Before ETP-5278 two overlapping writes for the same user were possible from the Users form. It
+re-enabled Save mid-write, and a write takes 11–21 s in production (ETP-5503). Both writes diffed
+the same `AD_Role_Inheritance` snapshot, and the loser failed with `StaleStateException`,
+`EntityNotFoundException` or a duplicate key → the generic `500`.
+
+Any remaining race failure (a lock timeout, deadlock, stale state or unique violation, classified
+by `RoleWriteConflicts#isConcurrencyFailure`) is rolled back and answered with a machine-readable
+code instead of the `500`:
+
+```json
+{"success": false, "message": "The user's roles were changed by another request at the same time",
+ "code": "CONCURRENT_MODIFICATION"}
+```
+
+The frontend maps `code` to a translated message (`ROLE_WRITE_CONFLICT_CODE` in
+`userRoleAssignmentsApi.js`). The raw `message` is never shown (ETP-5206).
+
 **Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured
 before entering admin mode — same convention as `SFRolesOverview`. No role, or a restricted
 role, gets `{"success": false, "message": "Not authorized"}` without touching the database.
@@ -4637,6 +4670,13 @@ creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersona
 // "don't 500 a validation rejection" convention, §8d):
 {"success": false, "message": "..."}
 ```
+
+**Serialized with role composition (ETP-5278).** Promote and demote take the same per-user
+`UserRoleWriteLock` as `SFAssignUserRoles`, so a promote can never interleave with an in-flight
+role assignment for the same user. Before this, an assign running alongside a promote could leave
+`Default_Ad_Role_ID` = Admin while `AD_User_Roles` still pointed at the personal role. A race
+failure is answered with the same `{"success": false, "code": "CONCURRENT_MODIFICATION"}` body
+(§8d).
 
 **Frontend counterpart:** Task 4 of this plan (`etendo_schema_forge`) — a thin client calling this
 endpoint with the same `UserId`/`Mode` params, wired to the `user` window's detail-header actions.

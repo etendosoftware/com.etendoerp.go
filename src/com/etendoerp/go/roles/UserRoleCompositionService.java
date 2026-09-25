@@ -199,6 +199,27 @@ public class UserRoleCompositionService {
       new RoleInheritanceReconciliationService();
 
   /**
+   * ETP-5278 — per-target-user write serialization, taken FIRST in every write entry point
+   * ({@link #assignTemplateRoles(String, List, Role, String)}, {@link #promoteToAdmin}, {@link
+   * #demoteFromAdmin}) — see {@link UserRoleWriteLock} for why it must precede any read of the
+   * target user.
+   */
+  private final UserRoleWriteLock writeLock;
+
+  /**
+   * Creates the service with the real per-user {@link UserRoleWriteLock}, so every write entry
+   * point is serialized against concurrent writes on the same user (ETP-5278).
+   */
+  public UserRoleCompositionService() {
+    this(new UserRoleWriteLock());
+  }
+
+  /** Test seam: plain unit tests that mock {@link OBDal} inject {@link UserRoleWriteLock#NO_OP}. */
+  UserRoleCompositionService(UserRoleWriteLock writeLock) {
+    this.writeLock = writeLock;
+  }
+
+  /**
    * The literal System Administrator {@code AD_Role_ID} — the ONLY role id that bypasses
    * {@link #enforceCallerClientBoundary(User, Role)}. Mirrors the same literal id
    * {@code NeoAccessHelper#isAdminOrClientAdmin} checks at the webhook-gating layer, but
@@ -294,6 +315,7 @@ public class UserRoleCompositionService {
     if (templateRoleIds == null) {
       throw new OBException("Missing template role id list for role composition");
     }
+    writeLock.acquire(userId);
     User user = OBDal.getInstance().get(User.class, userId);
     if (user == null) {
       throw new OBException(USER_NOT_FOUND + userId);
@@ -1083,6 +1105,8 @@ public class UserRoleCompositionService {
     if (StringUtils.isBlank(targetUserId)) {
       throw new OBException("Missing user id for admin promotion");
     }
+    // ETP-5278 — first, before any read of the target user (see UserRoleWriteLock).
+    writeLock.acquire(targetUserId);
     if (!callerIsOwnerOrAdmin(callerUserId)) {
       throw new OBException("Not authorized to promote users to Admin: " + callerUserId);
     }
@@ -1171,6 +1195,7 @@ public class UserRoleCompositionService {
     if (StringUtils.isBlank(targetUserId)) {
       throw new OBException("Missing user id for admin demotion");
     }
+    writeLock.acquire(targetUserId);
     if (!callerIsOwnerOrAdmin(callerUserId)) {
       throw new OBException("Not authorized to demote an Admin: " + callerUserId);
     }

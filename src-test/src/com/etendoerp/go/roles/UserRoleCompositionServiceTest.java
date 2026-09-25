@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -40,6 +41,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -81,7 +83,9 @@ class UserRoleCompositionServiceTest {
     obDalMock = mockStatic(OBDal.class);
     mockDal = mock(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
-    service = new UserRoleCompositionService();
+    // ETP-5278 — the real UserRoleWriteLock needs a Hibernate session, which this mocked OBDal
+    // does not have; the lock's own ordering contract is covered by the tests at the bottom.
+    service = new UserRoleCompositionService(UserRoleWriteLock.NO_OP);
   }
 
   @AfterEach
@@ -1438,5 +1442,72 @@ class UserRoleCompositionServiceTest {
       userRoleSyncMock.verify(() -> com.etendoerp.go.schemaforge.util.UserRoleSyncSupport
           .syncSingleActiveUserRole(target, adminRole));
     }
+  }
+
+  // ── ETP-5278: per-user write lock is taken BEFORE any read of the target user ──────────
+  // Anything read before the lock stays in Hibernate's first-level cache with its pre-lock
+  // state, so a request that waited behind a concurrent write would reconcile against a stale
+  // snapshot — exactly the overlap that produced the CP-6 HTTP 500s.
+
+  @Test
+  void assignTemplateRolesAcquiresTheWriteLockBeforeReadingTheUser() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+    when(mockDal.get(User.class, "user-1")).thenReturn(null);
+
+    assertThrows(OBException.class,
+        () -> lockedService.assignTemplateRoles("user-1", Collections.emptyList(), null, null));
+
+    InOrder order = inOrder(lock, mockDal);
+    order.verify(lock).acquire("user-1");
+    order.verify(mockDal).get(User.class, "user-1");
+  }
+
+  @Test
+  void assignTemplateRolesDoesNotLockWhenArgumentsAreInvalid() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    assertThrows(OBException.class, () -> lockedService.assignTemplateRoles(" ", List.of()));
+    assertThrows(OBException.class, () -> lockedService.assignTemplateRoles("user-1", null));
+
+    verify(lock, never()).acquire(any());
+  }
+
+  @Test
+  void promoteToAdminAcquiresTheWriteLockBeforeAnyRead() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    // callerIsOwnerOrAdmin fails on the unstubbed mock DAL — irrelevant here, the lock must
+    // already have been taken by then.
+    assertThrows(RuntimeException.class,
+        () -> lockedService.promoteToAdmin("caller-1", null, "target-1"));
+
+    verify(lock).acquire("target-1");
+    verify(mockDal, never()).get(User.class, "target-1");
+  }
+
+  @Test
+  void demoteFromAdminAcquiresTheWriteLockBeforeAnyRead() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    assertThrows(RuntimeException.class,
+        () -> lockedService.demoteFromAdmin("caller-1", null, "target-1"));
+
+    verify(lock).acquire("target-1");
+    verify(mockDal, never()).get(User.class, "target-1");
+  }
+
+  @Test
+  void promoteAndDemoteDoNotLockWithoutATargetUserId() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    assertThrows(OBException.class, () -> lockedService.promoteToAdmin("caller-1", null, " "));
+    assertThrows(OBException.class, () -> lockedService.demoteFromAdmin("caller-1", null, null));
+
+    verify(lock, never()).acquire(any());
   }
 }
