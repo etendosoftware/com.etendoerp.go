@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONException;
@@ -153,12 +154,34 @@ final class McpHookExecutor {
    */
   static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
       String actionName, JSONObject params, Tab adTab, SFEntity sfEntity) {
+    return buildActionHookContext(specName, entityName, recordId, actionName, "POST", params,
+        null, adTab, sfEntity);
+  }
+
+  /**
+   * Same as the POST overload, with an explicit HTTP method and query-param map (ETP-5447).
+   *
+   * <p>For the named actions a handler declares through {@code NeoHandler#declaredActions}: a
+   * handler compares {@code httpMethod} before it answers, so a {@code GET}-only action fired as
+   * {@code POST} fell through and ended in {@code 404 Action not found}. On {@code GET} a REST
+   * handler reads its input from the query string, so the caller passes the parameters flattened
+   * there as well as in the body.</p>
+   *
+   * @param method      {@code "GET"} or {@code "POST"}
+   * @param queryParams the query-param map, or {@code null} for none — replaced by a fresh empty
+   *                    map, as REST's {@code extractQueryParams} never hands a handler {@code null}
+   * @return a NeoContext with {@code endpointType=ACTION} and the given method
+   */
+  static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
+      String actionName, String method, JSONObject params, Map<String, String> queryParams,
+      Tab adTab, SFEntity sfEntity) {
     return NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("POST")
+        .httpMethod(method)
         .recordId(recordId)
         .requestBody(params)
+        .queryParams(queryParams != null ? queryParams : new HashMap<>())
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())

@@ -30,6 +30,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.schemaforge.NeoProcessService;
@@ -186,12 +187,39 @@ public final class NeoButtonActionHelper {
       return;
     }
     params.put("inpTabId", entity.getADTab().getId());
-    String tableName = entity.getADTab().getTable() != null
-        ? entity.getADTab().getTable().getDBTableName()
-        : null;
-    if (tableName != null) {
-      params.put(tableName + "_ID", recordId);
+    Table table = entity.getADTab().getTable();
+    String tableName = table != null ? table.getDBTableName() : null;
+    if (tableName == null) {
+      return;
     }
+    String derivedKey = tableName + "_ID";
+    params.put(derivedKey, recordId);
+    // ETP-5447: the table name and its key column do not always share casing. Classic
+    // FIN_BankStatementProcess reads "FIN_Bankstatement_ID" — the real key column of
+    // FIN_BankStatement — so "FIN_BankStatement_ID" alone left its recordID null and the process
+    // failed with "id to load is required for loading". The derived key is kept for processes
+    // that read the table-name casing.
+    String keyColumn = findKeyColumnName(table);
+    if (keyColumn != null && !keyColumn.equals(derivedKey)) {
+      params.put(keyColumn, recordId);
+    }
+  }
+
+  /**
+   * @return the DB name of the table's primary-key column ({@code AD_Column.IsKey = 'Y'}), or
+   *         {@code null} when the table declares none
+   */
+  private static String findKeyColumnName(Table table) {
+    List<Column> columns = table.getADColumnList();
+    if (columns == null) {
+      return null;
+    }
+    for (Column column : columns) {
+      if (Boolean.TRUE.equals(column.isKeyColumn())) {
+        return column.getDBColumnName();
+      }
+    }
+    return null;
   }
 
   /**

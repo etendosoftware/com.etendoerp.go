@@ -56,6 +56,7 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
@@ -1238,9 +1239,11 @@ public class McpToolRouter {
     // both `view` and `fields` returns the full response, byte-for-byte as before.
     String view = args.optString(McpActionsView.PARAM_VIEW, null);
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
+    // ETP-5447: plus the named actions the entity's handler declares, which live only in its
+    // pre-hook and are otherwise invisible. Fail-open: a lookup failure costs those entries only.
     if (McpActionsView.isActionsView(view)) {
-      return wrapAsTextContent(
-          McpActionsView.buildResponse(specName, entityName, fieldsArray));
+      return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
+          McpDeclaredActions.forCatalog(sfEntity, specName, entityName)));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
@@ -1583,6 +1586,10 @@ public class McpToolRouter {
    * {@code NeoEndpointType.ACTION}). A pre-hook {@link NeoResponse} short-circuits before the
    * process is fired; the post-hook may replace the result. Without this parity, completing a
    * document over MCP would skip handler logic the UI executes (ETP-4285).
+   * <p>
+   * A named action the handler declares ({@link NeoHandler#declaredActions}, ETP-5447) is run by
+   * {@link McpDeclaredActions#run} instead: declared method, required parameters checked first,
+   * the handler's own payload returned as the result.
    */
   JSONObject handleAction(String specName, JSONObject args) throws Exception {
     McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
@@ -1600,6 +1607,14 @@ public class McpToolRouter {
     // the same contract the REST path gives handlers.
     JSONObject actionParams = parameters != null ? parameters : new JSONObject();
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    // ETP-5447: a named action the handler declares runs with its declared method and never
+    // reaches the AD button path below, which could only answer "Action not found" for it.
+    NeoActionContract declared = McpDeclaredActions.find(handler, specName, entityName,
+        actionName);
+    if (declared != null) {
+      return McpDeclaredActions.run(handler, declared, specName, entityName, recordId,
+          actionParams, sfEntity);
+    }
     NeoContext hookCtx = McpHookExecutor.buildActionHookContext(specName, entityName, recordId,
         actionName, actionParams, sfEntity.getADTab(), sfEntity);
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);

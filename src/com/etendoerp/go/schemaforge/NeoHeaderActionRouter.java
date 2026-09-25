@@ -16,10 +16,17 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Shared dispatch helper for header handlers that fan out ACTION requests to multiple delegates.
  */
-final class NeoHeaderActionRouter {
+public final class NeoHeaderActionRouter {
 
   private NeoHeaderActionRouter() {
   }
@@ -38,5 +45,42 @@ final class NeoHeaderActionRouter {
       }
     }
     return null;
+  }
+
+  /**
+   * Concatenate the {@link NeoHandler#declaredActions} of the delegates a header handler fans
+   * out to (ETP-5447), de-duplicated by action name.
+   *
+   * <p>The first delegate to declare a name wins — the same precedence {@link #dispatch} applies
+   * at run time, where the first delegate that answers short-circuits the rest — so the catalog
+   * describes the action that will actually run.</p>
+   *
+   * @param specName   the spec being described
+   * @param entityName the entity being described
+   * @param delegates  the delegates, in dispatch order; {@code null} entries are skipped
+   * @return the combined declarations, in delegate order; never {@code null}
+   */
+  public static List<NeoActionContract> declaredActions(String specName, String entityName,
+      NeoHandler... delegates) {
+    List<NeoActionContract> combined = new ArrayList<>();
+    if (delegates == null) {
+      return combined;
+    }
+    Set<String> seen = new HashSet<>();
+    for (NeoHandler delegate : delegates) {
+      if (delegate == null) {
+        continue;
+      }
+      List<NeoActionContract> declared = delegate.declaredActions(specName, entityName);
+      if (declared == null) {
+        continue;
+      }
+      for (NeoActionContract action : declared) {
+        if (action != null && seen.add(action.getName())) {
+          combined.add(action);
+        }
+      }
+    }
+    return combined;
   }
 }
