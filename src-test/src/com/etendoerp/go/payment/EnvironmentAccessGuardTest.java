@@ -180,6 +180,56 @@ class EnvironmentAccessGuardTest {
     }
   }
 
+  // ===================== enforcedDecision (QA-low) =====================
+
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.NullSource
+  @org.junit.jupiter.params.provider.EnumSource(value = Decision.class, names = "ALLOWED")
+  void enforcedDecisionPassesAnAllowingOrMissingDecisionThroughWithoutTheSwitch(
+      Decision decision) {
+    decide(decision);
+
+    assertEquals(decision, guard(true).enforcedDecision(CLIENT_ID));
+
+    assertTrue(flagQueries.isEmpty(), "no refusal, no flag evaluation");
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = Decision.class, names = { "SUBSCRIPTION_REQUIRED", "DEMO_TRIAL_EXPIRED" })
+  void enforcedDecisionKeepsTheRefusalWhileEnforcing(Decision decision) {
+    decide(decision);
+
+    assertEquals(decision, guard(false).enforcedDecision(CLIENT_ID));
+
+    assertEquals(List.of(CLIENT_ID), flagQueries, "the switch is asked for this tenant");
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = Decision.class, names = { "SUBSCRIPTION_REQUIRED", "DEMO_TRIAL_EXPIRED" })
+  void enforcedDecisionReadsAllowedWhenTheSwitchIsOn(Decision decision) {
+    decide(decision);
+
+    assertEquals(Decision.ALLOWED, guard(true).enforcedDecision(CLIENT_ID));
+
+    assertEquals(List.of(CLIENT_ID), flagQueries);
+  }
+
+  @Test
+  void enforcedDecisionLogsNothingWhateverItDecides() {
+    // It reports a state; it decides no request — so, unlike check, no INFO line.
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    TestLogCapture info = TestLogCapture.attachTo(EnvironmentAccessGuard.class, Level.INFO);
+    try {
+      guard(true).enforcedDecision(CLIENT_ID);
+      guard(false).enforcedDecision(CLIENT_ID);
+    } finally {
+      info.detach();
+    }
+
+    assertTrue(info.messagesAt(Level.INFO).isEmpty(), info.messagesAt(Level.INFO).toString());
+    assertTrue(info.messagesAt(Level.WARN).isEmpty());
+  }
+
   // ===================== the shared wire format =====================
 
   @Test

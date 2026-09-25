@@ -110,6 +110,25 @@ class EnvironmentAccessEnforcementFlagTest {
     assertTrue(EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(CLIENT_ID));
   }
 
+  /** QA-low — every local spelling of "true" switches enforcement off (trimmed, any case). */
+  @ParameterizedTest
+  @ValueSource(strings = { "true", "TRUE", "True", " true ", "Y", "y", "yes", "YES", "1" })
+  void everyLocalSpellingOfTrueSwitchesEnforcementOff(String value) {
+    System.setProperty(FLAG_PROPERTY, value);
+
+    assertTrue(EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(CLIENT_ID), value);
+  }
+
+  /** QA-low — every local spelling of "false", and anything unparseable, keeps enforcing. */
+  @ParameterizedTest
+  @ValueSource(strings = { "false", "FALSE", "N", "n", "no", "NO", "0", "on", "off", "enabled",
+      "truee", "t" })
+  void everyOtherValueKeepsEnforcing(String value) {
+    System.setProperty(FLAG_PROPERTY, value);
+
+    assertFalse(EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(CLIENT_ID), value);
+  }
+
   @Test
   void evaluatesTheKillSwitchKeyWithTheTenantAsClientIdAndNoAccount() {
     try (MockedStatic<GoFeatureFlags> flags = mockStatic(GoFeatureFlags.class)) {

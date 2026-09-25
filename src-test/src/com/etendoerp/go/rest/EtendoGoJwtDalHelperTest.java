@@ -760,6 +760,215 @@ class EtendoGoJwtDalHelperTest {
       assertFalse(result.has("trialExpiresAt"), result.toString());
       assertFalse(result.has("trialDaysRemaining"), result.toString());
     }
+
+    // ===================== QA-low: accessState is the ENFORCED decision =====================
+
+    /** Routes the lifecycle preference reads by attribute; every other preference is absent. */
+    private void givenPreferences(Map<String, String> byAttribute) {
+      @SuppressWarnings("unchecked")
+      OBQuery<Preference> routed = mock(OBQuery.class);
+      java.util.concurrent.atomic.AtomicReference<String> attribute =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      org.mockito.Mockito.doAnswer(invocation -> {
+        if ("attribute".equals(invocation.getArgument(0))) {
+          attribute.set(invocation.getArgument(1));
+        }
+        return routed;
+      }).when(routed).setNamedParameter(anyString(), any());
+      Map<String, Preference> stored = new java.util.HashMap<>();
+      for (Map.Entry<String, String> entry : byAttribute.entrySet()) {
+        Preference preference = mock(Preference.class);
+        when(preference.getSearchKey()).thenReturn(entry.getValue());
+        stored.put(entry.getKey(), preference);
+      }
+      when(routed.uniqueResult()).thenAnswer(invocation -> stored.get(attribute.get()));
+      when(routed.list()).thenReturn(Collections.emptyList());
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(routed);
+    }
+
+    /** Serves {@code open} (may be null) for open-row lookups and nothing for closed ones. */
+    private void givenOpenRow(Subscription open) {
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> openRows = mock(OBQuery.class);
+      when(openRows.list()).thenReturn(open == null ? Collections.emptyList() : List.of(open));
+      when(openRows.uniqueResult()).thenReturn(open);
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> closedRows = mock(OBQuery.class);
+      when(closedRows.list()).thenReturn(Collections.emptyList());
+      when(closedRows.uniqueResult()).thenReturn(null);
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation ->
+          ((String) invocation.getArgument(1)).contains("is not null") ? closedRows : openRows);
+    }
+
+    private String givenTenant() {
+      String clientId = "QA-" + java.util.UUID.randomUUID();
+      when(client.getId()).thenReturn(clientId);
+      when(client.getName()).thenReturn("Blocked Tenant");
+      when(environmentUser.getId()).thenReturn("U-QA");
+      when(environmentUser.getUsername()).thenReturn("owner@blocked.test");
+      when(environmentUser.getName()).thenReturn("Owner");
+      return clientId;
+    }
+
+    /** A productive tenant whose grace ran out 45 days ago (default grace: 15 days). */
+    private java.time.Instant givenPastDueTenantOutOfGrace(String clientId) {
+      // Millisecond precision: the anchor travels through a java.util.Date column.
+      java.time.Instant anchor = java.time.Instant.now().minus(java.time.Duration.ofDays(45))
+          .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+      Subscription pastDue = mock(Subscription.class);
+      when(pastDue.getEnvironmentClient()).thenReturn(client);
+      when(pastDue.getSubscriptionStatus()).thenReturn("past_due");
+      when(pastDue.getGraceAnchor()).thenReturn(Date.from(anchor));
+      givenOpenRow(pastDue);
+      givenPreferences(Map.of("ETGO_EnvironmentType", "PRODUCTIVE"));
+      return anchor;
+    }
+
+    /** A demo whose 15-day trial started 40 days ago, with no subscription row. */
+    private java.time.Instant givenExpiredDemo() {
+      java.time.Instant started = java.time.Instant.now().minus(java.time.Duration.ofDays(40));
+      givenOpenRow(null);
+      givenPreferences(Map.of("ETGO_EnvironmentType", "DEMO",
+          "ETGO_DemoTrialStartedAt", started.toString()));
+      return started;
+    }
+
+    /** Builds the environment with the kill switch answering {@code switchedOff} for the tenant. */
+    private JSONObject buildWithSwitch(String clientId, boolean switchedOff) throws Exception {
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(anyString())).thenReturn(false);
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(clientId)).thenReturn(switchedOff);
+        JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null,
+            environmentUser);
+        flag.verify(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff(clientId));
+        return result;
+      }
+    }
+
+    /** Every key but accessState must be the same fact whatever the switch says. */
+    private void assertOnlyAccessStateDiffers(JSONObject enforced, JSONObject switchedOff)
+        throws Exception {
+      java.util.Set<String> enforcedKeys = new java.util.TreeSet<>();
+      enforced.keys().forEachRemaining(key -> enforcedKeys.add((String) key));
+      java.util.Set<String> switchedKeys = new java.util.TreeSet<>();
+      switchedOff.keys().forEachRemaining(key -> switchedKeys.add((String) key));
+      assertEquals(enforcedKeys, switchedKeys);
+      for (String key : enforcedKeys) {
+        if (!"accessState".equals(key)) {
+          assertEquals(String.valueOf(enforced.get(key)), String.valueOf(switchedOff.get(key)),
+              key);
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("QA-low: a past-due tenant out of grace reports SUBSCRIPTION_REQUIRED while "
+        + "enforcing, ALLOWED when switched off, with the same subscription facts")
+    void aPastDueTenantOutOfGraceReportsTheEnforcedDecision() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant anchor = givenPastDueTenantOutOfGrace(clientId);
+
+      JSONObject enforced = buildWithSwitch(clientId, false);
+      JSONObject switchedOff = buildWithSwitch(clientId, true);
+
+      assertEquals("SUBSCRIPTION_REQUIRED", enforced.getString("accessState"));
+      assertEquals("ALLOWED", switchedOff.getString("accessState"));
+      for (JSONObject result : List.of(enforced, switchedOff)) {
+        assertEquals("PRODUCTIVE", result.getString("environmentType"));
+        assertEquals("PAST_DUE", result.getString("subscriptionStatus"));
+        assertEquals(anchor.toString(), result.getString("renewalDueAt"));
+      }
+      assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    @Test
+    @DisplayName("QA-low: a canceled tenant reports ALLOWED only while switched off, still EXPIRED")
+    void aCanceledTenantReportsAllowedOnlyWhileSwitchedOff() throws Exception {
+      String clientId = givenTenant();
+      Subscription closed = mock(Subscription.class);
+      when(closed.getEnvironmentClient()).thenReturn(client);
+      when(closed.getSubscriptionStatus()).thenReturn("canceled");
+      when(closed.getEndDate()).thenReturn(new Date(System.currentTimeMillis() - 86_400_000L));
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> openRows = mock(OBQuery.class);
+      when(openRows.list()).thenReturn(Collections.emptyList());
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> closedRows = mock(OBQuery.class);
+      when(closedRows.list()).thenReturn(List.of(closed));
+      when(closedRows.uniqueResult()).thenReturn(closed);
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation ->
+          ((String) invocation.getArgument(1)).contains("is not null") ? closedRows : openRows);
+
+      JSONObject enforced = buildWithSwitch(clientId, false);
+      JSONObject switchedOff = buildWithSwitch(clientId, true);
+
+      assertEquals("SUBSCRIPTION_REQUIRED", enforced.getString("accessState"));
+      assertEquals("ALLOWED", switchedOff.getString("accessState"));
+      assertEquals("EXPIRED", switchedOff.getString("subscriptionStatus"));
+      assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    @Test
+    @DisplayName("QA-low: an expired demo reports DEMO_TRIAL_EXPIRED while enforcing, ALLOWED "
+        + "when switched off, with the trial fields unchanged")
+    void anExpiredDemoReportsTheEnforcedDecisionAndKeepsItsTrialFacts() throws Exception {
+      String clientId = givenTenant();
+      java.time.Instant started = givenExpiredDemo();
+
+      JSONObject enforced = buildWithSwitch(clientId, false);
+      JSONObject switchedOff = buildWithSwitch(clientId, true);
+
+      assertEquals("DEMO_TRIAL_EXPIRED", enforced.getString("accessState"));
+      assertEquals("ALLOWED", switchedOff.getString("accessState"));
+      for (JSONObject result : List.of(enforced, switchedOff)) {
+        assertEquals("DEMO", result.getString("environmentType"));
+        assertEquals(started.toString(), result.getString("trialStartedAt"));
+        assertEquals(started.plus(java.time.Duration.ofDays(15)).toString(),
+            result.getString("trialExpiresAt"));
+        assertTrue(result.has("trialDaysRemaining"));
+      }
+      assertOnlyAccessStateDiffers(enforced, switchedOff);
+    }
+
+    @Test
+    @DisplayName("QA-low: the switch of ANOTHER tenant does not change this tenant's refusal")
+    void theSwitchIsPerTenant() throws Exception {
+      String clientId = givenTenant();
+      givenPastDueTenantOutOfGrace(clientId);
+      JSONObject result;
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+            .isEnforcementSwitchedOff("SOME-OTHER-TENANT")).thenReturn(true);
+        result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      }
+
+      assertEquals("SUBSCRIPTION_REQUIRED", result.getString("accessState"));
+    }
+
+    @Test
+    @DisplayName("QA-low: a legacy tenant with no decision carries no accessState at all")
+    void aLegacyTenantWithNoDecisionHasNoAccessState() throws Exception {
+      String clientId = givenTenant();
+      givenOpenRow(null);
+      givenPreferences(Map.of());
+
+      JSONObject result;
+      try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+        result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+        // No refusal to switch off: the flag is never read.
+        flag.verifyNoInteractions();
+      }
+
+      assertFalse(result.has("accessState"), result.toString());
+      assertFalse(result.has("environmentType"), result.toString());
+      assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+    }
   }
 
   @Nested
