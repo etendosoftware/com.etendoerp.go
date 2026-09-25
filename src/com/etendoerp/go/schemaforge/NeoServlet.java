@@ -28,6 +28,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.usageevents.UsageEventRecorder;
 import com.smf.securewebservices.SWSConfig;
 
 /**
@@ -87,6 +88,22 @@ public class NeoServlet extends HttpBaseServlet {
   private final NeoPseudoSpecDispatcher pseudoSpecDispatcher =
       new NeoPseudoSpecDispatcher(this, batchService, simSearchEndpoint, vectorSearchEndpoint,
           goWebhookBridge);
+
+  /**
+   * Stop the usage event writer on undeploy or container shutdown, draining what is queued with a
+   * grace period and reporting what is lost. Hooked here because this servlet is the one component
+   * every Etendo GO instance has running, and it hosts the UI usage endpoint; a destroy() override
+   * needs no web.xml listener. Never throws.
+   */
+  @Override
+  public void destroy() {
+    try {
+      UsageEventRecorder.shutdown();
+    } catch (Exception e) {
+      log.debug("Could not stop the usage event writer on servlet destroy.", e);
+    }
+    super.destroy();
+  }
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {

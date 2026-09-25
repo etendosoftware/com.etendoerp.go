@@ -118,7 +118,9 @@ import com.etendoerp.go.session.IssuedGoSession;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usageevents.SessionLoginUsage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -3193,6 +3195,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleEnvironmentLogin(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    long startNanos = System.nanoTime();
     String token = extractBearerToken(request);
     if (token == null || !GoLegacyBearer.isEnabled()) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
@@ -3225,7 +3228,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoJwtSupport.RoleListData roleListData =
           EtendoGoJwtSupport.loadRoleListData(userId);
-      writeEnvironmentLoginResponse(response, userId, roleListData);
+      writeEnvironmentLoginResponse(response, userId, roleListData, startNanos);
 
     } catch (RuntimeException e) {
       log.error("Database error in /login", e);
@@ -3832,7 +3835,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
-      EtendoGoJwtSupport.RoleListData roleListData) throws Exception {
+      EtendoGoJwtSupport.RoleListData roleListData, long startNanos) throws Exception {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     try {
@@ -3850,8 +3853,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_TOKEN, jwtToken);
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
+      recordLegacyEnvironmentLogin(jwtToken, startNanos);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5462: {@code session.login} for the cookie-session path, from the ids the rotated session
+   * now stores. Last on the success path and never throws: a failure here must not reach the
+   * caller's catch blocks, which would write an error over the answer already sent.
+   */
+  private static void recordCookieEnvironmentLogin(GoSessionRecord entered, long startNanos) {
+    try {
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
+          entered.getCtxOrgId(), entered.getUserId(), entered.getRoleId(),
+          entered.getAuthMethod(), startNanos);
+    } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
+      log.debug("Could not record the cookie environment login usage event.", e);
+    }
+  }
+
+  /**
+   * ETP-5462: {@code session.login} for the legacy bearer path. The ids come from the claims of the
+   * environment JWT just issued (decoded, not re-verified: it is ours and a microsecond old), the
+   * same source the cookie path stores in its session. Runs after the response is written and never
+   * throws, so it cannot turn a successful login into an error.
+   */
+  private static void recordLegacyEnvironmentLogin(String jwtToken, long startNanos) {
+    try {
+      DecodedJWT claims = JWT.decode(jwtToken);
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN,
+          claims.getClaim(PROGRESS_CLIENT).asString(),
+          claims.getClaim(PROGRESS_ORGANIZATION).asString(),
+          claims.getClaim("user").asString(),
+          claims.getClaim("role").asString(),
+          null, startNanos);
+    } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
+      log.debug("Could not record the legacy environment login usage event.", e);
     }
   }
 
@@ -5063,6 +5102,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    long startNanos = System.nanoTime();
     JSONObject body;
     try {
       body = readJsonBody(request);
@@ -5143,6 +5183,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
+      recordCookieEnvironmentLogin(rotated.getRecord(), startNanos);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);

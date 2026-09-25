@@ -2625,6 +2625,90 @@ Two rules keep the links honest, and both are enforced in code:
 A proxied deployment therefore **must** set `etendo.go.app.baseUrl` to the public app URL, the same
 property the image upload URL depends on.
 
+### 4.15 Usage Events Endpoint (ETP-5462)
+
+```
+POST /sws/neo/usage
+Authorization: Bearer {token}
+Content-Type: application/json
+```
+
+Records product-usage events from the React UI and the AI BFF into `ETGO_USAGE_EVENT`. A global
+pseudo-spec like `batch`/`simsearch` (dispatched by `NeoPseudoSpecDispatcher`, implemented in
+`NeoUsageEventEndpoint`): no ETGO_SF_SPEC row, no Webhooks grant, only a valid NEO bearer token.
+Events are validated on the request thread and handed to `UsageEventRecorder`, whose writer thread
+does the INSERT; the response never waits for it.
+
+**Request:**
+
+```json
+{
+  "events": [
+    {
+      "eventType": "ai.agent.message",
+      "source": "ai-bff",
+      "target": "sales-invoice",
+      "action": "list",
+      "outcome": "ok",
+      "durationMs": 340,
+      "occurredAt": "2026-09-23T10:15:02.120Z",
+      "sessionKey": "b1f0…",
+      "appVersion": "2026.09.1",
+      "properties": { "model": "kimi-k2.6", "inputTokens": 1200 }
+    }
+  ]
+}
+```
+
+Only `eventType` is required. Events carry the **shape** of what happened, never business content
+(amounts, names, typed text) — see `UsageEvent`'s class javadoc.
+
+**Response:** `202 Accepted`
+
+```json
+{ "accepted": 1, "dropped": 0 }
+```
+
+`accepted + dropped` always equals the number of events sent. `accepted` counts events handed to
+the recorder with a known type; it does not confirm the INSERT (a writer-side failure is logged and
+counted server-side, not reported to the caller).
+
+**Rules:**
+
+| Aspect | Rule |
+|--------|------|
+| Who | Client, organization, user and role come from the token's `OBContext`. The body cannot set them; any such key is ignored. |
+| `source` | `ui` or `ai-bff`; anything else (including `backend`/`mcp`) or missing → `ui`. A label, not a trust boundary: the AI BFF uses the user's own token. |
+| `eventType` | Must be in `UsageEventTypes`. Unknown → dropped and counted; the recorder logs it at ERROR (throttled). Never an HTTP error. |
+| Batch size | At most 50 events per request; the rest are dropped and counted. |
+| `occurredAt` | ISO-8601 with `Z` or an offset, clamped to `[now − 24h, now + 5min]`. Missing or unparseable → now. |
+| `durationMs` | A non-negative number; anything else → null. |
+| `outcome` | `ok` or `error`; anything else → null. |
+| String fields | Must be JSON strings (a number is not coerced); clipped to their column width by the writer. |
+| `properties` | A flat object. String (clipped to 256 chars), number and boolean values are kept; a nested object, array, null or a key over 64 chars drops **that property**, not the event. Past 4 KB serialized the whole set is replaced by `{"_truncated":true}`. |
+| Rate limit | Two fixed one-minute windows, in memory and per instance (bounded maps); an event must pass **both**, the excess is dropped and counted. **Per session:** 600 events per client + user + `sessionKey`. **Per user:** 1200 events per client + user, whatever the `sessionKey` — the body names the session key, so the per-session limit alone can be evaded by rotating it; the per-user one is keyed only on the token. The per-session limit is checked first, so an event it refuses does not consume the user's budget. |
+| Opt-out | `usage.events.enabled=false` in `Openbravo.properties` — the endpoint still answers `202`, nothing is stored. |
+
+**Errors:** `400` only when the body is not a JSON object with an `events` array; `413` when the
+body exceeds 256 KB; `405` for any method other than `POST`; `401` without a valid token. Any
+unexpected failure after parsing answers `202` with the unprocessed events counted as dropped —
+never `500`, so an older or newer UI degrades to "not recorded" instead of failing.
+
+**Event types.** The accepted set is closed and lives in `UsageEventTypes` (D4); a type is added
+there, with its constant in `KNOWN`, before any caller may send it. Not every type comes through
+this endpoint — some are recorded by the backend itself through `UsageEventRecorder`, with
+`source = backend`:
+
+| Event type | Recorded by | When | Columns |
+|------------|-------------|------|---------|
+| `ai.agent.message` | AI BFF, through this endpoint (defined; no caller yet) | One completed AI agent chat turn | `properties`: model, token counts |
+| `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
+| `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+
+Recording is the last statement of the success path, after the response is written, and never
+throws; the INSERT happens on the recorder's writer thread, so a slow or locked
+`ETGO_USAGE_EVENT` does not slow a login.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec
