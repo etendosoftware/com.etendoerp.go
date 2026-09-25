@@ -83,7 +83,6 @@ import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
-import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -91,7 +90,6 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
-import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -343,8 +341,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
-  OnboardingDataTransferService onboardingDataTransferService =
-      new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingCompanyProfileTransferService onboardingCompanyProfileTransferService =
       new OnboardingCompanyProfileTransferService();
@@ -460,7 +456,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetFirstSteps(request, response);
     } else if (isPath(path, PATH_ONBOARDING_COMPANY_DATA)) {
       handleGetCompanyData(request, response);
-    } else if (isPath(path, "/demo-data-transfer") && DemoDataTransferFlag.isEnabled()) {
+    } else if (isPath(path, "/demo-data-transfer")) {
       handleDemoDataTransferStatus(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
@@ -635,7 +631,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
-    } else if (isPath(path, "/demo-data-transfer/retry") && DemoDataTransferFlag.isEnabled()) {
+    } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
@@ -2831,11 +2827,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /**
-   * Persists checkout selection before the hosted-provider redirect loses browser state. A no-op
-   * with flag {@code demo-data-transfer} off, where the body's selection is ignored as it was
-   * before ETP-5364.
-   */
+  /** Persists checkout selection before the hosted-provider redirect loses browser state. */
   void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult,
       CheckoutSelection selection) {
     recordDemoDataTransferSelection(body, checkoutResult.optString(FIELD_REQUEST_ID, ""),
@@ -2845,8 +2837,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** A purchase without a demo source never records a transfer selection. */
   private void recordDemoDataTransferSelection(JSONObject body, String requestId,
       CheckoutSelection selection) {
-    if (!DemoDataTransferFlag.isEnabled() || selection == null
-        || StringUtils.isBlank(selection.demoClientId)) return;
+    if (selection == null || StringUtils.isBlank(selection.demoClientId)) return;
     JSONObject transferSelection = body.optJSONObject(FIELD_DATA_TRANSFER);
     if (transferSelection == null) return;
     demoDataTransferService.recordSelection(requestId,
@@ -2972,9 +2963,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void addDemoDataTransferSelection(JSONObject result, String requestId, String demoClientId)
       throws JSONException {
     if (StringUtils.isBlank(demoClientId)) return;
-    boolean enabled = DemoDataTransferFlag.isEnabled();
-    result.put("dataTransferEnabled", enabled);
-    if (!enabled) return;
+    // Always true since ETP-5480 retired the flag; kept because the upgrade page still reads it.
+    result.put("dataTransferEnabled", true);
     JSONObject selection = demoDataTransferService.selection(requestId);
     if (selection != null) result.put(FIELD_DATA_TRANSFER, selection);
   }
@@ -3368,8 +3358,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (paidUpgrade) {
       transferDemoCompanyProfile(accountEmail, demoSourceClientId, clientId, orgId);
     }
-    transferSelectedData(writer, onboardingRequest, paidUpgrade, demoSourceClientId, clientId,
-        orgId);
     if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
@@ -3406,28 +3394,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static String resolveDemoSourceClientId(boolean paidUpgrade,
       OnboardingRequestData onboardingRequest) {
     return paidUpgrade ? StringUtils.trimToNull(onboardingRequest.demoClientId) : null;
-  }
-
-  private void transferSelectedData(PrintWriter writer, OnboardingRequestData onboardingRequest,
-      boolean paidUpgrade, String demoSourceClientId, String clientId, String orgId) {
-    if (!shouldRunSynchronousDataTransfer(paidUpgrade, onboardingRequest.transferProducts,
-        onboardingRequest.transferContacts)) return;
-    sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
-    OnboardingDataTransferService.TransferResult result = onboardingDataTransferService.transfer(
-        demoSourceClientId, clientId, orgId, onboardingRequest.transferProducts,
-        onboardingRequest.transferContacts);
-    if (result.failures() > 0) {
-      throw new IllegalStateException("Demo data transfer failed: "
-          + StringUtils.defaultIfBlank(result.failureReason(), "unknown reason"));
-    }
-    sendProgress(writer, "data-transfer", "done",
-        "Selected demo data transferred (products=" + result.productsCopied()
-            + ", contacts=" + result.contactsCopied() + ")");
-  }
-
-  static boolean shouldRunSynchronousDataTransfer(boolean paidUpgrade, boolean products,
-      boolean contacts) {
-    return paidUpgrade && !DemoDataTransferFlag.isEnabled() && (products || contacts);
   }
 
   private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
@@ -3495,8 +3461,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Legacy paid requests never saved a source or transfer intent. Resume them as a new
       // productive environment without inferring a demo or copying/revoking any tenant.
       onboardingRequest.demoClientId = null;
-      onboardingRequest.transferProducts = false;
-      onboardingRequest.transferContacts = false;
       return true;
     }
 
@@ -3511,12 +3475,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           e.getMessage(), e.getMessage());
       return false;
     }
-    CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
-        .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
-    onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
-        && transferSelection != null && transferSelection.isProducts();
-    onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
-        && transferSelection != null && transferSelection.isContacts();
     return true;
   }
 
@@ -3643,9 +3601,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing with
-   * flag {@code demo-data-transfer} off. Best-effort in its own right: a failure here is logged as
-   * a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
+   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing
+   * when the purchase has no demo source. Best-effort in its own right: a failure here is logged
+   * as a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
@@ -3653,7 +3611,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   void startDemoDataTransferBestEffort(String paymentToken, String demoClientId, String clientId,
       String accountId, String accountEmail) {
-    if (!DemoDataTransferFlag.isEnabled() || StringUtils.isBlank(demoClientId)) return;
+    if (StringUtils.isBlank(demoClientId)) return;
     try {
       CheckoutRequestStore.TransferSelection selection = checkoutRequestStore
           .findTransferSelection(paymentToken, accountId, accountEmail);
@@ -3941,9 +3899,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
-      JSONObject transfer = body.optJSONObject(FIELD_DATA_TRANSFER);
-      data.transferProducts = transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false);
-      data.transferContacts = transfer != null && transfer.optBoolean(FIELD_CONTACTS, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -5633,8 +5588,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Resolved only from the account-scoped checkout row; onboarding never trusts a browser value.
     private String demoClientId;
     private String upgradeAction;
-    private boolean transferProducts;
-    private boolean transferContacts;
   }
 
   private static class AdminContextData {

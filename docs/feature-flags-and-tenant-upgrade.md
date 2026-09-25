@@ -201,32 +201,32 @@ The web client evaluates the same flags for presentation only — which pages an
 decision about permissions, data or processes is made server-side. The paywall below holds
 regardless of what the client believes.
 
-### `demo-data-transfer` (ETP-5443) — backend-only, off by default
+### `demo-data-transfer` — retired (ETP-5480)
 
-Gates the ETP-5364 demo-to-productive data transfer. Evaluated in exactly one place,
-`DemoDataTransferFlag.isEnabled()`, with an account-less context (the endpoints are routed before
-any credential is read, so every toggle point must resolve the same answer). Locally:
-`etendo.go.flags.demo-data-transfer=true` / `ETGO_FLAG_DEMO_DATA_TRANSFER=true`.
+The ETP-5443 flag that gated the ETP-5364 demo-to-productive data transfer is gone: the transfer is
+permanent. `DemoDataTransferFlag`, `GoFeatureFlags.FLAG_DEMO_DATA_TRANSFER` and the older
+synchronous NEO grid-import path it kept alive for the flag-off case (`OnboardingDataTransferService`)
+were removed. A leftover `etendo.go.flags.demo-data-transfer` / `ETGO_FLAG_DEMO_DATA_TRANSFER`
+setting, or a ConfigCat key of that name, is no longer read and can be deleted.
 
-| Toggle point (`EtendoGoJwtServlet`) | Flag off — the pre-ETP-5364 behaviour |
+What was a toggle point is now unconditional in `EtendoGoJwtServlet`:
+
+| Point | Behaviour |
 |---|---|
-| `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | 404 `Unknown endpoint: <path>`, identical to a path that does not exist |
-| `recordDemoDataTransferSelection` (checkout / purchase) | the body's `dataTransfer` selection is ignored |
-| `startDemoDataTransferBestEffort` (paid onboarding commit) | no asynchronous transfer started |
+| `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | always routed; authenticated like any other session endpoint |
+| `recordDemoDataTransferSelection` (checkout / purchase) | records the body's `dataTransfer` selection when the purchase has a demo source |
+| `startDemoDataTransferBestEffort` (paid onboarding commit) | starts the asynchronous transfer from the demo persisted on the purchase |
 
-The worker thread is created on first submission, so an instance with the flag off never starts
-one. No key exists in the web client's `flag-keys.js`: the First Steps row appears only when the
-status read answers 2xx, so the browser follows this evaluator instead of running a second one.
-With the flag off, paid onboarding retains its older synchronous grid-import transfer when the
-browser explicitly selected products or contacts. With the flag on, that synchronous path is
-disabled: only the server-recorded asynchronous job copies data. Source and target client IDs
-must differ in both paths.
+The worker thread is still created on first submission, so an instance that never receives a
+transfer never starts one. Only the server-recorded asynchronous job copies data; the onboarding
+body's `dataTransfer` is ignored. Source and target client IDs must differ.
 
-With the flag on, checkout records `{products, contacts}` under its request ID before contacting
-Stripe. The first selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and
-the billing overview include `dataTransferEnabled` and include `dataTransfer` only when a
-server-side selection exists. A flag-on older purchase with no selection therefore remains
-`NOT_REQUESTED`; the browser must not guess its choice. The recovery procedure is in
+Checkout records `{products, contacts}` under its request ID before contacting Stripe. The first
+selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and the billing overview
+include `dataTransferEnabled: true` for a purchase with a demo source (kept for the upgrade page,
+which still reads it) and include `dataTransfer` only when a server-side selection exists. An older
+purchase with no selection therefore remains `NOT_REQUESTED`; the browser must not guess its
+choice. The recovery procedure is in
 [`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
 
 ## 2. The onboarding paywall
@@ -347,12 +347,19 @@ that purchase. If setup is already running, the response says to refresh its sta
 again. Once an attempt is marked failed, retrying the same paid request is allowed; a stale worker
 cannot mark the newer attempt complete.
 
-With `demo-data-transfer` enabled, the paid flow starts the durable transfer after provisioning
-commits. Products, their sales/purchase prices and current cost, and contacts are copied under
-target client references; global units and tax categories remain global references. Missing
-required target references fail the job with a visible reason. Existing target search keys and
-price/cost rows are updated so a retry does not duplicate them. With the flag disabled, the older
-synchronous NEO grid-import path remains available for an explicit browser selection.
+The paid flow starts the durable transfer after provisioning commits. Active products, their
+current cost and their prices, and active contacts are copied under target client references;
+global units and tax categories remain global references. Only prices on the demo's **default**
+sales and purchase price lists are migrated (the newest version of each), onto the target's
+default lists; prices on any other list are left behind. A contact address reuses only an
+address row already used by another contact, never the organization's fiscal address. Missing
+required target references fail the job with a visible reason.
+
+Each product and each contact is committed on its own, so the First Steps counters move while
+the job runs. A failure therefore rolls back only the item in progress and leaves the earlier
+ones copied; a retry re-runs every item through the same upserts (existing target search keys,
+price and cost rows are updated, never duplicated), so it completes the job without duplicating
+what was already copied.
 
 ### Company profile transfer during paid provisioning (ETP-5443)
 
@@ -390,9 +397,7 @@ environment. An independent purchase from an existing productive environment has
 associate or revoke.
 
 When a source demo organization exists, this profile setup is required for paid productive
-provisioning. It does not depend on whether the account selected product or contact transfer, and it
-is not gated by the optional `demo-data-transfer` feature flag. That flag controls the optional
-demo-data transfer described above; turning it off must not suppress the company profile copy. The
+provisioning. It does not depend on whether the account selected product or contact transfer. The
 target's currency is retained from paid onboarding and its ledger configuration; currency is not
 copied from the demo organization.
 
@@ -660,5 +665,5 @@ must never break the session.
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
-| Demo data transfer gate / worker | `com.etendoerp.go.payment.DemoDataTransferFlag`, `DemoDataTransferService` |
+| Demo data transfer worker | `com.etendoerp.go.payment.DemoDataTransferService` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |

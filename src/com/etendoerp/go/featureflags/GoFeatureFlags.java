@@ -132,16 +132,6 @@ public final class GoFeatureFlags {
   public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
 
   /**
-   * ETP-5443 — the demo-to-productive data transfer (ETP-5364): whether a paid productive tenant
-   * copies products/contacts from the account's demo, and whether {@code /sws/go/demo-data-transfer}
-   * exists at all. Environment-level, not per account: the endpoints are routed before any
-   * credential is read, so every toggle point evaluates the same context. Backend-only for the
-   * same reason as {@link #FLAG_BP_PORTAL_LINK} — the browser learns it from the endpoint answering
-   * 404. Its only caller is {@code DemoDataTransferFlag}.
-   */
-  public static final String FLAG_DEMO_DATA_TRANSFER = "demo-data-transfer";
-
-  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
