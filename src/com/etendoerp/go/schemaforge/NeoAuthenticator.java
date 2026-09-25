@@ -86,6 +86,10 @@ class NeoAuthenticator {
               "Invalid or expired session");
           return false;
         case NO_CREDENTIALS:
+          String oauth2Token = bearerToken(request);
+          if (oauth2Token != null && authenticateOAuth2TokenIfValid(request, oauth2Token)) {
+            return true;
+          }
           servlet.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
               "Missing or invalid Authorization header");
           return false;
@@ -212,10 +216,22 @@ class NeoAuthenticator {
    */
   private void authenticateOAuth2Token(HttpServletRequest request, String token, Exception jwtFailure)
       throws Exception {
-    java.util.Map<String, String> identity = OAuth2Filter.validateToken(token);
-    if (identity == null) {
+    if (!authenticateOAuth2TokenIfValid(request, token)) {
       if (jwtFailure != null) throw jwtFailure;
       throw new OBException("Invalid or expired token");
+    }
+  }
+
+  /**
+   * Authenticates an opaque OAuth2 token independently from the temporary legacy-JWT migration
+   * flag. A {@code false} result means the Bearer value is not a valid OAuth2 token; callers can
+   * then either try the legacy JWT path or return their usual unauthenticated response.
+   */
+  private boolean authenticateOAuth2TokenIfValid(HttpServletRequest request, String token)
+      throws Exception {
+    java.util.Map<String, String> identity = OAuth2Filter.validateToken(token);
+    if (identity == null) {
+      return false;
     }
 
     String userId = identity.get(OAuth2Filter.ATTR_USER_ID);
@@ -233,6 +249,15 @@ class NeoAuthenticator {
     OBContext.setOBContextInSession(request, context);
     enforceEnvironmentAccess(clientId);
     applyRequestLanguage(request);
+    return true;
+  }
+
+  private String bearerToken(HttpServletRequest request) {
+    String authHeader = request.getHeader("Authorization");
+    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+      return null;
+    }
+    return StringUtils.trimToNull(authHeader.substring(7));
   }
 
   private boolean hasRequiredScope(String method, String scopes) {
