@@ -378,17 +378,14 @@ public class DemoDataTransferService {
     return unique(Organization.class, "as o where o.client.id = :clientId and o.active = true and o.name <> '*'", clientId, null);
   }
 
+  /**
+   * Records a progress counter and commits the work copied so far, keeping the session and its
+   * loaded entities open, so status reads see the counters while the job runs. A later failure
+   * rolls back only the item in progress; a retry re-runs every item through the same upserts,
+   * which is what makes committing per item safe.
+   */
   void progress(Client client, String attribute, int value) {
     setClientPreference(attribute, String.valueOf(value), client);
-  }
-
-  /**
-   * Commits the work copied so far, keeping the session and its loaded entities open, so the
-   * progress counters are visible to status reads while the job runs. A later failure rolls back
-   * only the item in progress; a retry re-runs every item through the same upserts, which is what
-   * makes committing per item safe.
-   */
-  void checkpoint() {
     SessionHandler.getInstance().commitAndStart();
   }
 

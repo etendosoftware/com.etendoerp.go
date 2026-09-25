@@ -53,7 +53,6 @@ final class DemoDataTransferEntityCopier {
     owner.progress(target, PRODUCTS_TOTAL, products.size());
     int completed = 0;
     owner.progress(target, PRODUCTS_DONE, completed);
-    owner.checkpoint();
     for (Product product : products) {
       Product targetProduct = owner.unique(Product.class, "as p where p.client.id = :clientId and p.searchKey = :key",
           target.getId(), product.getSearchKey());
@@ -70,7 +69,6 @@ final class DemoDataTransferEntityCopier {
       copyPrices(product, targetProduct, target, targetOrg);
       copyCurrentCost(product, targetProduct, target, targetOrg);
       owner.progress(target, PRODUCTS_DONE, ++completed);
-      owner.checkpoint();
     }
   }
 
@@ -80,7 +78,6 @@ final class DemoDataTransferEntityCopier {
     owner.progress(target, CONTACTS_TOTAL, contacts.size());
     int completed = 0;
     owner.progress(target, CONTACTS_DONE, completed);
-    owner.checkpoint();
     for (BusinessPartner contact : contacts) {
       BusinessPartner targetContact = owner.unique(BusinessPartner.class,
           "as bp where bp.client.id = :clientId and bp.searchKey = :key", target.getId(), contact.getSearchKey());
@@ -97,7 +94,6 @@ final class DemoDataTransferEntityCopier {
           contact, targetContact, target, targetOrg);
       copyBusinessPartnerPersons(contact, targetContact, target, targetOrg, targetLocations);
       owner.progress(target, CONTACTS_DONE, ++completed);
-      owner.checkpoint();
     }
   }
 

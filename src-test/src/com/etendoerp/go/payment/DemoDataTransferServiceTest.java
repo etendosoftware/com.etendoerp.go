@@ -322,8 +322,9 @@ class DemoDataTransferServiceTest {
     verify(targetProduct).setUOM(unit);
     verify(targetProduct).setTaxCategory(tax);
     verify(obDal).save(targetProduct);
-    // Totals, then one commit per product: status reads see the progress while the job runs.
-    verify(sessionHandler, times(2)).commitAndStart();
+    // Every progress write commits (total, start, then one per product): status reads see the
+    // counters while the job runs.
+    verify(sessionHandler, times(3)).commitAndStart();
     verify(obDal).createQuery(eq(Product.class), contains("p.active = true"));
   }
 
@@ -477,7 +478,7 @@ class DemoDataTransferServiceTest {
     // The organization's fiscal address shares the table: only contact addresses are reusable.
     verify(obDal).createQuery(eq(org.openbravo.model.common.geography.Location.class),
         contains("BusinessPartnerLocation"));
-    verify(sessionHandler, times(2)).commitAndStart();
+    verify(sessionHandler, times(3)).commitAndStart();
   }
 
   @Test
