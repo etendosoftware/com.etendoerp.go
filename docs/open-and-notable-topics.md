@@ -330,59 +330,107 @@ trap. The other half — a fix dated *before* the newest fix an environment has 
 is invisible to a catalog test, so the rule above stays the author's job; `sql/README.md` "Choosing
 the timestamp" states it where fixes are written.
 
-### 🟠 3.7 Lifecycle webhooks write the open subscription row — preferences only without one
+### 🟠 3.7 Lifecycle webhooks write the subscription row they resolve — preferences only without one
 
 Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice.payment_failed`,
 `customer.subscription.updated`, `customer.subscription.deleted`) into a preference projection
-(`ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt`). Since the develop merge,
-`TenantEnvironmentLifecycleService.updateSubscriptionStatus` routes the outcome per tenant:
+(`ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt`). ETP-5046 moved the write onto the open
+`ETGO_SUBSCRIPTION` row; ETP-5047 made the row the event lands on explicit
+(`TenantEnvironmentLifecycleService.targetForSubscription` / `targetForTenant`, then
+`applySubscriptionEvent`):
 
-- **open `ETGO_SUBSCRIPTION` row** → `SubscriptionService.applyLifecycleStatus` writes `STATUS`
-  (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`) and `CURRENT_PERIOD_END` (the
-  applier's grace anchor, the end of the paid period; `null` clears it);
-- **no open row** → the preference projection, as before (`ETP-5046-TRANSITIONAL-FALLBACK`).
+1. **the open row whose `STRIPE_SUBSCRIPTION_ID` is the event's subscription** — the id is not
+   unique across rows, only across open ones (a plan change keeps the Stripe subscription and opens
+   a successor row, ETP-5053), so `END_DATE IS NULL` is part of the lookup;
+2. otherwise the tenant is found the old way — the checkout request that bought the subscription,
+   then the Stripe customer — and its **latest** row decides:
+   - no row at all → the preference projection (`ETP-5046-TRANSITIONAL-FALLBACK`);
+   - an open row with no Stripe id (backfilled) or this one → that row;
+   - an open row naming **another** subscription → `IGNORED`, `event for another subscription`;
+   - only closed rows → `IGNORED`, `subscription closed` (a late event of the canceled
+     subscription) or `no open subscription row` (the first event of a new purchase, before
+     onboarding opens its row). Neither may revive or overwrite anything.
 
-`readSubscriptionState` reads the same store the write goes to, and `resolve` reads the row first,
-so the access policy, `resolvePlan` and the environment list all agree. Every read on both routes
-runs in admin mode — the preference reads since ETP-5488, the row reads because
-`SubscriptionService` enters admin mode itself, and the transitional `ETGO_TenantPlan` fallback since
-the second develop merge — because the NEO access check runs as the calling user and a non-admin
-role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
+The row gets `STATUS` (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`) and
+`CURRENT_PERIOD_END` (the applier's grace anchor; `null` clears it). `readSubscriptionState`,
+`resolve` and `TenantPlanService.resolvePlan` read the same row, so the access policy, the plan and
+the environment list agree. Every read runs in admin mode (ETP-5488; the NEO check runs as the
+calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`).
 
-**Decided behaviour (Martin, 2026-09-24), not an open question:**
+**Decided behaviour (Martin, 2026-09-24; cancellation revised in ETP-5047):**
 
-- **`canceled` makes the tenant `free` immediately** for `resolvePlan` (only `active`/`past_due`
-  are productive). The environment keeps its `ETGO_EnvironmentType = PRODUCTIVE` marker, so the
-  access policy still sees a productive environment and applies `EXPIRED`. Watch §3.4: onboarding a
-  canceled tenant again would run `forceTestModeForFreeTenant` on it.
-- **`canceled` does not close the row** (`END_DATE` stays null). Closing a row is how a plan change
-  opens its successor (ETP-5053); a later re-subscription of the same tenant is not modelled yet —
-  `openSubscription` returns the existing open row untouched.
-- **The event-ordering watermark (`ETGO_SubscriptionEventAt`) stays a preference for both
-  routes.** It is webhook-stream metadata, not subscription state, and the row has no column for
-  it. Follow-up for ETP-5047: it could move onto `ETGO_SUBSCRIPTION` as its own column (new AD
-  column), which would let the row route drop its last preference read.
-- `CURRENT_PERIOD_END` on the row now means "grace anchor" as the applier computes it, not Stripe's
-  rolling billing window (§4 of the design doc). Nothing else writes it today; ETP-5047 should
-  decide whether to split the two.
-- The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the row too,
-  or it would stop affecting every tenant that has one. **`NONE` and `LEGACY_ENTITLEMENT` have no
-  row status, so once a tenant has a row the tool's choice of either is ignored:** it is written
-  to the preference, which the row route no longer reads, and the tenant keeps the row's status.
-  Noted by QA; accepted for a development-only tool rather than inventing row statuses for them.
-- **The webhook installs its own system context.** It runs with `OBContext == null`; develop only
-  worked because two stores leaked a system context, and the ETP-5045/5046 fixes that restore the
-  caller's context broke every correlated lifecycle event (NPE in the preference write → `FAILED`,
-  500). `applySubscriptionLifecycle` now runs through `SystemContext.run` (capture, install,
-  quiet unwind — shared with `CheckoutRequestStore`/`BillingEventStore`) and
-  `setPreference` runs in admin mode; `CheckoutWebhookEndpointIntegrationTest` pins both routes.
-  Design doc §8.4 has the full story — the lesson generalises to any context-less caller.
+- **A cancellation closes the row.** `customer.subscription.deleted`, and an update to Stripe's
+  terminal `canceled`, set `END_DATE` (Stripe's `ended_at`, else `canceled_at`, else now; never
+  before `START_DATE`). **A closed row reads as `canceled` whatever its `STATUS` says**
+  (`SubscriptionService.effectiveStatusOf`): access `EXPIRED`, plan `free`. `findLatest` /
+  `findLatestForClients` answer "open row, else the latest closed one", so a canceled tenant never
+  falls through to the preference fallback nor to `LEGACY_ENTITLEMENT`. The environment keeps its
+  `ETGO_EnvironmentType = PRODUCTIVE` marker, so the access policy still applies `EXPIRED`. Watch
+  §3.4: onboarding a canceled tenant again would run `forceTestModeForFreeTenant` on it.
+- **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
+  `openSubscription` inserts one. If the open row is `canceled` but was never closed (its delete
+  event was lost), `openSubscription` closes it and flushes before inserting — Hibernate runs
+  inserts before updates, and `etgo_sub_open_envclient_uq` would otherwise reject the new row.
+  ETP-5053 closes a row to open its successor with the same flush-first rule.
+- **Still open — the event-ordering watermark is a preference on both routes**
+  (`ETGO_SubscriptionEventAt`). ETP-5047 planned a `LAST_EVENT_AT` column so the row route reads
+  no preference; it is **not landed** (the AD column could not be deployed in the ETP-5047
+  session). Until then the row route reads this one preference.
+- **Still open — `CURRENT_PERIOD_END` on the row means "grace anchor"**, not Stripe's billing
+  period. The applier already extracts the real period (`SubscriptionEventOutcome.periodStart/End`:
+  the subscription or its first item on `customer.subscription.*`, the invoice lines on
+  `invoice.paid`), but nothing writes it until the anchor has its own column (`GRACE_ANCHOR`, not
+  landed — same reason). §5.5.
+- The development lifecycle tool mirrors a `CURRENT`/`PAST_DUE`/`EXPIRED` status onto the **open**
+  row (`applyLifecycleStatus`, which never closes one). **`NONE` and `LEGACY_ENTITLEMENT` have no
+  row status, so once a tenant has a row the tool's choice of either is ignored**, and a tenant
+  whose only row is closed cannot be flipped back by the tool at all. Accepted for a
+  development-only tool rather than inventing row statuses.
+- **The webhook installs its own system context.** It runs with `OBContext == null`;
+  `applySubscriptionLifecycle` runs through `SystemContext.run` (capture, install, quiet unwind —
+  shared with `CheckoutRequestStore`/`BillingEventStore`) and `setPreference` runs in admin mode;
+  `CheckoutWebhookEndpointIntegrationTest` pins both routes. Design doc §8.4 has the full story.
+  A watermark write that fails still propagates (500, the provider redelivers); a status write
+  that fails marks the event `FAILED`.
 - **The backfill carries the preference state onto the row.** R37 seeds `STATUS` from
   `ETGO_SubscriptionStatus` (same mapping as above, plus `NONE → canceled` so a locked-out tenant
-  stays locked out; absent/`LEGACY_ENTITLEMENT`/unknown → `active`) and
-  `CURRENT_PERIOD_END` from `ETGO_SubscriptionDueAt`, reading both by `AD_CLIENT_ID` (they are
-  owned by the tenant, unlike the plan marker of §3.3). Without that, the row — which wins once it
-  exists — would have reset every past-due or expired tenant to paying. Design doc §7.0.
+  stays locked out; absent/`LEGACY_ENTITLEMENT`/unknown → `active`) and `CURRENT_PERIOD_END` from
+  `ETGO_SubscriptionDueAt`, reading both by `AD_CLIENT_ID`. Design doc §7.0. **When `GRACE_ANCHOR`
+  lands, R37's anchor must reach it too** — a backfill that runs after that deploy and writes only
+  `CURRENT_PERIOD_END` would leave every backfilled past-due tenant with no anchor, i.e. blocked on
+  the spot.
+
+### 🟠 3.8 One environment-access check, one 402 body, one kill switch (ETP-5047)
+
+`EnvironmentAccessGuard` is the single commercial access check: NEO (`NeoAuthenticator`, every
+request), MCP (`McpServlet.doPost`, every credential scheme, run as system because MCP has no
+context yet) and the legacy `GET /sws/go/login` (it hands out a raw Etendo JWT, valid on every
+secure web service of the tenant). They all answer **HTTP 402** with:
+
+```json
+{ "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
+             "status": 402, "code": "ENVIRONMENT_ACCESS_DENIED", "decision": "SUBSCRIPTION_REQUIRED" } }
+```
+
+`message` is byte-for-byte the pre-ETP-5047 text; the SPA (`environmentAccessGate.js`) reads
+`error.decision` first and falls back to parsing it. **Keep the message unchanged for at least one
+release** — an SPA older than the backend still parses it.
+
+- **`POST /sws/go/session/environment` does NOT refuse, deliberately.** The blocked screen and the
+  pages it sends the customer to (`/account`, `/upgrade`) render inside the entered environment;
+  refusing entry would lock a blocked customer out of the only place that lets them pay. It answers
+  as before plus `accessDecision: "<DECISION>"` when the tenant is blocked. The platform-account
+  endpoints (`runWithPlatformAccount`: billing, portal, purchases, plans) never call the guard.
+- **Kill switch** `environment-access-enforcement-off` (backend-only, per `clientId` via ConfigCat):
+  enforcing unless explicitly `true`; when on, the would-be denial is logged at INFO and allowed.
+  See `feature-flags-and-tenant-upgrade.md` §1.
+- **Not guarded yet:** the servlets that authenticate through `JwtAuthUtils` —
+  `NeoFavoritesServlet`, `ReportSelectorsServlet`, `SurveyConfigServlet`,
+  `NeoFiscalTestModeServlet` — accept a blocked tenant's session. Out of ETP-5047's scope; one
+  `EnvironmentAccessGuard.check` in `JwtAuthUtils` would close all four.
+- **`charge.dispute.created`** is alert-only: recorded `APPLIED` in `ETGO_BILLING_EVENT`, a WARN
+  with the dispute, charge and payment-intent ids, amount and reason — never a status change. A lost
+  dispute reaches the subscription through the ordinary lifecycle events.
 
 ## 4. Known issues
 
@@ -580,12 +628,6 @@ guard the evaluator except this paragraph.** `ETGO_PLAN_QUOTA` is also the only 
 The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9; usage per subscription, which
 no ticket owns yet, is in §5.10–§5.12.
 
-### 🟠 5.2 ETP-5047: correlate to the OPEN row
-
-`STRIPE_SUBSCRIPTION_ID` is deliberately **not unique**: a plan change updates the item on the same
-Stripe subscription while opening a *new* Etendo row, so two local rows legitimately share one id.
-Lifecycle webhooks must resolve to the row with `END_DATE IS NULL`, not to "the" row.
-
 ### 🟠 5.3 ETP-5053: a plan change opens a new row
 
 Re-pricing a plan does **not** re-price existing subscribers — the subscription carries its own
@@ -599,8 +641,9 @@ current row (`END_DATE`) and inserts a successor, preserving price history. `PEN
   and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
   moving to the first real plan — until ETP-5053. `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay
   unread.
-- **Lifecycle webhooks update the row's status and grace anchor only** (§3.7): no period window,
-  no event watermark on the row, no closing on cancel, no re-subscription. ETP-5047 owns the rest.
+- **The lifecycle on the row is still partial** (§3.7): correlation by the open row, closing on
+  cancel and re-subscription landed in ETP-5047; the billing period and the event watermark are
+  still not on the row, waiting for the `GRACE_ANCHOR` / `LAST_EVENT_AT` columns.
 
 **Quota definition — owner ETP-5051.**
 
@@ -616,11 +659,13 @@ calendar month"; restated in the invariants table), and ETP-5051 reads it from
 Stripe anchor is preserved (PRD §8, ETP-5053).
 
 **What ETP-5051 must know:** today **no subscription row carries a billing period.**
-`SubscriptionService.openSubscription` writes neither column; `applyLifecycleStatus` only ever
+`SubscriptionService.openSubscription` writes neither column; the lifecycle write only ever
 *nulls* `CURRENT_PERIOD_START` and writes `CURRENT_PERIOD_END` as the lifecycle **grace anchor**
 (set on `PAST_DUE`, cleared to null on `CURRENT` and `EXPIRED` — §3.7). So an `active` row has both
-columns null. Populating the real Stripe period (and splitting it from the grace anchor) is
-ETP-5047's call per §3.7; the evaluator cannot be built on these columns until that happens.
+columns null. ETP-5047 decided the split — the anchor moves to its own `GRACE_ANCHOR` column and
+`CURRENT_PERIOD_START/END` take Stripe's period — and the applier already extracts that period
+(`SubscriptionEventOutcome.periodStart/End`); the new column and the write are not landed yet
+(§3.7). The evaluator cannot be built on these columns until they are.
 
 ### 🔴 5.6 Stock versus flow aggregation over the period — owned by nobody
 
@@ -661,7 +706,7 @@ deferred in PRD §16, yet the schema already accepts them.)
 
 Beyond §5.5's "no row has a period yet", two cases stay periodless by nature: rows backfilled by
 R37 (`CURRENT_PERIOD_START` always NULL, design §7.0) and a `canceled` row (`CURRENT_PERIOD_END`
-cleared, `END_DATE` still null — §3.7). **To decide in ETP-5051:** what the evaluator does with no
+cleared; since ETP-5047 the row is also closed, `END_DATE` set — §3.7). **To decide in ETP-5051:** what the evaluator does with no
 window — skip, treat as unlimited, or use the last known period. Latent today only because
 `legacy-productive` has no quota rows (§5.1); the first quota on a plan such a tenant can be on
 makes it live.
@@ -682,14 +727,16 @@ whom.
 
 ### 🔴 5.11 Past billing periods cannot be reconstructed locally — cheap now, impossible later
 
-`ETGO_SUBSCRIPTION` has one period slot and no history; once ETP-5047 fills it, each renewal will
-overwrite it. `ETGO_BILLING_EVENT` does not keep invoice periods either: `PAYLOAD_SUMMARY`'s
-allow-list (`WebhookPayloadSummary`) is `id, customer, subscription, livemode, payment_status,
-amount_total, currency, mode` — no `period_start`/`period_end`. So "usage in the last billed
-period" needs Stripe's invoice dates, and any overage billing, which bills a **closed** period,
-needs a local period history. **To decide:** a small period-history table, or recording the invoice
-period on the `invoice.paid` billing event. Starting to record now costs little; periods that were
-never recorded cannot be backfilled from local data.
+`ETGO_SUBSCRIPTION` has one period slot and no history; once it is filled (§5.5), each renewal
+will overwrite it. **Since ETP-5047 the ledger records the invoice period:** `WebhookPayloadSummary`
+keeps `period_start`/`period_end` (epoch seconds) for `invoice.*` events, so every `invoice.paid`
+row of `ETGO_BILLING_EVENT` carries its period from the deploy onwards. Two caveats for whoever
+reads it: Stripe's invoice-level period on a subscription invoice **looks back one period** (the
+usage period that ended when the invoice was cut — the service period is on the lines, which a
+summary never keeps), and the summary is an abbreviated JSON string, not a queryable column.
+**Still to decide:** whether that is enough for overage billing of a closed period, or a small
+period-history table is needed. Periods before the ETP-5047 deploy were never recorded and cannot
+be backfilled from local data.
 
 ### 🔴 5.12 The would-have-billed report is scheduled in the PRD and excluded by its owner
 

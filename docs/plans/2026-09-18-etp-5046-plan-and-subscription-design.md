@@ -121,7 +121,7 @@ row (`END_DATE IS NULL`), not to "the" row.
 
 | Columns | Meaning |
 |---|---|
-| `START_DATE` / `END_DATE` | Lifetime of **this subscription record**. `END_DATE` null ⇒ this is the open row. A plan change closes one row and opens the next. |
+| `START_DATE` / `END_DATE` | Lifetime of **this subscription record**. `END_DATE` null ⇒ this is the open row. A plan change closes one row and opens the next; since ETP-5047 a cancellation closes it too, and a closed row reads as `canceled` whatever its `STATUS` says. |
 | `CURRENT_PERIOD_START` / `CURRENT_PERIOD_END` | Stripe's rolling monthly billing window. Moves every cycle. |
 | `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` | ETP-5053 only. Shipped nullable and hidden; nothing in ETP-5046 reads or writes them. |
 
@@ -314,7 +314,7 @@ would silently turn a past-due or expired tenant back into a paying one. R37 the
 |---|---|---|
 | `CURRENT` | `active` | `CURRENT` |
 | `PAST_DUE` | `past_due` | `PAST_DUE` |
-| `EXPIRED` | `canceled` (still open, `END_DATE` NULL — §3.7 of the open-topics register) | `EXPIRED` |
+| `EXPIRED` | `canceled` (left open, `END_DATE` NULL; a cancellation received live closes its row since ETP-5047 — open or closed, a canceled row reads back the same, §3.7 of the open-topics register) | `EXPIRED` |
 | `NONE` | `canceled` | `EXPIRED` — same access decision as `NONE` (`SUBSCRIPTION_REQUIRED`) |
 | absent, blank, `LEGACY_ENTITLEMENT` or unknown | `active` | `CURRENT` (the preference reader's own fallback is `LEGACY_ENTITLEMENT`, also entitled) |
 

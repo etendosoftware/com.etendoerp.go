@@ -229,6 +229,35 @@ server-side selection exists. A flag-on older purchase with no selection therefo
 `NOT_REQUESTED`; the browser must not guess its choice. The recovery procedure is in
 [`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
 
+### `environment-access-enforcement-off` (ETP-5047) — backend-only kill switch, enforcing by default
+
+The commercial access check — HTTP 402 once a demo trial has expired or a subscription's payment
+grace has elapsed — went live with ETP-5443 with no off switch. This flag is that switch. It is
+**phrased as an OFF switch on purpose**: every failure in the table above resolves to `false`, and
+`false` here means *still enforcing*. An unset key, an unreachable ConfigCat, a wrong SDK key or an
+evaluation error therefore all keep today's behaviour; only an explicit `true` stops the refusal.
+A positively phrased "enforcement enabled" flag would do the opposite — a missing key would silently
+open every blocked tenant — so do not flip the polarity.
+
+Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
+called only by `EnvironmentAccessGuard` — the one check NEO (`NeoAuthenticator`), MCP
+(`McpServlet`) and the legacy environment login (`GET /sws/go/login`) share. The context is
+account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
+enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request
+never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
+`ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`.
+
+| Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
+|---|---|
+| unset / `false` / unreadable | 402 on NEO, MCP and `GET /sws/go/login` |
+| `true` (for that `clientId`, or globally) | allowed; INFO log `Environment access enforcement is switched off: <entry point> would have refused tenant <id> (<DECISION>)` |
+
+It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
+tenant free access. No key exists in the web client's `flag-keys.js`, and none must be added: the
+SPA follows the 402 it is given. The 402 body and the entry points are described in
+`open-and-notable-topics.md` §3.7; the registry entry is `environment-access-enforcement-kill-switch`
+in `schema_forge/flags-registry.json`.
+
 ## 2. The onboarding paywall
 
 `POST /sws/go/onboarding` gains a payment gate.
@@ -744,4 +773,5 @@ must never break the session.
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Demo data transfer gate / worker | `com.etendoerp.go.payment.DemoDataTransferFlag`, `DemoDataTransferService` |
+| Environment access check (NEO, MCP, `/login`), 402 body, kill switch | `com.etendoerp.go.payment.EnvironmentAccessGuard`, `EnvironmentAccessEnforcementFlag` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |
