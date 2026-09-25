@@ -34,6 +34,8 @@ public class LoggingOnboardingProgressSink implements OnboardingProgressSink {
   private String lastError;
 
   /**
+   * Creates a sink that writes progress for the supplied subject to the application log.
+   *
    * @param subject what is being provisioned, prefixed to every log line
    */
   public LoggingOnboardingProgressSink(String subject) {

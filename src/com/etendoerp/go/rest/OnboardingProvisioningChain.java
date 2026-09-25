@@ -159,6 +159,12 @@ public class OnboardingProvisioningChain {
    * <p>Note {@link InitialClientSetup} commits on its own: from here on the client survives a
    * rollback of the rest of the chain, which is what the name-based resume path relies on.
    *
+   * @param sink progress and result sink
+   * @param vars request variables used by the client setup
+   * @param currencyId currency assigned to the client
+   * @param clientName client display name
+   * @param clientUser initial administrator username
+   * @param adminPassword initial administrator password
    * @return the created client id, or {@code null} once an error has been reported to the sink
    */
   public String createClient(OnboardingProgressSink sink, VariablesSecureApp vars,
@@ -197,6 +203,8 @@ public class OnboardingProvisioningChain {
    * Resolves the client's admin user/role and "*" organization, switches the {@link OBContext} to
    * that admin, and marks the admin as the tenant owner (best-effort, idempotent — ETP-4830).
    *
+   * @param sink progress and result sink
+   * @param clientId client to resolve
    * @return the admin context, or {@code null} once an error has been reported to the sink
    */
   public AdminContext resolveAdminContext(OnboardingProgressSink sink, String clientId) {
@@ -251,6 +259,11 @@ public class OnboardingProvisioningChain {
    * Creates the client's legal organization through {@link InitialOrgSetup} and sets its
    * {@code SocialName}.
    *
+   * @param sink progress and result sink
+   * @param clientName organization display name
+   * @param clientId client that owns the organization
+   * @param starOrgId wildcard organization id
+   * @param currencyId organization currency
    * @return {@code true} on success; {@code false} once an error has been reported to the sink
    */
   public boolean createOrganization(OnboardingProgressSink sink, String clientName,
@@ -316,7 +329,12 @@ public class OnboardingProvisioningChain {
     return true;
   }
 
-  /** @return the client's first non-"*" organization id, or {@code null} when it has none */
+  /**
+   * Resolves the client's first non-"*" organization.
+   *
+   * @param clientId client to inspect
+   * @return the organization id, or {@code null} when it has none
+   */
   public String resolveOrganizationId(String clientId) {
     Organization organization = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
     return organization != null ? organization.getId() : null;
@@ -329,6 +347,14 @@ public class OnboardingProvisioningChain {
    * the dataset/accounting/period-control steps were gated on whether the organization had just
    * been created, which left a resumed tenant (client+org survive the rollback, dataset does not)
    * without seed data, ledger or fiscal periods.
+   *
+   * @param sink progress and result sink
+   * @param clientId client being provisioned
+   * @param orgId business organization id
+   * @param adminUserId administrator user id
+   * @param adminRoleId administrator role id
+   * @param orgInfo organization information supplied by onboarding
+   * @return {@code true} when every reconciliation step succeeds
    */
   public boolean ensureOnboardingDataset(OnboardingProgressSink sink, String clientId,
       String orgId, String adminUserId, String adminRoleId, OrgInfoInput orgInfo) {

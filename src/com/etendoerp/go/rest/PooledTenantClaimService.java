@@ -68,6 +68,8 @@ public class PooledTenantClaimService {
   }
 
   /**
+   * Claims and personalizes one READY tenant when the request is eligible for pooling.
+   *
    * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
    */
   public String claim(OnboardingProgressSink sink, ClaimRequest request) {

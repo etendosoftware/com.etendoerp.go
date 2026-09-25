@@ -47,6 +47,7 @@ public class TenantPoolStore {
 
   private static final int ERROR_MAX_LENGTH = 2000;
   private static final String SYSTEM_USER = "100";
+  private static final String SQL_UPDATE_STATUS = "UPDATE etgo_tenant_pool SET status = '";
 
   private static final String SQL_COUNT = "SELECT count(*) FROM etgo_tenant_pool"
       + " WHERE status = ? AND isactive = 'Y'";
@@ -63,10 +64,10 @@ public class TenantPoolStore {
       + " provisioning_version) VALUES (get_uuid(), '0', '0', 'Y', now(), '" + SYSTEM_USER + "',"
       + " now(), '" + SYSTEM_USER + "', '" + STATUS_PROVISIONING + "', ?)"
       + " RETURNING etgo_tenant_pool_id";
-  private static final String SQL_MARK_READY = "UPDATE etgo_tenant_pool SET status = '"
+  private static final String SQL_MARK_READY = SQL_UPDATE_STATUS
       + STATUS_READY + "', pool_client_id = ?, updated = now() WHERE etgo_tenant_pool_id = ?"
       + " AND status = '" + STATUS_PROVISIONING + "'";
-  private static final String SQL_MARK_FAILED = "UPDATE etgo_tenant_pool SET status = '"
+  private static final String SQL_MARK_FAILED = SQL_UPDATE_STATUS
       + STATUS_FAILED + "', pool_client_id = coalesce(CAST(? AS VARCHAR), pool_client_id),"
       + " error_message = ?, updated = now() WHERE etgo_tenant_pool_id = ?";
   /**
@@ -87,10 +88,13 @@ public class TenantPoolStore {
   public record Claim(String poolRowId, String clientId) {
   }
 
+  /** @param version provisioning version to count
+   * @return number of active READY rows for the version */
   public int countReady(String version) {
     return count(SQL_COUNT_READY, STATUS_READY, version);
   }
 
+  /** @return number of active rows currently being provisioned */
   public int countProvisioning() {
     return count(SQL_COUNT, STATUS_PROVISIONING, null);
   }
@@ -118,10 +122,12 @@ public class TenantPoolStore {
     }
   }
 
+  /** Marks a provisioning row READY and associates its client. */
   public void markReady(String poolRowId, String clientId) {
     update(SQL_MARK_READY, clientId, poolRowId);
   }
 
+  /** Marks a pool row FAILED and stores a bounded diagnostic message. */
   public void markFailed(String poolRowId, String clientId, String error) {
     update(SQL_MARK_FAILED, clientId,
         StringUtils.abbreviate(StringUtils.defaultIfBlank(error, "Unknown error"),
@@ -145,10 +151,12 @@ public class TenantPoolStore {
     }
   }
 
+  /** Commits the caller's DAL transaction. */
   public void commit() {
     OBDal.getInstance().commitAndClose();
   }
 
+  /** Rolls back the caller's DAL transaction. */
   public void rollback() {
     OBDal.getInstance().rollbackAndClose();
   }

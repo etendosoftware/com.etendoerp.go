@@ -48,16 +48,22 @@ public class TenantPoolFiller {
     /**
      * Provisions and commits one tenant named {@code placeholderName}. Never throws: failures come
      * back as an unsuccessful outcome, carrying the client id when one was already created.
+     *
+     * @param placeholderName placeholder client name
+     * @return the provisioning outcome
      */
     ProvisionOutcome provision(String placeholderName);
   }
 
   /** What one provisioning attempt produced. */
   public record ProvisionOutcome(boolean success, String clientId, String error) {
+    /** @param clientId id of the provisioned client */
     public static ProvisionOutcome ok(String clientId) {
       return new ProvisionOutcome(true, clientId, null);
     }
 
+    /** @param clientId id of a partially provisioned client, if available
+     * @param error failure description */
     public static ProvisionOutcome failed(String clientId, String error) {
       return new ProvisionOutcome(false, clientId, error);
     }
@@ -81,12 +87,15 @@ public class TenantPoolFiller {
   private final TenantPoolStore store;
   private final Provisioner provisioner;
 
+  /** Creates a filler backed by the supplied store and provisioner. */
   public TenantPoolFiller(TenantPoolStore store, Provisioner provisioner) {
     this.store = store;
     this.provisioner = provisioner;
   }
 
   /**
+   * Fills the pool until the requested number of READY tenants is available.
+   *
    * @param targetSize how many READY tenants to keep
    * @param version the provisioning version tenants are built with now
    * @param now the current instant

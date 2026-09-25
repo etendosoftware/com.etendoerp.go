@@ -63,6 +63,8 @@ public final class TenantPoolConfig {
   }
 
   /**
+   * Resolves whether the tenant pool is enabled for an account.
+   *
    * @param accountEmail the account onboarding, or {@code null} for the filler (no account)
    * @return whether pool-based onboarding is switched on
    */
@@ -91,6 +93,11 @@ public final class TenantPoolConfig {
   /**
    * Whether a request can be served from the pool. Every pooled tenant is built EUR / ES / es_ES,
    * so any other combination has to be provisioned from scratch.
+   *
+   * @param currencyIso requested ISO currency code
+   * @param countryCode requested ISO country code
+   * @param language requested Etendo language code
+   * @return whether the request matches the pool's supported combination
    */
   public static boolean supports(String currencyIso, String countryCode, String language) {
     return SUPPORTED_CURRENCY.equalsIgnoreCase(StringUtils.trimToEmpty(currencyIso))
@@ -98,7 +105,12 @@ public final class TenantPoolConfig {
         && SUPPORTED_LANGUAGE.equals(StringUtils.trimToEmpty(language));
   }
 
-  /** @return {@code true} for a client name reserved for an unclaimed pooled tenant */
+  /**
+   * Tests whether a client name is reserved for an unclaimed pooled tenant.
+   *
+   * @param clientName client name to inspect
+   * @return {@code true} when the name uses the pool placeholder prefix
+   */
   public static boolean isPlaceholderName(String clientName) {
     return clientName != null && clientName.startsWith(PLACEHOLDER_PREFIX);
   }

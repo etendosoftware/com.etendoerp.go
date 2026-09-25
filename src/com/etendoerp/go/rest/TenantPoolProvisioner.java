@@ -50,6 +50,7 @@ public class TenantPoolProvisioner implements TenantPoolFiller.Provisioner {
 
   private final OnboardingProvisioningChain chain;
 
+  /** Creates a provisioner using the standard onboarding chain. */
   public TenantPoolProvisioner() {
     this(new OnboardingProvisioningChain());
   }

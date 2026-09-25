@@ -53,6 +53,17 @@ public class TenantPoolConfigTest {
   @Test
   public void defaultsWhenNothingIsConfigured() {
     assertEquals(TenantPoolConfig.DEFAULT_SIZE, TenantPoolConfig.poolSize());
-    assertFalse(TenantPoolConfig.isEnabled(null));
+    String property = "etendo.go.flags.onboarding-tenant-pool";
+    String previous = System.getProperty(property);
+    try {
+      System.setProperty(property, "false");
+      assertFalse(TenantPoolConfig.isEnabled(null));
+    } finally {
+      if (previous == null) {
+        System.clearProperty(property);
+      } else {
+        System.setProperty(property, previous);
+      }
+    }
   }
 }
