@@ -57,7 +57,14 @@ import org.openbravo.module.bptaxidkey.ViesService;
 
 class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
-  private static final String OPERATORS = "operators";
+  // Package-private (not private): also read by Fiscal349SnapshotSupport.
+  static final String OPERATORS = "operators";
+  /** Payload key of the per-invoice origin rows (also the snapshot's excluded list). */
+  static final String INVOICES_KEY = "invoices";
+  /** Payload key of the corrective (Tipo Registro 2) detail rows. */
+  static final String RECTIFICATIONS_KEY = "rectifications";
+  /** Row key of an invoice/rectification's partner NIF-IVA. */
+  static final String NIF_IVA_KEY = "nifIva";
   private static final String GENERATE  = "generate";
 
   /** Row key for the operator's tax base amount, as produced by AEAT3492010ReportDao. */
@@ -80,7 +87,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * "registro tipo 2". See {@link #computeOperators} for why these rows are kept out of the
    * regular {@code summary}.
    */
-  private static final String RECTIFICATIVE = "rectificative";
+  static final String RECTIFICATIVE = "rectificative";
 
   /**
    * The whole VIES-validation cluster (gate, network phase, persistence), extracted for the
@@ -92,6 +99,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   Fiscal349BoxesHandler(NeoServlet servlet) {
     super(servlet);
+    this.snapshotSupport = new Fiscal349SnapshotSupport();
   }
 
   @Override
@@ -116,8 +124,11 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     runDispatch(response, () -> {
       if (OPERATORS.equals(entityName)) {
-        guardNotAlreadySubmitted(orgId, year, period);
-        JSONObject result = computeOperators(orgId, year, period);
+        // Deliberately NOT guarded (ETP-5438): operators is a pure read. A submitted declaration
+        // is served from its persisted submission snapshot (never recomputed); a legacy submitted
+        // one without a snapshot, and every draft/ready one, is computed live. Only the
+        // side-effecting generate (file generation) is blocked once submitted.
+        JSONObject result = snapshotOrCompute(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
@@ -136,7 +147,9 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   /**
    * ETP-5438 — thin, model-fixed wrapper around the shared {@link
-   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, so callers here
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, applied to
+   * {@code generate} only (the {@code operators} read stays open for a submitted declaration so
+   * the frontend can render and freeze it on a cold session cache), so callers here
    * (and {@code Fiscal349BoxesHandlerTest}) don't have to repeat the {@code "349"} literal. The
    * guard logic itself (and {@code AlreadySubmittedException}) moved to the shared base class —
    * see its javadoc — once {@code Fiscal303BoxesHandler} needed the identical check.
@@ -149,8 +162,6 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   protected String getModelKey() {
     return "fiscal349";
   }
-
-  // ── operators ─────────────────────────────────────────────────────
 
   JSONObject computeOperators(String orgId, int year, String period) throws Exception {
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
@@ -225,8 +236,8 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     root.put(OPERATORS, operatorsArr);
     root.put("summary",  summary);
     root.put("rectificativeSummary", buildKeyTotals(rectificativeByKey));
-    root.put("invoices", invoicesArr);
-    root.put("rectifications", rectifArr);
+    root.put(INVOICES_KEY, invoicesArr);
+    root.put(RECTIFICATIONS_KEY, rectifArr);
     root.put("orgNif",   orgNif != null ? orgNif : "");
     root.put("orgName",  org.getName());
     return root;
@@ -270,7 +281,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       row.put("date",          dateStr(r[1], sdf));
       row.put("type",          type);
       row.put("party",         str(r[2]));
-      row.put("nifIva",        str(r[3]));
+      row.put(NIF_IVA_KEY,     str(r[3]));
       row.put("originalRef",   str(r[4]));
       row.put("declaredYear",  str(r[5]));
       row.put("declaredPeriod", str(r[6]));
@@ -577,7 +588,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     row.put("date",   inv.getInvoiceDate() != null ? sdf.format(inv.getInvoiceDate()) : "");
     row.put("type",   type);
     row.put("party",  bp != null ? bp.getName() : "");
-    row.put("nifIva", bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
+    row.put(NIF_IVA_KEY, bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
     row.put("base",   base.toString());
     row.put("key",    resolvedKey != null ? resolvedKey : "");
     return row;

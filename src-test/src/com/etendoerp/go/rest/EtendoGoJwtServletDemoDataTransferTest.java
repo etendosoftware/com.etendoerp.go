@@ -18,13 +18,13 @@ package com.etendoerp.go.rest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -33,31 +33,26 @@ import static org.mockito.Mockito.when;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.MockedStatic;
 
 import com.etendoerp.go.payment.CheckoutRequestStore;
-import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 
 /**
- * ETP-5443 — flag {@code demo-data-transfer} gates every ETP-5364 transfer toggle point in the
- * servlet. With it OFF the servlet must behave as it did before ETP-5364: the two endpoints are
- * 404 "Unknown endpoint" (indistinguishable from not existing), the checkout selection is not
- * recorded and a paid onboarding starts no transfer. With it ON each point reaches the service.
- *
- * <p>The flag is stubbed at {@link DemoDataTransferFlag#isEnabled()} — the one gate every toggle
- * point calls — so these specs pin the wiring; {@code DemoDataTransferFlagTest} pins the gate.
+ * ETP-5480 — the demo-to-productive data transfer (ETP-5364) is permanent: the flag that gated it
+ * (ETP-5443) is retired. These specs pin the servlet wiring: both endpoints are routed, the
+ * checkout selection is recorded under its request, the purchase projection returns it for
+ * resume, and a paid onboarding starts the transfer from the demo persisted on the purchase.
  */
-class EtendoGoJwtServletDemoDataTransferFlagTest {
+class EtendoGoJwtServletDemoDataTransferTest {
 
   private static final String STATUS_PATH = "/demo-data-transfer";
   private static final String RETRY_PATH = "/demo-data-transfer/retry";
@@ -70,51 +65,15 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
   private final DemoDataTransferService transferService = mock(DemoDataTransferService.class);
   private final CheckoutRequestStore checkoutRequestStore = mock(CheckoutRequestStore.class);
-  private MockedStatic<DemoDataTransferFlag> flag;
 
   @BeforeEach
   void setUp() {
     servlet.demoDataTransferService = transferService;
     servlet.checkoutRequestStore = checkoutRequestStore;
-    flag = mockStatic(DemoDataTransferFlag.class);
-  }
-
-  @AfterEach
-  void tearDown() {
-    flag.close();
-  }
-
-  private void flagIs(boolean enabled) {
-    flag.when(DemoDataTransferFlag::isEnabled).thenReturn(enabled);
   }
 
   @Test
-  void flagOffStatusEndpointIsAnUnknownEndpoint() throws Exception {
-    flagIs(false);
-    ResponseCapture resp = mockResponse();
-
-    servlet.doGet(request(STATUS_PATH), resp.response);
-
-    assertEquals(404, resp.status);
-    assertEquals("Unknown endpoint: " + STATUS_PATH, errorMessage(resp));
-    verifyNoInteractions(transferService);
-  }
-
-  @Test
-  void flagOffRetryEndpointIsAnUnknownEndpoint() throws Exception {
-    flagIs(false);
-    ResponseCapture resp = mockResponse();
-
-    servlet.doPost(request(RETRY_PATH), resp.response);
-
-    assertEquals(404, resp.status);
-    assertEquals("Unknown endpoint: " + RETRY_PATH, errorMessage(resp));
-    verifyNoInteractions(transferService);
-  }
-
-  @Test
-  void flagOnStatusEndpointIsRoutedToItsAuthenticatedHandler() throws Exception {
-    flagIs(true);
+  void statusEndpointIsRoutedToItsAuthenticatedHandler() throws Exception {
     ResponseCapture resp = mockResponse();
 
     servlet.doGet(request(STATUS_PATH), resp.response);
@@ -125,26 +84,24 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
-  void flagOffCheckoutSelectionIsNotRecorded() throws Exception {
-    flagIs(false);
+  void retryEndpointIsRoutedToItsAuthenticatedHandler() throws Exception {
+    ResponseCapture resp = mockResponse();
 
-    recordSelection(DEMO_CLIENT_ID, true, false);
+    servlet.doPost(request(RETRY_PATH), resp.response);
 
+    assertEquals(401, resp.status);
     verifyNoInteractions(transferService);
   }
 
   @Test
-  void flagOnCheckoutSelectionIsRecordedUnderTheCheckoutRequest() throws Exception {
-    flagIs(true);
-
+  void checkoutSelectionIsRecordedUnderTheCheckoutRequest() throws Exception {
     recordSelection(DEMO_CLIENT_ID, true, false);
 
     verify(transferService).recordSelection(REQUEST_ID, true, false);
   }
 
   @Test
-  void flagOnPreservesAnExplicitAllFalseSelection() throws Exception {
-    flagIs(true);
+  void preservesAnExplicitAllFalseSelection() throws Exception {
     JSONObject body = new JSONObject().put("dataTransfer",
         new JSONObject().put("products", false).put("contacts", false));
 
@@ -155,8 +112,6 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
 
   @Test
   void checkoutWithoutAChoiceDoesNotInventOne() throws Exception {
-    flagIs(true);
-
     recordSelection(new JSONObject(), DEMO_CLIENT_ID);
 
     verifyNoInteractions(transferService);
@@ -164,12 +119,11 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
 
   @Test
   void purchaseProjectionReturnsThePersistedSelectionForResume() throws Exception {
-    flagIs(true);
     when(transferService.selection(REQUEST_ID)).thenReturn(
         new JSONObject().put("products", false).put("contacts", true));
     JSONObject purchase = checkoutResult();
 
-    projectSelection(purchase);
+    projectSelection(purchase, DEMO_CLIENT_ID);
 
     assertTrue(purchase.getBoolean("dataTransferEnabled"));
     assertFalse(purchase.getJSONObject("dataTransfer").getBoolean("products"));
@@ -177,29 +131,25 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
-  void flagOffPurchaseProjectionOmitsTheSelection() throws Exception {
-    flagIs(false);
+  void productivePurchaseProjectionCarriesNoTransferFields() throws Exception {
     JSONObject purchase = checkoutResult();
 
-    projectSelection(purchase);
+    projectSelection(purchase, null);
 
-    assertFalse(purchase.getBoolean("dataTransferEnabled"));
+    assertFalse(purchase.has("dataTransferEnabled"));
     assertFalse(purchase.has("dataTransfer"));
     verifyNoInteractions(transferService);
   }
 
   @Test
-  void flagOffPaidOnboardingStartsNoTransferAndDoesNotReadPurchaseSelection() {
-    flagIs(false);
-    servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
-        ACCOUNT_ID, ACCOUNT_EMAIL);
-    verifyNoInteractions(checkoutRequestStore);
-    verifyNoInteractions(transferService);
+  void paidOnboardingResolvesTheDemoPersistedOnThePurchase() throws Exception {
+    assertEquals(DEMO_CLIENT_ID, resolveDemoSourceClientId(true, " " + DEMO_CLIENT_ID + " "));
+    assertNull(resolveDemoSourceClientId(true, " "));
+    assertNull(resolveDemoSourceClientId(false, DEMO_CLIENT_ID));
   }
 
   @Test
-  void flagOnPaidOnboardingStartsFromTheExactDemoIdPersistedOnThePurchase() {
-    flagIs(true);
+  void paidOnboardingStartsFromTheExactDemoIdPersistedOnThePurchase() {
     servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
         ACCOUNT_ID, ACCOUNT_EMAIL);
     verify(checkoutRequestStore).findTransferSelection(REQUEST_ID, ACCOUNT_ID, ACCOUNT_EMAIL);
@@ -208,26 +158,7 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
-  void flagOnRoutesSelectedPaidDataOnlyThroughTheAsyncWorker() {
-    flagIs(true);
-
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, true));
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, false));
-  }
-
-  @Test
-  void flagOffKeepsTheExistingSynchronousCopyOnlyForPaidSelectedData() {
-    flagIs(false);
-
-    assertTrue(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, false));
-    assertTrue(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, false, true));
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, false, false));
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(false, true, true));
-  }
-
-  @Test
-  void flagOnAFailedStartNeverReachesTheOnboardingCaller() {
-    flagIs(true);
+  void aFailedStartNeverReachesTheOnboardingCaller() {
     doThrow(new IllegalStateException("boom")).when(transferService)
         .start(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID);
     servlet.startDemoDataTransferBestEffort(REQUEST_ID, DEMO_CLIENT_ID, CLIENT_ID,
@@ -236,9 +167,7 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
-  void flagOnProductivePurchaseDoesNotRecordOrStartDemoTransfer() throws Exception {
-    flagIs(true);
-
+  void productivePurchaseDoesNotRecordOrStartDemoTransfer() throws Exception {
     recordSelection(null, false, false);
     servlet.startDemoDataTransferBestEffort(REQUEST_ID, null, CLIENT_ID, ACCOUNT_ID,
         ACCOUNT_EMAIL);
@@ -246,15 +175,27 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
     verifyNoInteractions(transferService, checkoutRequestStore);
   }
 
-  private static String errorMessage(ResponseCapture resp) throws Exception {
-    return new JSONObject(resp.body()).getJSONObject("error").getString("message");
-  }
-
-  private void projectSelection(JSONObject purchase) throws Exception {
+  private void projectSelection(JSONObject purchase, String demoClientId) throws Exception {
     Method method = EtendoGoJwtServlet.class.getDeclaredMethod(
         "addDemoDataTransferSelection", JSONObject.class, String.class, String.class);
     method.setAccessible(true);
-    method.invoke(servlet, purchase, REQUEST_ID, DEMO_CLIENT_ID);
+    method.invoke(servlet, purchase, REQUEST_ID, demoClientId);
+  }
+
+  private static String resolveDemoSourceClientId(boolean paidUpgrade, String demoClientId)
+      throws Exception {
+    Class<?> requestClass = Class.forName(
+        "com.etendoerp.go.rest.EtendoGoJwtServlet$OnboardingRequestData");
+    Constructor<?> constructor = requestClass.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    Object onboardingRequest = constructor.newInstance();
+    Field field = requestClass.getDeclaredField("demoClientId");
+    field.setAccessible(true);
+    field.set(onboardingRequest, demoClientId);
+    Method method = EtendoGoJwtServlet.class.getDeclaredMethod("resolveDemoSourceClientId",
+        boolean.class, requestClass);
+    method.setAccessible(true);
+    return (String) method.invoke(null, paidUpgrade, onboardingRequest);
   }
 
   private static JSONObject selectionBody() throws Exception {
