@@ -57,9 +57,10 @@ public class BankStatementEntityHandler implements NeoHandler {
   static final String ENTITY_STATEMENTS = BankStatementActionsSupport.ENTITY_STATEMENTS;
   static final String ENTITY_LINES = "bankStatementLines";
 
-  private static final Set<String> WRITE_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
   private static final String METHOD_POST = "POST";
   private static final String METHOD_DELETE = "DELETE";
+  private static final Set<String> WRITE_METHODS = Set.of(METHOD_POST, "PUT", "PATCH",
+      METHOD_DELETE);
 
   static final String MSG_STATEMENT_CREATE_DISABLED =
       "Bank statements are created with the account action 'createStatement' (neo_action on"

@@ -95,6 +95,9 @@ public class BankStatementActionsSupport {
   private static final String PARAM_ACTION = "action";
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String FIELD_ID = "id";
+  private static final String PARAM_FILE_NAME = "fileName";
+  // The body flag that also runs the statement after saving; same literal as the action name.
+  private static final String PARAM_PROCESS = ACTION_PROCESS;
 
   private static final String DATE_SHAPE =
       "Date as yyyy-MM-dd (an ISO date-time such as 2026-06-04T00:00:00Z is also accepted;"
@@ -299,9 +302,9 @@ public class BankStatementActionsSupport {
         .param(NeoReportParam.required("importDate", NeoReportParam.TYPE_DATE,
             "Date the statement is registered. " + DATE_SHAPE))
         .param(NeoReportParam.required("lines", NeoReportParam.TYPE_ARRAY, LINES_DESCRIPTION))
-        .param(NeoReportParam.optional("process", NeoReportParam.TYPE_BOOLEAN,
+        .param(NeoReportParam.optional(PARAM_PROCESS, NeoReportParam.TYPE_BOOLEAN,
             "Process the statement after saving. Default true; false saves a draft."))
-        .param(NeoReportParam.optional("fileName", NeoReportParam.TYPE_STRING,
+        .param(NeoReportParam.optional(PARAM_FILE_NAME, NeoReportParam.TYPE_STRING,
             "Optional source file name to record on the statement (max 255)."))
         .param(NeoReportParam.optional("notes", NeoReportParam.TYPE_STRING,
             "Optional free-text notes (max 255)."))
@@ -334,7 +337,7 @@ public class BankStatementActionsSupport {
   }
 
   private static NeoReportParam fileNameParam() {
-    return NeoReportParam.required("fileName", NeoReportParam.TYPE_STRING,
+    return NeoReportParam.required(PARAM_FILE_NAME, NeoReportParam.TYPE_STRING,
         "Name of the uploaded file, recorded on the statement (e.g. extracto-junio.csv).");
   }
 
@@ -359,9 +362,9 @@ public class BankStatementActionsSupport {
             "Registration date. " + DATE_SHAPE))
         .param(NeoReportParam.optional("lines", NeoReportParam.TYPE_ARRAY, LINES_DESCRIPTION
             + " Required unless the statement already has matched lines."))
-        .param(NeoReportParam.optional("process", NeoReportParam.TYPE_BOOLEAN,
+        .param(NeoReportParam.optional(PARAM_PROCESS, NeoReportParam.TYPE_BOOLEAN,
             "Process the statement after saving. Default false (stays a draft)."))
-        .param(NeoReportParam.optional("fileName", NeoReportParam.TYPE_STRING,
+        .param(NeoReportParam.optional(PARAM_FILE_NAME, NeoReportParam.TYPE_STRING,
             "Source file name (max 255); omitted clears it."))
         .param(NeoReportParam.optional("notes", NeoReportParam.TYPE_STRING,
             "Free-text notes (max 255); omitted clears them."))

@@ -136,6 +136,8 @@ public final class NeoActionContract {
     }
 
     /**
+     * Set the description agents read in the action catalog.
+     *
      * @param description what the action does and what its result carries
      * @return this builder
      */
@@ -145,6 +147,8 @@ public final class NeoActionContract {
     }
 
     /**
+     * Set the HTTP method the action is fired with; {@code POST} when never called.
+     *
      * @param method {@code "GET"} or {@code "POST"} — the method the handler answers the action
      *               on; validated in {@link #build()}
      * @return this builder
@@ -155,6 +159,8 @@ public final class NeoActionContract {
     }
 
     /**
+     * Mark whether the action only reads data; {@code false} when never called.
+     *
      * @param readOnly {@code true} when the action changes nothing
      * @return this builder
      */
@@ -177,6 +183,8 @@ public final class NeoActionContract {
     }
 
     /**
+     * Validate the declaration and build the contract.
+     *
      * @return the immutable contract
      * @throws IllegalArgumentException when the name is blank or the method is not GET/POST
      */

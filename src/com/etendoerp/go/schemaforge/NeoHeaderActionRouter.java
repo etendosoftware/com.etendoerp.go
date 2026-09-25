@@ -68,19 +68,29 @@ public final class NeoHeaderActionRouter {
     }
     Set<String> seen = new HashSet<>();
     for (NeoHandler delegate : delegates) {
-      if (delegate == null) {
-        continue;
-      }
-      List<NeoActionContract> declared = delegate.declaredActions(specName, entityName);
-      if (declared == null) {
-        continue;
-      }
-      for (NeoActionContract action : declared) {
-        if (action != null && seen.add(action.getName())) {
-          combined.add(action);
-        }
+      if (delegate != null) {
+        addNew(combined, seen, delegate.declaredActions(specName, entityName));
       }
     }
     return combined;
+  }
+
+  /**
+   * Append the declarations whose name is not in {@code seen} yet, recording each name added.
+   *
+   * @param combined the accumulated declarations
+   * @param seen     the names already in {@code combined}
+   * @param declared one delegate's declarations; {@code null} and {@code null} entries are skipped
+   */
+  private static void addNew(List<NeoActionContract> combined, Set<String> seen,
+      List<NeoActionContract> declared) {
+    if (declared == null) {
+      return;
+    }
+    for (NeoActionContract action : declared) {
+      if (action != null && seen.add(action.getName())) {
+        combined.add(action);
+      }
+    }
   }
 }

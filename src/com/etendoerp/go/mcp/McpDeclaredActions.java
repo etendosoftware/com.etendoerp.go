@@ -131,8 +131,8 @@ final class McpDeclaredActions {
     }
     boolean isGet = NeoActionContract.METHOD_GET.equals(contract.getMethod());
     Map<String, String> query = isGet ? toQueryParams(params) : new HashMap<>();
-    NeoContext ctx = McpHookExecutor.buildActionHookContext(specName, entityName, recordId,
-        contract.getName(), contract.getMethod(), params, query, sfEntity.getADTab(), sfEntity);
+    NeoContext ctx = McpHookExecutor.buildDeclaredActionHookContext(specName, entityName,
+        recordId, contract, params, query, sfEntity);
     JSONObject result = McpHookExecutor.runPreHook(handler, ctx);
     if (result != null) {
       return result;

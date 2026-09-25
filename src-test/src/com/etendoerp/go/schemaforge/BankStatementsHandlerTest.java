@@ -2322,14 +2322,15 @@ public class BankStatementsHandlerTest {
 
   // ── ETP-5447: a file import dates the statement by its last movement ────
   //
-  // ?action=import used to leave statementdate at the "now" newBankStatement stamps, so a file
-  // imported today with August movements sorted as today's statement. After the lines are parsed
-  // and pruned, the statement's transactionDate is the calendar day of the latest KEPT line date;
-  // importdate stays now; with no dated line it stays today. The date is set before
-  // processStatement, whose first save + flush persists it.
+  // The import action used to leave the statement date at the current instant stamped when the
+  // statement is created, so a file imported today with August movements sorted as a statement
+  // of today. After the lines are parsed and pruned, the transaction date of the statement is the
+  // calendar day of the latest KEPT line date. The import date stays at the current instant, and
+  // with no dated line the transaction date stays today. The date is set before the statement is
+  // processed, and the first save and flush of that processing persists it.
   //
-  // These run the REAL newBankStatement and the REAL BankStatementLinePruner (only the parser,
-  // processStatement and the aggregates are stubbed), so they pin the whole wiring, not a stub.
+  // These tests run the REAL statement creation and the REAL line pruner. Only the parser, the
+  // processing step and the aggregates are stubbed, so they pin the whole wiring, not a stub.
 
   private static final String IMPORT_FILE_NAME = "extracto-agosto.c43";
   private static final String ACTION_IMPORT = "import";
@@ -2393,11 +2394,11 @@ public class BankStatementsHandlerTest {
       return null;
     }).when(handler).processStatement(any());
     if (useRealPrune) {
-      // Let the real prune run: it is where the latest kept-line date is collected. A
-      // MockedStatic intercepts EVERY static of the class — thenCallRealMethod() on the entry
-      // point would still route its private helpers (readLines, hasUnusableAmounts, later) to
-      // the mock defaults, so readLines would return an empty list. Release the class-level
-      // static mock instead, so the pruner runs entirely un-mocked; clearMocks() skips it.
+      // Let the real prune run, because it is where the latest kept-line date is collected. A
+      // static mock intercepts EVERY static method of the class, so calling the real entry point
+      // would still route its private helpers to the mock defaults and the line reader would
+      // return an empty list. Release the class-level static mock instead, so the pruner runs
+      // entirely un-mocked. The shared mock cleanup skips it once it is released.
       prunerMock.close();
       prunerMock = null;
     }

@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -2072,9 +2073,10 @@ class McpToolRouterRouteTest {
         JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
 
         assertTrue(contentText(result).contains("statements"), result.toString());
-        hookMock.verify(() -> McpHookExecutor.buildActionHookContext(eq(SPEC_NAME),
-            eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME), eq(METHOD_GET), any(), any(),
-            eq(tab), eq(entity)));
+        hookMock.verify(() -> McpHookExecutor.buildDeclaredActionHookContext(eq(SPEC_NAME),
+            eq(ENTITY_NAME), eq(RECORD_ID),
+            argThat(c -> ACTION_NAME.equals(c.getName()) && METHOD_GET.equals(c.getMethod())),
+            any(), any(), eq(entity)));
         hookMock.verify(() -> McpHookExecutor.runPostHook(any(), any(), any()), never());
         buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
             any(), any(), any(), any()), never());
@@ -2140,8 +2142,8 @@ class McpToolRouterRouteTest {
         assertEquals("success", new JSONObject(contentText(result)).getString("processResult"));
         hookMock.verify(() -> McpHookExecutor.buildActionHookContext(eq(SPEC_NAME),
             eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME), any(), eq(tab), eq(entity)));
-        hookMock.verify(() -> McpHookExecutor.buildActionHookContext(any(), any(), any(),
-            any(), eq(METHOD_GET), any(), any(), any(), any()), never());
+        hookMock.verify(() -> McpHookExecutor.buildDeclaredActionHookContext(any(), any(),
+            any(), any(), any(), any(), any()), never());
         buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
             eq(entity), eq(RECORD_ID), eq(ACTION_NAME), any()));
       }

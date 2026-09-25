@@ -30,6 +30,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
@@ -154,41 +155,64 @@ final class McpHookExecutor {
    */
   static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
       String actionName, JSONObject params, Tab adTab, SFEntity sfEntity) {
-    return buildActionHookContext(specName, entityName, recordId, actionName, "POST", params,
-        null, adTab, sfEntity);
+    return actionContextBuilder(specName, entityName, recordId, actionName, params, adTab,
+        sfEntity)
+        .httpMethod("POST")
+        .queryParams(new HashMap<>())
+        .build();
   }
 
   /**
-   * Same as the POST overload, with an explicit HTTP method and query-param map (ETP-5447).
+   * Build the ACTION hook context for a named action a handler declares through
+   * {@code NeoHandler#declaredActions} (ETP-5447): same shape as the POST overload, with the
+   * contract's HTTP method and an explicit query-param map.
    *
-   * <p>For the named actions a handler declares through {@code NeoHandler#declaredActions}: a
-   * handler compares {@code httpMethod} before it answers, so a {@code GET}-only action fired as
-   * {@code POST} fell through and ended in {@code 404 Action not found}. On {@code GET} a REST
+   * <p>A handler compares {@code httpMethod} before it answers, so a {@code GET}-only action fired
+   * as {@code POST} fell through and ended in {@code 404 Action not found}. On {@code GET} a REST
    * handler reads its input from the query string, so the caller passes the parameters flattened
    * there as well as in the body.</p>
    *
-   * @param method      {@code "GET"} or {@code "POST"}
+   * @param specName    the spec that owns the entity
+   * @param entityName  the entity that declares the action
+   * @param recordId    the record the action targets
+   * @param contract    the declared action; supplies the action name ({@code fieldName}) and the
+   *                    HTTP method
+   * @param params      the MCP {@code parameters} object, used as the request body
    * @param queryParams the query-param map, or {@code null} for none — replaced by a fresh empty
    *                    map, as REST's {@code extractQueryParams} never hands a handler {@code null}
-   * @return a NeoContext with {@code endpointType=ACTION} and the given method
+   * @param sfEntity    the entity configuration; its {@code getADTab()} is the context's AD tab
+   * @return a NeoContext with {@code endpointType=ACTION} and the contract's method
    */
-  static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
-      String actionName, String method, JSONObject params, Map<String, String> queryParams,
-      Tab adTab, SFEntity sfEntity) {
+  static NeoContext buildDeclaredActionHookContext(String specName, String entityName,
+      String recordId, NeoActionContract contract, JSONObject params,
+      Map<String, String> queryParams, SFEntity sfEntity) {
+    return actionContextBuilder(specName, entityName, recordId, contract.getName(), params,
+        sfEntity.getADTab(), sfEntity)
+        .httpMethod(contract.getMethod())
+        .queryParams(queryParams != null ? queryParams : new HashMap<>())
+        .build();
+  }
+
+  /**
+   * The fields every ACTION hook context shares; the caller sets the HTTP method and the
+   * query-param map, then builds.
+   *
+   * @return a builder with {@code endpointType=ACTION}, {@code fieldName=actionName} and
+   *         {@code mcpOrigin=true}
+   */
+  private static NeoContext.Builder actionContextBuilder(String specName, String entityName,
+      String recordId, String actionName, JSONObject params, Tab adTab, SFEntity sfEntity) {
     return NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod(method)
         .recordId(recordId)
         .requestBody(params)
-        .queryParams(queryParams != null ? queryParams : new HashMap<>())
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .mcpOrigin(true)
         .endpointType(NeoEndpointType.ACTION)
-        .fieldName(actionName)
-        .build();
+        .fieldName(actionName);
   }
 
   /**

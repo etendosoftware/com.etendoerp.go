@@ -42,6 +42,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link McpHookExecutor}.
@@ -50,8 +51,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * {@code neoResponseToMcpResult}, {@code runPreHook}, {@code runPostHook}, and
  * the early-exit paths of {@code resolveEntityHandler} (blank/null qualifier).
  * The CDI lookup path of {@code resolveEntityHandler} is covered by integration tests.
- * {@code buildActionHookContext} is covered here with a statically mocked
- * {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
+ * {@code buildActionHookContext} and {@code buildDeclaredActionHookContext} are covered here
+ * with a statically mocked {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
  */
 public class McpHookExecutorTest {
 
@@ -321,7 +322,7 @@ public class McpHookExecutorTest {
     }
   }
 
-  // ── buildActionHookContext with method + query params (ETP-5447) ──────
+  // ── buildDeclaredActionHookContext (ETP-5447) ─────────────────────────
 
   private static final String SPEC_FA = "financial-account";
   private static final String ENTITY_ACCOUNT = "account";
@@ -329,16 +330,21 @@ public class McpHookExecutorTest {
   private static final String LIST_STATEMENTS = "listStatements";
 
   @Test
-  public void testBuildActionHookContextNineArgCarriesMethodAndQueryParams() throws Exception {
+  public void testBuildDeclaredActionHookContextCarriesContractMethodAndQueryParams()
+      throws Exception {
     JSONObject params = new JSONObject();
     params.put("limit", "5");
     Map<String, String> queryParams = Map.of("limit", "5");
+    SFEntity sfEntity = mock(SFEntity.class);
+    Tab adTab = mock(Tab.class);
+    when(sfEntity.getADTab()).thenReturn(adTab);
+    NeoActionContract contract = NeoActionContract.builder(LIST_STATEMENTS).method("GET").build();
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(null);
 
-      NeoContext ctx = McpHookExecutor.buildActionHookContext(SPEC_FA, ENTITY_ACCOUNT, ACC_ID,
-          LIST_STATEMENTS, "GET", params, queryParams, null, null);
+      NeoContext ctx = McpHookExecutor.buildDeclaredActionHookContext(SPEC_FA, ENTITY_ACCOUNT,
+          ACC_ID, contract, params, queryParams, sfEntity);
 
       assertEquals("GET", ctx.getHttpMethod());
       assertEquals(NeoEndpointType.ACTION, ctx.getEndpointType());
@@ -349,21 +355,29 @@ public class McpHookExecutorTest {
       assertSame(params, ctx.getRequestBody());
       assertEquals(queryParams, ctx.getQueryParams());
       assertTrue(ctx.isMcpOrigin());
-      assertNull(ctx.getAdTab());
-      assertNull(ctx.getSfEntity());
+      // The AD tab is no longer a separate argument: it is read off the entity.
+      assertSame(adTab, ctx.getAdTab());
+      assertSame(sfEntity, ctx.getSfEntity());
     }
   }
 
   @Test
-  public void testBuildActionHookContextNineArgTurnsNullQueryParamsIntoAnEmptyMap()
+  public void testBuildDeclaredActionHookContextTurnsNullQueryParamsIntoAnEmptyMap()
       throws Exception {
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getADTab()).thenReturn(null);
+    NeoActionContract contract = NeoActionContract.builder("createStatement").method("POST")
+        .build();
+
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(null);
 
-      NeoContext ctx = McpHookExecutor.buildActionHookContext(SPEC_FA, ENTITY_ACCOUNT, ACC_ID,
-          "createStatement", "POST", new JSONObject(), null, null, null);
+      NeoContext ctx = McpHookExecutor.buildDeclaredActionHookContext(SPEC_FA, ENTITY_ACCOUNT,
+          ACC_ID, contract, new JSONObject(), null, sfEntity);
 
       assertEquals("POST", ctx.getHttpMethod());
+      assertEquals("createStatement", ctx.getFieldName());
+      assertNull(ctx.getAdTab());
       assertNotNull(ctx.getQueryParams());
       assertTrue(ctx.getQueryParams().isEmpty());
     }
