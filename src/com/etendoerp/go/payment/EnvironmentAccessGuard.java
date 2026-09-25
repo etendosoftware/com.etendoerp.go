@@ -43,7 +43,8 @@ import org.codehaus.jettison.json.JSONObject;
  * costs no flag evaluation.
  *
  * <p><b>The denial wire format is shared.</b> {@link Denial#errorBody(int)} is the one JSON shape
- * all three entry points answer with, HTTP 402:
+ * all four entry points (NEO, MCP, the {@code JwtAuthUtils} servlets and {@code GET /login})
+ * answer with, HTTP 402:
  *
  * <pre>
  * { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
