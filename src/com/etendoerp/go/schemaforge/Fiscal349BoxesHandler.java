@@ -36,15 +36,10 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
@@ -89,6 +84,14 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * reach it directly.
    */
   final Fiscal349ViesSupport viesSupport = new Fiscal349ViesSupport();
+
+  /**
+   * The file-name/contact/org-data resolution cluster used by {@link #handleGenerate} and
+   * {@link #computeOperators}'s {@code contactFallback}/{@code phoneFallback}/{@code orgNif} —
+   * extracted for the same {@code java:S1448} method-count fix, see
+   * {@link Fiscal349GenerateSupport}'s class javadoc.
+   */
+  private final Fiscal349GenerateSupport generateSupport = new Fiscal349GenerateSupport();
 
   Fiscal349BoxesHandler(NeoServlet servlet) {
     super(servlet);
@@ -217,7 +220,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         resolveInvoiceKeys(purch, taxesPurchase, taxReport.getId()));
     invoiceKeys.putAll(resolveInvoiceKeys(sales, taxesSales, taxReport.getId()));
 
-    String    orgNif      = resolveOrgNif(orgId);
+    String    orgNif      = generateSupport.resolveOrgNif(orgId);
     JSONArray invoicesArr = collectInvoices(purch, sales, invoiceKeys);
     JSONArray rectifArr   = collectRectifications(corrPurch, corrSales);
 
@@ -232,10 +235,11 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     // ETP-5456 — read-only fallback values for FileGenModal's "Persona de contacto"/"Teléfono de
     // contacto" fields, so the frontend can tell whether leaving them blank would actually resolve
     // to something at generation time (and block the modal when it wouldn't). Reuses the EXACT
-    // same resolution {@link #applyContactParams} already falls back to server-side — never
-    // duplicated, just exposed — so this can never drift from what a blank field actually does.
-    String contactFallback = resolveCurrentUserContactName();
-    String phoneFallback   = resolveOrgPhone(orgId);
+    // same resolution {@link Fiscal349GenerateSupport#applyContactParams} already falls back to
+    // server-side — never duplicated, just exposed — so this can never drift from what a blank
+    // field actually does.
+    String contactFallback = Fiscal349GenerateSupport.resolveCurrentUserContactName();
+    String phoneFallback   = generateSupport.resolveOrgPhone(orgId);
     root.put("contactFallback", contactFallback != null ? contactFallback : "");
     root.put("phoneFallback",   phoneFallback   != null ? phoneFallback   : "");
     return root;
@@ -663,9 +667,10 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
     String yearId    = periods.get(0).getYear().getId();
     String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
-    String filename  = resolveFileName(request, period, year);
+    String filename  = generateSupport.resolveFileName(request, period, year);
 
-    Map<String, String> inputParams = buildGenerateInputParams(request, orgId, filename);
+    Map<String, String> inputParams =
+        generateSupport.buildGenerateInputParams(request, orgId, filename);
 
     OBTL_TaxReport_I report = (OBTL_TaxReport_I)
         Class.forName(taxReport.getJavaClassName()).getDeclaredConstructor().newInstance();
@@ -673,104 +678,6 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     HashMap<String, Object> result = report.generateElectronicFile(
         orgId, taxReport.getId(), acctSchema.getId(), yearId, periodIds, inputParams);
     writeGeneratedFile(result, filename + ".349", response);
-  }
-
-  // FileName: request param wins when provided, else fall back to the locally-computed default.
-  private String resolveFileName(HttpServletRequest request, String period, int year) {
-    String requestedFileName = request.getParameter("fileName");
-    if (requestedFileName != null && !requestedFileName.isEmpty()) {
-      return requestedFileName;
-    }
-    return "349_" + period + "_" + year;
-  }
-
-  // Extracted from handleGenerate to keep its cognitive complexity within budget.
-  private Map<String, String> buildGenerateInputParams(HttpServletRequest request, String orgId,
-      String filename) {
-    Map<String, String> inputParams = new HashMap<>();
-    inputParams.put("FileName", filename);
-
-    // Substitutive/Navarra/Guipuzcoa are checkbox parameters: AEAT3492010Report's generateLine1
-    // calls inputParams.get("Substitutive").equals("Y") — NPE if the key is absent — so all three
-    // must ALWAYS be present in the map, "Y" or "N", mirroring classic's CHECK-type convention
-    // (OBTL_TaxReportLauncher#generateFile always writes CHECK params regardless of value).
-    inputParams.put("Substitutive", "Y".equals(request.getParameter("substitutive")) ? "Y" : "N");
-    inputParams.put("Navarra",      "Y".equals(request.getParameter("navarra"))      ? "Y" : "N");
-    inputParams.put("Guipuzcoa",    "Y".equals(request.getParameter("guipuzcoa"))    ? "Y" : "N");
-
-    applyContactParams(request, orgId, inputParams);
-    applyOptionalTextParams(request, inputParams);
-    return inputParams;
-  }
-
-  // Phone and Contact: AEAT3492010Report checks constantParameters first (TaxReport config),
-  // then falls back to inputParams. Query params override; fall back to AD_OrgInformation /
-  // current user so generation works even without TaxReport pre-configuration.
-  private void applyContactParams(HttpServletRequest request, String orgId,
-      Map<String, String> inputParams) {
-    String phone   = request.getParameter("phone");
-    String contact = request.getParameter("contact");
-    if (phone == null || phone.isEmpty()) {
-      phone = resolveOrgPhone(orgId);
-    }
-    if (contact == null || contact.isEmpty()) {
-      contact = resolveCurrentUserContactName();
-    }
-    if (phone   != null && !phone.isEmpty())   inputParams.put("Phone",   phone);
-    if (contact != null && !contact.isEmpty()) inputParams.put("Contact", contact);
-  }
-
-  /**
-   * The current session's AD_User display name — the {@code contact} fallback both
-   * {@link #applyContactParams} (generation time) and {@link #computeOperators}'s
-   * {@code contactFallback} (read-only, for the frontend's pre-generation validation) resolve to.
-   * Extracted so both call sites share the exact same one-liner instead of each repeating it.
-   */
-  private static String resolveCurrentUserContactName() {
-    return OBContext.getOBContext().getUser().getName();
-  }
-
-  // FormerStatement/RepresentativeTaxId are TEXT parameters — classic omits empty TEXT
-  // parameters from inputParams entirely (OBTL_TaxReportLauncher#generateFile), so mirror
-  // that here rather than sending an empty string.
-  private void applyOptionalTextParams(HttpServletRequest request, Map<String, String> inputParams) {
-    String formerStatement     = request.getParameter("formerStatement");
-    String representativeTaxId = request.getParameter("representativeTaxId");
-    if (formerStatement != null && !formerStatement.isEmpty()) {
-      inputParams.put("FormerStatement", formerStatement);
-    }
-    if (representativeTaxId != null && !representativeTaxId.isEmpty()) {
-      inputParams.put("RepresentativeTaxId", representativeTaxId);
-    }
-  }
-
-  // ── resolution helpers ────────────────────────────────────────────
-
-  private String resolveOrgNif(String orgId) {
-    OBCriteria<OrganizationInformation> crit =
-        OBDal.getInstance().createCriteria(OrganizationInformation.class);
-    crit.add(Restrictions.in(OrganizationInformation.PROPERTY_ORGANIZATION + ".id",
-        Arrays.asList(orgId, "0")));
-    crit.addOrder(Order.desc(OrganizationInformation.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<OrganizationInformation> list = crit.list();
-    if (list.isEmpty()) return "";
-    String taxId = list.get(0).getTaxID();
-    return taxId != null ? taxId : "";
-  }
-
-  private String resolveOrgPhone(String orgId) {
-    OBCriteria<OrganizationInformation> crit =
-        OBDal.getInstance().createCriteria(OrganizationInformation.class);
-    crit.add(Restrictions.eq(OrganizationInformation.PROPERTY_ORGANIZATION + ".id", orgId));
-    crit.setMaxResults(1);
-    List<OrganizationInformation> list = crit.list();
-    if (list.isEmpty()) return null;
-    // OrganizationInformation has no phone directly; try the org's user contact phone
-    org.openbravo.model.ad.access.User contact = list.get(0).getUserContact();
-    if (contact == null) return null;
-    String phone = contact.getPhone();
-    return phone != null && !phone.isEmpty() ? phone : contact.getAlternativePhone();
   }
 
   TaxReport resolveTaxReport349(String orgId, String periodCode) {

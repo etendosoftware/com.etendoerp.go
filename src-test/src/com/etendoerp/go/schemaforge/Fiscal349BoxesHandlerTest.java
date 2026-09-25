@@ -1374,11 +1374,14 @@ public class Fiscal349BoxesHandlerTest {
 
   // ── resolveCurrentUserContactName (ETP-5456) ───────────────────────────
   //
-  // Extracted so applyContactParams (generation time, existing) and computeOperators's new
-  // read-only contactFallback (frontend pre-generation validation) resolve the "contact" fallback
-  // through the EXACT same one-liner instead of each repeating `OBContext.getOBContext()
-  // .getUser().getName()`. It's `private static`, so invoked via reflection — same convention
-  // this file already uses for setAccessible-based access elsewhere in the module's test suite.
+  // Extracted so Fiscal349GenerateSupport#applyContactParams (generation time, existing) and
+  // computeOperators's new read-only contactFallback (frontend pre-generation validation) resolve
+  // the "contact" fallback through the EXACT same one-liner instead of each repeating
+  // `OBContext.getOBContext().getUser().getName()`. Since the ETP-5456 java:S1448 follow-up moved
+  // this method (with its whole file-name/contact/org-data resolution cluster) out of
+  // Fiscal349BoxesHandler into Fiscal349GenerateSupport, it now lives there as a package-private
+  // `static` method — still invoked via reflection here for consistency with this file's other
+  // setAccessible-based access, even though the new class no longer requires `private`.
 
   @Test
   public void testResolveCurrentUserContactNameReturnsTheLoggedInUsersName() throws Exception {
@@ -1409,15 +1412,16 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   /**
-   * Reflection helper for the {@code private static} {@code resolveCurrentUserContactName()}.
-   * Kept local to this test class — nothing else needs to call it directly, since
-   * {@code computeOperators}'s use of it is covered structurally (this same helper is what
-   * {@code computeOperators} calls to fill {@code contactFallback} — see the class-level Javadoc
-   * on {@code resolveCurrentUserContactName} in the handler itself), and {@code computeOperators}
-   * as a whole remains DB-integration-tested separately per this file's own top comment.
+   * Reflection helper for {@link Fiscal349GenerateSupport}'s {@code static}
+   * {@code resolveCurrentUserContactName()}. Kept local to this test class — nothing else needs
+   * to call it directly, since {@code computeOperators}'s use of it is covered structurally (this
+   * same helper is what {@code computeOperators} calls to fill {@code contactFallback} — see the
+   * class-level Javadoc on {@code resolveCurrentUserContactName} in {@link
+   * Fiscal349GenerateSupport}), and {@code computeOperators} as a whole remains DB-integration-
+   * tested separately per this file's own top comment.
    */
   private static String invokeResolveCurrentUserContactName() throws Exception {
-    Method m = Fiscal349BoxesHandler.class.getDeclaredMethod("resolveCurrentUserContactName");
+    Method m = Fiscal349GenerateSupport.class.getDeclaredMethod("resolveCurrentUserContactName");
     m.setAccessible(true);
     return (String) m.invoke(null);
   }
