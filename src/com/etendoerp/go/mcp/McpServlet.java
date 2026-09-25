@@ -41,6 +41,7 @@ import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -83,6 +84,12 @@ public class McpServlet extends HttpServlet {
   private static final String LEGACY_JWT_FALLBACK_SCOPES =
       "neo:read neo:write neo:process neo:report";
 
+  /**
+   * The commercial access check (ETP-5047). An instance field rather than a static so a test can
+   * substitute it by reflection.
+   */
+  private transient EnvironmentAccessGuard environmentAccessGuard = new EnvironmentAccessGuard();
+
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
@@ -119,6 +126,9 @@ public class McpServlet extends HttpServlet {
     AuthIdentity identity = authenticate(request, response);
     if (identity == null) {
       return; // Response already sent by authenticate()
+    }
+    if (!isEnvironmentAccessAllowed(response, identity)) {
+      return; // 402 already sent
     }
 
     response.setContentType(CONTENT_TYPE_JSON);
@@ -468,6 +478,32 @@ public class McpServlet extends HttpServlet {
     }
     return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
         session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
+  }
+
+  /**
+   * ETP-5047 — refuses an MCP request into a tenant whose commercial access was cut off (demo
+   * trial expired, subscription grace elapsed), exactly as NEO does: HTTP 402 with the shared
+   * {@link EnvironmentAccessGuard} error body. Before this, MCP was the one tenant entry point that
+   * never asked, so an agent kept reading and writing a blocked tenant's data. Every credential
+   * scheme (OAuth2, legacy JWT, cookie session) reaches it with the identity's tenant. The guard
+   * owns the decision and the kill switch; it runs as system because MCP has no
+   * {@code OBContext} of its own at this point.
+   *
+   * @return true when the request may proceed
+   */
+  private boolean isEnvironmentAccessAllowed(HttpServletResponse response, AuthIdentity identity)
+      throws IOException {
+    EnvironmentAccessGuard.Denial denial =
+        environmentAccessGuard.checkAsSystem(identity.clientId, "mcp");
+    if (denial == null) {
+      return true;
+    }
+    log.info("Commercial access denied for MCP request: {}", denial.message());
+    response.setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    response.setContentType(CONTENT_TYPE_JSON);
+    response.getWriter().write(
+        denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED).toString());
+    return false;
   }
 
   // ── JSON-RPC method dispatch ────────────────────────────────────────────

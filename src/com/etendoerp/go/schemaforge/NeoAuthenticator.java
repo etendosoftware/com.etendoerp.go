@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
-import java.time.Instant;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -41,7 +40,7 @@ import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
-import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -97,7 +96,9 @@ class NeoAuthenticator {
       }
     } catch (CommercialAccessException e) {
       log.info("Commercial access denied for NEO request: {}", e.getMessage());
-      servlet.sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED, e.getMessage());
+      // ETP-5047 — same 402 and message text as before, plus error.code / error.decision.
+      servlet.writeResponse(response, NeoResponse.error(HttpServletResponse.SC_PAYMENT_REQUIRED,
+          e.denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED)));
       return false;
     } catch (OBException e) {
       // OBException messages are safe to expose (we control them)
@@ -187,20 +188,27 @@ class NeoAuthenticator {
     applyRequestLanguage(request);
   }
 
+  /**
+   * Refuses a tenant whose commercial access was cut off. The decision and the kill switch live
+   * in {@link EnvironmentAccessGuard}, shared with MCP and the environment login endpoints; it is
+   * built over this class's lifecycle service so the NEO tests can substitute that service.
+   */
   private void enforceEnvironmentAccess(String clientId) throws CommercialAccessException {
-    EnvironmentAccessPolicy.Decision decision = environmentLifecycleService.evaluateAccess(
-        clientId, true, Instant.now());
-    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
-      return;
+    EnvironmentAccessGuard.Denial denial =
+        new EnvironmentAccessGuard(environmentLifecycleService).check(clientId, "neo");
+    if (denial != null) {
+      throw new CommercialAccessException(denial);
     }
-    throw new CommercialAccessException("Environment access is not available: " + decision.name());
   }
 
   private static final class CommercialAccessException extends Exception {
     private static final long serialVersionUID = 1L;
 
-    CommercialAccessException(String message) {
-      super(message);
+    private final transient EnvironmentAccessGuard.Denial denial;
+
+    CommercialAccessException(EnvironmentAccessGuard.Denial denial) {
+      super(denial.message());
+      this.denial = denial;
     }
   }
 

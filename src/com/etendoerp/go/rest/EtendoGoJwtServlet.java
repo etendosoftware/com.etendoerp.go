@@ -89,6 +89,7 @@ import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
 import com.etendoerp.go.payment.DemoDataTransferFlag;
@@ -335,6 +336,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
   private static final String FIELD_FIRST_STEPS_SEEN = "seen";
   private static final String FIELD_FIRST_STEPS_COMPLETED = "completed";
+  /** ETP-5047 — the access decision reported when entering a blocked tenant. */
+  private static final String FIELD_ACCESS_DECISION = "accessDecision";
   /**
    * ETP-5364 — the user closed the checklist for good, so the sidebar must stop offering it.
    * Independent of {@code seen} (which only spends the one-time post-signup redirect) and of
@@ -3595,6 +3598,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-5047 — the commercial access decision for the tenant an environment user belongs to,
+   * through the one guard NEO and MCP use too (decision, kill switch, error body). Runs in the
+   * caller's system context.
+   *
+   * @param userId the {@code AD_User} being entered, already verified to belong to the account
+   * @param entryPoint a short label for the log line
+   * @return the denial, or null when access is allowed or the user no longer exists
+   */
+  private EnvironmentAccessGuard.Denial environmentAccessDenial(String userId, String entryPoint) {
+    User user = OBDal.getInstance().get(User.class, userId);
+    if (user == null || user.getClient() == null) {
+      return null;
+    }
+    return new EnvironmentAccessGuard(tenantEnvironmentLifecycleService)
+        .check(user.getClient().getId(), entryPoint);
+  }
+
+  /**
    * GET /sws/go/login?userId={adUserId}
    * Header: Authorization: Bearer <session_token>
    * Returns an Etendo JWT for the given AD_User, if it belongs to the account.
@@ -3628,6 +3649,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(accountEmail, userId)) {
         writeError(response, HttpServletResponse.SC_FORBIDDEN,
             "User does not belong to this account");
+        return;
+      }
+      // ETP-5047 — this endpoint hands out a raw Etendo JWT, which reaches every secure web
+      // service of the tenant, not only NEO: a blocked tenant must not get one.
+      EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "environment-login");
+      if (denial != null) {
+        writeResponse(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
+            denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED));
         return;
       }
 
@@ -5550,6 +5579,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("environment", buildSessionEnvironment(rotated.getRecord()));
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      // ETP-5047 — entering a blocked tenant is NOT refused here, deliberately. The blocked-access
+      // screen and the pages it sends the customer to (/account, /upgrade) render inside the
+      // entered environment, so refusing entry would lock a blocked customer out of the one place
+      // that lets them pay. The tenant's data paths refuse on their own instead — NEO and MCP
+      // answer 402 on every request (the smaller servlets on JwtAuthUtils do not check yet); this
+      // answer only reports the decision so a client can show the blocked screen straight away.
+      EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "session-environment");
+      if (denial != null) {
+        result.put(FIELD_ACCESS_DECISION, denial.decision().name());
+      }
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);

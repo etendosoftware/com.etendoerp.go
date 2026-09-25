@@ -142,6 +142,36 @@ public final class GoFeatureFlags {
   public static final String FLAG_DEMO_DATA_TRANSFER = "demo-data-transfer";
 
   /**
+   * ETP-5047 — the kill switch of commercial environment-access enforcement: the HTTP 402 that
+   * NEO, MCP and the legacy environment login answer once a demo trial has expired or a
+   * subscription's payment grace has elapsed.
+   *
+   * <p><b>Phrased as an OFF switch on purpose, because every failure of this class resolves to
+   * {@code false}.</b> Enforcement is live from deploy and stays live when the flag is not
+   * configured, when ConfigCat is unreachable, when the SDK key is wrong or when evaluation
+   * throws: all of those read "not switched off". Only an explicit {@code true} disables the
+   * refusal. A positively phrased "enforcement enabled" flag would do the opposite — a missing key
+   * would silently open every blocked tenant — so do not "fix" the polarity.
+   *
+   * <p><b>What {@code true} does.</b> The access decision is still computed and logged at INFO
+   * (entry point, tenant, decision) instead of being refused, so an operator can see who would
+   * have been blocked. It is meant for an incident — a wrong status after a Stripe outage, a bad
+   * deploy — not as a way to grant a tenant free access.
+   *
+   * <p><b>Targeting.</b> Evaluated with an account-less context carrying the tenant as
+   * {@link FeatureFlagContext#ATTRIBUTE_CLIENT_ID}, so a ConfigCat rule can switch enforcement off
+   * for one tenant ({@code clientId}) or for everyone. Locally it is a plain boolean,
+   * {@code etendo.go.flags.environment-access-enforcement-off} /
+   * {@code ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF}.
+   *
+   * <p><b>Backend-only.</b> The browser follows the 402 it is given and needs no key of its own —
+   * same reasoning as {@link #FLAG_BP_PORTAL_LINK}; never add it to {@code flag-keys.js}. Its only
+   * caller is {@code EnvironmentAccessEnforcementFlag}.
+   */
+  public static final String FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF =
+      "environment-access-enforcement-off";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
