@@ -668,7 +668,9 @@ final class NeoHandlerUtils {
    * import. Shared by {@link GoodsReceiptLineHandler} (ETP-4671, purchase receipts) and
    * {@link GoodsShipmentLineHandler} (ETP-5062, sales shipments) — for both, a manually-added
    * line must always start at its own default (0) instead of silently jumping to the product's
-   * on-hand quantity, which risks moving an entire warehouse's stock by accident.
+   * on-hand quantity, which risks moving an entire warehouse's stock by accident. Also reused by
+   * {@link InternalConsumptionLineHandler} (ETP-5445), whose {@code SL_Internal_Consumption_Product}
+   * callout copies the product's on-hand stock into {@code movementQuantity} the same way.
    *
    * <p>Mutates {@code context.getPreviousResult()} in place and returns nothing: the dispatcher
    * (see {@link NeoHandler#afterCallout}) merges a returned {@code NeoResponse} additively only,

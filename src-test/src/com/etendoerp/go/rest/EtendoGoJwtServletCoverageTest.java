@@ -84,7 +84,6 @@ import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
-import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.session.GoSessionRecord;
@@ -142,7 +141,7 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   @Test
-  public void paidOnboardingUsesPersistedDemoAndTransferSelectionAndLegacySkipsTransfers()
+  public void paidOnboardingUsesPersistedDemoAndLegacySkipsTransfers()
       throws Exception {
     CheckoutRequestStore store = mock(CheckoutRequestStore.class);
     servlet.checkoutRequestStore = store;
@@ -154,56 +153,34 @@ public class EtendoGoJwtServletCoverageTest {
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     OnboardingCompanyProfileTransferService profileTransfer =
         mock(OnboardingCompanyProfileTransferService.class);
-    OnboardingDataTransferService dataTransfer = mock(OnboardingDataTransferService.class);
     servlet.tenantEnvironmentLifecycleService = lifecycle;
     servlet.onboardingCompanyProfileTransferService = profileTransfer;
-    servlet.onboardingDataTransferService = dataTransfer;
     when(lifecycle.associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE")).thenReturn(true);
-    when(dataTransfer.transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false, true))
-        .thenReturn(new OnboardingDataTransferService.TransferResult(0, 1, 0, null));
     when(store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
         .thenReturn(true, false);
     when(store.findDemoClientId("purchase-1", "account-1", "user@test.com"))
         .thenReturn("STORED-DEMO");
-    CheckoutRequestStore.TransferSelection selection = mock(CheckoutRequestStore.TransferSelection.class);
-    when(selection.isProducts()).thenReturn(false);
-    when(selection.isContacts()).thenReturn(true);
-    when(store.findTransferSelection("purchase-1", "account-1", "user@test.com"))
-        .thenReturn(selection);
     when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com"))
         .thenReturn(true);
     when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com"))
         .thenReturn(7L);
 
-    try (MockedStatic<com.etendoerp.go.payment.DemoDataTransferFlag> transferFlag =
-        mockStatic(com.etendoerp.go.payment.DemoDataTransferFlag.class)) {
-      transferFlag.when(com.etendoerp.go.payment.DemoDataTransferFlag::isEnabled)
-          .thenReturn(false);
-      Object recorded = prepareOnboardingForPersistedSelection();
-      Object recordedRequest = getField(recorded, "request");
-      assertEquals("STORED-DEMO", getField(recordedRequest, "demoClientId"));
-      assertFalse((boolean) getField(recordedRequest, "transferProducts"));
-      assertTrue((boolean) getField(recordedRequest, "transferContacts"));
-      invokeProfileAndSelectedDataTransfer(recordedRequest, "STORED-DEMO", "NEW-PRODUCTIVE");
+    Object recorded = prepareOnboardingForPersistedSelection();
+    Object recordedRequest = getField(recorded, "request");
+    assertEquals("STORED-DEMO", getField(recordedRequest, "demoClientId"));
+    invokeProfileTransfer("STORED-DEMO", "NEW-PRODUCTIVE");
 
-      Object legacy = prepareOnboardingForPersistedSelection();
-      Object legacyRequest = getField(legacy, "request");
-      assertNull(getField(legacyRequest, "demoClientId"));
-      assertFalse((boolean) getField(legacyRequest, "transferProducts"));
-      assertFalse((boolean) getField(legacyRequest, "transferContacts"));
-      invokeProfileAndSelectedDataTransfer(legacyRequest, null, "LEGACY-PRODUCTIVE");
-      servlet.startDemoDataTransferBestEffort("purchase-1", null, "LEGACY-PRODUCTIVE",
-          "account-1", "user@test.com");
-    }
+    Object legacy = prepareOnboardingForPersistedSelection();
+    Object legacyRequest = getField(legacy, "request");
+    assertNull(getField(legacyRequest, "demoClientId"));
+    invokeProfileTransfer(null, "LEGACY-PRODUCTIVE");
+    servlet.startDemoDataTransferBestEffort("purchase-1", null, "LEGACY-PRODUCTIVE",
+        "account-1", "user@test.com");
     verify(lifecycle, times(1)).associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE");
     verifyNoMoreInteractions(lifecycle);
     verify(profileTransfer, times(1)).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
     verifyNoMoreInteractions(profileTransfer);
-    verify(dataTransfer, times(1)).transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false,
-        true);
-    verifyNoMoreInteractions(dataTransfer);
     verify(store, times(1)).findDemoClientId("purchase-1", "account-1", "user@test.com");
-    verify(store, times(1)).findTransferSelection("purchase-1", "account-1", "user@test.com");
   }
 
   private Object prepareOnboardingForPersistedSelection() throws Exception {
@@ -248,18 +225,12 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
-  private void invokeProfileAndSelectedDataTransfer(Object requestData, String sourceClientId,
-      String targetClientId) throws Exception {
+  private void invokeProfileTransfer(String sourceClientId, String targetClientId)
+      throws Exception {
     Method transferProfile = EtendoGoJwtServlet.class.getDeclaredMethod(
         "transferDemoCompanyProfile", String.class, String.class, String.class, String.class);
     transferProfile.setAccessible(true);
     transferProfile.invoke(servlet, "user@test.com", sourceClientId, targetClientId, "ORG-1");
-    Method transferData = EtendoGoJwtServlet.class.getDeclaredMethod("transferSelectedData",
-        PrintWriter.class, requestData.getClass(), boolean.class, String.class, String.class,
-        String.class);
-    transferData.setAccessible(true);
-    transferData.invoke(servlet, new PrintWriter(new StringWriter()), requestData,
-        true, sourceClientId, targetClientId, "ORG-1");
   }
 
   private static Object getField(Object target, String fieldName) throws Exception {

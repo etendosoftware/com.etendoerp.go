@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -612,6 +613,67 @@ public class CandidatesSupportTest {
       assertEquals(5, counts.getInt("payments"));
       assertEquals(2, counts.getInt("salesInvoices"));
       assertEquals(4, counts.getInt("purchaseInvoices"));
+    }
+  }
+
+  /**
+   * Both count queries filter TIMESTAMP columns ({@code ft.statementdate}, {@code inv.dateinvoiced}),
+   * so the upper bound must be an EXCLUSIVE {@code < next day}, not {@code <= dateTo} — a {@code <=}
+   * bound would silently drop rows with a non-zero time of day on the last day of the range
+   * (ETP-5449), same reasoning as {@code ReconciliationHandlerTest}'s SQL-shape tests.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testCandidateCountsSqlUsesExclusiveUpperBoundForDateTo() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(org.getId()).thenReturn(ORG_ID);
+
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet txnRs = mock(ResultSet.class);
+    when(txnRs.next()).thenReturn(false);
+    ResultSet invRs = mock(ResultSet.class);
+    when(invRs.next()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinancialAccount.class, ACC_ID)).thenReturn(account);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(conn.createArrayOf(anyString(), any())).thenReturn(null);
+      when(ps.executeQuery()).thenReturn(txnRs, invRs);
+
+      OBContext ctx = mock(OBContext.class);
+      OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
+      when(osp.getNaturalTree(ORG_ID)).thenReturn(Collections.singleton(ORG_ID));
+      when(ctx.getOrganizationStructureProvider(CLIENT_ID)).thenReturn(osp);
+      when(ctx.getReadableClients()).thenReturn(new String[] {CLIENT_ID});
+      when(ctx.getReadableOrganizations()).thenReturn(new String[] {ORG_ID});
+      obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+      CandidatesSupport.candidateCounts(ACC_ID, "2026-01-01", "2026-01-31");
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn, times(2)).prepareStatement(sql.capture());
+      String txnSql = sql.getAllValues().get(0);
+      String invSql = sql.getAllValues().get(1);
+      assertTrue("TXN_COUNTS_SQL dateTo must be exclusive; got: " + txnSql,
+          txnSql.contains("ft.statementdate < CAST(? AS date) + 1"));
+      assertFalse("TXN_COUNTS_SQL must not truncate via <=; got: " + txnSql,
+          txnSql.contains("ft.statementdate <= ?"));
+      assertTrue("INVOICE_COUNTS_SQL dateTo must be exclusive; got: " + invSql,
+          invSql.contains("inv.dateinvoiced < CAST(? AS date) + 1"));
+      assertFalse("INVOICE_COUNTS_SQL must not truncate via <=; got: " + invSql,
+          invSql.contains("inv.dateinvoiced <= ?"));
     }
   }
 

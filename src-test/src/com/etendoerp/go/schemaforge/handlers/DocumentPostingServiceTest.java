@@ -39,8 +39,10 @@ import java.util.List;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -60,6 +62,8 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductAccounts;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumption;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
 import org.openbravo.model.materialmgmt.transaction.InventoryCount;
 import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
 import org.openbravo.model.materialmgmt.transaction.MaterialTransaction;
@@ -2145,9 +2149,11 @@ public class DocumentPostingServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // ETP-5360 (review finding B1): isUncalculatedCostInventory pre-check + its integration into
-  // post(). See the method's javadoc in DocumentPostingService for the full rationale (why the
-  // check is scoped to M_Inventory only, and why it fails OPEN on lookup error).
+  // ETP-5360 (review finding B1): isUncalculatedCost pre-check (originally M_Inventory only,
+  // extended to M_Internal_Consumption by ETP-5445 — see the section at the end of this class) +
+  // its integration into post(). See the method's javadoc in DocumentPostingService for the full
+  // rationale (why the check is scoped to those two tables only, and why it fails OPEN on lookup
+  // error).
   // ---------------------------------------------------------------------------------------------
 
   /** Arbitrary test AD_Table_ID standing in for the M_Inventory table (fully mocked, never looked up live). */
@@ -2366,6 +2372,410 @@ public class DocumentPostingServiceTest {
       assertTrue(r.ok());
       assertEquals("Document posted", r.message());
       verify(acct).post(eq("inv-4"), eq(false), any(), any(), any());
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5445: the same cost-calculated pre-check extended to Internal Consumption
+  // (M_Internal_Consumption). Core's DocInternalConsumption#validateCostCalculation has the same
+  // shape as DocInventory#createFact: an uncalculated line transaction makes it throw a bare,
+  // swallowed IllegalStateException, so the gate must block BEFORE AcctServer is ever touched.
+  // ---------------------------------------------------------------------------------------------
+
+  /** Real AD_Table_ID of M_Internal_Consumption (fully mocked here, never looked up live). */
+  private static final String TABLE_ID_M_INTERNAL_CONSUMPTION = "800168";
+  private static final String DB_TABLE_M_INTERNAL_CONSUMPTION = "M_Internal_Consumption";
+  private static final String IC_RECORD_ID = "ic-1";
+  private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
+  private static final String NOT_CALCULATED_COST_TEXT =
+      "Cost has not yet been calculated for all products in the document.";
+
+  @Mock
+  private ConnectionProvider mockIcConnectionProvider;
+  @Mock
+  private Connection mockIcConnection;
+  @Mock
+  private AcctServer mockIcAcctServer;
+  @Mock
+  private OBDal mockIcObDal;
+  @Mock
+  private Table mockIcTable;
+  @Mock
+  private InternalConsumption mockInternalConsumption;
+  @Mock
+  private InternalConsumptionLine mockInternalConsumptionLine;
+  @Mock
+  private MaterialTransaction mockCalculatedTransaction;
+  @Mock
+  private MaterialTransaction mockUncalculatedTransaction;
+
+  /**
+   * Stubs the table lookup to resolve {@code M_Internal_Consumption} and the header lookup to a
+   * single-line Internal Consumption whose line carries the given transactions.
+   */
+  private void stubInternalConsumption(MaterialTransaction... transactions) {
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockCalculatedTransaction.isCostCalculated()).thenReturn(Boolean.TRUE);
+    when(mockUncalculatedTransaction.isCostCalculated()).thenReturn(Boolean.FALSE);
+    when(mockInternalConsumptionLine.getMaterialMgmtMaterialTransactionList())
+        .thenReturn(List.of(transactions));
+    when(mockInternalConsumption.getMaterialMgmtInternalConsumptionLineList())
+        .thenReturn(List.of(mockInternalConsumptionLine));
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(mockInternalConsumption);
+  }
+
+  /** Stubs a successful {@code acct.post()} for the Internal Consumption record. */
+  private void stubSuccessfulIcPost() throws Exception {
+    when(mockIcConnectionProvider.getTransactionConnection()).thenReturn(mockIcConnection);
+    mockIcAcctServer.errors = 0;
+    when(mockIcAcctServer.post(eq(IC_RECORD_ID), eq(false), any(), any(), any())).thenReturn(true);
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption with at least one line transaction whose cost is not
+   * calculated is blocked with the plain {@code NotCalculatedCost} message, and neither
+   * {@code AcctServer.get()} nor {@code acct.post()} nor the transaction connection is touched.
+   */
+  @Test
+  public void testPostBlocksInternalConsumptionWhenCostNotCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption(mockCalculatedTransaction, mockUncalculatedTransaction);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST))
+          .thenReturn(NOT_CALCULATED_COST_TEXT);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertFalse(r.ok());
+      assertEquals(NOT_CALCULATED_COST_TEXT, r.message());
+      verify(mockIcAcctServer, never()).post(anyString(), eq(false), any(), any(), any());
+      acctStatic.verify(
+          () -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)), never());
+      verify(mockIcConnectionProvider, never()).getTransactionConnection();
+    }
+  }
+
+  /**
+   * ETP-5445 — a {@code null} {@code isCostCalculated()} flag on an Internal Consumption line
+   * transaction counts as not calculated (null-safe check), blocking exactly like {@code false}.
+   */
+  @Test
+  public void testPostBlocksInternalConsumptionWhenCostCalculatedFlagIsNull() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption(mockCalculatedTransaction, mockUncalculatedTransaction);
+    when(mockUncalculatedTransaction.isCostCalculated()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST))
+          .thenReturn(NOT_CALCULATED_COST_TEXT);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertFalse(r.ok());
+      assertEquals(NOT_CALCULATED_COST_TEXT, r.message());
+      acctStatic.verify(
+          () -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)), never());
+    }
+  }
+
+  /**
+   * ETP-5445 — when every Internal Consumption line transaction already has its cost calculated,
+   * the pre-check is a no-op and posting proceeds through {@code acct.post()}.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionCostIsFullyCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption(mockCalculatedTransaction);
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption id that cannot be resolved (null header) is not blocked by
+   * the pre-check; posting proceeds and core's accounting engine gets the final word.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionRecordIsNotFound() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(null);
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5445 — the pre-check still fails OPEN for Internal Consumption: an exception while
+   * walking the header lines is caught and posting proceeds normally.
+   */
+  @Test
+  public void testPostFailsOpenWhenInternalConsumptionLookupThrows() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(mockInternalConsumption);
+    when(mockInternalConsumption.getMaterialMgmtInternalConsumptionLineList())
+        .thenThrow(new RuntimeException("lazy init error"));
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5445 — the M_Inventory branch must never consult the Internal Consumption DAL entity: an
+   * Inventory post (here with an unresolved inventory record, so the pre-check is a no-op) never
+   * looks up {@code InternalConsumption}.
+   */
+  @Test
+  public void testPostInventoryNeverLooksUpInternalConsumption() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn("M_Inventory");
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INVENTORY)).thenReturn(mockIcTable);
+    when(mockIcConnectionProvider.getTransactionConnection()).thenReturn(mockIcConnection);
+    mockIcAcctServer.errors = 0;
+    when(mockIcAcctServer.post(eq("inv-9"), eq(false), any(), any(), any())).thenReturn(true);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(
+              () -> AcctServer.get(eq(TABLE_ID_M_INVENTORY), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-9", mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      verify(mockIcObDal, never()).get(eq(InternalConsumption.class), anyString());
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5445 QA gaps: the cost gate must not block an Internal Consumption that has nothing to
+  // check (no lines / no line transactions), and unposting a never-posted document must answer a
+  // clean, handled NEO response — never an exception or a 500.
+  // ---------------------------------------------------------------------------------------------
+
+  private static final String ACTION_UNPOST = "unpost";
+  private static final String BODY_SUCCESS = "success";
+  private static final String BODY_MESSAGE = "message";
+
+  @Mock
+  private Tab mockIcTab;
+  @Mock
+  private NeoContext mockIcContext;
+
+  /** Stubs {@code mockIcContext} as an ACTION request for {@code action} on the IC record. */
+  private void stubIcActionContext(String action) {
+    when(mockIcTable.getId()).thenReturn(TABLE_ID_M_INTERNAL_CONSUMPTION);
+    when(mockIcTab.getTable()).thenReturn(mockIcTable);
+    when(mockIcContext.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(mockIcContext.getFieldName()).thenReturn(action);
+    when(mockIcContext.getAdTab()).thenReturn(mockIcTab);
+    when(mockIcContext.getRecordId()).thenReturn(IC_RECORD_ID);
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption with ZERO lines has no transaction to be uncalculated, so
+   * the cost gate does not block it: posting proceeds and {@code acct.post()} is called.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionHasNoLines() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockInternalConsumption.getMaterialMgmtInternalConsumptionLineList()).thenReturn(new ArrayList<>());
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(mockInternalConsumption);
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+      msgMock.verify(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST), never());
+    }
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption whose line has an EMPTY {@code MaterialTransaction} list
+   * (e.g. a draft that was never processed) is not blocked either: the per-line scan finds no
+   * uncalculated transaction, so {@code acct.post()} is still called.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionLinesHaveNoTransactions() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption();
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+      msgMock.verify(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST), never());
+    }
+  }
+
+  /**
+   * ETP-5445 — unposting a NOT-posted Internal Consumption (Posted = 'N', no Fact_Acct rows).
+   * Core's {@code ResetAccounting.delete} finds nothing to remove and returns zero counts; the
+   * service answers a handled 200 with a flat body reporting 0 removed entries — no exception
+   * escapes and no 500 is produced.
+   */
+  @Test
+  public void testHandleActionUnpostOfNotPostedInternalConsumptionReturnsHandledResponse() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubIcActionContext(ACTION_UNPOST);
+    HashMap<String, Integer> zeroCounts = new HashMap<>();
+    zeroCounts.put("deleted", 0);
+    zeroCounts.put("updated", 0);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), eq(TABLE_ID_M_INTERNAL_CONSUMPTION),
+              eq(IC_RECORD_ID), eq(""), eq("")))
+          .thenReturn(zeroCounts);
+
+      NeoResponse resp = svc.handleAction(mockIcContext);
+
+      assertNotNull(resp);
+      assertEquals(200, resp.getHttpStatus());
+      assertTrue(resp.getBody().getBoolean(BODY_SUCCESS));
+      assertEquals("Unposted (0 entries removed)", resp.getBody().getString(BODY_MESSAGE));
+    }
+  }
+
+  /**
+   * ETP-5445 — a zero-count result map without a {@code deleted} key (defensive) is still a
+   * handled 200 reporting 0 removed entries, not a {@code NullPointerException}.
+   */
+  @Test
+  public void testHandleActionUnpostWithEmptyCountsMapReturnsHandledResponse() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubIcActionContext(ACTION_UNPOST);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), anyString(), anyString(), anyString(),
+              anyString()))
+          .thenReturn(new HashMap<String, Integer>());
+
+      NeoResponse resp = svc.handleAction(mockIcContext);
+
+      assertEquals(200, resp.getHttpStatus());
+      assertTrue(resp.getBody().getBoolean(BODY_SUCCESS));
+      assertEquals("Unposted (0 entries removed)", resp.getBody().getString(BODY_MESSAGE));
+    }
+  }
+
+  /**
+   * ETP-5445 — when core refuses the unpost of a not-posted document with an {@link OBException}
+   * (e.g. its period is closed), the failure is converted into a clean 422 with a flat
+   * {@code success=false} body carrying core's message — never propagated as a 500.
+   */
+  @Test
+  public void testHandleActionUnpostReturns422WhenResetAccountingRefuses() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubIcActionContext(ACTION_UNPOST);
+    String coreMessage = "The period is closed for unposting.";
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), anyString(), anyString(), anyString(),
+              anyString()))
+          .thenThrow(new OBException(coreMessage));
+
+      NeoResponse resp = svc.handleAction(mockIcContext);
+
+      assertNotNull(resp);
+      assertEquals(422, resp.getHttpStatus());
+      assertFalse(resp.getBody().getBoolean(BODY_SUCCESS));
+      assertEquals(coreMessage, resp.getBody().getString(BODY_MESSAGE));
     }
   }
 }

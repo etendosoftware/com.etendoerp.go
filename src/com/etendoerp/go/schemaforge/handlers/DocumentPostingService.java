@@ -26,6 +26,7 @@ import java.util.function.Function;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -44,6 +45,8 @@ import org.openbravo.model.common.businesspartner.CategoryAccounts;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductAccounts;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumption;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
 import org.openbravo.model.materialmgmt.transaction.InventoryCount;
 import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
 import org.openbravo.model.materialmgmt.transaction.MaterialTransaction;
@@ -52,7 +55,9 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Shared post/unpost core for Etendo GO. NOT a {@code NeoHandler} — it is a plain injectable bean
@@ -92,10 +97,16 @@ public class DocumentPostingService {
 
   /**
    * DB table name (not {@code AD_Table_ID} — resolved from the table's own record, see
-   * {@link #post(String, String, ConnectionProvider)}) for Physical Inventory, the only document
-   * type this pre-check applies to (ETP-5360).
+   * {@link #post(String, String, ConnectionProvider)}) for Physical Inventory, one of the two
+   * document types the cost-calculated pre-check applies to (ETP-5360).
    */
   private static final String TABLE_M_INVENTORY = "M_Inventory";
+
+  /**
+   * DB table name for Internal Consumption, the second document type the cost-calculated
+   * pre-check applies to (ETP-5445). Same resolution rule as {@link #TABLE_M_INVENTORY}.
+   */
+  private static final String TABLE_M_INTERNAL_CONSUMPTION = "M_Internal_Consumption";
 
   /**
    * {@code AD_MESSAGE.VALUE} for the plain, no-params "cost not yet calculated" text (ETP-5360) —
@@ -173,8 +184,51 @@ public class DocumentPostingService {
     }
   }
 
-  /** Result of a post/unpost attempt. */
-  public record PostResult(boolean ok, String message) {
+  /**
+   * Result of a post/unpost attempt. {@code messageKeys} (ETP-5360) are the AD_MESSAGE search keys
+   * behind a failure {@code message}, captured before translation so a client can map the failure
+   * by identity; never {@code null}, empty when there are none.
+   */
+  public record PostResult(boolean ok, String message, List<String> messageKeys) {
+    /**
+     * Canonical constructor. Normalizes {@code messageKeys} to an immutable copy, and a
+     * {@code null} list to an empty one, so callers never have to null-check it.
+     *
+     * @param ok
+     *     {@code true} when the post/unpost succeeded.
+     * @param message
+     *     the user-facing outcome message, already translated to the session language.
+     * @param messageKeys
+     *     the AD_MESSAGE search keys behind {@code message}; may be {@code null}.
+     */
+    public PostResult {
+      messageKeys = messageKeys == null ? List.of() : List.copyOf(messageKeys);
+    }
+
+    /**
+     * Convenience constructor for a result that carries no AD_MESSAGE keys (every success, and
+     * failures whose message was not built from AD_MESSAGE tokens).
+     *
+     * @param ok
+     *     {@code true} when the post/unpost succeeded.
+     * @param message
+     *     the user-facing outcome message.
+     */
+    public PostResult(boolean ok, String message) {
+      this(ok, message, List.of());
+    }
+  }
+
+  /**
+   * Failure result for a caught exception (ETP-5360). Core accounting code raises raw
+   * {@code @AD_Message_Key@} tokens (e.g. {@code ResetAccounting}'s
+   * {@code @PeriodClosedForUnPosting@}); forwarding {@code e.getMessage()} verbatim showed that
+   * token in the browser. The keys are extracted first, then the text is translated in the
+   * session language.
+   */
+  private static PostResult translatedFailure(String rawMessage) {
+    return new PostResult(false, NeoMessageTranslator.safeParseTranslation(rawMessage),
+        NeoMessageTranslator.extractMessageKeys(rawMessage));
   }
 
   /**
@@ -197,8 +251,9 @@ public class DocumentPostingService {
    * commit / rollback logic can be exercised with a mocked {@link ConnectionProvider} (no live DB).
    */
   PostResult post(String adTableId, String recordId, ConnectionProvider conn) {
-    if (isUncalculatedCostInventory(adTableId, recordId)) {
-      return new PostResult(false, OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST));
+    if (isUncalculatedCost(adTableId, recordId)) {
+      return new PostResult(false, OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST),
+          List.of(MSG_NOT_CALCULATED_COST));
     }
     OBContext ctx = OBContext.getOBContext();
     String clientId = ctx.getCurrentClient().getId();
@@ -223,14 +278,16 @@ public class DocumentPostingService {
     } catch (Exception e) {
       rollbackQuietly(conn, con);
       log.error("Post failed for table {} record {}", adTableId, recordId, e);
-      return new PostResult(false, e.getMessage());
+      return translatedFailure(e.getMessage());
     }
   }
 
   /**
-   * Pre-check scoped to Physical Inventory ({@code M_Inventory}) ONLY (ETP-5360) — do not
-   * generalize to other document types, they don't share this exact per-transaction cost-
-   * calculation shape.
+   * Cost-calculated pre-check scoped to Physical Inventory ({@code M_Inventory}, ETP-5360) and
+   * Internal Consumption ({@code M_Internal_Consumption}, ETP-5445) ONLY — do not generalize to
+   * other document types without confirming they share this exact per-transaction cost-calculation
+   * shape (one {@code M_Transaction} per document line, validated line by line in
+   * {@code createFact}).
    *
    * <p>{@code DocInventory#createFact} (classic core, {@code DocInventory.java}) throws a bare
    * {@code IllegalStateException()} when a line's {@code MaterialTransaction.isCostCalculated()}
@@ -246,16 +303,27 @@ public class DocumentPostingService {
    * is ever called, so the swallowed exception never happens and we return our own clean, correctly
    * localized message directly.
    *
+   * <p>ETP-5445 extends the same gate to Internal Consumption: core's
+   * {@code DocInternalConsumption#validateCostCalculation} ({@code DocInternalConsumption.java},
+   * lines 223-228) has the identical shape — it sets {@code STATUS_NotCalculatedCost} and then
+   * throws a bare {@code IllegalStateException()}, which {@code AcctServer.createFacts} swallows
+   * the same way. The table-specific part (header → lines) is resolved in
+   * {@link #hasUncalculatedInventoryCost(String)} and
+   * {@link #hasUncalculatedInternalConsumptionCost(String)}; the per-line transaction scan is
+   * shared in {@link #hasUncalculatedTransaction(List)}. Both helpers are called inside this
+   * method's {@code try}, so any exception they throw still fails open here.</p>
+   *
    * @param adTableId
    *     AD_Table_ID of the document table being posted.
    * @param recordId
-   *     primary key of the record being posted ({@code M_Inventory_ID} when applicable).
-   * @return {@code true} when this is an {@code M_Inventory} document with at least one line
-   *     transaction whose cost is not yet calculated (including a null/unset flag, treated as
-   *     not calculated); {@code false} otherwise, including when the table is not {@code
-   *     M_Inventory}, the record cannot be resolved, or the lookup itself fails. Unlike
-   *     {@link #resolveMissingAccountsDetail} and {@link #resolveMissingProductAccountsDetail} —
-   *     enrichment helpers called AFTER {@code acct.post()} has already failed, where a failure
+   *     primary key of the record being posted ({@code M_Inventory_ID} or
+   *     {@code M_Internal_Consumption_ID} when applicable).
+   * @return {@code true} when this is an {@code M_Inventory} or {@code M_Internal_Consumption}
+   *     document with at least one line transaction whose cost is not yet calculated (including a
+   *     null/unset flag, treated as not calculated); {@code false} otherwise, including when the
+   *     table is neither of those two, the record cannot be resolved, or the lookup itself fails.
+   *     Unlike {@link #resolveMissingAccountsDetail} and {@link #resolveMissingProductAccountsDetail}
+   *     — enrichment helpers called AFTER {@code acct.post()} has already failed, where a failure
    *     here just omits extra detail text and the post stays blocked either way — this method is
    *     a GATE called BEFORE {@code acct.post()}. On a lookup error it returns {@code false},
    *     which lets the post PROCEED normally: this pre-check fails OPEN (permissive), not closed.
@@ -264,28 +332,74 @@ public class DocumentPostingService {
    *     {@code OBDal}, for a pre-check that is a purely additive improvement over the generic
    *     error path in the first place.
    */
-  private boolean isUncalculatedCostInventory(String adTableId, String recordId) {
+  private boolean isUncalculatedCost(String adTableId, String recordId) {
     try {
       Table table = OBDal.getInstance().get(Table.class, adTableId);
-      if (table == null || !TABLE_M_INVENTORY.equals(table.getDBTableName())) {
+      if (table == null) {
         return false;
       }
-      InventoryCount inventoryCount = OBDal.getInstance().get(InventoryCount.class, recordId);
-      if (inventoryCount == null) {
-        return false;
+      String dbTableName = table.getDBTableName();
+      if (TABLE_M_INVENTORY.equals(dbTableName)) {
+        return hasUncalculatedInventoryCost(recordId);
       }
-      for (InventoryCountLine line : inventoryCount.getMaterialMgmtInventoryCountLineList()) {
-        for (MaterialTransaction transaction : line.getMaterialMgmtMaterialTransactionList()) {
-          if (!Boolean.TRUE.equals(transaction.isCostCalculated())) {
-            return true;
-          }
-        }
+      if (TABLE_M_INTERNAL_CONSUMPTION.equals(dbTableName)) {
+        return hasUncalculatedInternalConsumptionCost(recordId);
       }
       return false;
     } catch (Exception e) {
       log.warn("Could not evaluate cost-calculated pre-check for table {} record {}", adTableId, recordId, e);
       return false;
     }
+  }
+
+  /**
+   * {@code M_Inventory} branch of {@link #isUncalculatedCost}: resolves the Physical Inventory
+   * header and scans each line's transactions. {@code false} when the record does not exist.
+   * Exceptions propagate to the caller's fail-open {@code catch}.
+   */
+  private static boolean hasUncalculatedInventoryCost(String recordId) {
+    InventoryCount inventoryCount = OBDal.getInstance().get(InventoryCount.class, recordId);
+    if (inventoryCount == null) {
+      return false;
+    }
+    for (InventoryCountLine line : inventoryCount.getMaterialMgmtInventoryCountLineList()) {
+      if (hasUncalculatedTransaction(line.getMaterialMgmtMaterialTransactionList())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * {@code M_Internal_Consumption} branch of {@link #isUncalculatedCost} (ETP-5445): resolves the
+   * Internal Consumption header and scans each line's transactions. {@code false} when the record
+   * does not exist. Exceptions propagate to the caller's fail-open {@code catch}.
+   */
+  private static boolean hasUncalculatedInternalConsumptionCost(String recordId) {
+    InternalConsumption consumption = OBDal.getInstance().get(InternalConsumption.class, recordId);
+    if (consumption == null) {
+      return false;
+    }
+    for (InternalConsumptionLine line : consumption.getMaterialMgmtInternalConsumptionLineList()) {
+      if (hasUncalculatedTransaction(line.getMaterialMgmtMaterialTransactionList())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Shared per-line scan for {@link #isUncalculatedCost}: {@code true} when any of the line's
+   * material transactions has {@code IsCostCalculated} not set to {@code 'Y'} (a null flag counts
+   * as not calculated).
+   */
+  private static boolean hasUncalculatedTransaction(List<MaterialTransaction> transactions) {
+    for (MaterialTransaction transaction : transactions) {
+      if (!Boolean.TRUE.equals(transaction.isCostCalculated())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -309,7 +423,7 @@ public class DocumentPostingService {
       return new PostResult(true, "Unposted (" + deleted + " entries removed)");
     } catch (Exception e) {
       log.error("Unpost failed for table {} record {}", adTableId, recordId, e);
-      return new PostResult(false, e.getMessage());
+      return translatedFailure(e.getMessage());
     }
   }
 
@@ -338,6 +452,9 @@ public class DocumentPostingService {
       JSONObject body = new JSONObject();
       body.put("success", result.ok());
       body.put("message", result.message());
+      if (!result.messageKeys().isEmpty()) {
+        body.put(NeoProcessService.MESSAGE_KEYS, new JSONArray(result.messageKeys()));
+      }
       // NOTE: pass the JSONObject itself, NOT body.toString() — that String would bind to the
       // NeoResponse.error(int, String) overload, which wraps it as a nested error.message
       // string instead of sending this flat body, silently discarding the real message from

@@ -14,6 +14,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -73,7 +74,7 @@ public class DemoDataTransferService {
 
   /**
    * Created on the first submission, never at construction: the servlet builds this service at
-   * init, and with flag {@code demo-data-transfer} off nothing may start a worker thread.
+   * init, and an instance that never receives a transfer must not start a worker thread.
    */
   private ExecutorService executor;
   private final Set<String> activeClients = ConcurrentHashMap.newKeySet();
@@ -377,8 +378,15 @@ public class DemoDataTransferService {
     return unique(Organization.class, "as o where o.client.id = :clientId and o.active = true and o.name <> '*'", clientId, null);
   }
 
+  /**
+   * Records a progress counter and commits the work copied so far, keeping the session and its
+   * loaded entities open, so status reads see the counters while the job runs. A later failure
+   * rolls back only the item in progress; a retry re-runs every item through the same upserts,
+   * which is what makes committing per item safe.
+   */
   void progress(Client client, String attribute, int value) {
     setClientPreference(attribute, String.valueOf(value), client);
+    SessionHandler.getInstance().commitAndStart();
   }
 
   private boolean selected(String selection, int index) { return selection.length() > index && selection.charAt(index) == 'Y'; }
