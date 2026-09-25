@@ -210,6 +210,16 @@ plus the fallback's WARN lines ceasing. When both hold, everything marked
 `ETP-5046-TRANSITIONAL-FALLBACK` plus `markProductive` and `PREFERENCE_ATTRIBUTE` can be deleted.
 That is a query, not a judgement call.
 
+**In the same cleanup, fold `EnvironmentPlanCache` into the environment list.** Replace it with a
+local `Map<String, PlanView>` built in `EtendoGoJwtServlet.handleEnvironments` from
+`findLatestForClients`. The environment list is its only multi-tenant caller, and there *n* is the
+number of environments one account owns, typically 1–3. A dedicated class, with its thread-safety
+warnings, is out of proportion to that. Half of the class leaves with the fallback anyway: the
+`of(allClientIds, …)` overload and the seam that injects the preference fallback. The other caller,
+the single-environment overload of `EtendoGoJwtDalHelper.buildEnvironmentJson`, builds a one-entry
+cache only so it resolves the plan exactly as the list does. Once the fallback is gone it can read
+that one tenant's latest row directly.
+
 The WARN is deliberate: a silent fallback would let the backfill be forgotten indefinitely.
 
 ### 🟠 3.3 The preference is scoped by `VISIBLEAT_CLIENT_ID`, never `AD_CLIENT_ID`
