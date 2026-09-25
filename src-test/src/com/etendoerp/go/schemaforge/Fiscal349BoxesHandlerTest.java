@@ -34,6 +34,7 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
@@ -65,6 +66,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.invoice.Invoice;
@@ -1368,5 +1370,59 @@ public class Fiscal349BoxesHandlerTest {
     when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(declSeq);
     when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(status);
     return decl;
+  }
+
+  // ── resolveCurrentUserContactName (ETP-5456) ───────────────────────────
+  //
+  // Extracted so Fiscal349GenerateSupport#applyContactParams (generation time, existing) and
+  // computeOperators's new read-only contactFallback (frontend pre-generation validation) resolve
+  // the "contact" fallback through the EXACT same one-liner instead of each repeating
+  // `OBContext.getOBContext().getUser().getName()`. Since the ETP-5456 java:S1448 follow-up moved
+  // this method (with its whole file-name/contact/org-data resolution cluster) out of
+  // Fiscal349BoxesHandler into Fiscal349GenerateSupport, it now lives there as a package-private
+  // `static` method — still invoked via reflection here for consistency with this file's other
+  // setAccessible-based access, even though the new class no longer requires `private`.
+
+  @Test
+  public void testResolveCurrentUserContactNameReturnsTheLoggedInUsersName() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      User user = mock(User.class);
+      when(user.getName()).thenReturn("Ada Lovelace");
+      when(ctx.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      String result = invokeResolveCurrentUserContactName();
+
+      assertEquals("Ada Lovelace", result);
+    }
+  }
+
+  @Test
+  public void testResolveCurrentUserContactNamePropagatesANullUserName() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      User user = mock(User.class);
+      when(user.getName()).thenReturn(null);
+      when(ctx.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      assertNull(invokeResolveCurrentUserContactName());
+    }
+  }
+
+  /**
+   * Reflection helper for {@link Fiscal349GenerateSupport}'s {@code static}
+   * {@code resolveCurrentUserContactName()}. Kept local to this test class — nothing else needs
+   * to call it directly, since {@code computeOperators}'s use of it is covered structurally (this
+   * same helper is what {@code computeOperators} calls to fill {@code contactFallback} — see the
+   * class-level Javadoc on {@code resolveCurrentUserContactName} in {@link
+   * Fiscal349GenerateSupport}), and {@code computeOperators} as a whole remains DB-integration-
+   * tested separately per this file's own top comment.
+   */
+  private static String invokeResolveCurrentUserContactName() throws Exception {
+    Method m = Fiscal349GenerateSupport.class.getDeclaredMethod("resolveCurrentUserContactName");
+    m.setAccessible(true);
+    return (String) m.invoke(null);
   }
 }
