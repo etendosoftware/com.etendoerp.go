@@ -68,8 +68,8 @@ public final class EnvironmentPlanCache {
   /**
    * Builds a cache from the open subscriptions of a set of tenants.
    *
-   * @param openSubscriptions open subscription rows keyed by tenant id, as returned by
-   *     {@link SubscriptionService#findOpenForClients(java.util.Collection)}; may be null or empty
+   * @param openSubscriptions each tenant's subscription row (open, else latest closed) keyed by
+   *     tenant id, as returned by {@link SubscriptionService#findLatestForClients(java.util.Collection)}; may be null or empty
    * @return an immutable view over those rows
    */
   public static EnvironmentPlanCache of(Map<String, Subscription> openSubscriptions) {
@@ -106,8 +106,8 @@ public final class EnvironmentPlanCache {
    * to remove.
    *
    * @param allClientIds every tenant the caller is about to render; may be null or empty
-   * @param openSubscriptions open subscription rows keyed by tenant id, as returned by
-   *     {@link SubscriptionService#findOpenForClients(java.util.Collection)}; may be null or empty
+   * @param openSubscriptions each tenant's subscription row (open, else latest closed) keyed by
+   *     tenant id, as returned by {@link SubscriptionService#findLatestForClients(java.util.Collection)}; may be null or empty
    * @return an immutable view over those rows plus the transitional fallback
    */
   public static EnvironmentPlanCache of(Collection<String> allClientIds,
@@ -120,7 +120,8 @@ public final class EnvironmentPlanCache {
    * and count the queries it issues. Delete with the rest of the fallback in Phase F.
    *
    * @param allClientIds every tenant the caller is about to render; may be null or empty
-   * @param openSubscriptions open subscription rows keyed by tenant id; may be null or empty
+   * @param openSubscriptions each tenant's subscription row (open, else latest closed) keyed by
+   *     tenant id; may be null or empty
    * @param fallback the preference fallback to consult for tenants with no open subscription
    * @return an immutable view over those rows plus the transitional fallback
    */
@@ -154,7 +155,8 @@ public final class EnvironmentPlanCache {
 
   private static PlanView viewOf(Subscription subscription) {
     Plan plan = subscription.getPlan();
-    String status = StringUtils.trimToNull(subscription.getSubscriptionStatus());
+    // ETP-5047 — a closed (canceled) row reads as canceled, whatever STATUS still says.
+    String status = StringUtils.trimToNull(SubscriptionService.effectiveStatusOf(subscription));
     return new PlanView(plan == null ? null : StringUtils.trimToNull(plan.getSearchKey()), status,
         TenantPlanService.legacyPlanForStatus(status));
   }

@@ -187,25 +187,28 @@ public class TenantEnvironmentLifecycleService {
    * and the Subscription Plan Catalog disagree about the same tenant, which is precisely what
    * this unification exists to prevent.
    *
-   * <p>The Stripe lifecycle webhooks keep the row current: {@link #updateSubscriptionStatus}
-   * writes their outcome onto the open row whenever the tenant has one, so the row's
-   * {@code STATUS} and {@code CURRENT_PERIOD_END} are what the access policy reads here.
+   * <p>The Stripe lifecycle webhooks keep the row current: {@link #applySubscriptionEvent}
+   * writes their outcome onto the row they resolved, so the row's {@code STATUS} and
+   * {@code CURRENT_PERIOD_END} are what the access policy reads here.
    *
    * @param clientId environment client id, already known to be productive
    * @return the productive snapshot, never null
    */
   private EnvironmentSnapshot productiveSnapshot(String clientId) {
-    Optional<Subscription> openSubscription = subscriptionService.findOpen(clientId);
-    if (openSubscription.isPresent()) {
-      Subscription subscription = openSubscription.get();
+    // ETP-5047 — the open row, else the latest closed one: a canceled subscription is closed, and
+    // must keep reading as EXPIRED rather than fall through to the preference fallback below.
+    Optional<Subscription> latestSubscription = subscriptionService.findLatest(clientId);
+    if (latestSubscription.isPresent()) {
+      Subscription subscription = latestSubscription.get();
       Instant renewalDueAt = subscription.getCurrentPeriodEnd() == null ? null
           : subscription.getCurrentPeriodEnd().toInstant();
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-          subscriptionStatusOf(subscription.getSubscriptionStatus()), renewalDueAt, false);
+          subscriptionStatusOf(SubscriptionService.effectiveStatusOf(subscription)), renewalDueAt,
+          false);
     }
-    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant yet. Delete this part
-    // of the condition together with the rest of the fallback in Phase F, once every productive
-    // tenant has one.
+    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant at all, open or closed.
+    // Delete this part of the condition together with the rest of the fallback in Phase F, once
+    // every productive tenant has one.
     EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
         readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId),
         EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
@@ -276,75 +279,178 @@ public class TenantEnvironmentLifecycleService {
   }
 
   /**
-   * Stores a subscription lifecycle outcome; billing adapters supply the due date in UTC.
+   * ETP-5047 — where a lifecycle event for a Stripe subscription lands when an open
+   * {@code ETGO_SUBSCRIPTION} row carries that subscription id (§5.2: the id is not unique, so
+   * only the open row answers).
    *
-   * <p><b>Two stores, chosen per tenant.</b> A tenant with an open {@code ETGO_SUBSCRIPTION} row
-   * has the outcome written onto that row ({@link SubscriptionService#applyLifecycleStatus}), which
-   * is what {@link #resolve} reads for it. A tenant without one — a productive tenant the R37
-   * backfill has not reached — keeps the {@code ETGO_SubscriptionStatus} /
-   * {@code ETGO_SubscriptionDueAt} preference projection
-   * ({@code ETP-5046-TRANSITIONAL-FALLBACK}). Writing only one of them per tenant is what keeps the
+   * @param stripeSubscriptionId {@code sub_...} the event names; blank finds nothing
+   * @return the row target, or null when no open row carries the id — the caller then resolves
+   *     the tenant through its checkout request and asks {@link #targetForTenant}
+   */
+  public LifecycleTarget targetForSubscription(String stripeSubscriptionId) {
+    Optional<Subscription> row = subscriptionService.findOpenByStripeSubscription(
+        stripeSubscriptionId);
+    if (row.isEmpty() || row.get().getEnvironmentClient() == null) {
+      return null;
+    }
+    Subscription subscription = row.get();
+    String clientId = subscription.getEnvironmentClient().getId();
+    return LifecycleTarget.row(clientId, subscription, rowState(clientId, subscription));
+  }
+
+  /**
+   * ETP-5047 — where a lifecycle event lands for a tenant resolved without a row match (through
+   * the checkout request that created it, or the Stripe customer).
+   *
+   * <ul>
+   *   <li><b>No row at all</b> → the preference projection ({@code ETGO_SubscriptionStatus} /
+   *       {@code ETGO_SubscriptionDueAt}), a tenant the R37 backfill has not reached
+   *       ({@code ETP-5046-TRANSITIONAL-FALLBACK}).</li>
+   *   <li><b>An open row naming no Stripe subscription, or this one</b> → that row (a backfilled
+   *       row may carry no id).</li>
+   *   <li><b>An open row naming a different subscription</b> → ignored: the event belongs to an
+   *       older, replaced subscription and must not overwrite the current one.</li>
+   *   <li><b>Only closed rows</b> → ignored: the tenant's subscription was canceled, and a late
+   *       event for it must not revive it; a new purchase opens its own row.</li>
+   * </ul>
+   *
+   * @param clientId the tenant, {@code AD_CLIENT_ID}
+   * @param stripeSubscriptionId {@code sub_...} the event names, may be blank
+   * @return the target, never null; {@link LifecycleTarget#isIgnored()} carries the audit reason
+   */
+  public LifecycleTarget targetForTenant(String clientId, String stripeSubscriptionId) {
+    Optional<Subscription> latest = subscriptionService.findLatest(clientId);
+    if (latest.isEmpty()) {
+      // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row: the preference projection.
+      return LifecycleTarget.preferences(clientId, new SubscriptionLifecycleApplier.StoredState(
+          parseSubscriptionStatus(readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId), null),
+          parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId)),
+          readEventWatermark(clientId)));
+    }
+    Subscription subscription = latest.get();
+    String rowSubscriptionId = StringUtils.trimToNull(subscription.getStripeSubscription());
+    String eventSubscriptionId = StringUtils.trimToNull(stripeSubscriptionId);
+    boolean otherSubscription = rowSubscriptionId != null && eventSubscriptionId != null
+        && !rowSubscriptionId.equals(eventSubscriptionId);
+    if (subscription.getEndDate() != null) {
+      // A late event of the canceled subscription, or the first event of a new purchase whose row
+      // the onboarding has not opened yet: either way there is no open row it may write.
+      return LifecycleTarget.ignored(clientId,
+          otherSubscription ? "no open subscription row" : "subscription closed");
+    }
+    if (otherSubscription) {
+      return LifecycleTarget.ignored(clientId, "event for another subscription");
+    }
+    return LifecycleTarget.row(clientId, subscription, rowState(clientId, subscription));
+  }
+
+  private SubscriptionLifecycleApplier.StoredState rowState(String clientId,
+      Subscription subscription) {
+    return new SubscriptionLifecycleApplier.StoredState(
+        subscriptionStatusOf(subscription.getSubscriptionStatus()),
+        subscription.getCurrentPeriodEnd() == null ? null
+            : subscription.getCurrentPeriodEnd().toInstant(),
+        readEventWatermark(clientId));
+  }
+
+  /**
+   * The ordering watermark: the provider {@code created} instant of the last applied lifecycle
+   * event. Still the {@code ETGO_SubscriptionEventAt} preference on both routes.
+   */
+  private Instant readEventWatermark(String clientId) {
+    return parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId));
+  }
+
+  /**
+   * ETP-5047 — stores an applied lifecycle outcome where {@code target} says it belongs, together
+   * with the event's ordering watermark.
+   *
+   * <p>A row target is written through {@link SubscriptionService#applyLifecycleOutcome}, which
+   * also closes the row on a terminating event; a preference target keeps the
+   * {@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt} projection
+   * ({@code ETP-5046-TRANSITIONAL-FALLBACK}). Writing only one store per tenant is what keeps the
    * two from disagreeing.
    *
-   * <p>Not committed here: the webhook handler commits it with the event's ledger row.
+   * <p>Not committed here: the webhook handler commits it with the event's ledger row, and rolls
+   * both back on failure.
+   *
+   * @param target a non-ignored target from {@link #targetForSubscription} or
+   *     {@link #targetForTenant}
+   * @param outcome an applied outcome
+   * @param eventAt the event's provider {@code created} instant; null leaves the watermark as is
+   * @return true when the outcome was stored; false when the status write failed (logged). A
+   *     failing watermark write throws instead, so the caller rolls back and the provider retries.
+   */
+  public boolean applySubscriptionEvent(LifecycleTarget target, SubscriptionEventOutcome outcome,
+      Instant eventAt) {
+    if (target == null || target.isIgnored() || outcome == null || outcome.isIgnored()) {
+      return false;
+    }
+    if (!storeOutcome(target, outcome)) {
+      return false;
+    }
+    // Outside the status write's catch on purpose: a watermark that cannot be written propagates,
+    // so the webhook answers 500 and the provider redelivers, as before ETP-5047.
+    recordSubscriptionEventAt(target.clientId(), eventAt);
+    return true;
+  }
+
+  private boolean storeOutcome(LifecycleTarget target, SubscriptionEventOutcome outcome) {
+    try {
+      if (target.subscription() != null) {
+        subscriptionService.applyLifecycleOutcome(target.subscription(), outcome);
+        return true;
+      }
+      Client client = OBDal.getInstance().get(Client.class, target.clientId());
+      if (client == null) {
+        return false;
+      }
+      setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, outcome.status().name(), client);
+      setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+          outcome.dueAt() == null ? "" : outcome.dueAt().toString(), client);
+      return true;
+    } catch (RuntimeException e) {
+      log.error("Could not update subscription state for client {}", target.clientId(), e);
+      return false;
+    }
+  }
+
+  /**
+   * Tenant-level form of {@link #applySubscriptionEvent}: stores a status and grace anchor for the
+   * tenant's own subscription, with no Stripe subscription id to check and no watermark. Routed
+   * exactly like a webhook event resolved through the tenant ({@link #targetForTenant}): the open
+   * row, else the preference projection of a tenant that never had a row; a tenant whose only rows
+   * are closed stores nothing.
+   *
+   * <p>Not committed here.
    *
    * @param clientId environment client id
    * @param status subscription status to store
    * @param renewalDueAt grace anchor (end of the paid period), or null to clear it
-   * @return true when the outcome was stored in either place
+   * @return true when the outcome was stored
    */
   public boolean updateSubscriptionStatus(String clientId,
       EnvironmentAccessPolicy.SubscriptionStatus status, Instant renewalDueAt) {
     if (StringUtils.isBlank(clientId) || status == null) {
       return false;
     }
-    try {
-      if (subscriptionService.applyLifecycleStatus(clientId, status, renewalDueAt)) {
-        return true;
-      }
-      // ETP-5046-TRANSITIONAL-FALLBACK — no open subscription row for this tenant yet.
-      Client client = OBDal.getInstance().get(Client.class, clientId);
-      if (client == null) {
-        return false;
-      }
-      setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, status.name(), client);
-      setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE,
-          renewalDueAt == null ? "" : renewalDueAt.toString(), client);
-      return true;
-    } catch (RuntimeException e) {
-      log.error("Could not update subscription state for client {}", clientId, e);
-      return false;
-    }
+    return applySubscriptionEvent(targetForTenant(clientId, null),
+        SubscriptionEventOutcome.apply(status, renewalDueAt), null);
   }
 
   /**
-   * Reads the stored subscription state the lifecycle applier decides against: the open
-   * subscription row when the tenant has one, otherwise the preference projection — the same
-   * store {@link #updateSubscriptionStatus} writes to.
+   * Tenant-level form of {@link LifecycleTarget#storedState()}: the stored state a lifecycle event
+   * for this tenant is decided against — its open row, else the preference projection of a tenant
+   * that never had a row; empty for a blank id or a tenant whose only rows are closed.
+   *
    * @param clientId environment client id
-   * @return stored status, grace anchor and last applied event instant; empty when none is stored
+   * @return stored status, grace anchor and last applied event instant
    */
   public SubscriptionLifecycleApplier.StoredState readSubscriptionState(String clientId) {
     if (StringUtils.isBlank(clientId)) {
       return SubscriptionLifecycleApplier.StoredState.NONE;
     }
-    // The event instant stays a preference for both stores: it is the ordering watermark of the
-    // webhook stream, not subscription state, and the row has no column for it.
-    Instant lastEventAt = parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId));
-    Optional<Subscription> open = subscriptionService.findOpen(clientId);
-    if (open.isPresent()) {
-      Subscription subscription = open.get();
-      return new SubscriptionLifecycleApplier.StoredState(
-          subscriptionStatusOf(subscription.getSubscriptionStatus()),
-          subscription.getCurrentPeriodEnd() == null ? null
-              : subscription.getCurrentPeriodEnd().toInstant(),
-          lastEventAt);
-    }
-    // ETP-5046-TRANSITIONAL-FALLBACK — no open subscription row: the preference projection.
-    return new SubscriptionLifecycleApplier.StoredState(
-        parseSubscriptionStatus(readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId), null),
-        parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId)),
-        lastEventAt);
+    return targetForTenant(clientId, null).storedState();
   }
 
   /**
@@ -575,6 +681,65 @@ public class TenantEnvironmentLifecycleService {
     query.setMaxResult(1);
     Preference preference = query.uniqueResult();
     return preference == null ? null : StringUtils.trimToNull(preference.getSearchKey());
+  }
+
+  /**
+   * ETP-5047 — where one Stripe lifecycle event lands: an {@code ETGO_SUBSCRIPTION} row, the
+   * preference projection of a tenant with no row, or nowhere (ignored, with the audit reason),
+   * plus the stored state the applier decides against.
+   */
+  public static final class LifecycleTarget {
+    private final String clientId;
+    private final Subscription subscription;
+    private final SubscriptionLifecycleApplier.StoredState storedState;
+    private final String ignoreReason;
+
+    private LifecycleTarget(String clientId, Subscription subscription,
+        SubscriptionLifecycleApplier.StoredState storedState, String ignoreReason) {
+      this.clientId = clientId;
+      this.subscription = subscription;
+      this.storedState = storedState;
+      this.ignoreReason = ignoreReason;
+    }
+
+    static LifecycleTarget row(String clientId, Subscription subscription,
+        SubscriptionLifecycleApplier.StoredState storedState) {
+      return new LifecycleTarget(clientId, subscription, storedState, null);
+    }
+
+    static LifecycleTarget preferences(String clientId,
+        SubscriptionLifecycleApplier.StoredState storedState) {
+      return new LifecycleTarget(clientId, null, storedState, null);
+    }
+
+    static LifecycleTarget ignored(String clientId, String reason) {
+      return new LifecycleTarget(clientId, null, SubscriptionLifecycleApplier.StoredState.NONE,
+          reason);
+    }
+
+    /** The tenant the event belongs to. */
+    public String clientId() {
+      return clientId;
+    }
+
+    /** The row to write, or null for the preference route (and for an ignored target). */
+    public Subscription subscription() {
+      return subscription;
+    }
+
+    /** The stored projection the applier evaluates the event against. */
+    public SubscriptionLifecycleApplier.StoredState storedState() {
+      return storedState;
+    }
+
+    public boolean isIgnored() {
+      return ignoreReason != null;
+    }
+
+    /** Why the event is not applied; recorded verbatim in {@code ETGO_BILLING_EVENT}. */
+    public String ignoreReason() {
+      return ignoreReason;
+    }
   }
 
   /** Immutable lifecycle projection returned to access-policy callers. */

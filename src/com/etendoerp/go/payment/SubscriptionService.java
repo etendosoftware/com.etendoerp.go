@@ -34,12 +34,17 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * Reads and opens the per-tenant subscription rows of {@code ETGO_SUBSCRIPTION}, the record of
  * which tenant is on which plan, in which status, at which price.
  *
- * <p><b>"Open" is the whole vocabulary of this class.</b> A subscription row is open when its
+ * <p><b>"Open" is the core vocabulary of this class.</b> A subscription row is open when its
  * {@code END_DATE} is null and it is active; a plan change (ETP-5053) closes one row and inserts
  * the next, so a tenant accumulates a price history and at most one row is open at a time. The
  * database enforces that with the partial unique index {@code etgo_sub_open_envclient_uq}
  * ({@code isactive = 'Y' AND end_date IS NULL}), so this class never has to pick "the" row —
  * either there is one open or there is none.
+ *
+ * <p><b>A cancellation closes its row too</b> (ETP-5047), so "no open row" no longer means "never
+ * subscribed". {@link #findLatest} is the question "what is this tenant's subscription state":
+ * the open row, else the most recently closed one — which, with no open successor, can only be a
+ * canceled subscription.
  *
  * <p>Rows live at {@code AD_CLIENT_ID = '0'} and name the tenant through
  * {@code ENVIRONMENT_CLIENT_ID}: they are client-{@code 0} rows <em>about</em> another client.
@@ -82,6 +87,16 @@ public class SubscriptionService {
       " and sub." + Subscription.PROPERTY_ENDDATE + " is null"
           + " and sub." + Subscription.PROPERTY_ACTIVE + " = true";
 
+  private static final String CLOSED_ROW_PREDICATE =
+      " and sub." + Subscription.PROPERTY_ENDDATE + " is not null"
+          + " and sub." + Subscription.PROPERTY_ACTIVE + " = true";
+
+  private static final String LATEST_CLOSED_ORDER =
+      " order by sub." + Subscription.PROPERTY_ENDDATE + " desc, sub."
+          + Subscription.PROPERTY_CREATIONDATE + " desc";
+
+  private static final String PARAM_STRIPE_SUBSCRIPTION_ID = "stripeSubscriptionId";
+
   /**
    * Returns the tenant's open subscription, if it has one.
    *
@@ -102,6 +117,118 @@ public class SubscriptionService {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return Optional.ofNullable(query.uniqueResult());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5047 — returns the open subscription row that carries a Stripe subscription id.
+   *
+   * <p>{@code STRIPE_SUBSCRIPTION_ID} is deliberately <b>not unique</b>: a plan change (ETP-5053)
+   * keeps the Stripe subscription and opens a new local row, so the closed predecessor and its
+   * open successor share the id. Resolving to the open row ({@code END_DATE IS NULL}) is what
+   * makes a lifecycle event land on the row that is current, never on history.
+   *
+   * @param stripeSubscriptionId {@code sub_...}; blank finds nothing
+   * @return the open row naming that subscription, or {@link Optional#empty()}
+   */
+  public Optional<Subscription> findOpenByStripeSubscription(String stripeSubscriptionId) {
+    if (StringUtils.isBlank(stripeSubscriptionId)) {
+      return Optional.empty();
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
+          "as sub where sub." + Subscription.PROPERTY_STRIPESUBSCRIPTION + " = :"
+              + PARAM_STRIPE_SUBSCRIPTION_ID + OPEN_ROW_PREDICATE);
+      query.setNamedParameter(PARAM_STRIPE_SUBSCRIPTION_ID,
+          StringUtils.trimToEmpty(stripeSubscriptionId));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return Optional.ofNullable(query.uniqueResult());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5047 — returns the tenant's open subscription, or, when it has none, its most recently
+   * closed one.
+   *
+   * <p>A canceled subscription is closed ({@code END_DATE}), so "the open row" alone no longer
+   * answers "what is this tenant's subscription state": a canceled tenant has no open row, yet it
+   * must read as {@code canceled} (access {@code EXPIRED}, plan {@code free}) — never fall through
+   * to the pre-subscription preference fallback, which exists only for tenants that never had a
+   * row. A plan change (ETP-5053) always leaves an open successor, so the closed branch is reached
+   * only after a cancellation.
+   *
+   * @param environmentClientId {@code AD_CLIENT_ID} of the tenant
+   * @return the open row, else the latest closed row, else {@link Optional#empty()}
+   */
+  public Optional<Subscription> findLatest(String environmentClientId) {
+    Optional<Subscription> open = findOpen(environmentClientId);
+    if (open.isPresent() || StringUtils.isBlank(environmentClientId)) {
+      return open;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
+          "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+              + PARAM_CLIENT_ID + CLOSED_ROW_PREDICATE + LATEST_CLOSED_ORDER);
+      query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return Optional.ofNullable(query.uniqueResult());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5047 — bulk form of {@link #findLatest}: the open subscription of each tenant, or its
+   * most recently closed one when it has none. At most two queries per chunk, the second only for
+   * the tenants the first did not answer.
+   *
+   * @param environmentClientIds tenant ids to look up; null, blank and duplicate entries are
+   *     ignored
+   * @return the latest subscription of every tenant that has one, keyed by {@code AD_CLIENT_ID}
+   */
+  public Map<String, Subscription> findLatestForClients(Collection<String> environmentClientIds) {
+    Map<String, Subscription> byClientId = findOpenForClients(environmentClientIds);
+    if (environmentClientIds == null) {
+      return byClientId;
+    }
+    Set<String> missing = new LinkedHashSet<>();
+    for (String id : environmentClientIds) {
+      String trimmed = StringUtils.trimToNull(id);
+      if (trimmed != null && !byClientId.containsKey(trimmed)) {
+        missing.add(trimmed);
+      }
+    }
+    if (missing.isEmpty()) {
+      return byClientId;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      for (List<String> chunk : chunks(missing)) {
+        OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
+            "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id in (:"
+                + PARAM_CLIENT_IDS + ")" + CLOSED_ROW_PREDICATE + LATEST_CLOSED_ORDER);
+        query.setNamedParameter(PARAM_CLIENT_IDS, chunk);
+        query.setFilterOnReadableClients(false);
+        query.setFilterOnReadableOrganization(false);
+        // Ordered latest first, so the first row seen per tenant is the one to keep.
+        for (Subscription subscription : query.list()) {
+          Client tenant = subscription.getEnvironmentClient();
+          if (tenant != null) {
+            byClientId.putIfAbsent(tenant.getId(), subscription);
+          }
+        }
+      }
+      return byClientId;
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -188,7 +315,10 @@ public class SubscriptionService {
    * <p>An already-open subscription is returned untouched rather than re-snapshotted. The partial
    * unique index would reject a second open row anyway; returning the existing one keeps a
    * re-entered onboarding (the {@code ?checkout=success} URL stays live for the whole run)
-   * idempotent instead of turning it into a constraint violation.
+   * idempotent instead of turning it into a constraint violation. <b>Except a canceled one</b>
+   * (ETP-5047): a tenant buying again after a cancellation gets a fresh row, and the canceled one
+   * is closed. A cancellation normally closes its row already (see
+   * {@link #applyLifecycleOutcome}); this covers the case where that event never arrived.
    *
    * @param environmentClientId {@code AD_CLIENT_ID} of the tenant the subscription is for
    * @param plan the purchased plan, whose price is snapshotted onto the row
@@ -230,10 +360,21 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       Optional<Subscription> existing = findOpen(environmentClientId);
-      if (existing.isPresent()) {
+      if (existing.isPresent() && !isCanceled(existing.get())) {
         log.info("Tenant {} already has an open subscription; leaving its price snapshot intact",
             environmentClientId);
         return existing.get();
+      }
+      if (existing.isPresent()) {
+        // ETP-5047 — a re-subscription. The open row is a canceled subscription whose close never
+        // arrived (a lost customer.subscription.deleted); it is history now, so it is closed and a
+        // fresh row opened. The flush is load-bearing: Hibernate runs inserts before updates, and
+        // the partial unique index etgo_sub_open_envclient_uq would reject the new open row while
+        // the old one still reads as open.
+        close(existing.get(), null);
+        OBDal.getInstance().flush();
+        log.info("Tenant {} re-subscribed; closed its canceled subscription {}",
+            environmentClientId, existing.get().getId());
       }
       Subscription subscription = OBProvider.getInstance().get(Subscription.class);
       subscription.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
@@ -267,18 +408,15 @@ public class SubscriptionService {
   /**
    * Applies a Stripe lifecycle outcome to the tenant's open subscription row.
    *
-   * <p>The lifecycle webhooks ({@code invoice.paid}, {@code invoice.payment_failed},
-   * {@code customer.subscription.updated/deleted}) are interpreted by
-   * {@link SubscriptionLifecycleApplier}; this is where their result lands when the tenant has an
-   * {@code ETGO_SUBSCRIPTION} row, so the row stays the single answer to "is this tenant paying and
-   * until when". A tenant with no open row keeps the older preference projection instead — see
-   * {@link TenantEnvironmentLifecycleService#updateSubscriptionStatus}.
+   * <p>Used by the development lifecycle tool
+   * ({@link TenantEnvironmentLifecycleService#updateDevelopmentState}). The Stripe webhooks go
+   * through {@link #applyLifecycleOutcome} on the row they resolved instead.
    *
    * <ul>
    *   <li>{@code STATUS}: {@code CURRENT → active}, {@code PAST_DUE → past_due},
-   *       {@code EXPIRED → canceled}. {@code canceled} does not close the row ({@code END_DATE}
-   *       stays null): closing a row is how a plan change opens its successor (ETP-5053), and a
-   *       cancellation is not one.</li>
+   *       {@code EXPIRED → canceled}. This method never closes the row; the webhook uses
+   *       {@link #applyLifecycleOutcome}, which does on a terminating event. It stays for the
+   *       development lifecycle tool, which must be able to flip a tenant back.</li>
    *   <li>{@code CURRENT_PERIOD_END}: the outcome's grace anchor — for {@code PAST_DUE} the end of
    *       the period the customer already paid for, which is what the access policy counts the
    *       grace days from. {@code null} clears it, exactly as it clears the preference projection's
@@ -304,23 +442,93 @@ public class SubscriptionService {
     }
     OBContext.setAdminMode(true);
     try {
-      Subscription subscription = open.get();
-      subscription.setSubscriptionStatus(storedStatus);
-      Date periodEnd = graceAnchor == null ? null : Date.from(graceAnchor);
-      if (periodEnd != null && subscription.getCurrentPeriodStart() != null
-          && periodEnd.before(subscription.getCurrentPeriodStart())) {
-        // ETGO_SUB_PERIOD_CHK: a start after the anchor would reject the whole event. The start is
-        // not written by anything today, so dropping it loses nothing the policy reads.
-        subscription.setCurrentPeriodStart(null);
-      }
-      subscription.setCurrentPeriodEnd(periodEnd);
-      OBDal.getInstance().save(subscription);
+      writeStatus(open.get(), storedStatus, graceAnchor);
+      OBDal.getInstance().save(open.get());
       log.info("Subscription of tenant {} moved to '{}' by a lifecycle event",
           environmentClientId, storedStatus);
       return true;
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5047 — applies a Stripe lifecycle outcome to one known subscription row: the row the
+   * webhook resolved by {@code STRIPE_SUBSCRIPTION_ID} (or through the checkout request), rather
+   * than "whichever row is open for the tenant".
+   *
+   * <p>Writes {@code STATUS} and the grace anchor exactly like {@link #applyLifecycleStatus}, and
+   * additionally closes the row ({@code END_DATE}) when the outcome terminates the subscription
+   * ({@code customer.subscription.deleted}, or an update to Stripe's terminal {@code canceled}).
+   * A closed canceled row still answers for the tenant — {@link #findLatest} — so the access
+   * policy keeps reading it as {@code EXPIRED}, and the next purchase opens a fresh row.
+   *
+   * <p>Does not commit; the webhook commits it with the event's ledger row.
+   *
+   * @param subscription the row to update, never null
+   * @param outcome an applied outcome ({@code CURRENT}, {@code PAST_DUE} or {@code EXPIRED})
+   * @throws IllegalArgumentException for a status no lifecycle event produces
+   */
+  public void applyLifecycleOutcome(Subscription subscription, SubscriptionEventOutcome outcome) {
+    String storedStatus = storedStatusOf(outcome.status());
+    OBContext.setAdminMode(true);
+    try {
+      writeStatus(subscription, storedStatus, outcome.dueAt());
+      if (outcome.closesSubscription() && subscription.getEndDate() == null) {
+        close(subscription, outcome.endedAt());
+      }
+      OBDal.getInstance().save(subscription);
+      log.info("Subscription {} moved to '{}'{} by a lifecycle event", subscription.getId(),
+          storedStatus, subscription.getEndDate() == null ? "" : " and was closed");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static void writeStatus(Subscription subscription, String storedStatus,
+      Instant graceAnchor) {
+    subscription.setSubscriptionStatus(storedStatus);
+    Date periodEnd = graceAnchor == null ? null : Date.from(graceAnchor);
+    if (periodEnd != null && subscription.getCurrentPeriodStart() != null
+        && periodEnd.before(subscription.getCurrentPeriodStart())) {
+      // ETGO_SUB_PERIOD_CHK: a start after the anchor would reject the whole event. The start is
+      // not written by anything today, so dropping it loses nothing the policy reads.
+      subscription.setCurrentPeriodStart(null);
+    }
+    subscription.setCurrentPeriodEnd(periodEnd);
+  }
+
+  /**
+   * Closes a row: {@code END_DATE} is the provider's end instant, never before the row's own
+   * {@code START_DATE} ({@code ETGO_SUB_DATES_CHK}), and "now" when the provider gave none.
+   */
+  private static void close(Subscription subscription, Instant endedAt) {
+    Date end = endedAt == null ? new Date() : Date.from(endedAt);
+    Date start = subscription.getStartDate();
+    subscription.setEndDate(start != null && end.before(start) ? start : end);
+  }
+
+  private static boolean isCanceled(Subscription subscription) {
+    return STATUS_CANCELED.equalsIgnoreCase(
+        StringUtils.trimToEmpty(subscription.getSubscriptionStatus()));
+  }
+
+  /**
+   * ETP-5047 — the status a row stands for: its {@code STATUS} while it is open, and
+   * {@value #STATUS_CANCELED} once it is closed, whatever {@code STATUS} still says. A closed row
+   * is history, not entitlement — a row a plan change (ETP-5053) superseded can still read
+   * {@code active} — so every reader that may be handed a closed row by {@link #findLatest} must
+   * go through here, never read {@code STATUS} directly.
+   *
+   * @param subscription a subscription row, may be null
+   * @return the effective status, or null for a null row
+   */
+  public static String effectiveStatusOf(Subscription subscription) {
+    if (subscription == null) {
+      return null;
+    }
+    return subscription.getEndDate() != null ? STATUS_CANCELED
+        : subscription.getSubscriptionStatus();
   }
 
   /**

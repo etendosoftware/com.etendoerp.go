@@ -622,7 +622,7 @@ final class EtendoGoJwtDalHelper {
     // tenant the R37 backfill has not reached. Delete the extra argument in Phase F.
     return buildEnvironmentJson(client, organization, environmentUser,
         EnvironmentPlanCache.of(List.of(client.getId()),
-            SUBSCRIPTION_SERVICE.findOpenForClients(List.of(client.getId()))));
+            SUBSCRIPTION_SERVICE.findLatestForClients(List.of(client.getId()))));
   }
 
   /**

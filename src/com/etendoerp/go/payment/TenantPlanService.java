@@ -243,11 +243,13 @@ public class TenantPlanService {
       return PLAN_FREE;
     }
     try {
-      Optional<Subscription> openSubscription = subscriptionService.findOpen(clientId);
-      if (openSubscription.isPresent()) {
-        return legacyPlanForStatus(openSubscription.get().getSubscriptionStatus());
+      // ETP-5047 — the open row, else the latest closed one: a canceled subscription is closed,
+      // and must read as free from its own status, not from the retired preference below.
+      Optional<Subscription> subscription = subscriptionService.findLatest(clientId);
+      if (subscription.isPresent()) {
+        return legacyPlanForStatus(SubscriptionService.effectiveStatusOf(subscription.get()));
       }
-      // ETP-5046-TRANSITIONAL-FALLBACK — only reached when there is no open subscription at all.
+      // ETP-5046-TRANSITIONAL-FALLBACK — only reached when the tenant never had a subscription.
       return preferenceFallback.isProductive(clientId) ? PLAN_PRODUCTIVE : PLAN_FREE;
     } catch (RuntimeException e) {
       log.warn("Could not resolve plan for tenant {}, assuming '{}'", clientId, PLAN_FREE, e);

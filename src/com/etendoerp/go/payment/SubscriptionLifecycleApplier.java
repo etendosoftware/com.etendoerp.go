@@ -19,6 +19,13 @@ import org.codehaus.jettison.json.JSONObject;
  * read in both shapes: the subscription period at the top level or on its first item (API
  * 2025-03-31 and later), and the invoice's subscription directly or under
  * {@code parent.subscription_details}.
+ *
+ * <p>ETP-5047 — an applied outcome also carries what the row needs beyond the access state: the
+ * provider billing period ({@link SubscriptionEventOutcome#withPeriod}, from the subscription or
+ * its first item on {@code customer.subscription.*}, from the invoice lines on
+ * {@code invoice.paid}) and whether the subscription is terminated
+ * ({@link SubscriptionEventOutcome#closing}, on {@code customer.subscription.deleted} and on an
+ * update to Stripe's terminal {@code canceled}).
  */
 public class SubscriptionLifecycleApplier {
 
@@ -70,18 +77,62 @@ public class SubscriptionLifecycleApplier {
     }
     switch (StringUtils.trimToEmpty(type)) {
       case INVOICE_PAID:
-        return SubscriptionEventOutcome.apply(
-            EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+        return invoicePaid(object);
       case INVOICE_PAYMENT_FAILED:
         return pastDue(epochSeconds(object, "period_end"));
       case SUBSCRIPTION_DELETED:
         return SubscriptionEventOutcome.apply(
-            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
+            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+            .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
+                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END))
+            .closing(subscriptionEndedAt(object));
       case SUBSCRIPTION_UPDATED:
-        return fromSubscriptionStatus(object, current);
+        return fromSubscriptionStatus(object, current)
+            .withPeriod(subscriptionPeriodBoundary(object, CURRENT_PERIOD_START),
+                subscriptionPeriodBoundary(object, CURRENT_PERIOD_END));
       default:
         return SubscriptionEventOutcome.ignore("unhandled event type");
     }
+  }
+
+  /**
+   * A paid invoice makes the subscription current and reports the period it paid for.
+   *
+   * <p>ETP-5047 — the period comes from the invoice <em>lines</em>, not from the invoice's own
+   * {@code period_start}/{@code period_end}: on a subscription invoice those look back one period
+   * (the usage period that ended when the invoice was cut), while each line's {@code period} is the
+   * service period of its price. The line reaching furthest is the new period; a proration line
+   * never reaches past it.
+   */
+  private SubscriptionEventOutcome invoicePaid(JSONObject invoice) {
+    SubscriptionEventOutcome current = SubscriptionEventOutcome.apply(
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+    JSONObject lines = invoice.optJSONObject("lines");
+    JSONArray data = lines == null ? null : lines.optJSONArray("data");
+    if (data == null) {
+      return current;
+    }
+    Instant start = null;
+    Instant end = null;
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject line = data.optJSONObject(i);
+      JSONObject period = line == null ? null : line.optJSONObject("period");
+      Instant lineEnd = period == null ? null : epochSeconds(period, "end");
+      if (lineEnd != null && (end == null || lineEnd.isAfter(end))) {
+        end = lineEnd;
+        start = epochSeconds(period, "start");
+      }
+    }
+    return current.withPeriod(start, end);
+  }
+
+  /**
+   * When the provider ended a terminated subscription: {@code ended_at}, else
+   * {@code canceled_at}, else null (the row is then closed at the time it is written).
+   */
+  static Instant subscriptionEndedAt(JSONObject subscription) {
+    Instant endedAt = epochSeconds(subscription, "ended_at");
+    return endedAt != null ? endedAt : epochSeconds(subscription, "canceled_at");
   }
 
   /**
@@ -169,8 +220,11 @@ public class SubscriptionLifecycleApplier {
       case "unpaid":
         return subscriptionPastDue(object, current);
       case "canceled":
+        // Terminal at the provider: a canceled Stripe subscription cannot be reactivated, so the
+        // row closes here too, not only on customer.subscription.deleted (ETP-5047).
         return SubscriptionEventOutcome.apply(
-            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null);
+            EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+            .closing(subscriptionEndedAt(object));
       default:
         return SubscriptionEventOutcome.ignore("unhandled subscription status");
     }

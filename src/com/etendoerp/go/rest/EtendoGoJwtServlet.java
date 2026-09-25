@@ -1447,17 +1447,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * <p>These events carry no {@code request_id}: that metadata travels only on the checkout
    * session. Invoice events are keyed by the subscription field, while subscription events are
-   * keyed by the object id; both fall back to the customer when the subscription lookup misses.
+   * keyed by the object id. The open subscription row carrying that id wins; otherwise the
+   * checkout request (then the customer) names the tenant — see {@link #resolveLifecycleTarget}.
    * An event that resolves to no environment is ignored, never blocking.
    *
    * <p>The event is evaluated twice: once without state, so a malformed or unhandled event is
    * ignored before any lookup, and once against the environment's stored projection, which makes
    * an out-of-order older event stale and keeps an authoritative {@code PAST_DUE} due date.
    *
-   * <p>The outcome lands on the tenant's open {@code ETGO_SUBSCRIPTION} row when it has one, and on
-   * the preference projection otherwise (see
-   * {@link TenantEnvironmentLifecycleService#updateSubscriptionStatus}); the stored state the
-   * event is evaluated against is read from the same place.
+   * <p>The outcome lands on the resolved {@code ETGO_SUBSCRIPTION} row, and on the preference
+   * projection for a tenant with no row at all (see
+   * {@link TenantEnvironmentLifecycleService#applySubscriptionEvent}); the stored state the event
+   * is evaluated against is read from the same place.
    *
    * <p>The status, due date and event instant are written in the session that
    * {@code markApplied} commits, so they land together. When a write fails the session is rolled
@@ -1485,32 +1486,60 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONObject data = event.optJSONObject("data");
     JSONObject object = data == null ? null : data.optJSONObject("object");
     String subscriptionId = SubscriptionLifecycleApplier.subscriptionIdOf(type, object);
-    CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
-    if (purchase == null) {
-      purchase = checkoutRequestStore.findByStripeCustomer(object.optString("customer", ""));
-    }
-    if (purchase == null || purchase.getCreatedClient() == null) {
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        resolveLifecycleTarget(subscriptionId, object);
+    if (target == null) {
       billingEventStore.markIgnored(eventId, "unresolved subscription");
       return;
     }
-    String clientId = purchase.getCreatedClient().getId();
+    if (target.isIgnored()) {
+      billingEventStore.markIgnored(eventId, target.ignoreReason());
+      return;
+    }
     SubscriptionEventOutcome outcome = subscriptionLifecycleApplier.evaluate(type, event,
-        tenantEnvironmentLifecycleService.readSubscriptionState(clientId));
+        target.storedState());
     if (outcome.isIgnored()) {
       billingEventStore.markIgnored(eventId, outcome.reason());
       return;
     }
-    boolean stored = tenantEnvironmentLifecycleService.updateSubscriptionStatus(clientId,
-        outcome.status(), outcome.dueAt());
+    boolean stored = tenantEnvironmentLifecycleService.applySubscriptionEvent(target, outcome,
+        SubscriptionLifecycleApplier.eventCreatedAt(event));
     if (!stored) {
       EtendoGoDalHelper.rollbackDalChanges("subscription lifecycle event", null, log);
       billingEventStore.markFailed(eventId, "Could not store the subscription projection");
       return;
     }
-    tenantEnvironmentLifecycleService.recordSubscriptionEventAt(clientId,
-        SubscriptionLifecycleApplier.eventCreatedAt(event));
     billingEventStore.markApplied(eventId);
     log.info("Subscription lifecycle event '{}' ({}) applied", eventId, type);
+  }
+
+  /**
+   * Resolves where a lifecycle event lands (ETP-5047).
+   *
+   * <p>First the open {@code ETGO_SUBSCRIPTION} row carrying the event's Stripe subscription id —
+   * the id is not unique across rows, only across open ones (§5.2). When no open row carries it,
+   * the tenant is found the pre-ETP-5047 way, through the checkout request that bought the
+   * subscription or, failing that, the Stripe customer; the lifecycle service then decides whether
+   * that tenant's row, its preference projection or nothing takes the event.
+   *
+   * @return the target, or null when no tenant can be resolved at all
+   */
+  private TenantEnvironmentLifecycleService.LifecycleTarget resolveLifecycleTarget(
+      String subscriptionId, JSONObject object) {
+    TenantEnvironmentLifecycleService.LifecycleTarget byRow =
+        tenantEnvironmentLifecycleService.targetForSubscription(subscriptionId);
+    if (byRow != null) {
+      return byRow;
+    }
+    CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
+    if (purchase == null) {
+      purchase = checkoutRequestStore.findByStripeCustomer(object.optString("customer", ""));
+    }
+    if (purchase == null || purchase.getCreatedClient() == null) {
+      return null;
+    }
+    return tenantEnvironmentLifecycleService.targetForTenant(purchase.getCreatedClient().getId(),
+        subscriptionId);
   }
 
   /**
@@ -3596,7 +3625,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // query, only when at least one tenant is missing, and it keeps this list in agreement with
       // TenantPlanService#resolvePlan. Delete the extra argument in Phase F.
       EnvironmentPlanCache planCache = EnvironmentPlanCache.of(environmentClientIds,
-          subscriptionService.findOpenForClients(environmentClientIds));
+          subscriptionService.findLatestForClients(environmentClientIds));
       // The first environment is entered automatically after account login. Prefer the paid
       // productive tenant so a demo tenant never unexpectedly becomes the active workspace when
       // an account owns both plans. The client repeats this ordering for older backends.
