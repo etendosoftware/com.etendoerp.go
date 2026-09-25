@@ -393,6 +393,9 @@ public class McpServletTest {
 
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
     verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    // Written by the shared Denial.writeTo: JSON in UTF-8, like every other entry point.
+    verify(response).setContentType("application/json");
+    verify(response).setCharacterEncoding("UTF-8");
     verify(request, never()).getReader();
     JSONObject error = new JSONObject(getResponseBody()).getJSONObject("error");
     assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",

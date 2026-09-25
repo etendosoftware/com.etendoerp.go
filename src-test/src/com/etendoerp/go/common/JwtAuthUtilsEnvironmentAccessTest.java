@@ -148,6 +148,7 @@ class JwtAuthUtilsEnvironmentAccessTest {
     assertFalse(allowed);
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
     verify(response).setContentType("application/json");
+    verify(response).setCharacterEncoding("UTF-8");
     assertSharedBody("SUBSCRIPTION_REQUIRED");
     // The tenant is the session's environment, as installed in OBContext.
     verify(lifecycle).evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class));
@@ -165,6 +166,8 @@ class JwtAuthUtilsEnvironmentAccessTest {
 
     assertFalse(allowed);
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response).setContentType("application/json");
+    verify(response).setCharacterEncoding("UTF-8");
     assertSharedBody("DEMO_TRIAL_EXPIRED");
   }
 

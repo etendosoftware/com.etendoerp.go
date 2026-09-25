@@ -167,6 +167,9 @@ public class EtendoGoJwtServletEnvironmentAccessTest {
     servlet.doGet(loginRequest(), resp.response);
 
     assertEquals(HttpServletResponse.SC_PAYMENT_REQUIRED, resp.status);
+    // Written by the shared Denial.writeTo (review fix W5).
+    verify(resp.response).setContentType("application/json");
+    verify(resp.response).setCharacterEncoding("UTF-8");
     JSONObject body = new JSONObject(resp.body.toString());
     assertFalse("a blocked tenant must not get an Etendo JWT", body.has("token"));
     JSONObject error = body.getJSONObject("error");
@@ -225,6 +228,38 @@ public class EtendoGoJwtServletEnvironmentAccessTest {
     assertEquals(HttpServletResponse.SC_FORBIDDEN, resp.status);
     verify(lifecycle, never()).evaluateAccess(anyString(), org.mockito.ArgumentMatchers.anyBoolean(),
         any());
+  }
+
+  /**
+   * Review fix S1 — the servlet keeps one guard for its life, and that guard looks the lifecycle
+   * service up at every check: a service replaced after construction is the one the next request
+   * is decided by.
+   */
+  @Test
+  public void oneGuardServesEveryRequestAndFollowsAReplacedLifecycleService() throws Exception {
+    java.lang.reflect.Field guardField =
+        EtendoGoJwtServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    Object guard = guardField.get(servlet);
+    decide(Decision.ALLOWED);
+    Captured allowed = new Captured();
+    servlet.doGet(loginRequest(), allowed.response);
+
+    TenantEnvironmentLifecycleService replacement = mock(TenantEnvironmentLifecycleService.class);
+    when(replacement.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+    servlet.tenantEnvironmentLifecycleService = replacement;
+    Captured refused = new Captured();
+    servlet.doGet(loginRequest(), refused.response);
+
+    assertEquals(HttpServletResponse.SC_OK, allowed.status);
+    assertEquals(HttpServletResponse.SC_PAYMENT_REQUIRED, refused.status);
+    assertSameGuard(guard, guardField.get(servlet));
+    verify(replacement).evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class));
+  }
+
+  private static void assertSameGuard(Object expected, Object actual) {
+    org.junit.Assert.assertSame("one guard instance for the servlet's life", expected, actual);
   }
 
   // ===================== POST /session/environment =====================

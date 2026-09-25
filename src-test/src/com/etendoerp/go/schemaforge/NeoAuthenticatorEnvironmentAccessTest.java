@@ -234,6 +234,33 @@ class NeoAuthenticatorEnvironmentAccessTest {
   }
 
   /**
+   * Review fix S1 — the authenticator keeps ONE guard for its life (no guard per request), and
+   * that guard reads {@code environmentLifecycleService} at every check: a service swapped after
+   * construction decides the very next request.
+   */
+  @Test
+  void oneGuardServesEveryRequestAndFollowsAReplacedLifecycleService() throws Exception {
+    Field guardField = NeoAuthenticator.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    Object guard = guardField.get(authenticator);
+    stubCookieSession(CLIENT_ID);
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.ALLOWED);
+    assertTrue(authenticator.authenticateRequest(cookieRequest(), mock(HttpServletResponse.class)));
+
+    TenantEnvironmentLifecycleService replacement = mock(TenantEnvironmentLifecycleService.class);
+    when(replacement.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.DEMO_TRIAL_EXPIRED);
+    setField(authenticator, "environmentLifecycleService", replacement);
+    HttpServletResponse refused = mock(HttpServletResponse.class);
+
+    assertFalse(authenticator.authenticateRequest(cookieRequest(), refused));
+    assertRefusedWith402(refused, "DEMO_TRIAL_EXPIRED");
+    org.junit.jupiter.api.Assertions.assertSame(guard, guardField.get(authenticator),
+        "one guard instance for the authenticator's life");
+  }
+
+  /**
    * ETP-5395 — a user promoted or demoted after entering the environment must be authorized with
    * the role they hold now, not the one the session was opened with.
    */

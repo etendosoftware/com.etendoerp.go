@@ -212,6 +212,25 @@ class EnvironmentAccessGuardTest {
     assertEquals("DEMO_TRIAL_EXPIRED", error.getString("decision"));
   }
 
+  @Test
+  void writeToAnswersTheCompleteSharedHttpDenial() throws Exception {
+    // Review fix W5 — the one writer MCP, JwtAuthUtils and the environment login share.
+    decide(Decision.SUBSCRIPTION_REQUIRED);
+    EnvironmentAccessGuard.Denial denial = guard(false).check(CLIENT_ID, "mcp");
+    javax.servlet.http.HttpServletResponse response =
+        mock(javax.servlet.http.HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(response.getWriter()).thenReturn(new java.io.PrintWriter(body, true));
+
+    denial.writeTo(response);
+
+    Mockito.verify(response).setStatus(402);
+    Mockito.verify(response).setContentType("application/json");
+    Mockito.verify(response).setCharacterEncoding("UTF-8");
+    assertEquals(402, EnvironmentAccessGuard.Denial.STATUS);
+    assertEquals(denial.errorBody(402).toString(), body.toString());
+  }
+
   // ===================== checkAsSystem =====================
 
   @Nested
