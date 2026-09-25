@@ -48,6 +48,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
@@ -546,16 +547,19 @@ class EtendoGoJwtDalHelperTest {
   class BuildEnvironmentJson {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
+    private MockedStatic<OBContext> obContextMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
+      obContextMock = mockStatic(OBContext.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
     }
 
     @AfterEach
     void restoreOwnerLookup() {
+      obContextMock.close();
       ownerSupportMock.close();
     }
 
