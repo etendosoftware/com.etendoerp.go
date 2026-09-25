@@ -69,15 +69,17 @@ final class SupportIntegrationClient {
       "support.adk.url", "ETGO_SUPPORT_ADK_URL", "");
   private static final String ADK_APP_NAME = "agent";
 
-  // ETP-4210: the old hostname -> environment-name map (staging/experimental/go.etendo.cloud)
-  // went stale the moment those deployments were retired or renamed (go.etendo.cloud is not
-  // production anymore). Guessing the environment from the request's hostname means the code
-  // has to be updated by hand every time a domain changes, and nothing fails loudly when it
-  // doesn't — it just silently mislabels data. Same fix as ADK_BASE_URL above: each deployment
-  // declares its own name once in its Openbravo.properties, instead of the code trying to
-  // infer it.
-  static final String ENVIRONMENT_NAME = ConfigPropertyReader.readConfigValue(
-      "support.environment.name", "ETGO_SUPPORT_ENVIRONMENT_NAME", "development");
+  private static final String DEFAULT_ENVIRONMENT_NAME = "development";
+
+  // ETP-4210: previously a hostname -> environment-name lookup (staging/experimental/
+  // go.etendo.cloud), which went stale the moment those deployments were retired or renamed
+  // (go.etendo.cloud is not production anymore) — nothing failed loudly, it just silently
+  // mislabeled data. Reporting the hostname itself, untranslated, has no such failure mode:
+  // it identifies the exact deployment that handled the request rather than a hand-maintained
+  // category, so it is accurate by construction and never needs updating when a domain changes.
+  static String resolveEnvironment(String hostname) {
+    return hostname != null && !hostname.isEmpty() ? hostname : DEFAULT_ENVIRONMENT_NAME;
+  }
 
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
    * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a

@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import java.time.Instant;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -551,14 +552,53 @@ final class EtendoGoJwtDalHelper {
    *     tenants
    */
   public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+    return findOnlyFreeTenantIdByAccountEmail(accountEmail, null);
+  }
+
+  /**
+   * Returns the account's only free tenant, excluding a client that is the onboarding destination.
+   * The destination is still free while its demo source is resolved, so it must not make the
+   * source lookup ambiguous.
+   *
+   * @param accountEmail authenticated platform account email
+   * @param excludedClientId client id to omit from source candidates
+   * @return the only remaining free client id, or {@code null} when unresolved
+   */
+  public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail,
+      String excludedClientId) {
+    Set<String> freeClientIds = findFreeTenantIdsByAccountEmail(accountEmail, excludedClientId);
+    return freeClientIds.size() == 1 ? freeClientIds.iterator().next() : null;
+  }
+
+  /**
+   * Returns every free client owned by the account, allowing callers to distinguish no demo
+   * environment from an ambiguous account with multiple demo environments.
+   *
+   * @param accountEmail authenticated platform account email
+   * @return immutable distinct free-client IDs, possibly empty
+   */
+  public static Set<String> findFreeTenantIdsByAccountEmail(String accountEmail) {
+    return findFreeTenantIdsByAccountEmail(accountEmail, null);
+  }
+
+  /**
+   * Returns every free client owned by the account except the excluded onboarding destination.
+   *
+   * @param accountEmail authenticated platform account email
+   * @param excludedClientId client id to omit from the candidates, or {@code null}
+   * @return immutable distinct free-client IDs, possibly empty
+   */
+  public static Set<String> findFreeTenantIdsByAccountEmail(String accountEmail,
+      String excludedClientId) {
     Set<String> freeClientIds = new HashSet<>();
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
       String clientId = environmentUser.getClient().getId();
+      if (clientId.equals(excludedClientId)) continue;
       if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))) {
         freeClientIds.add(clientId);
       }
     }
-    return freeClientIds.size() == 1 ? freeClientIds.iterator().next() : null;
+    return Collections.unmodifiableSet(freeClientIds);
   }
 
   static JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
@@ -578,16 +618,16 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_RELATIONSHIP, OwnerSupport.isOwner(environmentUser.getId()) ? "OWNER" : "INVITED");
     TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
         ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
+    EnvironmentAccessPolicy.Decision access = ENVIRONMENT_LIFECYCLE_SERVICE
+        .evaluateAccess(client.getId(), true, Instant.now());
+    if (access != null) {
+      env.put(FIELD_ACCESS_STATE, access.name());
+    }
     if (lifecycle != null) {
       env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
       env.put(FIELD_SUBSCRIPTION_STATUS, lifecycle.getSubscriptionStatus().name());
       if (lifecycle.getRenewalDueAt() != null) {
         env.put(FIELD_RENEWAL_DUE_AT, lifecycle.getRenewalDueAt().toString());
-      }
-      EnvironmentAccessPolicy.Decision access = ENVIRONMENT_LIFECYCLE_SERVICE
-          .evaluateAccess(client.getId(), true, Instant.now());
-      if (access != null) {
-        env.put(FIELD_ACCESS_STATE, access.name());
       }
       if (lifecycle.getType() == EnvironmentAccessPolicy.EnvironmentType.DEMO) {
         Instant now = Instant.now();

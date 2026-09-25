@@ -61,6 +61,8 @@ public class GoSessionAuthenticator {
     if (!GoSessionSecurity.isUnsafeRequestAuthorized(request, sessionRecord.getCsrfToken())) {
       return GoSessionAuthResult.csrfFailed();
     }
+    // ETP-5465: only a fully authorized request keeps the session alive.
+    sessionService.renewIdleExpiry(sessionRecord);
     return GoSessionAuthResult.authenticated(sessionRecord);
   }
 
