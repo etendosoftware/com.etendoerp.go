@@ -35,14 +35,17 @@ public final class WebhookPayloadSummary {
       "subscription", "livemode", "payment_status", "amount_total", "currency", "mode");
 
   /**
-   * ETP-5047 — extra {@code data.object} keys kept for {@code invoice.*} events only: the invoice
-   * period, so {@code ETGO_BILLING_EVENT} keeps a history of billed periods that the one period
-   * slot on {@code ETGO_SUBSCRIPTION} overwrites at each renewal (open-and-notable-topics §5.11).
-   * Epoch seconds, as Stripe sends them. On a subscription invoice Stripe's invoice-level period
-   * looks back one period (it is the usage period that ended when the invoice was cut); the service
-   * period of each price is on the invoice lines, which a summary never keeps.
+   * ETP-5047 — for {@code invoice.*} events only, the service period the invoice bills, so
+   * {@code ETGO_BILLING_EVENT} keeps a history of billed periods that the one period slot on
+   * {@code ETGO_SUBSCRIPTION} overwrites at each renewal (open-and-notable-topics §5.11). Epoch
+   * seconds. Taken from the invoice LINES through
+   * {@link SubscriptionLifecycleApplier#invoiceServicePeriod} — the same period the row is given —
+   * and deliberately not from the invoice's own {@code period_start}/{@code period_end}, which on a
+   * subscription invoice look back one period. The distinct key names say so.
    */
-  private static final List<String> INVOICE_KEYS = Arrays.asList("period_start", "period_end");
+  static final String SERVICE_PERIOD_START = "service_period_start";
+  /** @see #SERVICE_PERIOD_START */
+  static final String SERVICE_PERIOD_END = "service_period_end";
 
   private static final String INVOICE_EVENT_PREFIX = "invoice.";
 
@@ -53,8 +56,9 @@ public final class WebhookPayloadSummary {
    * Builds the allow-listed summary of one provider event.
    *
    * <p>Keeps {@code data.object.{id, customer, subscription, livemode, payment_status,
-   * amount_total, currency, mode}}, {@code data.object.{period_start, period_end}} for
-   * {@code invoice.*} events only, and {@code data.object.metadata.request_id}, nothing else. A
+   * amount_total, currency, mode}}, the invoice's service period as {@code service_period_start} /
+   * {@code service_period_end} for {@code invoice.*} events only, and
+   * {@code data.object.metadata.request_id}, nothing else. A
    * value that is itself an object (an expanded {@code customer}) contributes only its {@code id};
    * arrays are dropped. The raw body, card data, {@code payment_method_details} and anything not
    * named above never reach the result. It is abbreviated to {@link #MAX_LENGTH}, so a
@@ -77,7 +81,7 @@ public final class WebhookPayloadSummary {
       JSONObject summary = new JSONObject();
       putAllowed(summary, object, ALLOWED_KEYS);
       if (StringUtils.startsWith(event.optString("type", ""), INVOICE_EVENT_PREFIX)) {
-        putAllowed(summary, object, INVOICE_KEYS);
+        putServicePeriod(summary, object);
       }
       JSONObject metadata = object.optJSONObject("metadata");
       String requestId = metadata == null ? null
@@ -91,6 +95,19 @@ public final class WebhookPayloadSummary {
       log.warn("Could not summarize a webhook payload", e);
       return null;
     }
+  }
+
+  private static void putServicePeriod(JSONObject summary, JSONObject invoice)
+      throws JSONException {
+    SubscriptionLifecycleApplier.BillingPeriod period =
+        SubscriptionLifecycleApplier.invoiceServicePeriod(invoice);
+    if (period == null) {
+      return;
+    }
+    if (period.start() != null) {
+      summary.put(SERVICE_PERIOD_START, period.start().getEpochSecond());
+    }
+    summary.put(SERVICE_PERIOD_END, period.end().getEpochSecond());
   }
 
   private static void putAllowed(JSONObject summary, JSONObject object, List<String> keys)

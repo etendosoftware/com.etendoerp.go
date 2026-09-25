@@ -107,10 +107,25 @@ public class SubscriptionLifecycleApplier {
   private SubscriptionEventOutcome invoicePaid(JSONObject invoice) {
     SubscriptionEventOutcome current = SubscriptionEventOutcome.apply(
         EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
-    JSONObject lines = invoice.optJSONObject("lines");
+    BillingPeriod period = invoiceServicePeriod(invoice);
+    return period == null ? current : current.withPeriod(period.start(), period.end());
+  }
+
+  /**
+   * The service period an invoice bills: the {@code period} of its line reaching furthest.
+   *
+   * <p>Not the invoice's own {@code period_start}/{@code period_end}: on a subscription invoice
+   * those look back one period (the usage period that ended when the invoice was cut). Shared with
+   * {@link WebhookPayloadSummary}, so the ledger records the same period the row is given.
+   *
+   * @param invoice the invoice object ({@code data.object} of an {@code invoice.*} event)
+   * @return the period, or null when no line carries one
+   */
+  static BillingPeriod invoiceServicePeriod(JSONObject invoice) {
+    JSONObject lines = invoice == null ? null : invoice.optJSONObject("lines");
     JSONArray data = lines == null ? null : lines.optJSONArray("data");
     if (data == null) {
-      return current;
+      return null;
     }
     Instant start = null;
     Instant end = null;
@@ -123,7 +138,26 @@ public class SubscriptionLifecycleApplier {
         start = epochSeconds(period, "start");
       }
     }
-    return current.withPeriod(start, end);
+    return end == null ? null : new BillingPeriod(start, end);
+  }
+
+  /** A provider billing period; {@code start} may be null when the provider omitted it. */
+  static final class BillingPeriod {
+    private final Instant start;
+    private final Instant end;
+
+    BillingPeriod(Instant start, Instant end) {
+      this.start = start;
+      this.end = end;
+    }
+
+    Instant start() {
+      return start;
+    }
+
+    Instant end() {
+      return end;
+    }
   }
 
   /**
