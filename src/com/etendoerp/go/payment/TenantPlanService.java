@@ -258,6 +258,31 @@ public class TenantPlanService {
   }
 
   /**
+   * ETP-5047 — {@link #resolvePlan} for a caller that has just established the tenant has no
+   * subscription row at all ({@link SubscriptionService#findLatest} was empty): only the
+   * transitional preference fallback is left to ask, so the row lookup is not repeated. Same
+   * contract as {@link #resolvePlan}: never null, never throws, degrades to {@value #PLAN_FREE}.
+   *
+   * <p>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK) — with the fallback gone in Phase F this
+   * answers {@value #PLAN_FREE} unconditionally and its caller can drop it.
+   *
+   * @param clientId the AD_Client to inspect, already known to have no subscription row
+   * @return {@value #PLAN_PRODUCTIVE} when the retired preference still marks the tenant
+   *     productive, otherwise {@value #PLAN_FREE}
+   */
+  public String resolvePlanWithoutSubscription(String clientId) {
+    if (StringUtils.isBlank(clientId)) {
+      return PLAN_FREE;
+    }
+    try {
+      return preferenceFallback.isProductive(clientId) ? PLAN_PRODUCTIVE : PLAN_FREE;
+    } catch (RuntimeException e) {
+      log.warn("Could not resolve plan for tenant {}, assuming '{}'", clientId, PLAN_FREE, e);
+      return PLAN_FREE;
+    }
+  }
+
+  /**
    * Maps a subscription status onto the coarse {@code "free" | "productive"} vocabulary the
    * environment list and the feature flags have used since ETP-4686.
    *

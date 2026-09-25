@@ -167,13 +167,16 @@ public class TenantEnvironmentLifecycleService {
         warnOnceWhenMarkerIsMissing(clientId, type);
         return rowSnapshot(subscription.get());
       }
-      if (TYPE_PRODUCTIVE.equalsIgnoreCase(type)
-          || TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
+      // No row at all: the plan can only come from the transitional preference fallback, so ask
+      // that directly instead of resolvePlan, which would repeat the row lookup (ETP-5047).
+      if (TYPE_PRODUCTIVE.equalsIgnoreCase(type) || TenantPlanService.PLAN_PRODUCTIVE.equals(
+          tenantPlanService.resolvePlanWithoutSubscription(clientId))) {
         return preferenceSnapshot(clientId);
       }
+      // Reaching here, the plan is known to be free (the branch above returned otherwise), so the
+      // second plan lookup the pre-ETP-5047 code made here is gone.
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
-      if (StringUtils.isBlank(startedAt)
-          && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(clientId))) {
+      if (StringUtils.isBlank(startedAt)) {
         startedAt = ensureLegacyTransitionStart(clientId);
       }
       if (StringUtils.isBlank(startedAt)) {
