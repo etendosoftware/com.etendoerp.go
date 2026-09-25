@@ -273,6 +273,17 @@ public class OnboardingBaselineService {
    */
   private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-02T12:00:00Z");
 
+  /**
+   * The provisioning cutoff a tenant onboarded by this build is stamped with. Exposed for the tenant
+   * pool (ETP-5389): it is part of a pooled tenant's provisioning version, so a bump here retires
+   * every pooled tenant built before it instead of handing it out without the new gap fix.
+   *
+   * @return {@link #ONBOARDING_PROVISIONED_THROUGH}
+   */
+  public static Instant provisionedThrough() {
+    return ONBOARDING_PROVISIONED_THROUGH;
+  }
+
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
       + "  etgo_data_fix_history_id, ad_client_id, ad_org_id, isactive,"

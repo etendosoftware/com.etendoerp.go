@@ -445,6 +445,33 @@ public class NotPostedDocumentsHandlerTest {
     assertEquals("472", result.get("tableId"));
   }
 
+  /**
+   * ETP-5445 regression guard — Internal Consumption rows had a filter code ("IC") but no
+   * row-enrichment entry, so their tableId resolved to null and {@code postRow()} in
+   * {@code NotPostedDocumentsPage.jsx} failed client-side. "Internal Consumption" is
+   * bulk.posting's own label ({@code NoPostedConstans.INTERNAL_CONSUMPTION}); it must resolve to
+   * table 800168 (M_Internal_Consumption) and the row must NOT be dropped by the global exclusion.
+   */
+  @Test
+  public void testBuildRowResolvesTableIdForInternalConsumption() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Internal Consumption");
+    row.put("documentId", "ic-9");
+
+    JSONObject result = handler.buildRow(row);
+
+    assertNotNull(result);
+    assertEquals("800168", result.get("tableId"));
+  }
+
+  /** ETP-5445 — the map entry itself, pinned directly so a later refactor cannot drop it. */
+  @Test
+  public void testDocumentTypeToTableIdMapsInternalConsumption() {
+    assertEquals("800168",
+        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Internal Consumption"));
+  }
+
   @Test
   public void buildRowSetsNullTableIdWhenDocumentTypeIsMissing() throws Exception {
     NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
