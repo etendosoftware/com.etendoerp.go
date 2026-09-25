@@ -1641,6 +1641,73 @@ Multi-currency needs no parameter: conversion uses the same exchange rate as the
 `candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
 `applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
 
+##### 4.12.1.2 Bank statement agent actions (ETP-5447)
+
+The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
+`@Named("bank-statements")`), the report spec (`SPEC_TYPE=R`) behind the SPA's
+`/sws/neo/bank-statements?action=…` routes. Its one included entity is also named
+`bank-statements`, so that is the `entity` `neo_action` / `neo_schema` take (the value
+`NeoActionContract.SpecActions#getEntityName()` resolves, and `actionEntity` in `neo_discover`).
+`BankStatementsHandler#actionContracts()` returns `BankStatementAgentActions.CONTRACTS`, and
+`handle()` sends only `NeoEndpointType.ACTION` to `BankStatementAgentActions.dispatch` — purely
+additive: the SPA's requests carry no endpoint type and keep their routing untouched.
+
+```
+neo_action {spec:"bank-statements", entity:"bank-statements", id:"<id>", action:"createStatement",
+            parameters:{name, transactionDate:"2026-06-30", importDate:"2026-07-01",
+                        lines:[{date:"2026-06-02", description, bpartnerName, in:3500, out:0}]}}
+```
+
+- **Same engine as the SPA.** Each action becomes the exact request the SPA sends — `POST` with
+  `action=<engine action>` in the query params and the body the engine reads — and re-enters
+  `BankStatementsHandler.handle` unchanged: required header dates, the account's BSF document type,
+  the line amount rules (exactly one of `in`/`out` above zero, never negative), the draft/processed
+  state machine and the PSD2 delete guard are the UI's own. The derived context has no endpoint
+  type, so it cannot loop back into the ACTION branch.
+- **`id` semantics.** Account-level actions take the **financial account** id (written into the
+  body as `FIN_Financial_Account_ID`); statement-level actions take the **bank statement** id
+  (written as `id`). The record `id` always wins: an id-like key in `parameters` is refused by the
+  contract as undeclared. Each contract carries an `idDescription` saying which one it is.
+- **Guards before anything runs.** Contract validation (§4.12.1.1 refusals, 422), blank `id` → 422,
+  then the report-spec role gate — `POST` for writes, `GET` for `previewStatement`, which only
+  reads even though the engine receives it as a POST (it needs the upload body).
+- **Flush while the context is set.** Successful writes are flushed to a clean session inside the
+  dispatcher, for the same reason as the reconciliation dispatcher (the MCP session scope flushes
+  once and restores a null `OBContext`; a leftover dirty session would fail at request end with an
+  HTML 500 after a reported success). A flush failure is rolled back and answered as JSON.
+
+| Action | Kind | `id` | Parameters (required in **bold**) | Engine route |
+|---|---|---|---|---|
+| `createStatement` | write | financial account | **`name`**, **`transactionDate`**, **`importDate`** (`yyyy-MM-dd`), **`lines[]`**, `process` (default `true`), `notes`, `fileName` | `POST ?action=create` |
+| `previewStatement` | read | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=preview` (never persists) |
+| `importStatement` | write | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=import` |
+| `updateStatement` | write | bank statement | **`name`**, **`transactionDate`**, **`importDate`**, `lines[]` (required unless matched lines remain), `process` (default `false`), `notes`, `fileName` (omitted = cleared) | `POST ?action=update` |
+| `processStatement` | write | bank statement | — | `POST ?action=process` |
+| `reactivateStatement` | write | bank statement | — | `POST ?action=reactivate` |
+| `deleteStatement` | write | bank statement | — | `POST ?action=delete` |
+
+Notes: `lines[]` items are `{date, description, bpartnerName, bpartnerId?, glItemId?, reference?,
+in, out}`; a line `date` defaults to the header `transactionDate`, `reference` defaults to `**`.
+`updateStatement` replaces only the unmatched lines and works on drafts only; `reactivateStatement`
+needs a processed, not posted statement and does not reverse reconciliations; `deleteStatement`
+works on drafts only, answers **409** on a PSD2-connected account and **400** while matched lines
+remain. Upload formats are Cuaderno 43 or a generic CSV with header `Transaction Date, Reference
+No., Business Partner Name, Description, Amount OUT, Amount IN` (dates `dd/MM/yyyy`).
+
+**Import date rule.** `importStatement` stores the statement **processed**, with `importdate` = now
+and `statementdate` (`transactionDate`) = the last movement date among the kept lines (today when
+no line has a date) — the same rule as the SPA's CSV import. A file with no valid line answers
+**400** with code `NO_VALID_LINES` and saves nothing.
+
+**Generic writes are refused (405).** On the `financial-account` W spec, `importedBankStatements`
+and `bankStatementLines` carry `Java_Qualifier = bankStatementEntityHandler`
+(`BankStatementEntityHandler`): generic create / update / delete bypass every rule above, so they
+answer 405 and the message names the concrete action and call — create → `createStatement` (or
+`importStatement` from a file) with `id` = the financial account; update → `updateStatement`;
+delete → `deleteStatement`; any line write → `updateStatement` on the line's statement — all via
+`neo_action {spec:"bank-statements", entity:"bank-statements"}`. Reads (`neo_list` / `neo_get`)
+pass through, which is how an agent finds statement ids.
+
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
