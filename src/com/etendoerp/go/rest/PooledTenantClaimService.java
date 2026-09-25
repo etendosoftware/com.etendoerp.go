@@ -70,6 +70,8 @@ public class PooledTenantClaimService {
   /**
    * Claims and personalizes one READY tenant when the request is eligible for pooling.
    *
+   * @param sink progress sink used while personalizing the tenant
+   * @param request account and tenant data supplied by the signup request
    * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
    */
   public String claim(OnboardingProgressSink sink, ClaimRequest request) {

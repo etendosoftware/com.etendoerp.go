@@ -43,7 +43,11 @@ public class NdjsonOnboardingProgressSink implements OnboardingProgressSink {
 
   private final PrintWriter writer;
 
-  /** Creates a sink that streams progress and results to the supplied writer. */
+  /**
+   * Creates a sink that streams progress and results to the supplied writer.
+   *
+   * @param writer destination for newline-delimited JSON events
+   */
   public NdjsonOnboardingProgressSink(PrintWriter writer) {
     this.writer = writer;
   }

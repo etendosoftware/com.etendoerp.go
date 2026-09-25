@@ -57,13 +57,23 @@ public class TenantPoolFiller {
 
   /** What one provisioning attempt produced. */
   public record ProvisionOutcome(boolean success, String clientId, String error) {
-    /** @param clientId id of the provisioned client */
+    /**
+     * Creates a successful provisioning outcome.
+     *
+     * @param clientId id of the provisioned client
+     * @return successful provisioning outcome
+     */
     public static ProvisionOutcome ok(String clientId) {
       return new ProvisionOutcome(true, clientId, null);
     }
 
-    /** @param clientId id of a partially provisioned client, if available
-     * @param error failure description */
+    /**
+     * Creates a failed provisioning outcome.
+     *
+     * @param clientId id of a partially provisioned client, if available
+     * @param error failure description
+     * @return failed provisioning outcome
+     */
     public static ProvisionOutcome failed(String clientId, String error) {
       return new ProvisionOutcome(false, clientId, error);
     }
@@ -87,7 +97,12 @@ public class TenantPoolFiller {
   private final TenantPoolStore store;
   private final Provisioner provisioner;
 
-  /** Creates a filler backed by the supplied store and provisioner. */
+  /**
+   * Creates a filler backed by the supplied store and provisioner.
+   *
+   * @param store persistence service for pool rows
+   * @param provisioner service that creates and configures one tenant
+   */
   public TenantPoolFiller(TenantPoolStore store, Provisioner provisioner) {
     this.store = store;
     this.provisioner = provisioner;

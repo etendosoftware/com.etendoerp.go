@@ -76,8 +76,8 @@ public class TenantPoolStore {
    * always get two different tenants (or one of them falls back to the classic path). The row lock
    * is held until the onboarding transaction ends, and a rollback returns the row to READY.
    */
-  private static final String SQL_CLAIM = "UPDATE etgo_tenant_pool SET status = '"
-      + STATUS_CLAIMED + "', claimed_at = now(), updated = now()"
+  private static final String SQL_CLAIM = SQL_UPDATE_STATUS + STATUS_CLAIMED
+      + "', claimed_at = now(), updated = now()"
       + " WHERE etgo_tenant_pool_id = (SELECT etgo_tenant_pool_id FROM etgo_tenant_pool"
       + "   WHERE status = '" + STATUS_READY + "' AND isactive = 'Y'"
       + "   AND provisioning_version = ? AND pool_client_id IS NOT NULL"
@@ -88,28 +88,52 @@ public class TenantPoolStore {
   public record Claim(String poolRowId, String clientId) {
   }
 
-  /** @param version provisioning version to count
-   * @return number of active READY rows for the version */
+  /**
+   * Counts active READY rows built with the requested provisioning version.
+   *
+   * @param version provisioning version to count
+   * @return number of active READY rows for the version
+   */
   public int countReady(String version) {
     return count(SQL_COUNT_READY, STATUS_READY, version);
   }
 
-  /** @return number of active rows currently being provisioned */
+  /**
+   * Counts active rows currently being provisioned.
+   *
+   * @return number of active rows currently being provisioned
+   */
   public int countProvisioning() {
     return count(SQL_COUNT, STATUS_PROVISIONING, null);
   }
 
-  /** Retires READY rows built by another provisioning version or older than {@code createdBefore}. */
+  /**
+   * Retires READY rows built by another provisioning version or older than {@code createdBefore}.
+   *
+   * @param version current provisioning version
+   * @param createdBefore oldest creation instant to keep
+   * @return number of rows retired
+   */
   public int retireStale(String version, Instant createdBefore) {
     return update(SQL_RETIRE_STALE, version, Timestamp.from(createdBefore));
   }
 
-  /** Fails PROVISIONING rows whose run started before {@code startedBefore}. */
+  /**
+   * Fails PROVISIONING rows whose run started before {@code startedBefore}.
+   *
+   * @param startedBefore lease expiration cutoff
+   * @return number of rows expired
+   */
   public int expireProvisioning(Instant startedBefore) {
     return update(SQL_EXPIRE_PROVISIONING, Timestamp.from(startedBefore));
   }
 
-  /** @return the id of a new PROVISIONING row stamped with {@code version} */
+  /**
+   * Inserts a new PROVISIONING row stamped with {@code version}.
+   *
+   * @param version provisioning version to store
+   * @return the id of the new PROVISIONING row
+   */
   public String insertProvisioning(String version) {
     try (PreparedStatement ps = connection().prepareStatement(SQL_INSERT)) {
       ps.setString(1, version);
@@ -122,12 +146,23 @@ public class TenantPoolStore {
     }
   }
 
-  /** Marks a provisioning row READY and associates its client. */
+  /**
+   * Marks a provisioning row READY and associates its client.
+   *
+   * @param poolRowId pool row identifier
+   * @param clientId provisioned client identifier
+   */
   public void markReady(String poolRowId, String clientId) {
     update(SQL_MARK_READY, clientId, poolRowId);
   }
 
-  /** Marks a pool row FAILED and stores a bounded diagnostic message. */
+  /**
+   * Marks a pool row FAILED and stores a bounded diagnostic message.
+   *
+   * @param poolRowId pool row identifier
+   * @param clientId partially provisioned client identifier, when available
+   * @param error failure diagnostic message
+   */
   public void markFailed(String poolRowId, String clientId, String error) {
     update(SQL_MARK_FAILED, clientId,
         StringUtils.abbreviate(StringUtils.defaultIfBlank(error, "Unknown error"),
@@ -138,6 +173,7 @@ public class TenantPoolStore {
   /**
    * Atomically claims the oldest READY tenant of {@code version}, inside the caller's transaction.
    *
+   * @param version provisioning version to claim
    * @return the claim, or {@code null} when the pool has nothing to hand out
    */
   public Claim claimReady(String version) {
