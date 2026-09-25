@@ -458,7 +458,8 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Group 3b — status and grace anchor carried over from the lifecycle preferences (ETP-5443)
+  // Group 3b — status, grace anchor and watermark carried over from the lifecycle preferences
+  // (ETP-5443, ETP-5047)
   // ---------------------------------------------------------------------------------------------
 
   /**
@@ -469,9 +470,12 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    * both, so a flat {@code 'active'} would turn a past-due or expired tenant back into a paying one.
    * Each status is asserted twice: as the stored value, and through the reader's own mapping, which
    * must hand back the very status the preference held.
+   *
+   * <p>ETP-5047 — the due date lands in {@code GRACE_ANCHOR}, its own column; the billing period
+   * ({@code CURRENT_PERIOD_START/END}) stays NULL because the preferences never knew it.
    */
   @Test
-  public void testTheBackfillSeedsStatusAndPeriodEndFromTheLifecyclePreferences() {
+  public void testTheBackfillSeedsStatusAndGraceAnchorFromTheLifecyclePreferences() {
     String dueAt = "2026-10-01T00:00:00Z";
     String pastDue = createTenant("life-pastdue", true);
     createLifecyclePreference(pastDue, "ETGO_SubscriptionStatus", "PAST_DUE");
@@ -525,22 +529,66 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   }
 
   private void assertSeeded(String tenant, String expectedRowStatus,
-      EnvironmentAccessPolicy.SubscriptionStatus expectedReaderStatus, Instant expectedPeriodEnd) {
-    String subscriptionId = (String) uniqueResult("SELECT ETGO_SUBSCRIPTION_ID "
-        + "FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant", "tenant", tenant);
-    assertNotNull(subscriptionId);
+      EnvironmentAccessPolicy.SubscriptionStatus expectedReaderStatus, Instant expectedGraceAnchor) {
+    String subscriptionId = seededSubscriptionId(tenant);
     String rowStatus = (String) rawColumn(subscriptionId, "STATUS");
     assertEquals(expectedRowStatus, rowStatus);
     assertEquals(expectedReaderStatus,
         TenantEnvironmentLifecycleService.subscriptionStatusOf(rowStatus));
-    assertNull("The period start is never seeded, so ETGO_SUB_PERIOD_CHK cannot reject the row",
+    // ETP-5047 — the billing period is the provider's, which the preferences never knew: both
+    // columns stay NULL, so ETGO_SUB_PERIOD_CHK cannot reject the row either.
+    assertNull("The period start is never seeded",
         rawColumn(subscriptionId, "CURRENT_PERIOD_START"));
-    Object periodEnd = rawColumn(subscriptionId, "CURRENT_PERIOD_END");
-    if (expectedPeriodEnd == null) {
-      assertNull(periodEnd);
+    assertNull("The period end is never seeded: the due date is a grace anchor, not a period",
+        rawColumn(subscriptionId, "CURRENT_PERIOD_END"));
+    Object graceAnchor = rawColumn(subscriptionId, "GRACE_ANCHOR");
+    if (expectedGraceAnchor == null) {
+      assertNull(graceAnchor);
     } else {
-      assertEquals(expectedPeriodEnd, ((Timestamp) periodEnd).toInstant());
+      assertEquals(expectedGraceAnchor, ((Timestamp) graceAnchor).toInstant());
     }
+  }
+
+  private String seededSubscriptionId(String tenant) {
+    String subscriptionId = (String) uniqueResult("SELECT ETGO_SUBSCRIPTION_ID "
+        + "FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant", "tenant", tenant);
+    assertNotNull(subscriptionId);
+    return subscriptionId;
+  }
+
+  /**
+   * ETP-5047 — the webhook ordering watermark is a column of the row now, and the row route no
+   * longer reads {@code ETGO_SubscriptionEventAt}: the backfill must carry it over, or the first
+   * event after the backfill could never be recognised as stale. Same ISO-8601 shape rule as the
+   * due date: anything else becomes NULL instead of failing the tenant.
+   */
+  @Test
+  public void testTheBackfillCarriesTheEventWatermarkIntoLastEventAt() {
+    String eventAt = "2026-09-20T08:15:30Z";
+    String withWatermark = createTenant("wm-set", true);
+    createLifecyclePreference(withWatermark, "ETGO_SubscriptionStatus", "CURRENT");
+    createLifecyclePreference(withWatermark, "ETGO_SubscriptionEventAt", eventAt);
+    String fractional = createTenant("wm-frac", true);
+    createLifecyclePreference(fractional, "ETGO_SubscriptionEventAt", "2026-09-20T08:15:30.123Z");
+    String malformed = createTenant("wm-bad", true);
+    createLifecyclePreference(malformed, "ETGO_SubscriptionEventAt", "2026-09-20 08:15:30");
+    String absent = createTenant("wm-none", true);
+
+    for (String tenant : new String[] { withWatermark, fractional, malformed, absent }) {
+      assertEquals(1, apply(tenant));
+    }
+
+    assertEquals(Instant.parse(eventAt), ((Timestamp) rawColumn(
+        seededSubscriptionId(withWatermark), "LAST_EVENT_AT")).toInstant());
+    assertEquals(Instant.parse("2026-09-20T08:15:30.123Z"), ((Timestamp) rawColumn(
+        seededSubscriptionId(fractional), "LAST_EVENT_AT")).toInstant());
+    assertNull("Not the Instant.toString() shape: ignored, never a failed tenant",
+        rawColumn(seededSubscriptionId(malformed), "LAST_EVENT_AT"));
+    assertNull(rawColumn(seededSubscriptionId(absent), "LAST_EVENT_AT"));
+    // The watermark never leaks into the anchor or the period.
+    String row = seededSubscriptionId(withWatermark);
+    assertNull(rawColumn(row, "GRACE_ANCHOR"));
+    assertNull(rawColumn(row, "CURRENT_PERIOD_END"));
   }
 
   /**

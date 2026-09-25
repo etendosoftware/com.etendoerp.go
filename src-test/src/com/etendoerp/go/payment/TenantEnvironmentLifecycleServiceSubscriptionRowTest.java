@@ -4,6 +4,8 @@ package com.etendoerp.go.payment;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -39,17 +41,19 @@ import org.openbravo.model.ad.system.Client;
 import com.etendoerp.go.schemaforge.data.Subscription;
 
 /**
- * Specs for where a Stripe lifecycle outcome lands and is read back from (ETP-5046).
+ * Specs for where a Stripe lifecycle outcome lands and is read back from (ETP-5046, ETP-5047).
  *
- * <p><b>Two stores, chosen per tenant.</b> A tenant with an open {@code ETGO_SUBSCRIPTION} row has
- * its status and grace anchor written onto that row and read back from it; a tenant the R37
- * backfill has not reached keeps the {@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt}
- * preferences. Writing to one store and reading from the other is the regression these specs
- * exist for: it is silent, and it makes a paying tenant's access decision disagree with the plan
- * catalog.
+ * <p><b>Two stores, chosen per tenant.</b> A tenant with an {@code ETGO_SUBSCRIPTION} row has its
+ * status, grace anchor ({@code GRACE_ANCHOR}), billing period and ordering watermark
+ * ({@code LAST_EVENT_AT}) written onto that row and read back from it; a tenant the R37 backfill
+ * has not reached keeps the {@code ETGO_SubscriptionStatus} / {@code ETGO_SubscriptionDueAt} /
+ * {@code ETGO_SubscriptionEventAt} preferences. Writing to one store and reading from the other is
+ * the regression these specs exist for: it is silent, and it makes a paying tenant's access
+ * decision disagree with the plan catalog.
  *
- * <p>The ordering watermark ({@code ETGO_SubscriptionEventAt}) stays a preference on <em>both</em>
- * routes, so a stale event is still rejected after a tenant moves onto a row.
+ * <p>ETP-5047 — the row route reads <em>no</em> preference: the watermark moved onto the row, so a
+ * stale preference can neither block nor unblock an event for a tenant that has a row. A closed
+ * (canceled) row still answers for the tenant, so it never falls through to the preferences.
  *
  * <p>A real {@link SubscriptionService} runs against a mocked DAL whose preference and
  * subscription queries — and subscription saves — fail unless admin mode is active, the way
@@ -59,14 +63,18 @@ import com.etendoerp.go.schemaforge.data.Subscription;
 public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   private static final String CLIENT_ID = "48F0981053084BC49CCEEFEC296E2A3D";
+  private static final String STRIPE_SUBSCRIPTION = "sub_current";
   private static final Instant ANCHOR = Instant.parse("2026-10-31T00:00:00Z");
   private static final Instant EVENT_AT = Instant.parse("2026-11-01T12:30:00Z");
+  private static final Instant PERIOD_START = Instant.parse("2026-11-01T00:00:00Z");
+  private static final Instant PERIOD_END = Instant.parse("2026-12-01T00:00:00Z");
+  private static final Instant ENDED_AT = Instant.parse("2026-11-15T09:00:00Z");
 
   private final TenantPlanService tenantPlanService = mock(TenantPlanService.class);
   private final TenantEnvironmentLifecycleService service =
       new TenantEnvironmentLifecycleService(tenantPlanService, new SubscriptionService());
 
-  // ===================== write routing =====================
+  // ===================== write routing (tenant level) =====================
 
   @Test
   public void aTenantWithARowGetsCurrentWrittenAsActiveOnTheRowAndNoPreference() {
@@ -77,7 +85,11 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
     verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
     // null clears the anchor, exactly as it clears the preference projection's due date.
-    verify(fixture.row).setCurrentPeriodEnd(null);
+    verify(fixture.row).setGraceAnchor(null);
+    // ETP-5047 — the billing period is not the anchor's column any more, and a status-only
+    // outcome carries no period: it must be left alone.
+    verify(fixture.row, never()).setCurrentPeriodEnd(any());
+    verify(fixture.row, never()).setCurrentPeriodStart(any());
     assertTrue("the row route must not also write the preference projection",
         fixture.savedPreferenceAttributes.isEmpty());
   }
@@ -90,7 +102,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR)));
 
     verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_PAST_DUE);
-    verify(fixture.row).setCurrentPeriodEnd(Date.from(ANCHOR));
+    verify(fixture.row).setGraceAnchor(Date.from(ANCHOR));
+    verify(fixture.row, never()).setCurrentPeriodEnd(any());
     assertTrue(fixture.savedPreferenceAttributes.isEmpty());
   }
 
@@ -102,7 +115,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)));
 
     verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_CANCELED);
-    // Decided behaviour: canceled leaves END_DATE null — closing a row is what a plan change does.
+    // The tenant-level write (the development tool) never closes a row: only a terminating
+    // webhook outcome does (ETP-5047).
     verify(fixture.row, never()).setEndDate(any());
     assertTrue(fixture.savedPreferenceAttributes.isEmpty());
   }
@@ -121,25 +135,320 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     verify(fixture.dal, never()).save(any(Subscription.class));
   }
 
+  @Test
+  public void aTenantWhoseOnlyRowIsClosedStoresNothingAtTheTenantLevel() {
+    // ETP-5047 — a canceled tenant's closed row must not be revived by a tenant-level write, and
+    // the preference projection is only for a tenant that never had a row.
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT).asWebhook();
+
+    assertFalse(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+        EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)));
+
+    verify(fixture.dal, never()).save(any());
+    verify(fixture.closedRow, never()).setSubscriptionStatus(anyString());
+    assertTrue(fixture.savedPreferenceAttributes.isEmpty());
+  }
+
+  // ===================== targetForSubscription / targetForTenant =====================
+
+  @Test
+  public void targetForSubscriptionResolvesTheOpenRowCarryingTheIdAndReadsItsStateFromTheRow() {
+    Fixture fixture = new Fixture().withOpenRow("past_due", ANCHOR)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION).withLastEventAt(EVENT_AT)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            "2020-01-01T00:00:00Z");
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForSubscription(STRIPE_SUBSCRIPTION));
+
+    assertFalse(target.isIgnored());
+    assertSame(fixture.row, target.subscription());
+    assertEquals(CLIENT_ID, target.clientId());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, target.storedState().status());
+    assertEquals(ANCHOR, target.storedState().dueAt());
+    assertEquals(EVENT_AT, target.storedState().lastEventAt());
+    assertTrue("the row route reads no preference", fixture.queriedPreferenceAttributes.isEmpty());
+  }
+
+  @Test
+  public void targetForSubscriptionFindsNothingForAnotherIdOrABlankOne() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    assertNull(fixture.run(() -> service.targetForSubscription("sub_other")));
+    assertNull(fixture.run(() -> service.targetForSubscription("  ")));
+    assertNull(fixture.run(() -> service.targetForSubscription(null)));
+  }
+
+  @Test
+  public void targetForSubscriptionIgnoresAClosedRowCarryingTheId() {
+    // STRIPE_SUBSCRIPTION_ID is not unique: only the open row answers.
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    assertNull(fixture.run(() -> service.targetForSubscription(STRIPE_SUBSCRIPTION)));
+  }
+
+  @Test
+  public void targetForTenantWithNoRowIsThePreferenceProjectionWithItsWatermark() {
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "PAST_DUE")
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+            ANCHOR.toString())
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            EVENT_AT.toString());
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, STRIPE_SUBSCRIPTION));
+
+    assertFalse(target.isIgnored());
+    assertNull("the preference route has no row", target.subscription());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, target.storedState().status());
+    assertEquals(ANCHOR, target.storedState().dueAt());
+    assertEquals(EVENT_AT, target.storedState().lastEventAt());
+  }
+
+  @Test
+  public void targetForTenantTakesAnOpenRowThatNamesNoSubscription() {
+    // A backfilled row may carry no Stripe id.
+    Fixture fixture = new Fixture().withOpenRow("active", null);
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, STRIPE_SUBSCRIPTION));
+
+    assertFalse(target.isIgnored());
+    assertSame(fixture.row, target.subscription());
+  }
+
+  @Test
+  public void targetForTenantTakesAnOpenRowThatNamesThisSubscription() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, STRIPE_SUBSCRIPTION));
+
+    assertSame(fixture.row, target.subscription());
+  }
+
+  @Test
+  public void targetForTenantIgnoresAnEventForAnotherSubscription() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, "sub_replaced"));
+
+    assertTrue(target.isIgnored());
+    assertEquals("event for another subscription", target.ignoreReason());
+    assertNull(target.subscription());
+    assertSame(SubscriptionLifecycleApplier.StoredState.NONE, target.storedState());
+  }
+
+  @Test
+  public void targetForTenantIgnoresALateEventOfTheClosedSubscription() {
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, STRIPE_SUBSCRIPTION));
+
+    assertTrue(target.isIgnored());
+    assertEquals("subscription closed", target.ignoreReason());
+  }
+
+  @Test
+  public void targetForTenantIgnoresAnEventWithNoIdWhenTheOnlyRowIsClosed() {
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, null));
+
+    assertEquals("subscription closed", target.ignoreReason());
+  }
+
+  @Test
+  public void targetForTenantIgnoresTheFirstEventOfANewPurchaseBeforeItsRowIsOpened() {
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+
+    TenantEnvironmentLifecycleService.LifecycleTarget target =
+        fixture.run(() -> service.targetForTenant(CLIENT_ID, "sub_new_purchase"));
+
+    assertTrue(target.isIgnored());
+    assertEquals("no open subscription row", target.ignoreReason());
+  }
+
+  // ===================== applySubscriptionEvent =====================
+
+  @Test
+  public void aRowTargetGetsStatusAnchorPeriodAndWatermarkOnTheRowAndNoPreference() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR)
+        .withPeriod(PERIOD_START, PERIOD_END);
+
+    boolean stored = fixture.run(() -> service.applySubscriptionEvent(
+        service.targetForSubscription(STRIPE_SUBSCRIPTION), outcome, EVENT_AT));
+
+    assertTrue(stored);
+    verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_PAST_DUE);
+    verify(fixture.row).setGraceAnchor(Date.from(ANCHOR));
+    verify(fixture.row).setCurrentPeriodStart(Date.from(PERIOD_START));
+    verify(fixture.row).setCurrentPeriodEnd(Date.from(PERIOD_END));
+    verify(fixture.row).setLastEventAt(Date.from(EVENT_AT));
+    verify(fixture.dal).save(fixture.row);
+    assertTrue("the row route writes no preference, not even the watermark",
+        fixture.savedPreferenceAttributes.isEmpty());
+  }
+
+  @Test
+  public void aTerminatingOutcomeClosesTheRowTarget() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null).closing(ENDED_AT);
+
+    assertTrue(fixture.run(() -> service.applySubscriptionEvent(
+        service.targetForSubscription(STRIPE_SUBSCRIPTION), outcome, EVENT_AT)));
+
+    verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_CANCELED);
+    verify(fixture.row).setEndDate(Date.from(ENDED_AT));
+  }
+
+  @Test
+  public void aPreferenceTargetWritesStatusDueAtAndTheEventAtWatermark() {
+    Fixture fixture = new Fixture().asWebhook();
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR)
+        .withPeriod(PERIOD_START, PERIOD_END);
+
+    assertTrue(fixture.run(() -> service.applySubscriptionEvent(
+        service.targetForTenant(CLIENT_ID, STRIPE_SUBSCRIPTION), outcome, EVENT_AT)));
+
+    // The preference projection never knew the billing period; only the three lifecycle values.
+    assertEquals(List.of(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE,
+        TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+        TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE),
+        fixture.savedPreferenceAttributes);
+    assertEquals(List.of("PAST_DUE", ANCHOR.toString(), EVENT_AT.toString()),
+        fixture.savedPreferenceValues);
+    verify(fixture.dal, never()).save(any(Subscription.class));
+  }
+
+  @Test
+  public void aFailedWatermarkWriteOnThePreferenceRoutePropagatesSoTheWebhookAnswers500() {
+    // The status write succeeds; the watermark's own Client lookup then comes back empty. It sits
+    // outside the status write's catch on purpose: the webhook must roll back and the provider
+    // redeliver, instead of committing a status with no watermark.
+    Fixture fixture = new Fixture().asWebhook().clientVanishesAfterFirstLookup();
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR);
+
+    IllegalStateException thrown = assertThrows(IllegalStateException.class,
+        () -> fixture.run(() -> service.applySubscriptionEvent(
+            service.targetForTenant(CLIENT_ID, null), outcome, EVENT_AT)));
+
+    assertEquals("Client not found while recording a subscription event", thrown.getMessage());
+  }
+
+  @Test
+  public void aFailedRowWriteAnswersFalseSoTheWebhookMarksTheEventFailed() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION).failingSubscriptionSave();
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR);
+
+    assertFalse(fixture.run(() -> service.applySubscriptionEvent(
+        service.targetForSubscription(STRIPE_SUBSCRIPTION), outcome, EVENT_AT)));
+    assertTrue(fixture.savedPreferenceAttributes.isEmpty());
+  }
+
+  @Test
+  public void aFailedPreferenceStatusWriteAnswersFalseAndWritesNoWatermark() {
+    Fixture fixture = new Fixture().asWebhook().withNoClient();
+    SubscriptionEventOutcome outcome = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR);
+
+    assertFalse(fixture.run(() -> service.applySubscriptionEvent(
+        service.targetForTenant(CLIENT_ID, null), outcome, EVENT_AT)));
+    assertTrue(fixture.savedPreferenceAttributes.isEmpty());
+  }
+
+  @Test
+  public void anIgnoredTargetOrOutcomeOrANullOneStoresNothing() {
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withStripeSubscription(STRIPE_SUBSCRIPTION);
+    SubscriptionEventOutcome applied = SubscriptionEventOutcome
+        .apply(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null);
+
+    fixture.run(() -> {
+      TenantEnvironmentLifecycleService.LifecycleTarget row =
+          service.targetForSubscription(STRIPE_SUBSCRIPTION);
+      assertFalse(service.applySubscriptionEvent(null, applied, EVENT_AT));
+      assertFalse(service.applySubscriptionEvent(
+          TenantEnvironmentLifecycleService.LifecycleTarget.ignored(CLIENT_ID, "subscription closed"),
+          applied, EVENT_AT));
+      assertFalse(service.applySubscriptionEvent(row, null, EVENT_AT));
+      assertFalse(service.applySubscriptionEvent(row,
+          SubscriptionEventOutcome.ignore("stale event"), EVENT_AT));
+      return null;
+    });
+
+    verify(fixture.dal, never()).save(any());
+    assertTrue(fixture.savedPreferenceAttributes.isEmpty());
+  }
+
   // ===================== read routing =====================
 
   @Test
   public void aTenantWithARowIsReadBackFromTheRowNotFromStalePreferences() {
-    // The preferences still hold what the tenant had before it moved onto a row. They must lose.
-    Fixture fixture = new Fixture().withOpenRow("past_due", ANCHOR)
+    // The preferences still hold what the tenant had before it moved onto a row. They must lose —
+    // the watermark included, which lives in LAST_EVENT_AT since ETP-5047.
+    Fixture fixture = new Fixture().withOpenRow("past_due", ANCHOR).withLastEventAt(EVENT_AT)
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "CURRENT")
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
             "2020-01-01T00:00:00Z")
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
-            EVENT_AT.toString());
+            "2020-01-01T00:00:00Z");
 
     SubscriptionLifecycleApplier.StoredState state =
         fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
     assertEquals(ANCHOR, state.dueAt());
-    // ...but the watermark is a preference on both routes: the row has no column for it.
     assertEquals(EVENT_AT, state.lastEventAt());
+    assertTrue("the row route reads no preference", fixture.queriedPreferenceAttributes.isEmpty());
+  }
+
+  @Test
+  public void aRowWithNoWatermarkHasNoneEvenWhenThePreferenceHoldsOne() {
+    // A row that predates LAST_EVENT_AT starts with no watermark: the first event after the deploy
+    // is never stale. The preference is not consulted as a stand-in.
+    Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            EVENT_AT.toString());
+
+    assertNull(fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).lastEventAt());
+  }
+
+  @Test
+  public void aPastDueRowInThePreSplitShapeReadsItsAnchorFromThePeriodEnd() {
+    // Anchor in CURRENT_PERIOD_END, no start, no GRACE_ANCHOR: what the old lifecycle write and the
+    // pre-ETP-5047 R37 left. Without the fallback it would read as zero grace — blocked on deploy.
+    Fixture fixture = new Fixture().withLegacyOpenRow("past_due", ANCHOR);
+
+    assertEquals(ANCHOR, fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).dueAt());
+  }
+
+  @Test
+  public void anActiveRowWithABillingPeriodHasNoAnchor() {
+    // The billing period is not a grace anchor: only past_due falls back to it.
+    Fixture fixture = new Fixture().withLegacyOpenRow("active", PERIOD_END);
+
+    assertNull(fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).dueAt());
   }
 
   @Test
@@ -158,13 +467,17 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     Fixture fixture = new Fixture()
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "PAST_DUE")
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
-            ANCHOR.toString());
+            ANCHOR.toString())
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
+            EVENT_AT.toString());
 
     SubscriptionLifecycleApplier.StoredState state =
         fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
     assertEquals(ANCHOR, state.dueAt());
+    // The preference route still reads its watermark from ETGO_SubscriptionEventAt.
+    assertEquals(EVENT_AT, state.lastEventAt());
   }
 
   @Test
@@ -180,6 +493,15 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
         snapshot.getSubscriptionStatus());
     assertEquals(ANCHOR, snapshot.getRenewalDueAt());
+    assertNoSubscriptionPreferenceRead(fixture);
+  }
+
+  @Test
+  public void theProductiveSnapshotReadsThePreSplitAnchorThroughTheFallback() {
+    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    Fixture fixture = new Fixture().withLegacyOpenRow("past_due", ANCHOR);
+
+    assertEquals(ANCHOR, fixture.run(() -> service.resolve(CLIENT_ID)).getRenewalDueAt());
   }
 
   @Test
@@ -198,13 +520,48 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     assertEquals(ANCHOR, snapshot.getRenewalDueAt());
   }
 
+  // ===================== a canceled (closed) row =====================
+
+  @Test
+  public void aClosedCanceledRowResolvesExpiredAndIsRefusedWithoutAnyPreferenceFallback() {
+    // ETP-5047 — the canceled tenant keeps its productive marker; its plan now reads free (the
+    // closed row answers canceled). Its subscription preferences still say CURRENT — the stale
+    // pre-row projection — and must not resurrect it, nor may LEGACY_ENTITLEMENT.
+    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
+        .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE, "PRODUCTIVE")
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "CURRENT");
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        fixture.run(() -> service.resolve(CLIENT_ID));
+    EnvironmentAccessPolicy.Decision decision =
+        fixture.run(() -> service.evaluateAccess(CLIENT_ID, true, EVENT_AT));
+
+    assertEquals(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, snapshot.getType());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
+        snapshot.getSubscriptionStatus());
+    assertNull(snapshot.getRenewalDueAt());
+    assertEquals(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED, decision);
+    assertNoSubscriptionPreferenceRead(fixture);
+  }
+
+  @Test
+  public void aClosedRowWhoseStatusStillSaysActiveReadsExpired() {
+    // A closed row is history, not entitlement: effectiveStatusOf answers canceled whatever
+    // STATUS still says.
+    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture().withClosedRow("active", ENDED_AT)
+        .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE, "PRODUCTIVE");
+
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
+        fixture.run(() -> service.resolve(CLIENT_ID)).getSubscriptionStatus());
+  }
+
   // ===================== ordering watermark on the row route =====================
 
   @Test
   public void anOlderEventIsStillRejectedAsStaleOnceTheTenantHasARow() throws Exception {
-    Fixture fixture = new Fixture().withOpenRow("active", null)
-        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
-            EVENT_AT.toString());
+    Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT);
     SubscriptionLifecycleApplier.StoredState state =
         fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
 
@@ -218,10 +575,26 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   }
 
   @Test
-  public void aNewerEventIsAppliedOnTheRowRoute() throws Exception {
+  public void aStalePreferenceWatermarkNoLongerBlocksAnEventOnTheRowRoute() throws Exception {
+    // Before ETP-5047 the watermark was a preference on both routes. Now the row's own
+    // LAST_EVENT_AT decides; the preference of a tenant that has a row is dead data.
     Fixture fixture = new Fixture().withOpenRow("active", null)
+        .withLastEventAt(EVENT_AT.minusSeconds(3600L))
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
             EVENT_AT.toString());
+    SubscriptionLifecycleApplier.StoredState state =
+        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+
+    SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
+        SubscriptionLifecycleApplier.INVOICE_PAYMENT_FAILED,
+        paymentFailed(EVENT_AT.minusSeconds(60L)), state);
+
+    assertTrue(outcome.isApplied());
+  }
+
+  @Test
+  public void aNewerEventIsAppliedOnTheRowRoute() throws Exception {
+    Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT);
     SubscriptionLifecycleApplier.StoredState state =
         fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
 
@@ -234,8 +607,9 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   }
 
   @Test
-  public void theWatermarkIsRecordedAsAPreferenceEvenForATenantWithARow() {
-    Fixture fixture = new Fixture().withOpenRow("active", null).asWebhook();
+  public void recordSubscriptionEventAtWritesThePreferenceWatermark() {
+    // The preference route's watermark writer (ETP-5046-TRANSITIONAL-FALLBACK).
+    Fixture fixture = new Fixture().asWebhook();
 
     fixture.run(() -> {
       service.recordSubscriptionEventAt(CLIENT_ID, EVENT_AT);
@@ -290,6 +664,16 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   // ===================== fixture =====================
 
+  private static void assertNoSubscriptionPreferenceRead(Fixture fixture) {
+    for (String attribute : List.of(
+        TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE,
+        TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+        TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE)) {
+      assertFalse("a tenant with a row must not read " + attribute,
+          fixture.queriedPreferenceAttributes.contains(attribute));
+    }
+  }
+
   private static JSONObject paymentFailed(Instant createdAt) throws Exception {
     return new JSONObject().put("created", createdAt.getEpochSecond()).put("data",
         new JSONObject().put("object", new JSONObject().put("id", "in_1")
@@ -297,37 +681,99 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   }
 
   /**
-   * A DAL holding at most one open subscription row and some lifecycle preferences, which refuses
-   * every read (and every subscription save) made outside admin mode.
+   * A DAL holding at most one open and one closed subscription row and some lifecycle
+   * preferences, which refuses every read (and every subscription save) made outside admin mode.
+   * Subscription queries are answered by their HQL: the open-row lookups ({@code END_DATE IS
+   * NULL}), the lookup by Stripe subscription id (open rows only), and the latest-closed lookup.
    */
   private static final class Fixture {
     final OBDal dal = mock(OBDal.class);
     final Map<String, String> preferences = new HashMap<>();
     final List<String> savedPreferenceAttributes = new ArrayList<>();
     final List<String> savedPreferenceValues = new ArrayList<>();
+    final List<String> queriedPreferenceAttributes = new ArrayList<>();
     final AtomicInteger adminDepth = new AtomicInteger();
+    final Client client = mock(Client.class);
     Subscription row;
+    Subscription closedRow;
     boolean systemCaller;
+    boolean clientVanishes;
+    boolean noClient;
+    boolean failSubscriptionSave;
+
+    Fixture() {
+      when(client.getId()).thenReturn(CLIENT_ID);
+    }
 
     /**
-     * The webhook path: it reaches the lifecycle service holding the system context the checkout
-     * request store left behind, so its writes are not refused whatever the admin-mode state.
+     * The webhook path: it reaches the lifecycle service holding the system context
+     * {@code SystemContext} installed, so its writes are not refused whatever the admin-mode state.
      */
     Fixture asWebhook() {
       systemCaller = true;
       return this;
     }
 
-    Fixture withOpenRow(String status, Instant periodEnd) {
-      row = mock(Subscription.class);
-      when(row.getSubscriptionStatus()).thenReturn(status);
-      when(row.getCurrentPeriodEnd()).thenReturn(periodEnd == null ? null : Date.from(periodEnd));
+    /** An open row whose grace anchor is in {@code GRACE_ANCHOR} (the ETP-5047 shape). */
+    Fixture withOpenRow(String status, Instant graceAnchor) {
+      row = rowMock(status);
+      when(row.getGraceAnchor()).thenReturn(graceAnchor == null ? null : Date.from(graceAnchor));
+      return this;
+    }
+
+    /**
+     * An open row in the pre-ETP-5047 shape: no {@code GRACE_ANCHOR}, no period start, the value
+     * in {@code CURRENT_PERIOD_END}.
+     */
+    Fixture withLegacyOpenRow(String status, Instant periodEnd) {
+      row = rowMock(status);
+      when(row.getCurrentPeriodEnd()).thenReturn(Date.from(periodEnd));
+      return this;
+    }
+
+    Fixture withClosedRow(String status, Instant endDate) {
+      closedRow = rowMock(status);
+      when(closedRow.getEndDate()).thenReturn(Date.from(endDate));
+      return this;
+    }
+
+    Fixture withStripeSubscription(String stripeSubscriptionId) {
+      Subscription target = row != null ? row : closedRow;
+      when(target.getStripeSubscription()).thenReturn(stripeSubscriptionId);
+      return this;
+    }
+
+    Fixture withLastEventAt(Instant lastEventAt) {
+      when(row.getLastEventAt()).thenReturn(Date.from(lastEventAt));
       return this;
     }
 
     Fixture withPreference(String attribute, String value) {
       preferences.put(attribute, value);
       return this;
+    }
+
+    /** The first {@code Client} lookup finds the tenant; every later one finds nothing. */
+    Fixture clientVanishesAfterFirstLookup() {
+      clientVanishes = true;
+      return this;
+    }
+
+    Fixture withNoClient() {
+      noClient = true;
+      return this;
+    }
+
+    Fixture failingSubscriptionSave() {
+      failSubscriptionSave = true;
+      return this;
+    }
+
+    private Subscription rowMock(String status) {
+      Subscription subscription = mock(Subscription.class);
+      when(subscription.getSubscriptionStatus()).thenReturn(status);
+      when(subscription.getEnvironmentClient()).thenReturn(client);
+      return subscription;
     }
 
     @SuppressWarnings("unchecked")
@@ -337,6 +783,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
       doAnswer(invocation -> {
         if ("attribute".equals(invocation.getArgument(0))) {
           attribute.set(invocation.getArgument(1));
+          queriedPreferenceAttributes.add(invocation.getArgument(1));
         }
         return preferenceQuery;
       }).when(preferenceQuery).setNamedParameter(anyString(), any());
@@ -345,26 +792,60 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
       for (Map.Entry<String, String> entry : preferences.entrySet()) {
         Preference preference = mock(Preference.class);
         when(preference.getSearchKey()).thenReturn(entry.getValue());
+        doAnswer(set -> {
+          savedPreferenceAttributes.add(entry.getKey());
+          savedPreferenceValues.add(set.getArgument(0));
+          return null;
+        }).when(preference).setSearchKey(anyString());
         stored.put(entry.getKey(), preference);
       }
       when(preferenceQuery.uniqueResult()).thenAnswer(invocation -> stored.get(attribute.get()));
-      OBQuery<Subscription> subscriptionQuery = mock(OBQuery.class);
-      when(subscriptionQuery.uniqueResult()).thenAnswer(invocation -> row);
+
+      OBQuery<Subscription> openQuery = mock(OBQuery.class);
+      when(openQuery.uniqueResult()).thenAnswer(invocation -> row);
+      OBQuery<Subscription> closedQuery = mock(OBQuery.class);
+      when(closedQuery.uniqueResult()).thenAnswer(invocation -> closedRow);
+      OBQuery<Subscription> byStripeQuery = mock(OBQuery.class);
+      AtomicReference<Object> stripeId = new AtomicReference<>();
+      doAnswer(invocation -> {
+        if ("stripeSubscriptionId".equals(invocation.getArgument(0))) {
+          stripeId.set(invocation.getArgument(1));
+        }
+        return byStripeQuery;
+      }).when(byStripeQuery).setNamedParameter(anyString(), any());
+      when(byStripeQuery.uniqueResult()).thenAnswer(invocation -> row != null
+          && stripeId.get() != null && stripeId.get().equals(row.getStripeSubscription())
+          ? row : null);
+
       when(dal.createQuery(eq(Preference.class), anyString())).thenAnswer(invocation -> {
         requireAdmin("ADPreference");
         return preferenceQuery;
       });
       when(dal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation -> {
         requireAdmin("ETGO_Subscription");
-        return subscriptionQuery;
+        String hql = invocation.getArgument(1);
+        if (hql.contains("is not null")) {
+          return closedQuery;
+        }
+        if (hql.contains("." + Subscription.PROPERTY_STRIPESUBSCRIPTION + " =")) {
+          return byStripeQuery;
+        }
+        return openQuery;
       });
-      Client client = mock(Client.class);
-      when(client.getId()).thenReturn(CLIENT_ID);
-      when(dal.get(Client.class, CLIENT_ID)).thenReturn(client);
+      AtomicInteger clientLookups = new AtomicInteger();
+      when(dal.get(Client.class, CLIENT_ID)).thenAnswer(invocation -> {
+        if (noClient || (clientVanishes && clientLookups.getAndIncrement() > 0)) {
+          return null;
+        }
+        return client;
+      });
       doAnswer(invocation -> {
         Object saved = invocation.getArgument(0);
         if (saved instanceof Subscription) {
           requireAdmin("ETGO_Subscription");
+          if (failSubscriptionSave) {
+            throw new IllegalStateException("ETGO_SUBSCRIPTION write failed");
+          }
         }
         return null;
       }).when(dal).save(any());

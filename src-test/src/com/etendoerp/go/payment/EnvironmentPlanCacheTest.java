@@ -226,4 +226,38 @@ class EnvironmentPlanCacheTest {
     assertFalse(cache.isProductive(PAID_CLIENT));
     verifyNoInteractions(fallback);
   }
+
+  // ===================== ETP-5047: a closed (canceled) row =====================
+
+  private static Subscription closed(Subscription subscription) {
+    when(subscription.getEndDate()).thenReturn(new java.util.Date());
+    return subscription;
+  }
+
+  @Test
+  void aClosedRowReadsCanceledAndFreeWhateverItsStatusSays() {
+    // findLatestForClients hands the cache a tenant's latest closed row when it has no open one.
+    // A closed row is history: even one whose STATUS still says active (a row a plan change
+    // superseded) must not keep the tenant productive.
+    EnvironmentPlanCache cache = cacheWith(PAID_CLIENT,
+        closed(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_ACTIVE)));
+
+    assertFalse(cache.isProductive(PAID_CLIENT));
+    assertEquals(SubscriptionService.STATUS_CANCELED, cache.status(PAID_CLIENT));
+    assertEquals(PLAN_KEY, cache.planKey(PAID_CLIENT), "the plan it was on is still reported");
+  }
+
+  @Test
+  void aClosedCanceledRowNeverReachesThePreferenceFallback() {
+    // The canceled tenant has a row, so the retired preference — which may still say productive —
+    // must not be asked about it.
+    TenantPlanPreferenceFallback fallback = mock(TenantPlanPreferenceFallback.class);
+    Map<String, Subscription> latest = new LinkedHashMap<>();
+    latest.put(PAID_CLIENT, closed(subscriptionOn(PLAN_KEY, SubscriptionService.STATUS_CANCELED)));
+
+    EnvironmentPlanCache cache = EnvironmentPlanCache.of(List.of(PAID_CLIENT), latest, fallback);
+
+    assertFalse(cache.isProductive(PAID_CLIENT));
+    verifyNoInteractions(fallback);
+  }
 }

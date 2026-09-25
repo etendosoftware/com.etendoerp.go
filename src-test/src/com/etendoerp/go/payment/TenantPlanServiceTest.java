@@ -140,15 +140,34 @@ class TenantPlanServiceTest {
   }
 
   /** Stubs the subscription lookup {@code resolvePlan} performs with an open row. */
+  /**
+   * Stubs an open subscription row. {@code resolvePlan} reads {@code findLatest} since ETP-5047
+   * (the open row, else the latest closed one); {@code findOpen} is stubbed too so a spec on the
+   * write side sees the same row.
+   */
   private void givenOpenSubscription(String status) {
     Subscription subscription = mock(Subscription.class);
     when(subscription.getSubscriptionStatus()).thenReturn(status);
     when(subscriptionService.findOpen(CLIENT_ID)).thenReturn(Optional.of(subscription));
+    when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(subscription));
   }
 
-  /** Stubs the subscription lookup with no open row — a closed one, or none at all. */
+  /**
+   * ETP-5047 — stubs a tenant whose only row is closed ({@code END_DATE} set): a cancellation
+   * closes its row, so {@code findOpen} finds nothing while {@code findLatest} still answers it.
+   */
+  private void givenOnlyAClosedSubscription(String status) {
+    Subscription subscription = mock(Subscription.class);
+    when(subscription.getSubscriptionStatus()).thenReturn(status);
+    when(subscription.getEndDate()).thenReturn(new java.util.Date());
+    when(subscriptionService.findOpen(CLIENT_ID)).thenReturn(Optional.empty());
+    when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(subscription));
+  }
+
+  /** Stubs a tenant with no subscription row at all, open or closed. */
   private void givenNoOpenSubscription() {
     when(subscriptionService.findOpen(CLIENT_ID)).thenReturn(Optional.empty());
+    when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.empty());
   }
 
   @Nested
@@ -366,8 +385,6 @@ class TenantPlanServiceTest {
 
     @Test
     void readsBackFreeWhenTheTenantHasNoOpenSubscription() {
-      // findOpen already filters on END_DATE IS NULL, so a closed row — the previous row of a plan
-      // change, or a tenant that churned — never reaches this method and reads as free.
       givenNoOpenSubscription();
 
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
@@ -396,7 +413,7 @@ class TenantPlanServiceTest {
       // subscription whose plan is never even consulted.
       Subscription subscription = mock(Subscription.class);
       when(subscription.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_ACTIVE);
-      when(subscriptionService.findOpen(CLIENT_ID)).thenReturn(Optional.of(subscription));
+      when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(subscription));
 
       assertEquals(TenantPlanService.PLAN_PRODUCTIVE, service.resolvePlan(CLIENT_ID));
 
@@ -411,13 +428,14 @@ class TenantPlanServiceTest {
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(clientId));
 
       verify(subscriptionService, never()).findOpen(anyString());
+      verify(subscriptionService, never()).findLatest(anyString());
     }
 
     @Test
     void readsBackFreeWhenTheLookupFails() {
       // Contractual: never null, never throws, degrades to free.
       // OnboardingForceTestModeService compares the result to PLAN_FREE with no null guard.
-      when(subscriptionService.findOpen(CLIENT_ID))
+      when(subscriptionService.findLatest(CLIENT_ID))
           .thenThrow(new IllegalStateException("no session"));
 
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
@@ -464,16 +482,27 @@ class TenantPlanServiceTest {
     }
 
     @Test
-    void fallsBackToTheRetiredPreferenceWhenTheOnlySubscriptionRowIsClosed() {
-      // findOpen filters on END_DATE IS NULL, so a closed row — a churned tenant, or the previous
-      // row of a plan change — is indistinguishable here from having no row at all, and takes the
-      // same transitional path.
-      givenNoOpenSubscription();
+    void aTenantWhoseOnlyRowIsClosedReadsFreeAndNeverReachesThePreferenceFallback() {
+      // ETP-5047 — a cancellation closes its row, so "no open row" no longer means "never
+      // subscribed". The closed row answers (canceled → free); the retired preference, which may
+      // still say productive, must not resurrect a tenant that canceled.
+      givenOnlyAClosedSubscription(SubscriptionService.STATUS_CANCELED);
       when(preferenceFallback.isProductive(CLIENT_ID)).thenReturn(true);
 
-      assertEquals(TenantPlanService.PLAN_PRODUCTIVE, service.resolvePlan(CLIENT_ID));
+      assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
 
-      verify(preferenceFallback).isProductive(CLIENT_ID);
+      verify(preferenceFallback, never()).isProductive(anyString());
+    }
+
+    @Test
+    void aClosedRowReadsFreeEvenWhenItsStoredStatusStillSaysActive() {
+      // ETP-5047 — a closed row is history, not entitlement: its STATUS is read through
+      // effectiveStatusOf, which answers canceled for any row with an END_DATE.
+      givenOnlyAClosedSubscription(SubscriptionService.STATUS_ACTIVE);
+
+      assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
+
+      verify(preferenceFallback, never()).isProductive(anyString());
     }
 
     @Test

@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -26,13 +27,16 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
@@ -51,6 +55,8 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.session.GoSessionRecord;
 
 /**
@@ -64,10 +70,18 @@ public class McpServletTest {
   private HttpServletResponse response;
   private StringWriter responseBody;
   private PrintWriter writer;
+  private EnvironmentAccessGuard environmentAccessGuard;
 
   @Before
   public void setUp() throws Exception {
     servlet = new McpServlet();
+    // ETP-5047 — doPost asks the commercial access guard, which runs as system against the DAL.
+    // A mock that allows every tenant (null denial) keeps these dispatch tests DB-free; the
+    // refusal itself is pinned by the environment-access tests below.
+    environmentAccessGuard = mock(EnvironmentAccessGuard.class);
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, environmentAccessGuard);
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
     responseBody = new StringWriter();
@@ -343,6 +357,94 @@ public class McpServletTest {
       String body = getResponseBody();
       assertTrue(body.contains("error"));
     }
+  }
+
+  // ── doPost: commercial environment access (ETP-5047) ────────────────────
+
+  /**
+   * A denial built by the real guard, so the body asserted below is the shared wire format and not
+   * a test double of it. The guard's lifecycle service answers the decision; its kill switch is
+   * off.
+   */
+  private static EnvironmentAccessGuard.Denial denialFor(EnvironmentAccessPolicy.Decision decision) {
+    com.etendoerp.go.payment.TenantEnvironmentLifecycleService lifecycle =
+        mock(com.etendoerp.go.payment.TenantEnvironmentLifecycleService.class);
+    when(lifecycle.evaluateAccess(eq("client1"), eq(true),
+        org.mockito.ArgumentMatchers.any(java.time.Instant.class))).thenReturn(decision);
+    try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
+        mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {
+      flag.when(() -> com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag
+          .isEnforcementSwitchedOff(anyString())).thenReturn(false);
+      return new EnvironmentAccessGuard(lifecycle).check("client1", "test");
+    }
+  }
+
+  @Test
+  public void doPostIntoABlockedTenantAnswers402WithTheSharedBodyAndDispatchesNothing()
+      throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping")
+        .toString());
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(denial);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    verify(request, never()).getReader();
+    JSONObject error = new JSONObject(getResponseBody()).getJSONObject("error");
+    assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
+        error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals("SUBSCRIPTION_REQUIRED", error.getString("decision"));
+    assertFalse("a refused request is not a JSON-RPC response",
+        new JSONObject(getResponseBody()).has("jsonrpc"));
+  }
+
+  @Test
+  public void doPostIntoAnExpiredDemoAnswers402WithItsDecision() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping")
+        .toString());
+    // Built before the stubbing starts: denialFor stubs mocks of its own.
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(denial);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    assertEquals("DEMO_TRIAL_EXPIRED", new JSONObject(getResponseBody())
+        .getJSONObject("error").getString("decision"));
+  }
+
+  @Test
+  public void doPostIntoAnAllowedTenantAsksTheGuardForItsClientAndProceeds() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 7).put("method", "ping")
+        .toString());
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(null);
+
+    servlet.doPost(request, response);
+
+    verify(environmentAccessGuard).checkAsSystem("client1", "mcp");
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    assertEquals(7, new JSONObject(getResponseBody()).getInt("id"));
+  }
+
+  @Test
+  public void doPostThatFailsAuthenticationNeverAsksTheGuard() throws Exception {
+    when(request.getAttribute(OAuth2Filter.ATTR_USER_ID)).thenReturn(null);
+    when(request.getHeader("Authorization")).thenReturn(null);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    verifyNoInteractions(environmentAccessGuard);
   }
 
   // ── doPost: JSON-RPC dispatch ───────────────────────────────────────────

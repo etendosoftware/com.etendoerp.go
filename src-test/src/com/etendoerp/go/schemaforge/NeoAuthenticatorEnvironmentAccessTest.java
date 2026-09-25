@@ -41,7 +41,9 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 
@@ -86,6 +88,9 @@ class NeoAuthenticatorEnvironmentAccessTest {
   private static final String BEARER_TOKEN = "bearer-token-xyz";
   private static final String OAUTH2_TOKEN = "oauth2-opaque-token-xyz";
   private static final String LEGACY_BEARER_PROPERTY = "etgo.legacy.bearer.enabled";
+  /** ETP-5047 — the local form of the {@code environment-access-enforcement-off} kill switch. */
+  private static final String KILL_SWITCH_PROPERTY =
+      "etendo.go.flags.environment-access-enforcement-off";
 
   private NeoServlet servlet;
   private NeoAuthenticator authenticator;
@@ -124,6 +129,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
     swsStatic.close();
     obContextStatic.close();
     System.clearProperty(LEGACY_BEARER_PROPERTY);
+    System.clearProperty(KILL_SWITCH_PROPERTY);
   }
 
   // ===================== Cookie session (USE_SESSION) path =====================
@@ -140,8 +146,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
     boolean authenticated = authenticator.authenticateRequest(request, response);
 
     assertFalse(authenticated, "a refused environment must not authenticate the request");
-    verify(servlet).sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
-        "Environment access is not available: SUBSCRIPTION_REQUIRED");
+    assertRefusedWith402(response, "SUBSCRIPTION_REQUIRED");
   }
 
   @Test
@@ -156,8 +161,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
     boolean authenticated = authenticator.authenticateRequest(request, response);
 
     assertFalse(authenticated, "a refused environment must not authenticate the request");
-    verify(servlet).sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
-        "Environment access is not available: DEMO_TRIAL_EXPIRED");
+    assertRefusedWith402(response, "DEMO_TRIAL_EXPIRED");
   }
 
   @Test
@@ -173,6 +177,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertTrue(authenticated, "an allowed environment must authenticate the request");
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(servlet, never()).writeResponse(any(), any());
   }
 
   /**
@@ -193,6 +198,39 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertTrue(authenticated, "a legacy tenant with no lifecycle metadata must not be refused");
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(servlet, never()).writeResponse(any(), any());
+  }
+
+  /**
+   * ETP-5047 — NEO decides through the shared {@code EnvironmentAccessGuard}, built over its own
+   * lifecycle service but with the real kill switch: switched off, a blocked tenant is let through
+   * (the decision is only logged) and nothing is written.
+   */
+  @Test
+  void cookieSessionOfABlockedTenantIsAllowedWhileEnforcementIsSwitchedOff() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+    stubCookieSession(CLIENT_ID);
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean authenticated = authenticator.authenticateRequest(cookieRequest(), response);
+
+    assertTrue(authenticated, "the kill switch must stop the refusal");
+    verify(servlet, never()).writeResponse(any(), any());
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+  }
+
+  @Test
+  void cookieSessionOfABlockedTenantIsRefusedWhenTheSwitchIsExplicitlyFalse() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "false");
+    stubCookieSession(CLIENT_ID);
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenReturn(Decision.SUBSCRIPTION_REQUIRED);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    assertFalse(authenticator.authenticateRequest(cookieRequest(), response));
+    assertRefusedWith402(response, "SUBSCRIPTION_REQUIRED");
   }
 
   /**
@@ -252,8 +290,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
     boolean authenticated = authenticator.authenticateRequest(request, response);
 
     assertFalse(authenticated, "the pre-existing Bearer enforcement must remain intact");
-    verify(servlet).sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
-        "Environment access is not available: SUBSCRIPTION_REQUIRED");
+    assertRefusedWith402(response, "SUBSCRIPTION_REQUIRED");
   }
 
   // ===================== OAuth2 opaque client-credentials token path =====================
@@ -278,8 +315,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
     boolean authenticated = authenticator.authenticateRequest(request, response);
 
     assertFalse(authenticated, "a refused environment must not authenticate the OAuth2 request");
-    verify(servlet).sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
-        "Environment access is not available: SUBSCRIPTION_REQUIRED");
+    assertRefusedWith402(response, "SUBSCRIPTION_REQUIRED");
   }
 
   @Test
@@ -296,8 +332,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
     boolean authenticated = authenticator.authenticateRequest(request, response);
 
     assertFalse(authenticated, "a refused environment must not authenticate the OAuth2 request");
-    verify(servlet).sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
-        "Environment access is not available: DEMO_TRIAL_EXPIRED");
+    assertRefusedWith402(response, "DEMO_TRIAL_EXPIRED");
   }
 
   @Test
@@ -315,6 +350,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertTrue(authenticated, "an allowed environment must authenticate the OAuth2 request");
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(servlet, never()).writeResponse(any(), any());
   }
 
   @Test
@@ -332,6 +368,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertTrue(authenticated, "a legacy tenant with no lifecycle metadata must not be refused");
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(servlet, never()).writeResponse(any(), any());
   }
 
   /**
@@ -405,10 +442,13 @@ class NeoAuthenticatorEnvironmentAccessTest {
     assertFalse(cookieResult);
     assertEquals(cookieResult, bearerResult);
     assertEquals(cookieResult, oauth2Result);
-    String expectedMessage = "Environment access is not available: SUBSCRIPTION_REQUIRED";
-    verify(servlet).sendError(cookieResponse, HttpServletResponse.SC_PAYMENT_REQUIRED, expectedMessage);
-    verify(servlet).sendError(bearerResponse, HttpServletResponse.SC_PAYMENT_REQUIRED, expectedMessage);
-    verify(servlet).sendError(oauth2Response, HttpServletResponse.SC_PAYMENT_REQUIRED, expectedMessage);
+    JSONObject cookieBody = assertRefusedWith402(cookieResponse, "SUBSCRIPTION_REQUIRED");
+    JSONObject bearerBody = assertRefusedWith402(bearerResponse, "SUBSCRIPTION_REQUIRED");
+    JSONObject oauth2Body = assertRefusedWith402(oauth2Response, "SUBSCRIPTION_REQUIRED");
+    assertEquals(cookieBody.toString(), bearerBody.toString(),
+        "the cookie and Bearer schemes must answer the same 402 body");
+    assertEquals(cookieBody.toString(), oauth2Body.toString(),
+        "the cookie and OAuth2 schemes must answer the same 402 body");
   }
 
   @Test
@@ -424,9 +464,34 @@ class NeoAuthenticatorEnvironmentAccessTest {
     assertEquals(cookieResult, bearerResult);
     assertEquals(cookieResult, oauth2Result);
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(servlet, never()).writeResponse(any(), any());
   }
 
   // ===================== Fixtures =====================
+
+  /**
+   * ETP-5047 — NEO answers a refused tenant with the shared {@code EnvironmentAccessGuard} body
+   * through {@code writeResponse}, no longer through the plain-text {@code sendError}: HTTP 402,
+   * the message text unchanged since ETP-5443 (a client parsing the prefix keeps working), plus
+   * the machine-readable {@code code} and {@code decision}.
+   *
+   * @return the {@code error} object written, for cross-scheme comparison
+   */
+  private JSONObject assertRefusedWith402(HttpServletResponse response, String decision)
+      throws Exception {
+    ArgumentCaptor<NeoResponse> written = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(response), written.capture());
+    verify(servlet, never()).sendError(eq(response), anyInt(), anyString());
+    NeoResponse neoResponse = written.getValue();
+    assertEquals(HttpServletResponse.SC_PAYMENT_REQUIRED, neoResponse.getHttpStatus());
+    JSONObject error = neoResponse.getBody().getJSONObject("error");
+    assertEquals("Environment access is not available: " + decision, error.getString("message"));
+    assertEquals(HttpServletResponse.SC_PAYMENT_REQUIRED, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals(decision, error.getString("decision"));
+    assertEquals(4, error.length(), "the error body carries exactly message, status, code, decision");
+    return error;
+  }
 
   private boolean runCookiePath(String clientId, HttpServletResponse response) throws Exception {
     stubCookieSession(clientId);

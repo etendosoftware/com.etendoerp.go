@@ -408,12 +408,13 @@ class SubscriptionServiceTest {
           EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null));
 
       verify(open).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
-      verify(open).setCurrentPeriodEnd(null);
+      // null clears the grace anchor (ETP-5047: its own column, GRACE_ANCHOR).
+      verify(open).setGraceAnchor(null);
       verify(obDal).save(open);
     }
 
     @Test
-    void pastDueIsStoredWithTheGraceAnchorAsThePeriodEnd() {
+    void pastDueIsStoredWithTheGraceAnchorInItsOwnColumn() {
       Subscription open = subscriptionOf(CLIENT_ID);
       when(subscriptionQuery.uniqueResult()).thenReturn(open);
 
@@ -421,8 +422,10 @@ class SubscriptionServiceTest {
           EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR));
 
       verify(open).setSubscriptionStatus(SubscriptionService.STATUS_PAST_DUE);
-      // The access policy counts the grace days from this column.
-      verify(open).setCurrentPeriodEnd(java.util.Date.from(ANCHOR));
+      // The access policy counts the grace days from this column. Before ETP-5047 it was
+      // CURRENT_PERIOD_END, which now holds only the provider billing period.
+      verify(open).setGraceAnchor(java.util.Date.from(ANCHOR));
+      verify(open, never()).setCurrentPeriodEnd(any());
     }
 
     @Test
@@ -434,14 +437,17 @@ class SubscriptionServiceTest {
           EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null));
 
       verify(open).setSubscriptionStatus(SubscriptionService.STATUS_CANCELED);
-      // Closing a row is how a plan change opens its successor (ETP-5053); a cancellation is not
-      // one, so END_DATE is left alone.
+      // This is the development tool's write, which must be able to flip a tenant back; only the
+      // webhook's applyLifecycleOutcome closes a row on a terminating event.
       verify(open, never()).setEndDate(any());
-      verify(open).setCurrentPeriodEnd(null);
+      verify(open).setGraceAnchor(null);
     }
 
     @Test
-    void aStartAfterTheNewAnchorIsDroppedSoThePeriodCheckCannotRejectTheEvent() {
+    void neverTouchesTheBillingPeriod() {
+      // ETP-5047 — the anchor left CURRENT_PERIOD_END, so the pre-split rule that dropped a start
+      // after the new anchor (to keep ETGO_SUB_PERIOD_CHK) is gone: the period is not written here
+      // at all, whatever the anchor.
       Subscription open = subscriptionOf(CLIENT_ID);
       when(open.getCurrentPeriodStart())
           .thenReturn(java.util.Date.from(ANCHOR.plusSeconds(86_400L)));
@@ -450,8 +456,9 @@ class SubscriptionServiceTest {
       service.applyLifecycleStatus(CLIENT_ID, EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
           ANCHOR);
 
-      verify(open).setCurrentPeriodStart(null);
-      verify(open).setCurrentPeriodEnd(java.util.Date.from(ANCHOR));
+      verify(open, never()).setCurrentPeriodStart(any());
+      verify(open, never()).setCurrentPeriodEnd(any());
+      verify(open).setGraceAnchor(java.util.Date.from(ANCHOR));
     }
 
     @Test
@@ -480,6 +487,455 @@ class SubscriptionServiceTest {
     void refusesAStatusNoLifecycleEventProduces() {
       assertThrows(IllegalArgumentException.class, () -> service.applyLifecycleStatus(CLIENT_ID,
           EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT, null));
+    }
+  }
+
+  /** ETP-5047 — the lookup a lifecycle event resolves its row with. */
+  @Nested
+  class FindOpenByStripeSubscription {
+
+    @Test
+    void returnsTheOpenRowCarryingTheId() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      assertSame(open, service.findOpenByStripeSubscription(STRIPE_SUBSCRIPTION_ID).orElseThrow());
+    }
+
+    @Test
+    void asksOnlyForOpenRowsSoAClosedPredecessorSharingTheIdNeverAnswers() {
+      // STRIPE_SUBSCRIPTION_ID is not unique: a plan change keeps the Stripe subscription and
+      // opens a successor row. Only the open one may take an event.
+      service.findOpenByStripeSubscription("  " + STRIPE_SUBSCRIPTION_ID + " ");
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(obDal).createQuery(eq(Subscription.class), hql.capture());
+      assertTrue(hql.getValue().contains("stripeSubscription = :stripeSubscriptionId"),
+          hql.getValue());
+      assertTrue(hql.getValue().contains("endDate is null"), hql.getValue());
+      assertTrue(hql.getValue().contains("active = true"), hql.getValue());
+      verify(subscriptionQuery).setNamedParameter("stripeSubscriptionId", STRIPE_SUBSCRIPTION_ID);
+      verify(subscriptionQuery).setFilterOnReadableClients(false);
+      verify(subscriptionQuery).setFilterOnReadableOrganization(false);
+      verify(subscriptionQuery).setMaxResult(1);
+    }
+
+    @Test
+    void returnsEmptyWhenNoOpenRowCarriesTheId() {
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+
+      assertTrue(service.findOpenByStripeSubscription(STRIPE_SUBSCRIPTION_ID).isEmpty());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = { "", "   " })
+    void findsNothingForABlankIdWithoutQuerying(String id) {
+      assertTrue(service.findOpenByStripeSubscription(id).isEmpty());
+
+      verify(obDal, never()).createQuery(eq(Subscription.class), anyString());
+    }
+  }
+
+  /** ETP-5047 — "what is this tenant's subscription state": open row, else latest closed one. */
+  @Nested
+  class FindLatest {
+
+    @Test
+    void theOpenRowAnswersWithASingleQuery() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(open);
+
+      assertSame(open, service.findLatest(CLIENT_ID).orElseThrow());
+
+      verify(obDal, times(1)).createQuery(eq(Subscription.class), anyString());
+    }
+
+    @Test
+    void withNoOpenRowTheNewestClosedRowAnswers() {
+      Subscription closed = subscriptionOf(CLIENT_ID);
+      when(subscriptionQuery.uniqueResult()).thenReturn(null, closed);
+
+      assertSame(closed, service.findLatest(CLIENT_ID).orElseThrow());
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(obDal, times(2)).createQuery(eq(Subscription.class), hql.capture());
+      String closedQuery = hql.getAllValues().get(1);
+      assertTrue(closedQuery.contains("endDate is not null"), closedQuery);
+      assertTrue(closedQuery.contains("active = true"), closedQuery);
+      // Newest first: the latest END_DATE, then the latest created, and only one row.
+      assertTrue(closedQuery.contains("order by sub.endDate desc, sub.creationDate desc"),
+          closedQuery);
+      verify(subscriptionQuery, times(2)).setMaxResult(1);
+      verify(subscriptionQuery, times(2)).setFilterOnReadableClients(false);
+    }
+
+    @Test
+    void aTenantThatNeverHadARowFindsNothing() {
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+
+      assertTrue(service.findLatest(CLIENT_ID).isEmpty());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = { "", "   " })
+    void findsNothingForABlankTenantWithoutQuerying(String clientId) {
+      assertTrue(service.findLatest(clientId).isEmpty());
+
+      verify(obDal, never()).createQuery(eq(Subscription.class), anyString());
+    }
+  }
+
+  @Nested
+  class FindLatestForClients {
+
+    @Test
+    void anOpenRowAnswersAndAClosedOneFillsTheTenantsWithout() {
+      Subscription open = subscriptionOf(CLIENT_ID);
+      Subscription newestClosed = subscriptionOf(OTHER_CLIENT_ID);
+      Subscription olderClosed = subscriptionOf(OTHER_CLIENT_ID);
+      when(subscriptionQuery.list()).thenReturn(List.of(open), List.of(newestClosed, olderClosed));
+
+      Map<String, Subscription> byClient =
+          service.findLatestForClients(List.of(CLIENT_ID, OTHER_CLIENT_ID));
+
+      assertEquals(2, byClient.size());
+      assertSame(open, byClient.get(CLIENT_ID));
+      // Ordered latest first, so the first closed row seen for a tenant is the one kept.
+      assertSame(newestClosed, byClient.get(OTHER_CLIENT_ID));
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(obDal, times(2)).createQuery(eq(Subscription.class), hql.capture());
+      assertTrue(hql.getAllValues().get(1).contains("endDate is not null"));
+      assertTrue(hql.getAllValues().get(1).contains("order by sub.endDate desc"));
+      // The second query asks only for the tenants the first did not answer.
+      verify(subscriptionQuery).setNamedParameter("environmentClientIds", List.of(OTHER_CLIENT_ID));
+    }
+
+    @Test
+    void issuesNoSecondQueryWhenEveryTenantHasAnOpenRow() {
+      List<Subscription> rows = List.of(subscriptionOf(CLIENT_ID), subscriptionOf(OTHER_CLIENT_ID));
+      when(subscriptionQuery.list()).thenReturn(rows);
+
+      service.findLatestForClients(List.of(CLIENT_ID, OTHER_CLIENT_ID));
+
+      verify(obDal, times(1)).createQuery(eq(Subscription.class), anyString());
+    }
+
+    @Test
+    void queriesNothingForANullOrBlankOnlyRequest() {
+      assertTrue(service.findLatestForClients(null).isEmpty());
+      assertTrue(service.findLatestForClients(java.util.Arrays.asList(null, "", "  ")).isEmpty());
+
+      verify(obDal, never()).createQuery(eq(Subscription.class), anyString());
+    }
+
+    @Test
+    void leavesATenantWithNoRowAtAllOutOfTheResult() {
+      when(subscriptionQuery.list()).thenReturn(Collections.emptyList());
+
+      assertTrue(service.findLatestForClients(List.of(CLIENT_ID)).isEmpty());
+    }
+  }
+
+  /** ETP-5047 — the webhook's write onto the row it resolved. */
+  @Nested
+  class ApplyLifecycleOutcome {
+
+    private final java.time.Instant anchor = java.time.Instant.parse("2026-10-31T00:00:00Z");
+    private final java.time.Instant periodStart = java.time.Instant.parse("2026-11-01T00:00:00Z");
+    private final java.time.Instant periodEnd = java.time.Instant.parse("2026-12-01T00:00:00Z");
+    private final java.time.Instant eventAt = java.time.Instant.parse("2026-11-01T12:00:00Z");
+
+    private SubscriptionEventOutcome pastDue() {
+      return SubscriptionEventOutcome.apply(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
+          anchor);
+    }
+
+    @Test
+    void writesStatusAndTheGraceAnchorButNotThePeriodWhenTheEventReportsNone() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      service.applyLifecycleOutcome(row, pastDue(), eventAt);
+
+      verify(row).setSubscriptionStatus(SubscriptionService.STATUS_PAST_DUE);
+      verify(row).setGraceAnchor(java.util.Date.from(anchor));
+      // An event that reports no period (invoice.payment_failed) leaves the stored one alone —
+      // and the anchor is never written into the period.
+      verify(row, never()).setCurrentPeriodStart(any());
+      verify(row, never()).setCurrentPeriodEnd(any());
+      verify(row, never()).setEndDate(any());
+      verify(obDal).save(row);
+      verify(obDal, never()).commitAndClose();
+    }
+
+    @Test
+    void writesBothPeriodColumnsWhenTheOutcomeCarriesAPeriod() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)
+          .withPeriod(periodStart, periodEnd), eventAt);
+
+      verify(row).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
+      verify(row).setGraceAnchor(null);
+      verify(row).setCurrentPeriodStart(java.util.Date.from(periodStart));
+      verify(row).setCurrentPeriodEnd(java.util.Date.from(periodEnd));
+    }
+
+    @Test
+    void setsTheWatermarkOnARowThatHasNone() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      service.applyLifecycleOutcome(row, pastDue(), eventAt);
+
+      verify(row).setLastEventAt(java.util.Date.from(eventAt));
+    }
+
+    @Test
+    void movesTheWatermarkForwardOnly() {
+      Subscription older = subscriptionOf(CLIENT_ID);
+      when(older.getLastEventAt()).thenReturn(java.util.Date.from(eventAt.minusSeconds(60L)));
+      Subscription newer = subscriptionOf(CLIENT_ID);
+      when(newer.getLastEventAt()).thenReturn(java.util.Date.from(eventAt.plusSeconds(60L)));
+      Subscription same = subscriptionOf(CLIENT_ID);
+      when(same.getLastEventAt()).thenReturn(java.util.Date.from(eventAt));
+
+      service.applyLifecycleOutcome(older, pastDue(), eventAt);
+      service.applyLifecycleOutcome(newer, pastDue(), eventAt);
+      service.applyLifecycleOutcome(same, pastDue(), eventAt);
+
+      verify(older).setLastEventAt(java.util.Date.from(eventAt));
+      verify(newer, never()).setLastEventAt(any());
+      verify(same, never()).setLastEventAt(any());
+    }
+
+    @Test
+    void aNullEventInstantLeavesTheWatermarkAlone() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      service.applyLifecycleOutcome(row, pastDue(), null);
+
+      verify(row, never()).setLastEventAt(any());
+    }
+
+    @Test
+    void aTerminatingOutcomeClosesTheRowAtTheProviderEndInstant() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+      when(row.getStartDate()).thenReturn(java.util.Date.from(anchor.minusSeconds(86_400L * 30)));
+      java.time.Instant ended = java.time.Instant.parse("2026-11-15T09:00:00Z");
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null).closing(ended), eventAt);
+
+      verify(row).setSubscriptionStatus(SubscriptionService.STATUS_CANCELED);
+      verify(row).setEndDate(java.util.Date.from(ended));
+    }
+
+    @Test
+    void aClosingInstantBeforeTheStartDateClosesAtTheStartDate() {
+      // ETGO_SUB_DATES_CHK: END_DATE >= START_DATE. A provider instant earlier than the row's own
+      // start (the row was opened after Stripe ended it) must not reject the whole event.
+      Subscription row = subscriptionOf(CLIENT_ID);
+      java.util.Date start = java.util.Date.from(eventAt);
+      when(row.getStartDate()).thenReturn(start);
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+          .closing(eventAt.minusSeconds(3600L)), eventAt);
+
+      verify(row).setEndDate(start);
+    }
+
+    @Test
+    void aClosingOutcomeWithNoInstantClosesTheRowNow() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+      java.util.Date before = new java.util.Date();
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null).closing(null), eventAt);
+
+      ArgumentCaptor<java.util.Date> end = ArgumentCaptor.forClass(java.util.Date.class);
+      verify(row).setEndDate(end.capture());
+      assertTrue(!end.getValue().before(before) && !end.getValue().after(new java.util.Date()),
+          "closed 'now': " + end.getValue());
+    }
+
+    @Test
+    void anAlreadyClosedRowIsNotClosedAgain() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+      when(row.getEndDate()).thenReturn(java.util.Date.from(eventAt));
+
+      service.applyLifecycleOutcome(row, SubscriptionEventOutcome
+          .apply(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)
+          .closing(eventAt.plusSeconds(60L)), eventAt);
+
+      verify(row, never()).setEndDate(any());
+    }
+
+    @Test
+    void refusesAStatusNoLifecycleEventProduces() {
+      Subscription row = subscriptionOf(CLIENT_ID);
+
+      assertThrows(IllegalArgumentException.class, () -> service.applyLifecycleOutcome(row,
+          SubscriptionEventOutcome.apply(
+              EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT, null), eventAt));
+      verify(obDal, never()).save(any());
+    }
+  }
+
+  /** ETP-5047 — a re-subscription after a cancellation whose close never arrived. */
+  @Nested
+  class OpenSubscriptionOverACanceledRow {
+
+    private Plan plan;
+    private Subscription created;
+
+    @BeforeEach
+    void givenACatalogPlanAndANewRow() {
+      plan = mock(Plan.class);
+      when(plan.getSearchKey()).thenReturn(PLAN_KEY);
+      when(plan.getProviderPriceID()).thenReturn(PRICE_ID);
+      created = mock(Subscription.class);
+      when(obProvider.get(Subscription.class)).thenReturn(created);
+      when(obDal.get(eq(Client.class), any())).thenReturn(mock(Client.class));
+      when(obDal.get(eq(Organization.class), any())).thenReturn(mock(Organization.class));
+    }
+
+    @Test
+    void closesTheOpenCanceledRowAndFlushesBeforeInsertingTheNewOne() {
+      Subscription canceled = subscriptionOf(CLIENT_ID);
+      when(canceled.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_CANCELED);
+      when(subscriptionQuery.uniqueResult()).thenReturn(canceled);
+
+      Subscription result = service.openSubscription(CLIENT_ID, plan, null, CUSTOMER_ID,
+          STRIPE_SUBSCRIPTION_ID);
+
+      assertSame(created, result);
+      // The flush is load-bearing: Hibernate runs inserts before updates, and the partial unique
+      // index etgo_sub_open_envclient_uq would reject the new open row while the old one is open.
+      org.mockito.InOrder order = org.mockito.Mockito.inOrder(canceled, obDal, obProvider);
+      order.verify(canceled).setEndDate(any(java.util.Date.class));
+      order.verify(obDal).flush();
+      order.verify(obProvider).get(Subscription.class);
+      order.verify(obDal).save(created);
+    }
+
+    @Test
+    void aCanceledStatusIsRecognisedInAnyCase() {
+      Subscription canceled = subscriptionOf(CLIENT_ID);
+      when(canceled.getSubscriptionStatus()).thenReturn(" CANCELED ");
+      when(subscriptionQuery.uniqueResult()).thenReturn(canceled);
+
+      assertSame(created, service.openSubscription(CLIENT_ID, plan, null, null, null));
+      verify(canceled).setEndDate(any(java.util.Date.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { SubscriptionService.STATUS_ACTIVE, SubscriptionService.STATUS_PAST_DUE })
+    void returnsALiveOpenRowUntouched(String status) {
+      Subscription live = subscriptionOf(CLIENT_ID);
+      when(live.getSubscriptionStatus()).thenReturn(status);
+      when(subscriptionQuery.uniqueResult()).thenReturn(live);
+
+      assertSame(live, service.openSubscription(CLIENT_ID, plan, null, null, null));
+
+      verify(live, never()).setEndDate(any());
+      verify(obDal, never()).flush();
+      verify(obProvider, never()).get(Subscription.class);
+      verify(obDal, never()).save(any());
+    }
+  }
+
+  /** ETP-5047 — the status a row stands for, and the anchor the access policy counts from. */
+  @Nested
+  class RowReaders {
+
+    private final java.util.Date anchor =
+        java.util.Date.from(java.time.Instant.parse("2026-10-31T00:00:00Z"));
+    private final java.util.Date periodEnd =
+        java.util.Date.from(java.time.Instant.parse("2026-12-01T00:00:00Z"));
+
+    private Subscription row(String status) {
+      Subscription row = mock(Subscription.class);
+      when(row.getSubscriptionStatus()).thenReturn(status);
+      return row;
+    }
+
+    @Test
+    void effectiveStatusIsTheStoredOneWhileTheRowIsOpen() {
+      assertEquals(SubscriptionService.STATUS_PAST_DUE,
+          SubscriptionService.effectiveStatusOf(row(SubscriptionService.STATUS_PAST_DUE)));
+    }
+
+    @Test
+    void effectiveStatusOfAClosedRowIsCanceledWhateverItsStatusSays() {
+      Subscription superseded = row(SubscriptionService.STATUS_ACTIVE);
+      when(superseded.getEndDate()).thenReturn(periodEnd);
+
+      assertEquals(SubscriptionService.STATUS_CANCELED,
+          SubscriptionService.effectiveStatusOf(superseded));
+      assertEquals(null, SubscriptionService.effectiveStatusOf(null));
+    }
+
+    @Test
+    void graceAnchorColumnWins() {
+      Subscription pastDue = row(SubscriptionService.STATUS_PAST_DUE);
+      when(pastDue.getGraceAnchor()).thenReturn(anchor);
+      when(pastDue.getCurrentPeriodEnd()).thenReturn(periodEnd);
+
+      assertEquals(anchor.toInstant(), SubscriptionService.graceAnchorOf(pastDue));
+    }
+
+    @Test
+    void aPastDueRowInThePreSplitShapeFallsBackToThePeriodEnd() {
+      Subscription legacy = row(SubscriptionService.STATUS_PAST_DUE);
+      when(legacy.getCurrentPeriodEnd()).thenReturn(periodEnd);
+
+      assertEquals(periodEnd.toInstant(), SubscriptionService.graceAnchorOf(legacy));
+    }
+
+    @Test
+    void noFallbackWhenThePeriodHasAStartBecauseThatIsARealBillingPeriod() {
+      Subscription pastDue = row(SubscriptionService.STATUS_PAST_DUE);
+      when(pastDue.getCurrentPeriodStart()).thenReturn(anchor);
+      when(pastDue.getCurrentPeriodEnd()).thenReturn(periodEnd);
+
+      assertEquals(null, SubscriptionService.graceAnchorOf(pastDue));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { SubscriptionService.STATUS_ACTIVE, SubscriptionService.STATUS_CANCELED })
+    void noFallbackForARowThatIsNotPastDue(String status) {
+      Subscription notPastDue = row(status);
+      when(notPastDue.getCurrentPeriodEnd()).thenReturn(periodEnd);
+
+      assertEquals(null, SubscriptionService.graceAnchorOf(notPastDue));
+    }
+
+    @Test
+    void noFallbackForAClosedRowWhoseStatusStillSaysPastDue() {
+      Subscription closed = row(SubscriptionService.STATUS_PAST_DUE);
+      when(closed.getCurrentPeriodEnd()).thenReturn(periodEnd);
+      when(closed.getEndDate()).thenReturn(periodEnd);
+
+      assertEquals(null, SubscriptionService.graceAnchorOf(closed));
+    }
+
+    @Test
+    void noFallbackWithNoPeriodEndAndNullForANullRow() {
+      assertEquals(null, SubscriptionService.graceAnchorOf(row(SubscriptionService.STATUS_PAST_DUE)));
+      assertEquals(null, SubscriptionService.graceAnchorOf(null));
+    }
+
+    @Test
+    void lastEventAtReadsTheWatermarkColumn() {
+      Subscription withWatermark = row(SubscriptionService.STATUS_ACTIVE);
+      when(withWatermark.getLastEventAt()).thenReturn(anchor);
+
+      assertEquals(anchor.toInstant(), SubscriptionService.lastEventAtOf(withWatermark));
+      assertEquals(null, SubscriptionService.lastEventAtOf(row(SubscriptionService.STATUS_ACTIVE)));
+      assertEquals(null, SubscriptionService.lastEventAtOf(null));
     }
   }
 
