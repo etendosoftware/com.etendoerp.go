@@ -23,9 +23,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
@@ -70,6 +73,11 @@ final class FinancialAccountSupport {
   private static final String METHOD_TRANSFER_EN = "Wire Transfer";
   private static final String METHOD_RECEIPT = "Recibo";
   private static final String METHOD_CARD = "Tarjeta";
+
+  /** DAL property of {@code EM_ETGO_Amount_Tolerance} — Etendo drops the "EM_" module prefix. */
+  private static final String FIELD_AMOUNT_TOLERANCE = "eTGOAmountTolerance";
+  /** A tolerance is a percentage OF the statement line, so beyond 100 % it stops meaning anything. */
+  private static final int AMOUNT_TOLERANCE_MAX_PCT = 100;
 
   /**
    * Maps each financial-account type to the payment methods that must be auto-assigned
@@ -318,5 +326,73 @@ final class FinancialAccountSupport {
     String name = method.getName();
     return METHOD_TRANSFER.equals(name) || METHOD_TRANSFER_SHORT.equals(name)
         || METHOD_TRANSFER_EN.equals(name);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Write-request validation for FinancialAccountHandler's create/update pre-hooks.
+  // Moved here verbatim from the handler (ETP-5447) purely to keep that handler under Sonar's per-class
+  // method limit (java:S1448) — the same reason FinancialAccountDeleteSupport exists. All three
+  // are pure functions of the request body, so they need none of the handler's test seams.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Rejects an amount tolerance outside 0…100. Returns {@code null} when the body does not carry the
+   * field at all, so a partial update that never mentions it is untouched.
+   *
+   * <p>Enforced in the handler and not only in the edit modal because this is a generic W spec:
+   * anything holding a token can PUT {@code eTGOAmountTolerance} straight at the entity. The value is
+   * read as a PERCENTAGE of the statement line by both the automatch engine
+   * ({@code MatchTolerances.signalGroupTolerance}) and the difference posting
+   * ({@code ReconciliationDifferenceSupport.differenceLimit}); at 100 % or more the latter's gate
+   * would authorise posting an entire statement line of any size to a G/L item, so this is a
+   * boundary, not a nicety.
+   */
+  static NeoResponse validateAmountTolerance(JSONObject body) {
+    if (body == null || !body.has(FIELD_AMOUNT_TOLERANCE)
+        || body.isNull(FIELD_AMOUNT_TOLERANCE)) {
+      return null;
+    }
+    String raw = StringUtils.trimToEmpty(body.optString(FIELD_AMOUNT_TOLERANCE, ""));
+    if (raw.isEmpty()) {
+      return null;
+    }
+    BigDecimal pct;
+    try {
+      pct = new BigDecimal(raw);
+    } catch (NumberFormatException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Amount tolerance must be a number: " + raw);
+    }
+    if (pct.signum() < 0
+        || pct.compareTo(BigDecimal.valueOf(AMOUNT_TOLERANCE_MAX_PCT)) > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Amount tolerance must be a percentage between 0 and " + AMOUNT_TOLERANCE_MAX_PCT
+              + " (received " + pct.toPlainString() + ").");
+    }
+    return null;
+  }
+
+  /**
+   * Validates the name / IBAN / BIC-SWIFT lengths of a create body (the name is also required).
+   * Returns the 400 for the first violation, or {@code null} when all three fit.
+   */
+  static NeoResponse validateLengths(String name, String iban, String swift) {
+    if (StringUtils.isBlank(name)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
+    }
+    if (name.length() > FinancialAccountHandler.NAME_MAX_LENGTH) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
+    }
+    if (iban.length() > FinancialAccountHandler.IBAN_MAX_LENGTH
+        || swift.length() > FinancialAccountHandler.SWIFT_MAX_LENGTH) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
+    }
+    return null;
+  }
+
+  /** {@code true} when the incoming body explicitly sets {@code active} to {@code false}. */
+  static boolean isArchivingRequest(JSONObject body) {
+    String active = FinancialAccountHandler.FIELD_ACTIVE;
+    return body.has(active) && !body.isNull(active) && !body.optBoolean(active, true);
   }
 }

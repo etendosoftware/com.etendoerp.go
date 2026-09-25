@@ -20,10 +20,12 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Date;
 
@@ -210,5 +212,78 @@ public class BankStatementsSupportTest {
   @Test
   public void truncateCutsLongString() {
     assertEquals("abc", BankStatementsSupport.truncate("abcdef", 3));
+  }
+
+  // ── statementDateFromLastLine (ETP-5447) ─────────────────────────────────
+
+  private static final LocalDate LAST_LINE_DAY = LocalDate.of(2026, 8, 29);
+
+  private static Date localInstant(LocalDateTime dateTime) {
+    return Date.from(dateTime.atZone(ZoneId.systemDefault()).toInstant());
+  }
+
+  private static Date serverMidnight(LocalDate day) {
+    return Date.from(day.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  @Test
+  public void testStatementDateFromLastLineReturnsTheFallbackWhenThereIsNoLineDate() {
+    Date today = new Date();
+    assertSame(today, BankStatementsSupport.statementDateFromLastLine(null, today));
+  }
+
+  @Test
+  public void testStatementDateFromLastLineReturnsANullFallbackUnchanged() {
+    assertNull(BankStatementsSupport.statementDateFromLastLine(null, null));
+  }
+
+  /** The time of day is dropped: the statement date is midnight of the line's calendar day. */
+  @Test
+  public void testStatementDateFromLastLineTruncatesToServerMidnightOfThatDay() {
+    Date lineDate = localInstant(LAST_LINE_DAY.atTime(18, 45, 30));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, new Date()));
+  }
+
+  /** A late-evening movement stays on its own day — no UTC shift into the next or previous one. */
+  @Test
+  public void testStatementDateFromLastLineKeepsALateEveningLineOnItsOwnDay() {
+    Date lineDate = localInstant(LAST_LINE_DAY.atTime(23, 59, 59));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, null));
+  }
+
+  @Test
+  public void testStatementDateFromLastLineKeepsAMidnightLineDateAsIs() {
+    Date lineDate = serverMidnight(LAST_LINE_DAY);
+    assertEquals(lineDate, BankStatementsSupport.statementDateFromLastLine(lineDate, null));
+  }
+
+  /** The line date wins over the fallback whenever there is one. */
+  @Test
+  public void testStatementDateFromLastLineIgnoresTheFallbackWhenALineDateExists() {
+    Date fallback = serverMidnight(LocalDate.of(2026, 9, 25));
+    Date lineDate = localInstant(LAST_LINE_DAY.atTime(8, 0));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, fallback));
+  }
+
+  /**
+   * Hibernate can hand back a {@code java.sql.Date}, whose {@code toInstant()} throws — the helper
+   * must accept it and still return a plain {@code java.util.Date} for that calendar day.
+   */
+  @Test
+  public void testStatementDateFromLastLineAcceptsASqlDate() {
+    Date result = BankStatementsSupport.statementDateFromLastLine(
+        java.sql.Date.valueOf(LAST_LINE_DAY), null);
+    assertEquals(serverMidnight(LAST_LINE_DAY), result);
+    assertEquals(Date.class, result.getClass());
+  }
+
+  @Test
+  public void testStatementDateFromLastLineAcceptsASqlTimestamp() {
+    Timestamp lineDate = Timestamp.valueOf(LAST_LINE_DAY.atTime(14, 30));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, null));
   }
 }

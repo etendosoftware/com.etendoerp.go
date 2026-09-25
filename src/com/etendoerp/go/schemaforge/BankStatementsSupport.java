@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -302,6 +303,29 @@ public final class BankStatementsSupport {
   }
 
   /**
+   * Fixed-width UTC instant with millisecond precision. Deliberately not {@code Instant#toString}
+   * or {@code ISO_INSTANT}: both drop a zero fraction, so {@code ...:05Z} and {@code ...:05.123Z}
+   * would compare lexicographically in the wrong order ({@code '.'} sorts before {@code 'Z'}) —
+   * and the frontend orders these strings as-is (see {@code clientSort.js}).
+   */
+  private static final DateTimeFormatter AUDIT_INSTANT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+
+  /**
+   * Formats an audit timestamp ({@code created}) as a full UTC instant, e.g.
+   * {@code 2026-06-04T13:05:09.123Z}. Unlike {@link #formatDate}, which renders a business (civil)
+   * date/time, an audit column IS an instant, so it carries its zone and keeps sub-second
+   * precision: it is used as a sort tiebreak between statements sharing a transaction date
+   * (ETP-5447), where two statements created within the same second must still order.
+   *
+   * @param ts the timestamp to format (may be {@code null})
+   * @return the fixed-width UTC instant, or {@code ""} when {@code ts} is {@code null}
+   */
+  public static String formatInstant(Timestamp ts) {
+    return ts == null ? "" : AUDIT_INSTANT.format(Instant.ofEpochMilli(ts.getTime()));
+  }
+
+  /**
    * Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}) sent by the frontend as UTC
    * midnight for a chosen calendar day (see {@code ManualStatementModal.jsx}'s {@code toIsoUtc}: it
    * deliberately picks UTC midnight so the calendar day survives regardless of the caller's
@@ -328,13 +352,94 @@ public final class BankStatementsSupport {
       // Zone-less ISO (`2026-06-04T10:00:00`, or a bare `2026-06-04`): Instant.parse rejects it
       // for want of an offset. Since ETP-5100 that is the shape NEO itself emits, so a value
       // this API handed out and got echoed back must round-trip rather than silently collapse
-      // to `fallback` — which, being `new Date()` at both call sites in BankStatementsHandler,
-      // would substitute TODAY for the statement's real day and look like nothing went wrong.
+      // to `fallback`. The manual-statement header passes a null fallback and rejects the
+      // request (ETP-5447), so a lost value there would surface as a spurious 400 — and a caller
+      // passing `new Date()` would silently substitute TODAY for the statement's real day.
       // Only the calendar day is read here anyway, so the prefix is the whole datum.
       calendarDay = parseCalendarDayPrefix(iso);
       if (calendarDay == null) return fallback;
     }
     return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /**
+   * The statement date a file import stamps: midnight, in the server's own timezone, of the
+   * calendar day of {@code lastLineDate} — the same anchoring {@link #parseIsoDate} applies to the
+   * dates the SPA sends, so an imported statement and a manually created one store the same kind
+   * of value. Returns {@code fallback} when {@code lastLineDate} is {@code null} (no kept line had a
+   * date).
+   *
+   * <p>Mirrors the SPA's CSV import ({@code buildStatementCreatePayload} in
+   * {@code bankStatementImportPipeline.js}), which sends the last movement date of the file as
+   * {@code transactionDate} and falls back to today (ETP-5447).
+   *
+   * @param lastLineDate the latest transaction date among the imported lines (may be {@code null})
+   * @param fallback     the value to return when there is no line date
+   * @return the calendar-day start of {@code lastLineDate}, or {@code fallback}
+   */
+  public static Date statementDateFromLastLine(Date lastLineDate, Date fallback) {
+    if (lastLineDate == null) return fallback;
+    // new Date(millis) first: a java.sql.Date coming back from Hibernate throws on toInstant().
+    LocalDate calendarDay = new Date(lastLineDate.getTime()).toInstant()
+        .atZone(ZoneId.systemDefault()).toLocalDate();
+    return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /**
+   * ETP-5447 — both header dates of a manual statement are required. Returns the 400
+   * {@code Missing required field: transactionDate|importDate} for the first one that is
+   * blank OR unparseable, else {@code null}. An unparseable value is treated as missing
+   * because persisting it would need a substitute, and the substitute used to be
+   * {@code new Date()}: a cleared field silently became TODAY. Shared by
+   * {@link BankStatementsHandler}'s create and update actions.
+   *
+   * <p>Lives here rather than in the handler only to keep that class under Sonar's per-class
+   * method limit (java:S1448); the body keys and the message prefix stay owned by the handler.
+   *
+   * @param body the {@code ?action=create|update} request body (non-null)
+   * @return the 400 for the first missing/unparseable date, or {@code null} when both are valid
+   */
+  public static NeoResponse validateHeaderDates(JSONObject body) {
+    String transactionDate = BankStatementsHandler.FIELD_TRANSACTION_DATE;
+    String importDate = BankStatementsHandler.FIELD_IMPORT_DATE;
+    if (parseIsoDate(body.optString(transactionDate, null), null) == null) {
+      return NeoResponse.error(400, BankStatementsHandler.MSG_MISSING_FIELD + transactionDate);
+    }
+    if (parseIsoDate(body.optString(importDate, null), null) == null) {
+      return NeoResponse.error(400, BankStatementsHandler.MSG_MISSING_FIELD + importDate);
+    }
+    return null;
+  }
+
+  /**
+   * Validates the {@code ?action=create} body of {@link BankStatementsHandler}: the financial
+   * account, the name, both header dates ({@link #validateHeaderDates}) and at least one line are
+   * required.
+   *
+   * <p>Moved here from the handler (ETP-5447) for the same reason as {@link #validateHeaderDates}:
+   * that class sits on Sonar's per-class method limit (java:S1448) and needed the room for
+   * {@code actionContracts()}. The body keys and messages stay owned by the handler.
+   *
+   * @param body the request body (non-null)
+   * @return the 400 {@code Missing required field: <field>} / {@code At least one line is
+   *         required} for the first rule the body breaks, or {@code null} when it is valid
+   */
+  public static NeoResponse validateCreateBody(JSONObject body) {
+    if (StringUtils.isBlank(body.optString(BankStatementsHandler.PARAM_ACCOUNT_ID, null))) {
+      return NeoResponse.error(400,
+          BankStatementsHandler.MSG_MISSING_FIELD + BankStatementsHandler.PARAM_ACCOUNT_ID);
+    }
+    if (StringUtils.isBlank(body.optString(BankStatementsHandler.FIELD_NAME, null))) {
+      return NeoResponse.error(400,
+          BankStatementsHandler.MSG_MISSING_FIELD + BankStatementsHandler.FIELD_NAME);
+    }
+    NeoResponse invalidDates = validateHeaderDates(body);
+    if (invalidDates != null) return invalidDates;
+    JSONArray lines = body.optJSONArray(BankStatementsHandler.FIELD_LINES);
+    if (lines == null || lines.length() == 0) {
+      return NeoResponse.error(400, BankStatementsHandler.MSG_LINE_REQUIRED);
+    }
+    return null;
   }
 
   /** The leading {@code yyyy-MM-dd} of an ISO string, or {@code null} when it has none. */

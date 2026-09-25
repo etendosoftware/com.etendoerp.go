@@ -780,9 +780,9 @@ public class FinancialAccountHandlerTest {
   // "delete: hard delete" section below). The former archive semantics — soft-delete via
   // IsActive='N', gated by the open-reconciliations guard — moved onto the PUT/PATCH path.
   // The frontend now archives by sending {"active": false}; validateAndEnrichUpdate detects
-  // that via the private isArchivingRequest(body) and runs the guard via the private
-  // guardArchive(id) — neither is package-private any more, so these are exercised only
-  // through validateAndEnrichUpdate, never called directly. Note this pre-hook does NOT persist
+  // that via FinancialAccountSupport.isArchivingRequest(body) (package-private static) and runs
+  // the guard via the handler's private guardArchive(id) — the guard is exercised only through
+  // validateAndEnrichUpdate, never called directly. Note this pre-hook does NOT persist
   // the flip itself (unlike the old archive()) — a passing guard returns null so the generic
   // CRUD persists {"active": false} in its own transaction.
 
