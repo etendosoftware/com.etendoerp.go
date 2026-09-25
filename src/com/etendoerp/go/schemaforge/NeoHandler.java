@@ -22,7 +22,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
@@ -140,33 +139,6 @@ public interface NeoHandler {
    */
   default boolean servesActions() {
     return false;
-  }
-
-  /**
-   * Declares the named actions this handler answers in {@link #handle(NeoContext)} for the given
-   * spec and entity — the {@code /{spec}/{entity}/{id}/action/{name}} routes that are not AD
-   * buttons, e.g. {@code createDraftInvoice} / {@code listInvoices}.
-   *
-   * <p><b>Why this exists (ETP-5447).</b> Such an action is only a string comparison inside the
-   * pre-hook, so neither the configuration nor the Application Dictionary knows it exists: the MCP
-   * catalog ({@code neo_schema({view:"actions"})}) listed the AD buttons and none of these, and
-   * {@code neo_action} fired every action as {@code POST}, so a {@code GET}-only one answered
-   * {@code 404 Action not found}. The declaration is what the MCP catalog and the method selection
-   * of {@code neo_action} read. The REST path is unaffected: it still dispatches on the method the
-   * client sent.</p>
-   *
-   * <p>Declare only actions the handler demonstrably answers for that spec/entity, with the
-   * method and parameters it actually reads. A declared-but-ignored action is the same silent lie
-   * as a declared-but-ignored report parameter (see {@link #reportParameters()}): the agent is
-   * told it can call something that then falls through. A handler that delegates to others
-   * should concatenate their declarations with {@code NeoHeaderActionRouter#declaredActions}.</p>
-   *
-   * @param specName   the spec the entity belongs to (a handler may be shared across specs)
-   * @param entityName the entity the catalog is being built for
-   * @return the declared actions; empty — the default — when the handler answers none
-   */
-  default List<NeoActionContract> declaredActions(String specName, String entityName) {
-    return List.of();
   }
 
   /**

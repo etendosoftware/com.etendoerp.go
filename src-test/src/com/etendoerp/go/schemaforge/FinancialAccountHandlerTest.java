@@ -53,7 +53,6 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -74,7 +73,6 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 import com.etendoerp.go.schemaforge.data.MatchRule;
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
 
@@ -114,10 +112,6 @@ public class FinancialAccountHandlerTest {
   private static final String ES_IBAN = "ES9121000418450200051332";
 
   private FinancialAccountHandler handler;
-
-  /** The bank-statement named actions of the account entity (ETP-5447). */
-  @Mock
-  private BankStatementActionsSupport bankStatementActions;
 
   /**
    * Initializes a Mockito spy of the handler before each test so individual
@@ -786,9 +780,9 @@ public class FinancialAccountHandlerTest {
   // "delete: hard delete" section below). The former archive semantics — soft-delete via
   // IsActive='N', gated by the open-reconciliations guard — moved onto the PUT/PATCH path.
   // The frontend now archives by sending {"active": false}; validateAndEnrichUpdate detects
-  // that via the private isArchivingRequest(body) and runs the guard via the private
-  // guardArchive(id) — neither is package-private any more, so these are exercised only
-  // through validateAndEnrichUpdate, never called directly. Note this pre-hook does NOT persist
+  // that via FinancialAccountSupport.isArchivingRequest(body) (package-private static) and runs
+  // the guard via the handler's private guardArchive(id) — the guard is exercised only through
+  // validateAndEnrichUpdate, never called directly. Note this pre-hook does NOT persist
   // the flip itself (unlike the old archive()) — a passing guard returns null so the generic
   // CRUD persists {"active": false} in its own transaction.
 
@@ -2290,184 +2284,4 @@ public class FinancialAccountHandlerTest {
     assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
   }
 
-
-  // ── ETP-5447: bank-statement named actions on the account entity ─────────
-
-  private static final String ENTITY_ACCOUNT = "account";
-  private static final String CREATE_STATEMENT = "createStatement";
-  private static final String HTTP_POST = "POST";
-  private static final String OTHER_SPEC = "other-spec";
-  private static final String ACTION_PROCESSED = "Processed";
-
-  private NeoContext actionContext(String spec, String action, String method) throws Exception {
-    return NeoContext.builder()
-        .specName(spec)
-        .entityName(ENTITY_ACCOUNT)
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName(action)
-        .httpMethod(method)
-        .recordId(ACC_ID)
-        .requestBody(new JSONObject().put("name", "June"))
-        .build();
-  }
-
-  /**
-   * The POST branch treats any POST as an account create; an ACTION POST such as
-   * createStatement must be answered by the support first and never be validated as a new
-   * financial account.
-   */
-  @Test
-  public void testHandleActionCreateStatementGoesToTheSupportAndSkipsCreateValidation()
-      throws Exception {
-    handler.setBankStatementActions(bankStatementActions);
-    NeoContext ctx = actionContext(SPEC, CREATE_STATEMENT, HTTP_POST);
-    NeoResponse created = NeoResponse.created(new JSONObject().put("id", "BS-1"));
-    when(bankStatementActions.handle(ctx)).thenReturn(created);
-
-    assertSame(created, handler.handle(ctx));
-    verify(bankStatementActions).handle(ctx);
-    verify(handler, never()).validateAndEnrichCreate(any());
-    verify(handler, never()).enterAdminMode();
-  }
-
-  /**
-   * The statement actions are scoped to the financial-account spec: an ACTION on an entity named
-   * "account" of another spec wired to this qualifier never reaches the support, even when the
-   * support would have answered it.
-   */
-  @Test
-  public void testHandleActionOnAForeignSpecNeverConsultsTheSupport() throws Exception {
-    handler.setBankStatementActions(bankStatementActions);
-    NeoContext ctx = actionContext(OTHER_SPEC, CREATE_STATEMENT, HTTP_POST);
-    when(bankStatementActions.handle(any()))
-        .thenReturn(NeoResponse.created(new JSONObject()));
-
-    assertNull(handler.handle(ctx));
-    verify(bankStatementActions, never()).handle(any());
-    verify(bankStatementActions, never()).declaredActions(any());
-    verify(handler, never()).validateAndEnrichCreate(any());
-    verify(handler, never()).enterAdminMode();
-  }
-
-  /** An ACTION the support does not know keeps the pre-ETP-5447 behaviour of handle(). */
-  @Test
-  public void testHandleActionDeclinedBySupportKeepsThePreviousBehaviour() throws Exception {
-    handler.setBankStatementActions(bankStatementActions);
-    NeoContext ctx = actionContext(SPEC, ACTION_PROCESSED, HTTP_POST);
-    when(bankStatementActions.handle(ctx)).thenReturn(null);
-    doReturn(null).when(handler).validateAndEnrichCreate(any());
-
-    assertNull(handler.handle(ctx));
-    verify(bankStatementActions).handle(ctx);
-    verify(handler).validateAndEnrichCreate(any());
-  }
-
-  @Test
-  public void testHandleActionOnAForeignSpecWithAnUnknownActionReturnsNull() throws Exception {
-    handler.setBankStatementActions(bankStatementActions);
-    NeoContext ctx = actionContext(OTHER_SPEC, ACTION_PROCESSED, HTTP_POST);
-
-    assertNull(handler.handle(ctx));
-    verify(bankStatementActions, never()).handle(any());
-    verify(handler, never()).validateAndEnrichCreate(any());
-  }
-
-  @Test
-  public void testHandleActionWithoutSupportDoesNotFail() throws Exception {
-    NeoContext ctx = actionContext(SPEC, CREATE_STATEMENT, "GET");
-
-    assertNull(handler.handle(ctx));
-  }
-
-  @Test
-  public void testHandleNonActionPostNeverAsksTheSupport() throws Exception {
-    handler.setBankStatementActions(bankStatementActions);
-    NeoContext ctx = NeoContext.builder()
-        .specName(SPEC)
-        .entityName(ENTITY_ACCOUNT)
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod(HTTP_POST)
-        .requestBody(validCreateBody())
-        .build();
-    doReturn(null).when(handler).validateAndEnrichCreate(any());
-
-    handler.handle(ctx);
-
-    verify(bankStatementActions, never()).handle(any());
-    verify(handler).validateAndEnrichCreate(any());
-  }
-
-  /**
-   * Without the guard an ACTION POST would reach the create post-hook, read the new STATEMENT's
-   * id as an account id and try to provision it.
-   */
-  @Test
-  public void testAfterHandleActionIsFinalAndNeverProvisions() throws Exception {
-    NeoContext ctx = NeoContext.builder()
-        .specName(SPEC)
-        .entityName(ENTITY_ACCOUNT)
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName(CREATE_STATEMENT)
-        .httpMethod(HTTP_POST)
-        .recordId(ACC_ID)
-        .previousResult(NeoResponse.created(new JSONObject().put("id", "BS-1")))
-        .build();
-
-    assertNull(handler.afterHandle(ctx));
-    verify(handler, never()).enterAdminMode();
-    verify(handler, never()).extractCreatedId(any());
-    verify(handler, never()).loadAccount(any());
-  }
-
-  @Test
-  public void testDeclaredActionsForAccountComeFromTheSupport() {
-    handler.setBankStatementActions(bankStatementActions);
-    List<NeoActionContract> declared =
-        List.of(NeoActionContract.builder(CREATE_STATEMENT).build());
-    when(bankStatementActions.declaredActions(ENTITY_ACCOUNT)).thenReturn(declared);
-
-    assertSame(declared, handler.declaredActions(SPEC, ENTITY_ACCOUNT));
-  }
-
-  @Test
-  public void testDeclaredActionsForAnotherEntityAreEmpty() {
-    handler.setBankStatementActions(bankStatementActions);
-
-    assertTrue(handler.declaredActions(SPEC, "importedBankStatements").isEmpty());
-    verify(bankStatementActions, never()).declaredActions(any());
-  }
-
-  @Test
-  public void testDeclaredActionsForTheAccountOfAnotherSpecAreEmpty() {
-    handler.setBankStatementActions(bankStatementActions);
-    when(bankStatementActions.declaredActions(ENTITY_ACCOUNT))
-        .thenReturn(List.of(NeoActionContract.builder(CREATE_STATEMENT).build()));
-
-    List<NeoActionContract> declared = handler.declaredActions(OTHER_SPEC, ENTITY_ACCOUNT);
-
-    assertNotNull(declared);
-    assertTrue(declared.isEmpty());
-    verify(bankStatementActions, never()).declaredActions(any());
-  }
-
-  @Test
-  public void testDeclaredActionsWithANullSpecAreEmpty() {
-    handler.setBankStatementActions(bankStatementActions);
-
-    assertTrue(handler.declaredActions(null, ENTITY_ACCOUNT).isEmpty());
-    verify(bankStatementActions, never()).declaredActions(any());
-  }
-
-  @Test
-  public void testDeclaredActionsWithoutSupportAreEmpty() {
-    List<NeoActionContract> declared = handler.declaredActions(SPEC, ENTITY_ACCOUNT);
-
-    assertNotNull(declared);
-    assertTrue(declared.isEmpty());
-  }
-
-  @Test
-  public void testServesActions() {
-    assertTrue(handler.servesActions());
-  }
 }

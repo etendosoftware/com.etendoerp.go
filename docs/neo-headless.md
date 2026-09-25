@@ -1551,25 +1551,6 @@ Behavior details (`McpActionsView`):
   column name (`EM_Psd2_Generate Bank Payment`). The fallback chain is now curated `AD_Field` label
   → process name → the column name with its `EM_<module>_` prefix stripped.
 - An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
-- **Handler actions (ETP-5447 / IMP-49).** After the buttons come the named actions the entity's
-  `NeoHandler` declares through `declaredActions(spec, entity)` — routes answered in the pre-hook
-  that are not AD buttons (e.g. `listInvoices`). Each is
-  `{name, action, source:"handler", method, readOnly, description, parameters, invokeVia:"neo_action"}`,
-  where `parameters` is a JSON-schema object (`properties` + `required`) rendered by the same code as
-  the `generate_*` report tools. They count in `actionCount` and `invokableCount`. A declared name
-  that equals a button's `action`/`name` replaces the button entry and carries `shadows:"button"`.
-  The handler lookup is fail-open: a CDI failure or a throwing declaration drops only these entries.
-  How to declare them: `schema_forge/docs/neo-headless-extensibility.md` §2.7.1.
-
-**`neo_action` on a declared action.** The action name is looked up in the handler's declaration
-first. When declared: a missing required parameter is refused with a 422
-(`status`/`error:"validation_error"`/`detail`/`missingParameters`/`hint`) before the handler runs;
-the pre-hook runs with the **declared** HTTP method (on `GET` the `parameters` object is the request
-body and, flattened to strings, the query-param map); the handler's own payload is the result; and
-the call never falls through to the AD button path — a pre-hook that declines is answered with a 500
-*Declared action '<x>' was not handled by its handler*. An undeclared name keeps the button path
-unchanged. Before this, `neo_action` always built a `POST` context, so every GET-only handler action
-ended in `404 Action not found`.
 
 **Button actions pass the real key column (ETP-5447).** `NeoButtonActionHelper.addTabParamsCore`
 puts the record id under `<TableName>_ID` and, when it differs, also under the table's real
@@ -1577,7 +1558,8 @@ primary-key column name (`AD_Column.IsKey = 'Y'`). Classic `FIN_BankStatementPro
 `FIN_Bankstatement_ID` while the table is `FIN_BankStatement`, so with the derived key alone its
 `recordID` was null and the process failed with *id to load is required for loading*. Both keys
 carry the same value, so processes that read the table-name casing are unaffected.
-The catalog advertises `actionParameter:"docAction"` for every list-backed button, but Classic Java
+
+**`docAction` is also passed as `action` (ETP-5447).** The catalog advertises `actionParameter:"docAction"` for every list-backed button, but Classic Java
 processes read the chosen value as `action` (`FIN_BankStatementProcess`:
 `bundle.getParams().get("action")`), so `NeoProcessService.buildBundleParams` also puts `action` =
 `docAction` when `action` is absent — on the Classic `DalBaseProcess`/scheduling bundle path only

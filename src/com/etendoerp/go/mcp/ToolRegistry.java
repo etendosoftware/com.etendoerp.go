@@ -20,7 +20,6 @@ package com.etendoerp.go.mcp;
 import static com.etendoerp.go.mcp.McpJsonSchema.KEY_REQUIRED;
 import static com.etendoerp.go.mcp.McpJsonSchema.booleanProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.buildObjectSchema;
-import static com.etendoerp.go.mcp.McpJsonSchema.declaredParamProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.enumProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.objectArrayProp;
@@ -1078,8 +1077,7 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("id", stringProp("Record ID to act upon"));
     props.put("action", stringProp(
-        "Column name of the button field to trigger (e.g. 'Processed', 'Processing'), or the "
-            + "name of a handler action listed by neo_schema view:\"actions\""));
+        "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
     props.put(McpConstants.PARAM_PARAMETERS, objectProp(
         "Process parameters. For a list-backed button, put the chosen value under the key "
             + "named by the field's 'actionParameter' — e.g. {\"docAction\": \"CO\"}"));
@@ -1097,11 +1095,7 @@ public class ToolRegistry {
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
             + "rules, and neo_get the record first if unsure. "
-            + "Returns {processResult: success|error|warning, processMessage: ...}. "
-            + "view:\"actions\" also lists handler actions (source:\"handler\") with their own "
-            + "'parameters' schema: pass them the same way; the server picks the HTTP method, "
-            + "rejects a missing required parameter before running, and returns the handler's "
-            + "own payload as the result instead of only processResult/processMessage.",
+            + "Returns {processResult: success|error|warning, processMessage: ...}.",
         buildObjectSchema(props,
             List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
   }
@@ -1148,9 +1142,7 @@ public class ToolRegistry {
 
     Map<String, Object> paramProps = new LinkedHashMap<>();
     for (NeoReportParam param : contract.getParameters()) {
-      // ETP-5447: rendering moved to McpJsonSchema so the handler actions of
-      // neo_schema({view:"actions"}) spell a declared parameter exactly as this tool does.
-      paramProps.put(param.getName(), declaredParamProp(param));
+      paramProps.put(param.getName(), reportParamProp(param));
     }
 
     Map<String, Object> parametersProp = objectProp("Report input parameters",
@@ -1174,6 +1166,36 @@ public class ToolRegistry {
         "Output format (default: " + contract.getDefaultFormat() + ")", contract.getFormats()));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+  }
+
+  /**
+   * Render one declared report parameter as a JSON-schema property.
+   *
+   * <p>{@code date} is carried as a string with the expected shape stated in the description:
+   * JSON Schema's own {@code format:"date"} is an annotation most MCP clients do not enforce, and
+   * IMP-16 traced silent corruption to date values whose shape was never written down where an
+   * agent could read it.</p>
+   */
+  private Map<String, Object> reportParamProp(NeoReportParam param) {
+    String description = param.getDescription();
+    if (!param.getAllowedValues().isEmpty()) {
+      return enumProp(description, param.getAllowedValues());
+    }
+    if (NeoReportParam.TYPE_DATE.equals(param.getType())) {
+      Map<String, Object> prop = stringProp(description + " Format: yyyy-MM-dd.");
+      prop.put("format", "date");
+      return prop;
+    }
+    if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
+      return numericProp(TYPE_INTEGER, description);
+    }
+    if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
+      Map<String, Object> prop = new LinkedHashMap<>();
+      prop.put("type", "boolean");
+      prop.put(McpConstants.KEY_DESCRIPTION, description);
+      return prop;
+    }
+    return stringProp(description);
   }
 
   // ── Process/report parameter introspection ─────────────────────────────

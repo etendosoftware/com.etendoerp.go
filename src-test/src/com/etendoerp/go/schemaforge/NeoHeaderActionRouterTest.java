@@ -17,25 +17,17 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link NeoHeaderActionRouter}.
@@ -121,131 +113,5 @@ class NeoHeaderActionRouterTest {
 
     NeoResponse result = invokeDispatch(ctx, null, h1);
     assertEquals(expected, result);
-  }
-
-  // ── declaredActions (ETP-5447) ─────────────────────────────────────────
-
-  private static final String SPEC = "financial-account";
-  private static final String ENTITY = "account";
-  private static final String ACTION_CREATE = "createStatement";
-  private static final String ACTION_LIST = "listStatements";
-
-  /** A delegate whose only behaviour is its declaration; records the spec/entity it was asked. */
-  private static final class DeclaringHandler implements NeoHandler {
-    private final List<NeoActionContract> declared;
-    private String askedSpec;
-    private String askedEntity;
-
-    DeclaringHandler(List<NeoActionContract> declared) {
-      this.declared = declared;
-    }
-
-    @Override
-    public NeoResponse handle(NeoContext context) {
-      return null;
-    }
-
-    @Override
-    public List<NeoActionContract> declaredActions(String specName, String entityName) {
-      askedSpec = specName;
-      askedEntity = entityName;
-      return declared;
-    }
-  }
-
-  private static NeoActionContract contract(String name, String method) {
-    return NeoActionContract.builder(name).method(method).build();
-  }
-
-  @Test
-  void testDeclaredActionsConcatenatesDelegatesInOrder() {
-    NeoActionContract create = contract(ACTION_CREATE, NeoActionContract.METHOD_POST);
-    NeoActionContract list = contract(ACTION_LIST, NeoActionContract.METHOD_GET);
-    NeoActionContract lines = contract("lines", NeoActionContract.METHOD_GET);
-
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY,
-        new DeclaringHandler(List.of(create, list)), new DeclaringHandler(List.of(lines)));
-
-    assertEquals(Arrays.asList(create, list, lines), combined);
-  }
-
-  @Test
-  void testDeclaredActionsDeduplicatesByNameAndFirstDelegateWins() {
-    NeoActionContract firstCreate = contract(ACTION_CREATE, NeoActionContract.METHOD_POST);
-    NeoActionContract secondCreate = contract(ACTION_CREATE, NeoActionContract.METHOD_GET);
-    NeoActionContract list = contract(ACTION_LIST, NeoActionContract.METHOD_GET);
-
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY,
-        new DeclaringHandler(List.of(firstCreate)),
-        new DeclaringHandler(List.of(secondCreate, list)));
-
-    assertEquals(2, combined.size());
-    assertSame(firstCreate, combined.get(0));
-    assertEquals(NeoActionContract.METHOD_POST, combined.get(0).getMethod());
-    assertSame(list, combined.get(1));
-  }
-
-  @Test
-  void testDeclaredActionsDeduplicatesWithinASingleDelegate() {
-    NeoActionContract first = contract(ACTION_CREATE, NeoActionContract.METHOD_POST);
-    NeoActionContract duplicate = contract(ACTION_CREATE, NeoActionContract.METHOD_GET);
-
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY,
-        new DeclaringHandler(List.of(first, duplicate)));
-
-    assertEquals(List.of(first), combined);
-  }
-
-  @Test
-  void testDeclaredActionsSkipsNullDelegatesNullListsAndNullEntries() {
-    NeoActionContract create = contract(ACTION_CREATE, NeoActionContract.METHOD_POST);
-    List<NeoActionContract> withNullEntry = new ArrayList<>();
-    withNullEntry.add(null);
-    withNullEntry.add(create);
-
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY,
-        null, new DeclaringHandler(null), new DeclaringHandler(withNullEntry));
-
-    assertEquals(List.of(create), combined);
-  }
-
-  @Test
-  void testDeclaredActionsReturnsEmptyForNullDelegatesArray() {
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY,
-        (NeoHandler[]) null);
-
-    assertNotNull(combined);
-    assertTrue(combined.isEmpty());
-  }
-
-  @Test
-  void testDeclaredActionsReturnsEmptyForNoDelegates() {
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY);
-
-    assertNotNull(combined);
-    assertTrue(combined.isEmpty());
-  }
-
-  @Test
-  void testDeclaredActionsReturnsEmptyForDefaultDeclarations() {
-    NeoHandler plain = context -> null;
-
-    List<NeoActionContract> combined = NeoHeaderActionRouter.declaredActions(SPEC, ENTITY,
-        plain);
-
-    assertTrue(combined.isEmpty());
-  }
-
-  @Test
-  void testDeclaredActionsPassesSpecAndEntityToEachDelegate() {
-    DeclaringHandler first = new DeclaringHandler(List.of());
-    DeclaringHandler second = new DeclaringHandler(List.of());
-
-    NeoHeaderActionRouter.declaredActions(SPEC, ENTITY, first, second);
-
-    assertEquals(SPEC, first.askedSpec);
-    assertEquals(ENTITY, first.askedEntity);
-    assertEquals(SPEC, second.askedSpec);
-    assertEquals(ENTITY, second.askedEntity);
   }
 }

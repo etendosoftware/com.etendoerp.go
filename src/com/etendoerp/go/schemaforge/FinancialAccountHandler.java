@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import javax.inject.Inject;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -48,7 +47,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
@@ -204,32 +202,8 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
 
-  /**
-   * The bank-statement named actions of the {@code account} entity (ETP-5447): createStatement,
-   * previewStatement and importStatement (reads use the generic list/get). See {@link BankStatementActionsSupport}.
-   */
-  @Inject
-  private BankStatementActionsSupport bankStatementActions;
-
-  /** Package-private seam so unit tests can supply a mocked {@link BankStatementActionsSupport}. */
-  void setBankStatementActions(BankStatementActionsSupport bankStatementActions) {
-    this.bankStatementActions = bankStatementActions;
-  }
-
   @Override
   public NeoResponse handle(NeoContext context) {
-    // ETP-5447 — must run before everything below: the POST branch treats ANY POST as an account
-    // create, so an ACTION POST (e.g. createStatement) would otherwise be validated as a new
-    // financial account. An ACTION the support does not know keeps today's behaviour.
-    // Scoped to the financial-account spec: another spec wired to this qualifier with an entity
-    // named "account" must not receive the statement actions.
-    if (NeoEndpointType.ACTION.equals(context.getEndpointType()) && bankStatementActions != null
-        && SPEC.equals(context.getSpecName())) {
-      NeoResponse actionResult = bankStatementActions.handle(context);
-      if (actionResult != null) {
-        return actionResult;
-      }
-    }
     if (!SPEC.equals(context.getSpecName())) {
       return null;
     }
@@ -263,25 +237,6 @@ public class FinancialAccountHandler implements NeoHandler {
     }
   }
 
-  /**
-   * ETP-5447 — the bank-statement named actions of the {@code account} entity, for the MCP
-   * catalog ({@code neo_schema view:"actions"}) and {@code neo_action}'s method selection.
-   */
-  @Override
-  public List<NeoActionContract> declaredActions(String specName, String entityName) {
-    if (!SPEC.equals(specName) || !ENTITY_ACCOUNT.equals(entityName)
-        || bankStatementActions == null) {
-      return List.of();
-    }
-    return bankStatementActions.declaredActions(ENTITY_ACCOUNT);
-  }
-
-  /** The {@code account} entity answers ACTION requests (the bank-statement actions, ETP-5447). */
-  @Override
-  public boolean servesActions() {
-    return true;
-  }
-
   // ---------------------------------------------------------------------------
   // Post-hook: auto-assign default payment methods by account type on create
   // ---------------------------------------------------------------------------
@@ -296,12 +251,6 @@ public class FinancialAccountHandler implements NeoHandler {
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    // ETP-5447 — an ACTION response (a bank-statement action) is final. Without this guard an
-    // ACTION POST would fall through to the create post-hook below, read the new STATEMENT's id
-    // as an account id and try to provision it.
-    if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
-      return null;
-    }
     if (!SPEC.equals(context.getSpecName())) {
       return null;
     }

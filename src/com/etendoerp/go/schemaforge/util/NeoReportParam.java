@@ -42,9 +42,6 @@ import java.util.List;
  *
  * <p>Type names are JSON Schema types, plus {@code date} for a {@code yyyy-MM-dd} string. They match
  * the vocabulary {@code AgingReportHandler} was already using in its GET descriptor.</p>
- *
- * <p>Also the parameter vocabulary of {@link NeoActionContract} (ETP-5447), which is why it has
- * {@link #TYPE_ARRAY} and {@link #TYPE_OBJECT} although no report reads either today.</p>
  */
 public final class NeoReportParam {
 
@@ -63,17 +60,6 @@ public final class NeoReportParam {
    * was never stated anywhere an agent could read it.
    */
   public static final String TYPE_DATE = "date";
-  /**
-   * A JSON array (ETP-5447, for {@link NeoActionContract} inputs such as a list of lines). The
-   * shape of its items is stated in the description: the schema renders it as a JSON Schema
-   * {@code array} of {@code object} items without deeper typing.
-   */
-  public static final String TYPE_ARRAY = "array";
-  /**
-   * A JSON object (ETP-5447). Its shape is stated in the description: the schema renders it as a
-   * JSON Schema {@code object} without declaring its properties.
-   */
-  public static final String TYPE_OBJECT = "object";
 
   private final String name;
   private final String type;

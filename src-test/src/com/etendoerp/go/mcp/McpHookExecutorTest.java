@@ -20,15 +20,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-
-import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -42,7 +39,6 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link McpHookExecutor}.
@@ -51,8 +47,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * {@code neoResponseToMcpResult}, {@code runPreHook}, {@code runPostHook}, and
  * the early-exit paths of {@code resolveEntityHandler} (blank/null qualifier).
  * The CDI lookup path of {@code resolveEntityHandler} is covered by integration tests.
- * {@code buildActionHookContext} and {@code buildDeclaredActionHookContext} are covered here
- * with a statically mocked {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
+ * {@code buildActionHookContext} is covered here with a statically mocked
+ * {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
  */
 public class McpHookExecutorTest {
 
@@ -319,88 +315,6 @@ public class McpHookExecutorTest {
       assertEquals("CO", ctx.getRequestBody().getString("docAction"));
       assertEquals(adTab, ctx.getAdTab());
       assertEquals(sfEntity, ctx.getSfEntity());
-    }
-  }
-
-  // ── buildDeclaredActionHookContext (ETP-5447) ─────────────────────────
-
-  private static final String SPEC_FA = "financial-account";
-  private static final String ENTITY_ACCOUNT = "account";
-  private static final String ACC_ID = "ACC-1";
-  private static final String LIST_STATEMENTS = "listStatements";
-
-  @Test
-  public void testBuildDeclaredActionHookContextCarriesContractMethodAndQueryParams()
-      throws Exception {
-    JSONObject params = new JSONObject();
-    params.put("limit", "5");
-    Map<String, String> queryParams = Map.of("limit", "5");
-    SFEntity sfEntity = mock(SFEntity.class);
-    Tab adTab = mock(Tab.class);
-    when(sfEntity.getADTab()).thenReturn(adTab);
-    NeoActionContract contract = NeoActionContract.builder(LIST_STATEMENTS).method("GET").build();
-
-    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
-      obContextMock.when(OBContext::getOBContext).thenReturn(null);
-
-      NeoContext ctx = McpHookExecutor.buildDeclaredActionHookContext(SPEC_FA, ENTITY_ACCOUNT,
-          ACC_ID, contract, params, queryParams, sfEntity);
-
-      assertEquals("GET", ctx.getHttpMethod());
-      assertEquals(NeoEndpointType.ACTION, ctx.getEndpointType());
-      assertEquals(LIST_STATEMENTS, ctx.getFieldName());
-      assertEquals(SPEC_FA, ctx.getSpecName());
-      assertEquals(ENTITY_ACCOUNT, ctx.getEntityName());
-      assertEquals(ACC_ID, ctx.getRecordId());
-      assertSame(params, ctx.getRequestBody());
-      assertEquals(queryParams, ctx.getQueryParams());
-      assertTrue(ctx.isMcpOrigin());
-      // The AD tab is no longer a separate argument: it is read off the entity.
-      assertSame(adTab, ctx.getAdTab());
-      assertSame(sfEntity, ctx.getSfEntity());
-    }
-  }
-
-  @Test
-  public void testBuildDeclaredActionHookContextTurnsNullQueryParamsIntoAnEmptyMap()
-      throws Exception {
-    SFEntity sfEntity = mock(SFEntity.class);
-    when(sfEntity.getADTab()).thenReturn(null);
-    NeoActionContract contract = NeoActionContract.builder("createStatement").method("POST")
-        .build();
-
-    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
-      obContextMock.when(OBContext::getOBContext).thenReturn(null);
-
-      NeoContext ctx = McpHookExecutor.buildDeclaredActionHookContext(SPEC_FA, ENTITY_ACCOUNT,
-          ACC_ID, contract, new JSONObject(), null, sfEntity);
-
-      assertEquals("POST", ctx.getHttpMethod());
-      assertEquals("createStatement", ctx.getFieldName());
-      assertNull(ctx.getAdTab());
-      assertNotNull(ctx.getQueryParams());
-      assertTrue(ctx.getQueryParams().isEmpty());
-    }
-  }
-
-  @Test
-  public void testBuildActionHookContextSevenArgDefaultsToPostWithEmptyQueryParams()
-      throws Exception {
-    JSONObject params = new JSONObject();
-
-    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
-      obContextMock.when(OBContext::getOBContext).thenReturn(null);
-
-      NeoContext ctx = McpHookExecutor.buildActionHookContext(SPEC_FA, ENTITY_ACCOUNT, ACC_ID,
-          LIST_STATEMENTS, params, null, null);
-
-      assertEquals("POST", ctx.getHttpMethod());
-      assertNotNull(ctx.getQueryParams());
-      assertTrue(ctx.getQueryParams().isEmpty());
-      assertEquals(NeoEndpointType.ACTION, ctx.getEndpointType());
-      assertEquals(LIST_STATEMENTS, ctx.getFieldName());
-      assertSame(params, ctx.getRequestBody());
-      assertTrue(ctx.isMcpOrigin());
     }
   }
 }

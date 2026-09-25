@@ -17,35 +17,30 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-import javax.inject.Inject;
 import javax.inject.Named;
-
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler of the {@code importedBankStatements} and {@code bankStatementLines} entities of the
  * {@code financial-account} W spec (ETP-5447), registered via
  * {@code ETGO_SF_ENTITY.Java_Qualifier = "bankStatementEntityHandler"}.
  *
- * <p><b>Named actions.</b> ACTION requests on {@code importedBankStatements} (update, process,
- * reactivate, delete — all POST) are answered by {@link BankStatementActionsSupport}, which reuses
- * {@link BankStatementsHandler} — the engine the SPA calls at {@code /sws/neo/bank-statements}.</p>
- *
  * <p><b>Generic CRUD writes are refused (405).</b> A generic create, update or delete on either
- * entity goes straight to the DAL and skips every rule the engine enforces. A live probe on
- * 2026-09-25 showed the damage: a generic create stamped TODAY on both header dates (the required
- * dates of ETP-5447 never reach it), a line's date could not be set, {@code referenceNo} became
- * mandatory, and deleting a statement with lines failed with a Hibernate cascade error because
- * {@code BankStatementLineAggregateHandler} saves the parent while the cascade removes it. The
- * refusal names the action to use instead, so an agent can correct itself. The SPA never uses
- * these generic paths — all its statement traffic goes to {@code /sws/neo/bank-statements}.</p>
+ * entity goes straight to the DAL and skips every rule the bank-statements engine
+ * ({@link BankStatementsHandler}, served at {@code /sws/neo/bank-statements}) enforces. A live probe
+ * on 2026-09-25 showed the damage: a generic create stamped TODAY on both header dates (the
+ * required dates of ETP-5447 never reach it), a line's date could not be set, {@code referenceNo}
+ * became mandatory, and deleting a statement with lines failed with a Hibernate cascade error
+ * because {@code BankStatementLineAggregateHandler} saves the parent while the cascade removes it.
+ * The refusal points the caller at the bank-statements actions instead, so an agent can correct
+ * itself. The SPA never uses these generic paths — all its statement traffic goes to
+ * {@code /sws/neo/bank-statements}.</p>
  *
- * <p>Reads (list, get, defaults, selectors) pass through to the generic service untouched: they
- * are how an agent reads statements and their lines, so no named read action exists.</p>
+ * <p>Everything else passes through to the generic service untouched: reads (list, get), defaults,
+ * selectors and any non-CRUD endpoint. The HTTP method is compared case-insensitively; a request
+ * without a method passes through.</p>
  *
  * <p>Note: carrying a {@code Java_Qualifier} exempts these entities from {@code NeoFieldFilter}'s
  * IMP-28 rejection of read-only fields on create. It is irrelevant here, because every generic
@@ -54,7 +49,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
 @Named("bankStatementEntityHandler")
 public class BankStatementEntityHandler implements NeoHandler {
 
-  static final String ENTITY_STATEMENTS = BankStatementActionsSupport.ENTITY_STATEMENTS;
+  static final String ENTITY_STATEMENTS = "importedBankStatements";
   static final String ENTITY_LINES = "bankStatementLines";
 
   private static final String METHOD_POST = "POST";
@@ -62,57 +57,41 @@ public class BankStatementEntityHandler implements NeoHandler {
   private static final Set<String> WRITE_METHODS = Set.of(METHOD_POST, "PUT", "PATCH",
       METHOD_DELETE);
 
+  /** Where a caller finds the supported way to write bank statements. */
+  private static final String ACTIONS_HINT =
+      "the bank-statements actions (neo_schema({spec:\"bank-statements\", view:\"actions\"}))";
+
   static final String MSG_STATEMENT_CREATE_DISABLED =
-      "Bank statements are created with the account action 'createStatement' (neo_action on"
-          + " financial-account/account, id = the financial account), or from a file with"
-          + " 'importStatement'. Generic create is disabled because it bypasses the required"
-          + " dates, the BSF document type and line validation.";
+      "Bank statements are created through " + ACTIONS_HINT + ". Generic create on this entity is"
+          + " disabled because it bypasses the required dates, the BSF document type and line"
+          + " validation.";
   static final String MSG_STATEMENT_UPDATE_DISABLED =
-      "Edit a bank statement with neo_action 'update' on financial-account/importedBankStatements"
-          + " (id = the statement; 'reactivate' it first when it is processed), or change its"
-          + " state with 'process' / 'reactivate'. Generic update is disabled because it bypasses"
-          + " the required dates and line validation.";
+      "Bank statements are changed through " + ACTIONS_HINT + ". Generic update on this entity is"
+          + " disabled because it bypasses the required dates and line validation.";
   static final String MSG_STATEMENT_DELETE_DISABLED =
-      "Delete a bank statement with neo_action 'delete' on financial-account/importedBankStatements"
-          + " (id = the statement). Generic delete is disabled because it bypasses the draft,"
-          + " matched-line and bank-connection checks.";
+      "Bank statements are deleted through " + ACTIONS_HINT + ". Generic delete on this entity is"
+          + " disabled because it bypasses the draft, matched-line and bank-connection checks.";
   static final String MSG_LINES_WRITE_DISABLED =
-      "Edit a statement's lines with neo_action 'update' on financial-account/importedBankStatements"
-          + " (id = the statement; it replaces the unmatched lines). Generic writes on"
-          + " bankStatementLines are disabled because they bypass line validation.";
-
-  @Inject
-  private BankStatementActionsSupport bankStatementActions;
-
-  /** Package-private seam so unit tests can supply a mocked {@link BankStatementActionsSupport}. */
-  void setBankStatementActions(BankStatementActionsSupport bankStatementActions) {
-    this.bankStatementActions = bankStatementActions;
-  }
+      "Bank statement lines are changed through " + ACTIONS_HINT + ". Generic writes on this"
+          + " entity are disabled because they bypass line validation.";
 
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoEndpointType endpointType = context.getEndpointType();
-    String entityName = context.getEntityName();
-    if (NeoEndpointType.ACTION.equals(endpointType)) {
-      return ENTITY_STATEMENTS.equals(entityName) && bankStatementActions != null
-          ? bankStatementActions.handle(context)
-          : null;
-    }
     boolean crud = endpointType == null || NeoEndpointType.CRUD.equals(endpointType);
     String rawMethod = context.getHttpMethod();
-    // Normalized (case-insensitive, like BankStatementActionsSupport) and null-checked first:
-    // Set.of(...).contains(null) throws.
+    // Normalized (case-insensitive) and null-checked first: Set.of(...).contains(null) throws.
     String method = rawMethod == null ? null : rawMethod.toUpperCase(Locale.ROOT);
     if (crud && method != null && WRITE_METHODS.contains(method)) {
-      return refuseGenericWrite(entityName, method);
+      return refuseGenericWrite(context.getEntityName(), method);
     }
-    // Reads, defaults and selectors flow through to the generic service.
+    // Reads, defaults, selectors and non-CRUD endpoints flow through to the generic service.
     return null;
   }
 
   /**
-   * The 405 for a generic write, naming the action that does the job. 405 is what the MCP maps to
-   * {@code method_not_allowed}, a 4xx the agent can act on by switching tools.
+   * The 405 for a generic write. 405 is what the MCP maps to {@code method_not_allowed}, a 4xx the
+   * agent can act on by switching tools.
    *
    * @return the refusal, or {@code null} for an entity this handler does not guard
    */
@@ -135,19 +114,5 @@ public class BankStatementEntityHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     return null;
-  }
-
-  @Override
-  public List<NeoActionContract> declaredActions(String specName, String entityName) {
-    if (!ENTITY_STATEMENTS.equals(entityName) || bankStatementActions == null) {
-      return List.of();
-    }
-    return bankStatementActions.declaredActions(ENTITY_STATEMENTS);
-  }
-
-  /** {@code importedBankStatements} answers ACTION requests (ETP-5447). */
-  @Override
-  public boolean servesActions() {
-    return true;
   }
 }
