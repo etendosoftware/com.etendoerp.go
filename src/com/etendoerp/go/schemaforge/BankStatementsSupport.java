@@ -385,6 +385,32 @@ public final class BankStatementsSupport {
     return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
   }
 
+  /**
+   * ETP-5447 — both header dates of a manual statement are required. Returns the 400
+   * {@code Missing required field: transactionDate|importDate} for the first one that is
+   * blank OR unparseable, else {@code null}. An unparseable value is treated as missing
+   * because persisting it would need a substitute, and the substitute used to be
+   * {@code new Date()}: a cleared field silently became TODAY. Shared by
+   * {@link BankStatementsHandler}'s create and update actions.
+   *
+   * <p>Lives here rather than in the handler only to keep that class under Sonar's per-class
+   * method limit (java:S1448); the body keys and the message prefix stay owned by the handler.
+   *
+   * @param body the {@code ?action=create|update} request body (non-null)
+   * @return the 400 for the first missing/unparseable date, or {@code null} when both are valid
+   */
+  public static NeoResponse validateHeaderDates(JSONObject body) {
+    String transactionDate = BankStatementsHandler.FIELD_TRANSACTION_DATE;
+    String importDate = BankStatementsHandler.FIELD_IMPORT_DATE;
+    if (parseIsoDate(body.optString(transactionDate, null), null) == null) {
+      return NeoResponse.error(400, BankStatementsHandler.MSG_MISSING_FIELD + transactionDate);
+    }
+    if (parseIsoDate(body.optString(importDate, null), null) == null) {
+      return NeoResponse.error(400, BankStatementsHandler.MSG_MISSING_FIELD + importDate);
+    }
+    return null;
+  }
+
   /** The leading {@code yyyy-MM-dd} of an ISO string, or {@code null} when it has none. */
   private static LocalDate parseCalendarDayPrefix(String iso) {
     try {

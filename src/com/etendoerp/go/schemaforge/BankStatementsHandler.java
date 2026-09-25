@@ -30,6 +30,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateHeaderDates;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
@@ -124,11 +125,13 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String FIELD_REFERENCE = "reference";
   private static final String FIELD_PROCESS = "process";
   private static final String FIELD_PROCESSED = "processed";
-  private static final String FIELD_TRANSACTION_DATE = "transactionDate";
-  private static final String FIELD_IMPORT_DATE = "importDate";
+  // Package-private (not private): BankStatementsSupport#validateHeaderDates reads the same body
+  // keys and message prefix this class uses, instead of re-declaring the literals (ETP-5447).
+  static final String FIELD_TRANSACTION_DATE = "transactionDate";
+  static final String FIELD_IMPORT_DATE = "importDate";
   private static final String FIELD_ID = "id";
   private static final String DEFAULT_REFERENCE = "**";
-  private static final String MSG_MISSING_FIELD = "Missing required field: ";
+  static final String MSG_MISSING_FIELD = "Missing required field: ";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
   private static final String MSG_STATEMENT_NOT_FOUND = "Bank statement not found: ";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
@@ -672,7 +675,8 @@ public class BankStatementsHandler implements NeoHandler {
    * its lines with the ones in the body. Same body shape as create plus the
    * {@code "id"} of the statement to edit. Only drafts can be edited; passing
    * {@code "process": true} also runs it after saving. {@code name} and both header
-   * dates are required, exactly as on create (see {@link #validateHeaderDates}).
+   * dates are required, exactly as on create
+   * (see {@link BankStatementsSupport#validateHeaderDates}).
    */
   private NeoResponse handleUpdate(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -903,23 +907,6 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5447 — both header dates of a manual statement are required. Returns the 400
-   * {@code Missing required field: transactionDate|importDate} for the first one that is
-   * blank OR unparseable, else {@code null}. An unparseable value is treated as missing
-   * because persisting it would need a substitute, and the substitute used to be
-   * {@code new Date()}: a cleared field silently became TODAY. Shared by create and update.
-   */
-  static NeoResponse validateHeaderDates(JSONObject body) {
-    if (parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), null) == null) {
-      return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_TRANSACTION_DATE);
-    }
-    if (parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), null) == null) {
-      return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_IMPORT_DATE);
-    }
-    return null;
-  }
-
-  /**
    * Builds a {@link FIN_BankStatement} for the manual-create flow from the
    * request body. Same header fields as Classic's manual statement: name,
    * import/transaction dates, file name and notes. Name and both dates are
@@ -945,7 +932,8 @@ public class BankStatementsHandler implements NeoHandler {
    * manual create and update flows so both treat the header identically. Blank
    * file name / notes clear the field, mirroring an edit that removed them. The
    * dates have no fallback: both callers validate them first
-   * ({@link #validateHeaderDates}), so a missing date is a 400, never TODAY (ETP-5447).
+   * ({@link BankStatementsSupport#validateHeaderDates}), so a missing date is a 400,
+   * never TODAY (ETP-5447).
    */
   private void applyEditableHeader(FIN_BankStatement statement, JSONObject body) {
     String name = body.optString(FIELD_NAME, null);

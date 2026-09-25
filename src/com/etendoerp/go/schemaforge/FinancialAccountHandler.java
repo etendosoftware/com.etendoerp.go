@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -107,10 +106,6 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
-  /** DAL property of {@code EM_ETGO_Amount_Tolerance} — Etendo drops the "EM_" module prefix. */
-  private static final String FIELD_AMOUNT_TOLERANCE = "eTGOAmountTolerance";
-  /** A tolerance is a percentage OF the statement line, so beyond 100 % it stops meaning anything. */
-  private static final int AMOUNT_TOLERANCE_MAX_PCT = 100;
   /** Salt Edge provider chosen at offline creation (optional); persisted so a later bank connect
    *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
    *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
@@ -170,8 +165,9 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_IS_DEFAULT = "isDefault";
   private static final String FIELD_MASKED_PAN = "maskedPan";
   /** Archived-vs-active flag. {@code Isactive} has no ETGO_SF_FIELD row on this entity, so the
-   *  generic CRUD response would not carry it — but the list's "Inactivas" filter needs it. */
-  private static final String FIELD_ACTIVE = "active";
+   *  generic CRUD response would not carry it — but the list's "Inactivas" filter needs it.
+   *  Package-private so {@link FinancialAccountSupport#isArchivingRequest} reads the same body key. */
+  static final String FIELD_ACTIVE = "active";
   /**
    * The account's difference GL item, under the SAME flat names the {@code financial-accounts-page}
    * R spec emits. The W record carries the raw DAL property ({@code aprmGlitemDiff}) instead, so
@@ -200,9 +196,10 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
   private static final String TYPE_CARD = "CA";
-  private static final int NAME_MAX_LENGTH = 60;
-  private static final int IBAN_MAX_LENGTH = 34;
-  private static final int SWIFT_MAX_LENGTH = 20;
+  /** Package-private: {@link FinancialAccountSupport#validateLengths} enforces the same limits. */
+  static final int NAME_MAX_LENGTH = 60;
+  static final int IBAN_MAX_LENGTH = 34;
+  static final int SWIFT_MAX_LENGTH = 20;
 
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
@@ -602,11 +599,11 @@ public class FinancialAccountHandler implements NeoHandler {
     String iban = StringUtils.trimToEmpty(FinancialAccountCountrySupport.bodyString(body, FIELD_IBAN));
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
-    NeoResponse lengthError = validateLengths(name, iban, swift);
+    NeoResponse lengthError = FinancialAccountSupport.validateLengths(name, iban, swift);
     if (lengthError != null) {
       return lengthError;
     }
-    NeoResponse toleranceError = validateAmountTolerance(body);
+    NeoResponse toleranceError = FinancialAccountSupport.validateAmountTolerance(body);
     if (toleranceError != null) {
       return toleranceError;
     }
@@ -676,7 +673,7 @@ public class FinancialAccountHandler implements NeoHandler {
     // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
     // that used to gate the soft-archive must gate this instead, before the generic CRUD persists
     // the flip. Reuses the same has()/isNull() body-inspection idiom as the IBAN check below.
-    if (isArchivingRequest(body)) {
+    if (FinancialAccountSupport.isArchivingRequest(body)) {
       NeoResponse archiveGuardError = guardArchive(id);
       if (archiveGuardError != null) {
         return archiveGuardError;
@@ -696,7 +693,7 @@ public class FinancialAccountHandler implements NeoHandler {
     if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
     }
-    NeoResponse toleranceError = validateAmountTolerance(body);
+    NeoResponse toleranceError = FinancialAccountSupport.validateAmountTolerance(body);
     if (toleranceError != null) {
       return toleranceError;
     }
@@ -817,11 +814,6 @@ public class FinancialAccountHandler implements NeoHandler {
   // Archive guard (moved here from the former DELETE-based archive(); ETP-4871)
   // ---------------------------------------------------------------------------
 
-  /** {@code true} when the incoming body explicitly sets {@code active} to {@code false}. */
-  private boolean isArchivingRequest(JSONObject body) {
-    return body.has(FIELD_ACTIVE) && !body.isNull(FIELD_ACTIVE) && !body.optBoolean(FIELD_ACTIVE, true);
-  }
-
   /**
    * Blocks an archive (soft-delete via {@code active=false}) the same way the old DELETE-based
    * {@code archive()} used to: an account with open reconciliations cannot be archived. Loads the
@@ -881,48 +873,14 @@ public class FinancialAccountHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
-
-  /**
-   * Rejects an amount tolerance outside 0…100. Returns {@code null} when the body does not carry the
-   * field at all, so a partial update that never mentions it is untouched.
-   *
-   * <p>Enforced here and not only in the edit modal because this is a generic W spec: anything
-   * holding a token can PUT {@code eTGOAmountTolerance} straight at the entity. The value is read as
-   * a PERCENTAGE of the statement line by both the automatch engine
-   * ({@code MatchTolerances.signalGroupTolerance}) and the difference posting
-   * ({@code ReconciliationDifferenceSupport.differenceLimit}); at 100 % or more the latter's gate
-   * would authorise posting an entire statement line of any size to a G/L item, so this is a
-   * boundary, not a nicety.
-   */
-  private NeoResponse validateAmountTolerance(JSONObject body) {
-    if (body == null || !body.has(FIELD_AMOUNT_TOLERANCE)
-        || body.isNull(FIELD_AMOUNT_TOLERANCE)) {
-      return null;
-    }
-    String raw = StringUtils.trimToEmpty(body.optString(FIELD_AMOUNT_TOLERANCE, ""));
-    if (raw.isEmpty()) {
-      return null;
-    }
-    BigDecimal pct;
-    try {
-      pct = new BigDecimal(raw);
-    } catch (NumberFormatException e) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Amount tolerance must be a number: " + raw);
-    }
-    if (pct.signum() < 0
-        || pct.compareTo(BigDecimal.valueOf(AMOUNT_TOLERANCE_MAX_PCT)) > 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Amount tolerance must be a percentage between 0 and " + AMOUNT_TOLERANCE_MAX_PCT
-              + " (received " + pct.toPlainString() + ").");
-    }
-    return null;
-  }
+  // The pure body validators (validateAmountTolerance, validateLengths, isArchivingRequest) live in
+  // FinancialAccountSupport since ETP-5447, to keep this class under java:S1448.
 
   /**
    * Validates the name an update is trying to set. A {@code null} name means the caller never sent
    * the field, so a partial update that does not rename the account skips these checks entirely —
-   * which is why this cannot reuse {@link #validateLengths}, whose blank check is unconditional.
+   * which is why this cannot reuse {@link FinancialAccountSupport#validateLengths}, whose blank
+   * check is unconditional.
    */
   private NeoResponse validateRenamedName(String name, String id) {
     if (name == null) {
@@ -937,19 +895,6 @@ public class FinancialAccountHandler implements NeoHandler {
     if (nameExists(name, id)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "An account with this name already exists");
-    }
-    return null;
-  }
-
-  private NeoResponse validateLengths(String name, String iban, String swift) {
-    if (StringUtils.isBlank(name)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
-    }
-    if (name.length() > NAME_MAX_LENGTH) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
-    }
-    if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
     }
     return null;
   }
