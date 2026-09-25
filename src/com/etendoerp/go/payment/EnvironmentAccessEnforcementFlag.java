@@ -30,7 +30,9 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  *
  * <p><b>Enforcement is the default.</b> {@link GoFeatureFlags#isEnabled} answers {@code false}
  * for an unconfigured flag, an unreachable control plane and any evaluation error, and
- * {@code false} here means "not switched off". Only an explicit {@code true} stops the refusal.
+ * {@code false} here means "not switched off". Only a value that resolves to {@code true} stops
+ * the refusal — locally {@code true}, {@code Y}, {@code yes} or {@code 1} (case insensitive,
+ * trimmed); see {@link GoFeatureFlags#FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF}.
  */
 public final class EnvironmentAccessEnforcementFlag {
 

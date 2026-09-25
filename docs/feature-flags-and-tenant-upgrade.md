@@ -235,7 +235,10 @@ The commercial access check — HTTP 402 once a demo trial has expired or a subs
 grace has elapsed — went live with ETP-5443 with no off switch. This flag is that switch. It is
 **phrased as an OFF switch on purpose**: every failure in the table above resolves to `false`, and
 `false` here means *still enforcing*. An unset key, an unreachable ConfigCat, a wrong SDK key or an
-evaluation error therefore all keep today's behaviour; only an explicit `true` stops the refusal.
+evaluation error therefore all keep today's behaviour; only the flag resolving to `true` — on ConfigCat the boolean setting served as `true`; locally
+(`etendo.go.flags.environment-access-enforcement-off` / `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF`)
+any of `true`, `Y`, `yes`, `1`, case-insensitive and trimmed. `false`, `N`, `no`, `0` keep
+enforcing, and any other value is a `PARSE_ERROR` that keeps enforcing too.
 A positively phrased "enforcement enabled" flag would do the opposite — a missing key would silently
 open every blocked tenant — so do not flip the polarity.
 

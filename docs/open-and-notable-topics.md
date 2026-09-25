@@ -458,7 +458,9 @@ release** — an SPA older than the backend still parses it.
   never call the guard, and none of them authenticates through `JwtAuthUtils` (checked in ETP-5047:
   `EtendoGoJwtServlet` only reads `JwtAuthUtils`' claim-name constants).
 - **Kill switch** `environment-access-enforcement-off` (backend-only, per `clientId` via ConfigCat):
-  enforcing unless explicitly `true`; when on, the would-be denial is logged at INFO and allowed.
+  enforcing unless the flag resolves to `true` (locally `true`/`Y`/`yes`/`1`, case-insensitive;
+  anything else, unset or unreadable keeps enforcing); when on, the would-be denial is logged at
+  INFO and allowed, and the environment list reports `accessState` as `ALLOWED` for that tenant.
   See `feature-flags-and-tenant-upgrade.md` §1.
 - **A new tenant servlet must authenticate through `NeoAuthenticator` or
   `JwtAuthUtils.authenticateOrFail`** to inherit the check; one that builds its own `OBContext`

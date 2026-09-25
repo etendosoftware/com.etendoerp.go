@@ -149,8 +149,11 @@ public final class GoFeatureFlags {
    * <p><b>Phrased as an OFF switch on purpose, because every failure of this class resolves to
    * {@code false}.</b> Enforcement is live from deploy and stays live when the flag is not
    * configured, when ConfigCat is unreachable, when the SDK key is wrong or when evaluation
-   * throws: all of those read "not switched off". Only an explicit {@code true} disables the
-   * refusal. A positively phrased "enforcement enabled" flag would do the opposite — a missing key
+   * throws: all of those read "not switched off". Only a value that resolves to {@code true}
+   * disables the refusal: on ConfigCat the boolean setting served as {@code true}; locally
+   * ({@link PropertiesFeatureProvider}) {@code true}, {@code Y}, {@code yes} or {@code 1}, case
+   * insensitive and trimmed. {@code false}/{@code N}/{@code no}/{@code 0} keep enforcing, and any
+   * other value is a {@code PARSE_ERROR} that keeps enforcing too. A positively phrased "enforcement enabled" flag would do the opposite — a missing key
    * would silently open every blocked tenant — so do not "fix" the polarity.
    *
    * <p><b>What {@code true} does.</b> The access decision is still computed and logged at INFO

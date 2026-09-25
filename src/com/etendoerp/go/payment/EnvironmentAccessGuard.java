@@ -37,7 +37,8 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <p>It decides with {@link TenantEnvironmentLifecycleService#evaluateAccess} and then applies the
  * kill switch ({@link EnvironmentAccessEnforcementFlag}): a denial is returned unless enforcement
- * was explicitly switched off, in which case it is logged at INFO and access is allowed. The flag
+ * was switched off (the flag resolves to {@code true}), in which case it is logged at INFO and
+ * access is allowed. The flag
  * is consulted only for a denial, so an allowed request — the normal case, on every NEO call —
  * costs no flag evaluation.
  *
