@@ -1,28 +1,22 @@
 package com.etendoerp.go.schemaforge;
 
-import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.base.weld.WeldUtils;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Warehouse;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Shared lookups used by {@link NeoServlet}.
@@ -30,60 +24,25 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 class NeoServletSupport {
 
   private static final Logger log = LogManager.getLogger(NeoServletSupport.class);
+  private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
+      new EnvironmentRequestAuthenticator();
 
   private NeoServletSupport() {
   }
 
-  static OBContext authenticateJwt(HttpServletRequest request) throws Exception {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new OBException("Missing or invalid Authorization header");
-    }
-    String token = authHeader.substring(7);
-    DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
-
-    String userId = decoded.getClaim("user").asString();
-    String roleId = decoded.getClaim("role").asString();
-    String orgId = decoded.getClaim("organization").asString();
-    String warehouseId = decoded.getClaim("warehouse").asString();
-    String clientId = decoded.getClaim("client").asString();
-
-    if (StringUtils.isAnyBlank(userId, roleId, orgId, clientId)) {
-      throw new OBException("Invalid token: missing required claims");
-    }
-
-    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
-    OBContext.setOBContext(context);
-    OBContext.setOBContextInSession(request, context);
-    return context;
-  }
-
-  static String findAccessibleWarehouse(OBContext ctx) {
-    try {
-      OBContext.setAdminMode(true);
-      Set<String> readableOrgs = new HashSet<>(Arrays.asList(ctx.getReadableOrganizations()));
-      OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
-      criteria.add(Restrictions.eq(Warehouse.PROPERTY_CLIENT, ctx.getCurrentClient()));
-      criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
-      criteria.setMaxResults(50);
-      for (Warehouse warehouse : criteria.list()) {
-        String warehouseOrgId = warehouse.getOrganization().getId();
-        if (readableOrgs.contains(warehouseOrgId)) {
-          log.debug("Resolved accessible warehouse '{}' (org='{}') for user '{}'",
-              warehouse.getId(), warehouseOrgId, ctx.getUser().getId());
-          return warehouse.getId();
-        }
-      }
-      log.warn("No accessible warehouse found for user '{}' client '{}'",
-          ctx.getUser().getId(), ctx.getCurrentClient().getId());
-      return null;
-    } catch (Exception e) {
-      log.error("Error finding accessible warehouse for user '{}': {}",
-          ctx.getUser().getId(), e.getMessage(), e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+  /**
+   * Authenticates a request to one of the environment-scoped servlets that are not
+   * {@link NeoServlet} itself (report selectors, survey configuration) through the shared
+   * pipeline (ETP-5455). It used to be a bearer-only JWT decode: those servlets answered 401 to
+   * the cookie session the SPA actually sends, ignored the legacy kill switch, and never checked
+   * commercial access.
+   *
+   * @param request the incoming request
+   * @param policy  what the calling surface requires beyond a valid credential
+   * @return the outcome; on refusal it carries the status and message to answer with
+   */
+  static EnvironmentAuthOutcome authenticate(HttpServletRequest request, SurfacePolicy policy) {
+    return AUTHENTICATOR.authenticate(request, policy);
   }
 
   /**

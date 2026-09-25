@@ -2193,8 +2193,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleRemoveAuthMethod(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
+    if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
@@ -2215,14 +2214,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      // ETP-5455 — through the account surface's single resolver: it used to read the Bearer
+      // header inline, so the SPA's cookie session got 401 here (and the frontend logs out on a
+      // 401), and the legacy kill switch did not apply.
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
-      removeAuthMethod(account, method, currentPassword, response);
+      removeAuthMethod(authenticated.account, method, currentPassword, response);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("remove auth method", e, log);
       log.error("Database error removing an authentication method", e);
@@ -2378,35 +2377,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolve the platform account under the system admin context. Always enters admin mode (so
-   * callers can restore it in their finally block) and writes the error response, returning null,
-   * when the request is not authenticated.
+   * Resolve the platform account for a billing / checkout / upgrade endpoint. Always enters admin
+   * mode (so callers can restore it in their finally block) and writes the error response,
+   * returning null, when the request is not authenticated.
    *
-   * <p>A request carrying the {@code __Host-go_session} cookie (ADR-0001, the only credential the
-   * SPA sends) is resolved by {@link #resolveAuthenticatedAccountContext}, the same resolver the
-   * already-migrated endpoints use — so an unsafe method without a valid {@code X-Go-CSRF} proof
-   * answers 403 there, and a dead session 401. A request without the cookie keeps the legacy
-   * narrow bearer lookup unchanged.
+   * <p>ETP-5455 — the account surface's single resolver under
+   * {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}. It used to carry its own Bearer branch,
+   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
+   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
+   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
    */
   private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if (hasSessionCookie(request)) {
-      return resolveAuthenticatedAccount(request, response);
-    }
-    OBContext.setOBContext("0", "0", "0", "0");
-    OBContext.setAdminMode(true);
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
-      return null;
-    }
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
-    if (account == null) writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
-    return account;
-  }
-
-  private Account resolveAuthenticatedAccount(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+    AuthenticatedAccount authenticated =
+        resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
     return authenticated == null ? null : authenticated.account;
   }
 
@@ -2434,6 +2417,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private AuthenticatedAccount resolveAuthenticatedAccountContext(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
+    return resolveAccount(request, response, AccountRequirement.ANY_ACCOUNT_CREDENTIAL);
+  }
+
+  /**
+   * Which Bearer an account endpoint accepts when no session cookie is present (ETP-5455). The
+   * ONLY thing that may differ between account endpoints: the cookie, CSRF, kill-switch and
+   * counting rules are the same for all of them.
+   */
+  enum AccountRequirement {
+    /** An account session token or an environment JWT (the wide lookup). */
+    ANY_ACCOUNT_CREDENTIAL,
+    /** The account session (platform) token only: environment JWTs are refused for billing. */
+    PLATFORM_CREDENTIAL_ONLY
+  }
+
+  /**
+   * The account surface's single resolver (ETP-5455). Enters admin mode unconditionally, so the
+   * callers' {@code finally} can always restore it, and writes the error response itself.
+   *
+   * <p>The cookie session wins whenever it is present and valid; a dead one is final (401, no
+   * fallback to a Bearer sent alongside). Only without a session does a Bearer count — gated by
+   * the legacy kill switch, counted as a legacy use, and looked up as the requirement says.
+   */
+  private AuthenticatedAccount resolveAccount(HttpServletRequest request,
+      HttpServletResponse response, AccountRequirement requirement) throws IOException {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
@@ -2461,13 +2469,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     GoLegacyBearer.recordUse();
-    // The wide lookup, not findActiveAccountByToken: the legacy path has to keep
-    // accepting Etendo's JWTs, and only this one falls back to decoding the token and
+    // The wide lookup, not findActiveAccountByToken, for ANY_ACCOUNT_CREDENTIAL: the legacy path
+    // has to keep accepting Etendo's JWTs, and only this one falls back to decoding the token and
     // resolving the account from its `user` claim when no opaque sessionToken matches.
-    // Centralising the resolution here narrowed it by accident, which answered 401 to
-    // every JWT-bearing client on /me, /environments, the onboarding draft and the
-    // invitation endpoints — the exact callers GoLegacyBearer stays enabled for.
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+    // Centralising the resolution here narrowed it by accident once, which answered 401 to every
+    // JWT-bearing client on /me, /environments, the onboarding draft and the invitation
+    // endpoints — the exact callers GoLegacyBearer stays enabled for.
+    Account account = requirement == AccountRequirement.PLATFORM_CREDENTIAL_ONLY
+        ? EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token)
+        : EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     if (account == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
       return null;
@@ -3056,6 +3066,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, account.getEmail())) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
           "The session client is not owned by this account");
+      return null;
+    }
+    // ETP-5455 (decision 2) — a commercially blocked environment's data is fully inaccessible,
+    // not only through NEO: every account endpoint that acts on the session's tenant is refused
+    // with the same 402 NEO answers. The account itself (billing, upgrade, /me) stays reachable so
+    // the owner can pay. null = a tenant that predates lifecycle metadata, the legacy transition.
+    EnvironmentAccessPolicy.Decision access =
+        tenantEnvironmentLifecycleService.evaluateAccess(clientId, true, Instant.now());
+    if (access != null && access != EnvironmentAccessPolicy.Decision.ALLOWED) {
+      writeError(response, SC_PAYMENT_REQUIRED,
+          "Environment access is not available: " + access.name());
       return null;
     }
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));

@@ -44,6 +44,7 @@ import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
@@ -374,6 +375,10 @@ public class EtendoGoJwtServletTenantSessionCookieTest {
 
     Fixture() {
       servlet.onboardingCompanyDataService = companyDataService;
+      // ETP-5455: resolveTenantSession now consults the commercial policy; a mock with no stubs
+      // answers null (a tenant with no lifecycle metadata = allowed), so this class keeps
+      // testing tenant resolution alone and never reaches the real service's DAL lookups.
+      servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
       when(account.getId()).thenReturn(ACCOUNT_ID);
       when(account.getEmail()).thenReturn(ACCOUNT_EMAIL);
     }
