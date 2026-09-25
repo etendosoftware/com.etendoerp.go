@@ -319,6 +319,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final List<String> SUBSCRIPTION_EVENT_TYPES = List.of(
       "invoice.payment_failed", "invoice.paid", "customer.subscription.updated",
       "customer.subscription.deleted");
+  /**
+   * ETP-5047 — events that raise an operator alert and change nothing. A dispute is a chargeback
+   * the provider is already arbitrating: blocking the tenant on it would punish a customer before
+   * the outcome is known, and a lost dispute reaches the subscription through the ordinary
+   * lifecycle events anyway.
+   */
+  private static final List<String> ALERT_ONLY_EVENT_TYPES = List.of("charge.dispute.created");
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
@@ -1373,7 +1380,43 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       applySubscriptionLifecycle(eventId, type, event);
       return;
     }
+    if (ALERT_ONLY_EVENT_TYPES.contains(type)) {
+      applyAlertOnlyEvent(eventId, type, event);
+      return;
+    }
     billingEventStore.markIgnored(eventId, "unhandled event type");
+  }
+
+  /**
+   * Records an alert-only event as {@code APPLIED} and raises a WARN carrying the provider ids an
+   * operator needs to find it in the Stripe dashboard. No subscription status, grace anchor or
+   * access decision is touched — see {@link #ALERT_ONLY_EVENT_TYPES}. Only ids, the amount and the
+   * provider's reason code are logged: never card or customer personal data.
+   */
+  private void applyAlertOnlyEvent(String eventId, String type, JSONObject event) {
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject("object");
+    log.warn("Billing alert: Stripe event '{}' ({}) — dispute {} on charge {} (payment intent {}),"
+        + " amount {} {}, reason '{}'. No access change was made; review it in the Stripe"
+        + " dashboard.", eventId, type, optProviderText(object, "id"),
+        optProviderText(object, "charge"), optProviderText(object, "payment_intent"),
+        optProviderText(object, "amount"), optProviderText(object, "currency"),
+        optProviderText(object, "reason"));
+    billingEventStore.markApplied(eventId);
+  }
+
+  /**
+   * Reads one provider field for a log line: a nested object contributes its {@code id}, a
+   * missing or JSON-null value reads as {@code "-"} (jettison's {@code optString} would print the
+   * literal word "null").
+   */
+  private static String optProviderText(JSONObject object, String key) {
+    if (object == null || !object.has(key) || object.isNull(key)) {
+      return "-";
+    }
+    JSONObject nested = object.optJSONObject(key);
+    String value = nested == null ? object.optString(key, "") : nested.optString("id", "");
+    return StringUtils.defaultIfBlank(value, "-");
   }
 
   private void applyCheckoutPaid(String eventId, String type, JSONObject event) {
