@@ -468,6 +468,28 @@ release** — an SPA older than the backend still parses it.
   with the dispute, charge and payment-intent ids, amount and reason — never a status change. A lost
   dispute reaches the subscription through the ordinary lifecycle events.
 
+### 🔴 3.9 The `ETGO_EnvironmentType` marker is missing on tenants with a subscription row — data-fix proposed
+
+Since ETP-5047 a subscription row, not the marker, makes a tenant productive (§3.7), and a row
+without `ETGO_EnvironmentType = PRODUCTIVE` logs one WARN per tenant and JVM
+(`TenantEnvironmentLifecycleService.warnOnceWhenMarkerIsMissing`). Every tenant provisioned before
+the marker existed has a row but no marker — 6 of 6 productive tenants on the development
+database — so the WARN fires on every node after every restart and never converges on its own.
+Nothing depends on the marker for access or display any more (the environment list's type,
+access state and trial fields all come from `resolve`), so this is noise, not a fault; but a WARN
+that can never reach zero trains everyone to ignore it.
+
+**Proposal — to decide, not scheduled:** a follow-up data-fix (`cli/src/data-fixes/sql/`, the next
+free R-number, dated after every fix merged at that point — §3.6) that, per tenant, writes
+`ETGO_EnvironmentType = PRODUCTIVE` when the tenant has any `ETGO_SUBSCRIPTION` row
+(`environment_client_id = :client_id`) and no such preference. Scoping: the marker is written by
+`TenantEnvironmentLifecycleService#setPreferenceValue` with `setClient(tenant)`, so it is keyed by
+`AD_CLIENT_ID`, like the lifecycle preferences in R37 statement 2 — not by `VISIBLEAT_CLIENT_ID`.
+Its `@check` is naturally idempotent (row exists AND no marker). **R37 is deliberately not
+changed for this** (reviewed and declined in ETP-5047): it is already written, and adding a write
+to it would widen a fix whose scope is the subscription backfill. Converges the WARN count to zero;
+the per-tenant WARN is the operator-visible worklist until then.
+
 ## 4. Known issues
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
