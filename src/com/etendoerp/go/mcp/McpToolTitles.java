@@ -22,7 +22,10 @@ import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Window;
@@ -49,6 +52,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  */
 final class McpToolTitles {
 
+  private static final Logger log = LogManager.getLogger(McpToolTitles.class);
   private static final String BUNDLE = "com.etendoerp.go.mcp.messages.mcp_titles";
   private static final String KEY_PREFIX = "title.";
   /** The MCP surface is English (descriptions, errors), so an unknown language falls back to it. */
@@ -96,6 +100,21 @@ final class McpToolTitles {
       title = read(KEY_PREFIX + toolName, FALLBACK_LOCALE);
     }
     return title != null ? title : humanize(toolName);
+  }
+
+  /**
+   * Display title of a per-spec tool: the spec's AD_Process (else AD_Window) name in the current
+   * user's language. Total by design: a title is cosmetic, so a lookup failure returns
+   * {@code null} ({@link #resolve} then humanizes the tool name) instead of dropping the tool.
+   */
+  static String forSpec(SFSpec spec) {
+    try {
+      OBContext context = OBContext.getOBContext();
+      return fromSpec(spec, context != null ? context.getLanguage() : null);
+    } catch (RuntimeException e) {
+      log.debug("Could not resolve the AD title for spec '{}'", spec.getName(), e);
+      return null;
+    }
   }
 
   /**
