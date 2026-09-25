@@ -163,7 +163,7 @@ public class EnvironmentAccessPolicyTest {
     OBDal dal = mock(OBDal.class);
     when(dal.createQuery(eq(Preference.class), anyString())).thenReturn(query);
     TenantPlanService plans = mock(TenantPlanService.class);
-    when(plans.resolvePlan("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
+    when(plans.resolvePlanWithoutSubscription("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
     // ETP-5047 — resolve asks for a subscription row first (any row decides the productive
     // path). Neither tenant here has one; without this mock the real SubscriptionService would
     // throw on the mocked DAL and resolve would swallow it into a null snapshot.
@@ -210,7 +210,7 @@ public class EnvironmentAccessPolicyTest {
     OBDal dal = mock(OBDal.class);
     when(dal.createQuery(eq(Preference.class), anyString())).thenReturn(query);
     TenantPlanService plans = mock(TenantPlanService.class);
-    when(plans.resolvePlan("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
+    when(plans.resolvePlanWithoutSubscription("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
     // ETP-5047 — resolve asks for a subscription row first (any row decides the productive
     // path). Neither tenant here has one; without this mock the real SubscriptionService would
     // throw on the mocked DAL and resolve would swallow it into a null snapshot.

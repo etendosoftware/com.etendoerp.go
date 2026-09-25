@@ -29,6 +29,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.Serializable;
@@ -523,6 +524,63 @@ class TenantPlanServiceTest {
           .thenThrow(new IllegalStateException("preference query failed"));
 
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
+    }
+  }
+
+  /**
+   * ETP-5047 follow-up (W1') — {@code resolvePlan} for a caller that already knows the tenant has
+   * no subscription row: only the transitional preference fallback is asked, the row lookup is
+   * never repeated, and the {@code resolvePlan} contract holds (never null, never throws,
+   * degrades to free).
+   */
+  @Nested
+  class ResolvePlanWithoutSubscription {
+
+    @Test
+    void aProductivePreferenceReadsProductive() {
+      when(preferenceFallback.isProductive(CLIENT_ID)).thenReturn(true);
+
+      assertEquals(TenantPlanService.PLAN_PRODUCTIVE,
+          service.resolvePlanWithoutSubscription(CLIENT_ID));
+      verifyNoInteractions(subscriptionService);
+    }
+
+    @Test
+    void aNonProductivePreferenceReadsFree() {
+      when(preferenceFallback.isProductive(CLIENT_ID)).thenReturn(false);
+
+      assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlanWithoutSubscription(CLIENT_ID));
+      verifyNoInteractions(subscriptionService);
+    }
+
+    @Test
+    void aFailingFallbackDegradesToFree() {
+      when(preferenceFallback.isProductive(CLIENT_ID))
+          .thenThrow(new IllegalStateException("preference query failed"));
+
+      assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlanWithoutSubscription(CLIENT_ID));
+      verifyNoInteractions(subscriptionService);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = { "", "   " })
+    void aBlankClientIdReadsFreeWithoutAskingAnything(String clientId) {
+      assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlanWithoutSubscription(clientId));
+
+      verifyNoInteractions(preferenceFallback, subscriptionService);
+    }
+
+    @Test
+    void ignoresAnyRowTheSubscriptionServiceWouldHaveAnswered() {
+      // The caller has established there is no row; even a stubbed one must not be consulted.
+      Subscription active = mock(Subscription.class);
+      when(active.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_ACTIVE);
+      when(subscriptionService.findLatest(CLIENT_ID)).thenReturn(Optional.of(active));
+      when(preferenceFallback.isProductive(CLIENT_ID)).thenReturn(false);
+
+      assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlanWithoutSubscription(CLIENT_ID));
+      verifyNoInteractions(subscriptionService);
     }
   }
 

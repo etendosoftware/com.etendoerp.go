@@ -711,6 +711,55 @@ class EtendoGoJwtDalHelperTest {
       assertTrue(result.isNull("planKey"));
       assertTrue(result.isNull("subscriptionStatus"));
     }
+
+    /**
+     * ETP-5047 review regression pin (W2') — a tenant whose only subscription row was CLOSED by a
+     * cancellation, and which never got the {@code ETGO_EnvironmentType} marker (every tenant
+     * provisioned before the marker existed). Before the "row decides" fix the canceled row made
+     * the plan free, the missing marker sent the tenant down the demo path, and the environment
+     * list reported it as a demo (with trial fields) that was ALLOWED in. The single-environment
+     * path runs the real SubscriptionService, TenantPlanService and lifecycle service here.
+     */
+    @Test
+    @DisplayName("ETP-5047: a canceled tenant without the productive marker reads as a blocked "
+        + "productive environment on the free plan")
+    void aClosedCanceledRowWithoutTheMarkerIsABlockedProductiveEnvironment() throws Exception {
+      String clientId = "W2-" + java.util.UUID.randomUUID();
+      when(client.getId()).thenReturn(clientId);
+      when(client.getName()).thenReturn("Canceled Tenant");
+      when(environmentUser.getId()).thenReturn("U-W2");
+      when(environmentUser.getUsername()).thenReturn("owner@canceled.test");
+      when(environmentUser.getName()).thenReturn("Owner");
+
+      com.etendoerp.go.schemaforge.data.Plan plan =
+          mock(com.etendoerp.go.schemaforge.data.Plan.class);
+      when(plan.getSearchKey()).thenReturn("productive-monthly");
+      Subscription closed = mock(Subscription.class);
+      when(closed.getEnvironmentClient()).thenReturn(client);
+      when(closed.getPlan()).thenReturn(plan);
+      when(closed.getSubscriptionStatus()).thenReturn("canceled");
+      when(closed.getEndDate()).thenReturn(new Date(System.currentTimeMillis() - 86_400_000L));
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> openRows = mock(OBQuery.class);
+      when(openRows.list()).thenReturn(Collections.emptyList());
+      when(openRows.uniqueResult()).thenReturn(null);
+      @SuppressWarnings("unchecked")
+      OBQuery<Subscription> closedRows = mock(OBQuery.class);
+      when(closedRows.list()).thenReturn(List.of(closed));
+      when(closedRows.uniqueResult()).thenReturn(closed);
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenAnswer(invocation ->
+          ((String) invocation.getArgument(1)).contains("is not null") ? closedRows : openRows);
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+
+      assertEquals("PRODUCTIVE", result.getString("environmentType"));
+      assertEquals("SUBSCRIPTION_REQUIRED", result.getString("accessState"));
+      assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+      assertEquals("EXPIRED", result.getString("subscriptionStatus"));
+      assertFalse(result.has("trialStartedAt"), result.toString());
+      assertFalse(result.has("trialExpiresAt"), result.toString());
+      assertFalse(result.has("trialDaysRemaining"), result.toString());
+    }
   }
 
   @Nested

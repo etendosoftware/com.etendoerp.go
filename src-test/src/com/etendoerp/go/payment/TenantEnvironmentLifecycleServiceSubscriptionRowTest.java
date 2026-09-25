@@ -534,7 +534,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   @Test
   public void theProductiveSnapshotReadsTheRowTheWebhookWrote() {
-    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    // The row alone makes the tenant productive: no plan lookup is stubbed (ETP-5047).
     Fixture fixture = new Fixture().withOpenRow("past_due", ANCHOR)
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "CURRENT");
 
@@ -550,7 +550,6 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   @Test
   public void theProductiveSnapshotReadsThePreSplitAnchorThroughTheFallback() {
-    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     Fixture fixture = new Fixture().withLegacyOpenRow("past_due", ANCHOR);
 
     assertEquals(ANCHOR, fixture.run(() -> service.resolve(CLIENT_ID)).getRenewalDueAt());
@@ -558,7 +557,9 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   @Test
   public void theProductiveSnapshotOfATenantWithoutARowReadsThePreferences() {
-    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    // No row: resolve asks the preference fallback directly (resolvePlanWithoutSubscription).
+    when(tenantPlanService.resolvePlanWithoutSubscription(CLIENT_ID))
+        .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     Fixture fixture = new Fixture()
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "PAST_DUE")
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
@@ -579,7 +580,6 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // ETP-5047 — the canceled tenant keeps its productive marker; its plan now reads free (the
     // closed row answers canceled). Its subscription preferences still say CURRENT — the stale
     // pre-row projection — and must not resurrect it, nor may LEGACY_ENTITLEMENT.
-    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_FREE);
     Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
         .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE, "PRODUCTIVE")
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "CURRENT");
@@ -601,7 +601,6 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void aClosedRowWhoseStatusStillSaysActiveReadsExpired() {
     // A closed row is history, not entitlement: effectiveStatusOf answers canceled whatever
     // STATUS still says.
-    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_FREE);
     Fixture fixture = new Fixture().withClosedRow("active", ENDED_AT)
         .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE, "PRODUCTIVE");
 
@@ -618,7 +617,16 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     return "B1-" + java.util.UUID.randomUUID();
   }
 
-  private static void assertNeverEnteredTheDemoPath(Fixture fixture) {
+  /** A plan answer of "free" that the row must override without either lookup being asked. */
+  private void givenEveryPlanLookupSaysFree() {
+    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    when(tenantPlanService.resolvePlanWithoutSubscription(anyString()))
+        .thenReturn(TenantPlanService.PLAN_FREE);
+  }
+
+  private void assertNeverEnteredTheDemoPath(Fixture fixture) {
+    verify(tenantPlanService, never()).resolvePlan(anyString());
+    verify(tenantPlanService, never()).resolvePlanWithoutSubscription(anyString());
     assertFalse("the demo trial start must not even be read",
         fixture.queriedPreferenceAttributes.contains(
             TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE));
@@ -644,7 +652,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   @Test
   public void aClosedCanceledRowWithoutTheMarkerIsRefusedAsSubscriptionRequired() {
     String clientId = freshClientId();
-    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    givenEveryPlanLookupSaysFree();
     Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT);
 
     EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
@@ -652,7 +660,6 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
     assertEquals(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED, decision);
     assertNeverEnteredTheDemoPath(fixture);
-    verify(tenantPlanService, never()).resolvePlan(anyString());
   }
 
   @Test
@@ -660,7 +667,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // R37 maps NONE / EXPIRED to an OPEN 'canceled' row, and the tenant may carry neither the
     // ETGO_EnvironmentType marker nor (retired by R37 itself) ETGO_TenantPlan.
     String clientId = freshClientId();
-    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    givenEveryPlanLookupSaysFree();
     Fixture fixture = new Fixture().withOpenRow("canceled", null);
 
     EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
@@ -675,7 +682,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // Control for the two specs above: without a row the same tenant does take the demo path,
     // so "never read DEMO_TRIAL_STARTED" there is not vacuous.
     String clientId = freshClientId();
-    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    givenEveryPlanLookupSaysFree();
     Fixture fixture = new Fixture();
 
     fixture.run(() -> service.resolve(clientId));
@@ -731,7 +738,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   @Test
   public void anActiveRowWithoutTheMarkerIsAllowed() {
     String clientId = freshClientId();
-    when(tenantPlanService.resolvePlan(anyString())).thenReturn(TenantPlanService.PLAN_FREE);
+    givenEveryPlanLookupSaysFree();
     Fixture fixture = new Fixture().withOpenRow("active", null);
 
     EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
@@ -758,6 +765,108 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
         snapshot.getSubscriptionStatus());
     assertEquals(ANCHOR, snapshot.getRenewalDueAt());
+  }
+
+  // ===================== follow-up W1': a tenant with no row skips the second row lookup ========
+
+  /** A lifecycle service over a spied SubscriptionService, to count the row lookups. */
+  private static final class Counted {
+    final TenantPlanService plans = mock(TenantPlanService.class);
+    final SubscriptionService subscriptions = org.mockito.Mockito.spy(new SubscriptionService());
+    final TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plans, subscriptions);
+  }
+
+  @Test
+  public void noRowAndTheProductiveMarkerReadsThePreferenceSnapshotWithoutAPlanLookup() {
+    Counted counted = new Counted();
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+            TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE)
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "CURRENT");
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        fixture.run(() -> counted.lifecycle.resolve(CLIENT_ID));
+
+    assertEquals(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, snapshot.getType());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.CURRENT,
+        snapshot.getSubscriptionStatus());
+    // The marker short-circuits: the fallback is not asked at all.
+    verify(counted.plans, never()).resolvePlanWithoutSubscription(anyString());
+    verify(counted.plans, never()).resolvePlan(anyString());
+    verify(counted.subscriptions, org.mockito.Mockito.times(1)).findLatest(CLIENT_ID);
+  }
+
+  @Test
+  public void noRowNoMarkerButAProductiveFallbackReadsThePreferenceSnapshot() {
+    Counted counted = new Counted();
+    when(counted.plans.resolvePlanWithoutSubscription(CLIENT_ID))
+        .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "PAST_DUE")
+        .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+            ANCHOR.toString());
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        fixture.run(() -> counted.lifecycle.resolve(CLIENT_ID));
+
+    assertEquals(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, snapshot.getType());
+    assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
+        snapshot.getSubscriptionStatus());
+    assertEquals(ANCHOR, snapshot.getRenewalDueAt());
+    verify(counted.plans, org.mockito.Mockito.times(1)).resolvePlanWithoutSubscription(CLIENT_ID);
+    verify(counted.plans, never()).resolvePlan(anyString());
+    verify(counted.subscriptions, org.mockito.Mockito.times(1)).findLatest(CLIENT_ID);
+  }
+
+  @Test
+  public void noRowNoMarkerFreeAndNoTrialStartReachesTheLegacyTransition() {
+    // The plan is known to be free once the fallback said so: the legacy transition is reached
+    // without a second plan lookup, and (activation configured) records its start.
+    Counted counted = new Counted();
+    when(counted.plans.resolvePlanWithoutSubscription(CLIENT_ID))
+        .thenReturn(TenantPlanService.PLAN_FREE);
+    Fixture fixture = new Fixture();
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = withLegacyActivation(
+        () -> fixture.run(() -> counted.lifecycle.resolve(CLIENT_ID)));
+
+    assertTrue(fixture.queriedPreferenceAttributes.contains(
+        TenantEnvironmentLifecycleService.LEGACY_TRANSITION_STARTED_ATTRIBUTE));
+    assertEquals(List.of(TenantEnvironmentLifecycleService.LEGACY_TRANSITION_STARTED_ATTRIBUTE),
+        fixture.savedPreferenceAttributes);
+    assertEquals(List.of(LEGACY_ACTIVATION), fixture.savedPreferenceValues);
+    assertEquals(EnvironmentAccessPolicy.EnvironmentType.DEMO, snapshot.getType());
+    assertEquals(Instant.parse(LEGACY_ACTIVATION), snapshot.getTrialStartedAt());
+    verify(counted.plans, org.mockito.Mockito.times(1)).resolvePlanWithoutSubscription(CLIENT_ID);
+    verify(counted.plans, never()).resolvePlan(anyString());
+    verify(counted.subscriptions, org.mockito.Mockito.times(1)).findLatest(CLIENT_ID);
+  }
+
+  @Test
+  public void noRowAndADemoTrialStartIsADemoWithOneRowLookupAndNoPlanLookupBeyondTheFallback() {
+    Counted counted = new Counted();
+    when(counted.plans.resolvePlanWithoutSubscription(CLIENT_ID))
+        .thenReturn(TenantPlanService.PLAN_FREE);
+    Instant trialStart = EVENT_AT.minusSeconds(3600L);
+    Fixture fixture = new Fixture()
+        .withPreference(TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE,
+            trialStart.toString());
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot first =
+        fixture.run(() -> counted.lifecycle.resolve(CLIENT_ID));
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot second =
+        fixture.run(() -> counted.lifecycle.resolve(CLIENT_ID));
+
+    assertEquals(EnvironmentAccessPolicy.EnvironmentType.DEMO, first.getType());
+    assertEquals(trialStart, second.getTrialStartedAt());
+    assertFalse("a trial already started needs no legacy transition",
+        fixture.queriedPreferenceAttributes.contains(
+            TenantEnvironmentLifecycleService.LEGACY_TRANSITION_STARTED_ATTRIBUTE));
+    // Exactly one row lookup per resolve, and never the row-repeating resolvePlan.
+    verify(counted.subscriptions, org.mockito.Mockito.times(2)).findLatest(CLIENT_ID);
+    verify(counted.plans, org.mockito.Mockito.times(2)).resolvePlanWithoutSubscription(CLIENT_ID);
+    verify(counted.plans, never()).resolvePlan(anyString());
   }
 
   // ===================== ordering watermark on the row route =====================
@@ -841,7 +950,9 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
   @Test
   public void aNonAdminCallerStillGetsTheProductiveSnapshotOnBothRoutes() {
-    when(tenantPlanService.resolvePlan(CLIENT_ID)).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    // The row route needs no plan; the no-row route asks the preference fallback directly.
+    when(tenantPlanService.resolvePlanWithoutSubscription(CLIENT_ID))
+        .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
 
     Fixture withRow = new Fixture().withOpenRow("canceled", null);
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
