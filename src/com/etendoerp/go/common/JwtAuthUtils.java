@@ -28,6 +28,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -73,6 +74,12 @@ public class JwtAuthUtils {
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
+  /**
+   * ETP-5047 — the commercial access check {@link #authenticateOrFail} runs once the tenant is
+   * known. Package-visible and non-final only so a test can substitute it.
+   */
+  static EnvironmentAccessGuard environmentAccessGuard = new EnvironmentAccessGuard();
+
   private JwtAuthUtils() {
   }
 
@@ -92,15 +99,54 @@ public class JwtAuthUtils {
   /**
    * Authenticates the request and, on failure, writes a 401 response and logs the reason.
    *
+   * <p>ETP-5047 — once authenticated, the tenant's commercial access is checked with the same
+   * {@link EnvironmentAccessGuard} NEO and MCP use: a tenant whose demo trial expired or whose
+   * subscription grace elapsed gets the shared HTTP 402 body, unless the
+   * {@code environment-access-enforcement-off} kill switch is on. Every caller of this method is a
+   * tenant data endpoint (favorites, report selectors, survey config, fiscal test mode); the
+   * account-level billing, portal and plan endpoints authenticate the account elsewhere
+   * ({@code EtendoGoJwtServlet.runWithPlatformAccount}) and never reach this check.
+   *
    * @param request  the incoming HTTP request
-   * @param response the HTTP response (used to write the 401 body on failure)
+   * @param response the HTTP response (used to write the 401/402 body on failure)
    * @param log      logger used to record the failure cause
    * @param context  short label for the endpoint, included in the log message
    * @return {@code true} when authentication succeeded, {@code false} when the caller must abort
-   * @throws IOException if writing the 401 response body fails
+   * @throws IOException if writing the error response body fails
    */
   public static boolean authenticateOrFail(HttpServletRequest request, HttpServletResponse response,
       Logger log, String context) throws IOException {
+    return authenticateCredentialsOrFail(request, response, log, context)
+        && isEnvironmentAccessAllowed(response, log, context);
+  }
+
+  /**
+   * Refuses a tenant whose commercial access was cut off. Runs after the {@link OBContext} of the
+   * authenticated user is installed, so the guard reads the tenant from it and needs no system
+   * context of its own.
+   */
+  private static boolean isEnvironmentAccessAllowed(HttpServletResponse response, Logger log,
+      String context) throws IOException {
+    OBContext obContext = OBContext.getOBContext();
+    if (obContext == null || obContext.getCurrentClient() == null) {
+      return true;
+    }
+    EnvironmentAccessGuard.Denial denial =
+        environmentAccessGuard.check(obContext.getCurrentClient().getId(), context);
+    if (denial == null) {
+      return true;
+    }
+    log.info("Commercial access denied for {}: {}", context, denial.message());
+    response.setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    response.setContentType("application/json");
+    response.setCharacterEncoding("UTF-8");
+    response.getWriter().write(
+        denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED).toString());
+    return false;
+  }
+
+  private static boolean authenticateCredentialsOrFail(HttpServletRequest request,
+      HttpServletResponse response, Logger log, String context) throws IOException {
     GoSessionAuthResult sessionAuth = SESSION_AUTHENTICATOR.authenticate(request);
     switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
       case USE_SESSION:

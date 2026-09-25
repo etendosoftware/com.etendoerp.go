@@ -25,8 +25,8 @@ import com.etendoerp.go.featureflags.GoFeatureFlags;
  * {@value GoFeatureFlags#FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF}).
  *
  * <p>Only {@link EnvironmentAccessGuard} calls {@link #isEnforcementSwitchedOff(String)}, so every
- * entry point that refuses a blocked tenant — NEO, MCP, the legacy environment login — obeys the
- * same switch. Retiring the flag is a grep for this class.
+ * entry point that refuses a blocked tenant — NEO, MCP, the {@code JwtAuthUtils} servlets, the
+ * legacy environment login — obeys the same switch. Retiring the flag is a grep for this class.
  *
  * <p><b>Enforcement is the default.</b> {@link GoFeatureFlags#isEnabled} answers {@code false}
  * for an unconfigured flag, an unreachable control plane and any evaluation error, and

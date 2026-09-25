@@ -143,8 +143,8 @@ public final class GoFeatureFlags {
 
   /**
    * ETP-5047 — the kill switch of commercial environment-access enforcement: the HTTP 402 that
-   * NEO, MCP and the legacy environment login answer once a demo trial has expired or a
-   * subscription's payment grace has elapsed.
+   * NEO, MCP, the {@code JwtAuthUtils} servlets and the legacy environment login answer once a
+   * demo trial has expired or a subscription's payment grace has elapsed.
    *
    * <p><b>Phrased as an OFF switch on purpose, because every failure of this class resolves to
    * {@code false}.</b> Enforcement is live from deploy and stays live when the flag is not

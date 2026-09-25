@@ -404,8 +404,10 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
 
 `EnvironmentAccessGuard` is the single commercial access check: NEO (`NeoAuthenticator`, every
 request), MCP (`McpServlet.doPost`, every credential scheme, run as system because MCP has no
-context yet) and the legacy `GET /sws/go/login` (it hands out a raw Etendo JWT, valid on every
-secure web service of the tenant). They all answer **HTTP 402** with:
+context yet), the servlets that authenticate through `JwtAuthUtils.authenticateOrFail`
+(`NeoFavoritesServlet`, `ReportSelectorsServlet`, `SurveyConfigServlet`,
+`NeoFiscalTestModeServlet`) and the legacy `GET /sws/go/login` (it hands out a raw Etendo JWT, valid
+on every secure web service of the tenant). They all answer **HTTP 402** with:
 
 ```json
 { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
@@ -416,18 +418,20 @@ secure web service of the tenant). They all answer **HTTP 402** with:
 `error.decision` first and falls back to parsing it. **Keep the message unchanged for at least one
 release** — an SPA older than the backend still parses it.
 
-- **`POST /sws/go/session/environment` does NOT refuse, deliberately.** The blocked screen and the
-  pages it sends the customer to (`/account`, `/upgrade`) render inside the entered environment;
-  refusing entry would lock a blocked customer out of the only place that lets them pay. It answers
-  as before plus `accessDecision: "<DECISION>"` when the tenant is blocked. The platform-account
-  endpoints (`runWithPlatformAccount`: billing, portal, purchases, plans) never call the guard.
+- **`POST /sws/go/session/environment` does NOT refuse — decided (Martin, 2026-09-25).** The
+  blocked screen and the pages it sends the customer to (`/account`, `/upgrade`) render inside the
+  entered environment; refusing entry would lock a blocked customer out of the only place that lets
+  them pay. It answers as before plus `accessDecision: "<DECISION>"` when the tenant is blocked.
+  The platform-account endpoints (`runWithPlatformAccount`: billing, portal, purchases, plans)
+  never call the guard, and none of them authenticates through `JwtAuthUtils` (checked in ETP-5047:
+  `EtendoGoJwtServlet` only reads `JwtAuthUtils`' claim-name constants).
 - **Kill switch** `environment-access-enforcement-off` (backend-only, per `clientId` via ConfigCat):
   enforcing unless explicitly `true`; when on, the would-be denial is logged at INFO and allowed.
   See `feature-flags-and-tenant-upgrade.md` §1.
-- **Not guarded yet:** the servlets that authenticate through `JwtAuthUtils` —
-  `NeoFavoritesServlet`, `ReportSelectorsServlet`, `SurveyConfigServlet`,
-  `NeoFiscalTestModeServlet` — accept a blocked tenant's session. Out of ETP-5047's scope; one
-  `EnvironmentAccessGuard.check` in `JwtAuthUtils` would close all four.
+- **A new tenant servlet must authenticate through `NeoAuthenticator` or
+  `JwtAuthUtils.authenticateOrFail`** to inherit the check; one that builds its own `OBContext`
+  from a session or JWT skips it silently. Pay-path endpoints are the exception and must stay
+  outside both.
 - **`charge.dispute.created`** is alert-only: recorded `APPLIED` in `ETGO_BILLING_EVENT`, a WARN
   with the dispute, charge and payment-intent ids, amount and reason — never a status change. A lost
   dispute reaches the subscription through the ordinary lifecycle events.

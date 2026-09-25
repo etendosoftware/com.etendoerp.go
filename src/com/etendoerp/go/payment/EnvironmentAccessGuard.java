@@ -27,8 +27,9 @@ import org.codehaus.jettison.json.JSONObject;
 
 /**
  * ETP-5047 — the single commercial access check every tenant entry point runs: NEO
- * ({@code NeoAuthenticator}), MCP ({@code McpServlet}) and the environment login endpoints of
- * {@code EtendoGoJwtServlet}.
+ * ({@code NeoAuthenticator}), MCP ({@code McpServlet}), the servlets authenticating through
+ * {@code JwtAuthUtils.authenticateOrFail} (favorites, report selectors, survey config, fiscal test
+ * mode) and the environment login endpoints of {@code EtendoGoJwtServlet}.
  *
  * <p>It decides with {@link TenantEnvironmentLifecycleService#evaluateAccess} and then applies the
  * kill switch ({@link EnvironmentAccessEnforcementFlag}): a denial is returned unless enforcement

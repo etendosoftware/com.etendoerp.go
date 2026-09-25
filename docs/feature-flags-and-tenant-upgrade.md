@@ -241,7 +241,10 @@ open every blocked tenant — so do not flip the polarity.
 
 Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
 called only by `EnvironmentAccessGuard` — the one check NEO (`NeoAuthenticator`), MCP
-(`McpServlet`) and the legacy environment login (`GET /sws/go/login`) share. The context is
+(`McpServlet`), the `JwtAuthUtils.authenticateOrFail` servlets (favorites, report selectors,
+survey config, fiscal test mode) and the legacy environment login (`GET /sws/go/login`) share.
+`POST /sws/go/session/environment` evaluates it but never refuses (it reports `accessDecision`), so
+the blocked customer reaches the pay path. The context is
 account-less and carries the tenant as the `clientId` attribute, so a ConfigCat rule can switch
 enforcement off for one tenant or for all. It is consulted **only for a denial**: an allowed request
 never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off=true` /
@@ -249,7 +252,7 @@ never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off
 
 | Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
 |---|---|
-| unset / `false` / unreadable | 402 on NEO, MCP and `GET /sws/go/login` |
+| unset / `false` / unreadable | 402 on NEO, MCP, the `JwtAuthUtils` servlets and `GET /sws/go/login` |
 | `true` (for that `clientId`, or globally) | allowed; INFO log `Environment access enforcement is switched off: <entry point> would have refused tenant <id> (<DECISION>)` |
 
 It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
@@ -773,5 +776,5 @@ must never break the session.
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Demo data transfer gate / worker | `com.etendoerp.go.payment.DemoDataTransferFlag`, `DemoDataTransferService` |
-| Environment access check (NEO, MCP, `/login`), 402 body, kill switch | `com.etendoerp.go.payment.EnvironmentAccessGuard`, `EnvironmentAccessEnforcementFlag` |
+| Environment access check (NEO, MCP, `JwtAuthUtils`, `/login`), 402 body, kill switch | `com.etendoerp.go.payment.EnvironmentAccessGuard`, `EnvironmentAccessEnforcementFlag` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |

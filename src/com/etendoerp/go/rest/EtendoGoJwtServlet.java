@@ -5654,9 +5654,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // ETP-5047 — entering a blocked tenant is NOT refused here, deliberately. The blocked-access
       // screen and the pages it sends the customer to (/account, /upgrade) render inside the
       // entered environment, so refusing entry would lock a blocked customer out of the one place
-      // that lets them pay. The tenant's data paths refuse on their own instead — NEO and MCP
-      // answer 402 on every request (the smaller servlets on JwtAuthUtils do not check yet); this
-      // answer only reports the decision so a client can show the blocked screen straight away.
+      // that lets them pay. The tenant's data paths refuse on their own instead — NEO, MCP and the
+      // JwtAuthUtils servlets answer 402 on every request; this answer only reports the decision
+      // so a client can show the blocked screen straight away.
       EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "session-environment");
       if (denial != null) {
         result.put(FIELD_ACCESS_DECISION, denial.decision().name());
