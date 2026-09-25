@@ -831,7 +831,8 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
    */
   private String createRequest(String accountId, String email) {
     String requestId = REQUEST_MARKER + UUID.randomUUID().toString().replace("-", "");
-    requestStore.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    requestStore.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     return requestId;
   }
 

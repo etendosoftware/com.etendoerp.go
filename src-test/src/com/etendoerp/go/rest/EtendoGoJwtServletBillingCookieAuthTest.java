@@ -373,10 +373,10 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     }
 
     GoSessionRecord validSession() {
-      GoSessionRecord record = new GoSessionRecord();
-      record.setAccountId(ACCOUNT_ID);
-      record.setCsrfToken(CSRF);
-      return record;
+      GoSessionRecord session = new GoSessionRecord();
+      session.setAccountId(ACCOUNT_ID);
+      session.setCsrfToken(CSRF);
+      return session;
     }
   }
 

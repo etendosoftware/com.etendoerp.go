@@ -170,6 +170,167 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   }
 
   /**
+   * The chosen demo is durable checkout intent: after Stripe redirects back and onboarding claims
+   * the payment (including a later retry), the source must remain the same client selected before
+   * checkout. Re-discovering a free client from account e-mail can choose a different tenant when
+   * the account owns more than one trial.
+   */
+  @Test
+  public void testSelectedDemoClientIdSurvivesProvisioningRetryAndIsAccountScoped() {
+    String email = newEmail("selected-demo-owner");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    String selectedDemoClientId = ZERO;
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(selectedDemoClientId, true, true, false, null));
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+    CheckoutRequest retriedCheckout = store.findActiveForAccountAndClientName(
+        accountId, email, ENVIRONMENT);
+    assertNotNull("Retry by the same environment name must resolve the original purchase",
+        retriedCheckout);
+    assertEquals("Retry reuses the original purchase id", requestId, retriedCheckout.getRequest());
+    store.recordSessionCreated(requestId, "cs_duplicate_" + requestId);
+    assertEquals("Repeated checkout callbacks must not replace the Stripe session",
+        "cs_" + requestId, store.find(requestId, accountId, email).getStripeSession());
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+
+    assertEquals("The stored selection is returned only for the authenticated account",
+        selectedDemoClientId, store.findDemoClientId(requestId, accountId, email));
+    assertTrue("A retry may continue only with the demo selected before checkout",
+        store.matchesDemoSelection(requestId, accountId, email, selectedDemoClientId));
+    assertFalse("A later conflicting demo choice must not replace the checkout selection",
+        store.matchesDemoSelection(requestId, accountId, email, "TRIAL-OTHER"));
+    CheckoutRequestStore.TransferSelection originalTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertTrue("Product transfer intent is stored with the purchase", originalTransfer.isProducts());
+    assertFalse("Contact transfer intent is stored with the purchase", originalTransfer.isContacts());
+
+    assertTrue("The paid request can be claimed for its first provisioning attempt",
+        store.claimForProvisioning(requestId, accountId, email));
+    assertEquals("Claiming provisioning must not replace the checkout's selected source",
+        selectedDemoClientId, store.findDemoClientId(requestId, accountId, email));
+    store.recordFailureReason(requestId, "transient provisioning failure");
+    assertTrue("A failed paid attempt can be retried",
+        store.claimForProvisioning(requestId, accountId, email));
+    assertEquals("A retry must recover the exact source selected before checkout",
+        selectedDemoClientId, store.findDemoClientId(requestId, accountId, email));
+    CheckoutRequestStore.TransferSelection retriedTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertTrue("Retry preserves the products transfer choice", retriedTransfer.isProducts());
+    assertFalse("Retry preserves the contacts transfer choice", retriedTransfer.isContacts());
+    assertNull("Another account cannot read the selected source for this payment",
+        store.findDemoClientId(requestId, createAccount(newEmail("selected-demo-intruder")), email));
+  }
+
+  /** A productive-origin checkout persists an explicit empty source, not a legacy missing value. */
+  @Test
+  public void testRecordedEmptyDemoSelectionStaysEmptyAcrossProvisioningRetries() {
+    String email = newEmail("empty-demo-owner");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, null));
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+
+    assertTrue("An empty selection must be distinguishable from a legacy request",
+        store.hasRecordedDemoSelection(requestId, accountId, email));
+    assertNull("The productive checkout has no source demo", store.findDemoClientId(
+        requestId, accountId, email));
+    assertTrue("The original empty selection is a valid retry identity",
+        store.matchesDemoSelection(requestId, accountId, email, null));
+    assertFalse("A demo added after checkout cannot become a retry source",
+        store.matchesDemoSelection(requestId, accountId, email, "TRIAL-ADDED-LATER"));
+    CheckoutRequestStore.TransferSelection originalTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertFalse(originalTransfer.isProducts());
+    assertFalse(originalTransfer.isContacts());
+
+    assertTrue("The paid request can be claimed for its first attempt",
+        store.claimForProvisioning(requestId, accountId, email));
+    store.recordFailureReason(requestId, "transient provisioning failure");
+    assertTrue("A failed paid request can be claimed for retry",
+        store.claimForProvisioning(requestId, accountId, email));
+
+    assertTrue("Retry preserves the explicit-empty marker",
+        store.hasRecordedDemoSelection(requestId, accountId, email));
+    assertNull("Retry must not infer any of the account's later demos", store.findDemoClientId(
+        requestId, accountId, email));
+    assertFalse("Retry cannot substitute a newly available demo",
+        store.matchesDemoSelection(requestId, accountId, email, "TRIAL-ADDED-LATER"));
+    CheckoutRequestStore.TransferSelection retriedTransfer = store.findTransferSelection(
+        requestId, accountId, email);
+    assertFalse("Productive-origin retry keeps product transfer disabled",
+        retriedTransfer.isProducts());
+    assertFalse("Productive-origin retry keeps contact transfer disabled",
+        retriedTransfer.isContacts());
+  }
+
+  @Test
+  public void testStripePriceIsDurableAndAStaleRetryCannotReplaceItsSession() {
+    String email = newEmail("stripe-price-cas");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+    String savedPriceId = "price_etp5463_saved";
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, true, false, false, savedPriceId));
+
+    assertEquals("The configured provider price must survive the committed write",
+        savedPriceId, store.findStripePriceId(requestId));
+
+    store.recordSessionCreated(requestId, "cs_initial");
+    try {
+      store.recordSessionCreated(requestId, "cs_stale", "cs_replacement");
+      org.junit.Assert.fail(
+          "A stale retry must not replace a session created by another attempt");
+    } catch (IllegalStateException expected) {
+      // The compare-and-set mismatch is the behavior under test; the message is not API.
+    }
+
+    assertEquals("The first session remains the purchase's correlation anchor",
+        "cs_initial", store.findStripeSessionId(requestId));
+    assertEquals("A failed compare-and-set leaves the saved price unchanged",
+        savedPriceId, store.findStripePriceId(requestId));
+  }
+
+  /** Unpaid rows must be filtered before applying the billing overview's 20-row limit. */
+  @Test
+  public void testFindForAccountFiltersUnpaidRowsBeforeApplyingRecentPurchaseLimit() {
+    String email = newEmail("overview-status-filter");
+    String accountId = createAccount(email);
+    String olderPaidRequestId = createPaidRequest(accountId, email);
+    List<String> newerUnpaidRequestIds = new java.util.ArrayList<>();
+
+    for (int index = 0; index < 21; index++) {
+      String unpaidRequestId = createRequest(accountId, email);
+      store.recordSessionCreated(unpaidRequestId, "cs_" + unpaidRequestId);
+      newerUnpaidRequestIds.add(unpaidRequestId);
+    }
+
+    List<CheckoutRequest> purchases = store.findForAccount(accountId, email);
+
+    assertTrue("An older confirmed purchase must remain visible when newer unpaid attempts exceed "
+        + "the page limit", purchases.stream().anyMatch(purchase -> olderPaidRequestId
+            .equals(purchase.getRequest())));
+    for (String unpaidRequestId : newerUnpaidRequestIds) {
+      assertFalse("Unpaid checkout attempts must not appear in billing overview",
+          purchases.stream().anyMatch(purchase -> unpaidRequestId.equals(purchase.getRequest())));
+    }
+  }
+
+  @Test
+  public void testLegacyRequestWithoutSelectionMarkerIsNotMistakenForExplicitEmpty() {
+    String email = newEmail("legacy-demo-owner");
+    String accountId = createAccount(email);
+    String requestId = createRequest(accountId, email);
+
+    assertFalse("Legacy requests have no recorded demo selection",
+        store.hasRecordedDemoSelection(requestId, accountId, email));
+    assertFalse("A missing selection marker must not be read as explicit empty",
+        store.matchesDemoSelection(requestId, accountId, email, null));
+  }
+
+  /**
    * E-mail is a case-insensitive identifier in practice — a browser autofills what the user typed
    * at signup, which is not necessarily how the account was stored. If the {@code lower()} on both
    * sides of the predicate is ever dropped, a paying customer who typed {@code Owner@…} instead of
@@ -582,7 +743,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     OBContext caller = OBContext.getOBContext();
     assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
 
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     assertSame("recordRequested must give the caller's context back", caller,
         OBContext.getOBContext());
 
@@ -681,7 +843,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     RuntimeException failure = null;
     try {
       store.recordRequested(newRequestId(), UNKNOWN_ACCOUNT_ID, newEmail("ctx-throwing"),
-          ENVIRONMENT);
+          ENVIRONMENT, new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     } catch (RuntimeException e) {
       failure = e;
     }
@@ -757,7 +919,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    */
   private String createRequest(String accountId, String email) {
     String requestId = newRequestId();
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT,
+        new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     return requestId;
   }
 
