@@ -362,6 +362,29 @@ public final class BankStatementsSupport {
     return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
   }
 
+  /**
+   * The statement date a file import stamps: midnight, in the server's own timezone, of the
+   * calendar day of {@code lastLineDate} — the same anchoring {@link #parseIsoDate} applies to the
+   * dates the SPA sends, so an imported statement and a manually created one store the same kind
+   * of value. Returns {@code fallback} when {@code lastLineDate} is {@code null} (no kept line had a
+   * date).
+   *
+   * <p>Mirrors the SPA's CSV import ({@code buildStatementCreatePayload} in
+   * {@code bankStatementImportPipeline.js}), which sends the last movement date of the file as
+   * {@code transactionDate} and falls back to today (ETP-5447).
+   *
+   * @param lastLineDate the latest transaction date among the imported lines (may be {@code null})
+   * @param fallback     the value to return when there is no line date
+   * @return the calendar-day start of {@code lastLineDate}, or {@code fallback}
+   */
+  public static Date statementDateFromLastLine(Date lastLineDate, Date fallback) {
+    if (lastLineDate == null) return fallback;
+    // new Date(millis) first: a java.sql.Date coming back from Hibernate throws on toInstant().
+    LocalDate calendarDay = new Date(lastLineDate.getTime()).toInstant()
+        .atZone(ZoneId.systemDefault()).toLocalDate();
+    return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
   /** The leading {@code yyyy-MM-dd} of an ISO string, or {@code null} when it has none. */
   private static LocalDate parseCalendarDayPrefix(String iso) {
     try {

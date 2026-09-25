@@ -436,6 +436,19 @@ public class BankStatementsHandler implements NeoHandler {
     return env;
   }
 
+  /**
+   * {@code ?action=import} — parses an uploaded Cuaderno 43 or generic CSV file into a new,
+   * processed statement. Reached by the MCP {@code importStatement} action and by direct REST
+   * callers; the SPA no longer calls it (since ETP-4954 its import parses the file in the browser
+   * and posts {@code ?action=create}).
+   *
+   * <p>Header dates (ETP-5447): {@code importdate} is now, and {@code statementdate} is the latest
+   * {@code datetrx} among the lines that survive pruning, anchored to midnight of that calendar
+   * day in the server's timezone ({@link BankStatementsSupport#statementDateFromLastLine}). When
+   * no kept line carries a date it stays today, as stamped by {@link #newBankStatement}. This is
+   * the same rule the SPA's CSV import applies ({@code buildStatementCreatePayload}), so a
+   * statement lands in the same place of the date-ordered list whichever path imported it.
+   */
   private NeoResponse handleImport(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) {
@@ -462,6 +475,13 @@ public class BankStatementsHandler implements NeoHandler {
         OBDal.getInstance().rollbackAndClose();
         return codedError(CODE_NO_VALID_LINES, MSG_NO_VALID_LINES);
       }
+
+      // ETP-5447 — the statement date is the last movement date of the file (kept lines only),
+      // like the SPA's CSV import; newBankStatement's today survives only when no line has a date.
+      // Set before processStatement, whose first save + flush persists it, so the statement is
+      // already processed with its real date.
+      statement.setTransactionDate(BankStatementsSupport.statementDateFromLastLine(
+          pruned.getLatestTransactionDate(), statement.getTransactionDate()));
 
       processStatement(statement);
       BankStatementAggregates.recompute(statement);
@@ -1156,6 +1176,13 @@ public class BankStatementsHandler implements NeoHandler {
     return arr;
   }
 
+  /**
+   * Builds the draft header a file import (and the read-only preview) parses its lines into.
+   * Both {@code importdate} and {@code statementdate} start as now: the lines are not parsed yet,
+   * so the real statement date is unknown here. {@link #handleImport} replaces
+   * {@code statementdate} with the last line date once the lines are parsed and pruned
+   * (ETP-5447); the preview never persists the header, so its today is never seen.
+   */
   FIN_BankStatement newBankStatement(FIN_FinancialAccount account, String fileName) {
     FIN_BankStatement statement = OBProvider.getInstance().get(FIN_BankStatement.class);
     statement.setClient(account.getClient());
