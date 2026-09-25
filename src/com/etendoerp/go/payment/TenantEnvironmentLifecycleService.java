@@ -15,6 +15,8 @@ package com.etendoerp.go.payment;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -63,6 +65,12 @@ public class TenantEnvironmentLifecycleService {
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
+
+  /**
+   * Tenants already reported for holding a subscription row without the productive marker, so the
+   * WARN is written once per tenant and JVM rather than on every NEO request.
+   */
+  private static final Set<String> MISSING_MARKER_REPORTED = ConcurrentHashMap.newKeySet();
 
   private final TenantPlanService tenantPlanService;
   private final SubscriptionService subscriptionService;
@@ -135,6 +143,16 @@ public class TenantEnvironmentLifecycleService {
 
   /**
    * Resolves a stored environment snapshot, falling back to the existing productive marker.
+   *
+   * <p><b>A subscription row makes the tenant productive (ETP-5047).</b> Only a paid tenant ever
+   * has an {@code ETGO_SUBSCRIPTION} row, open or closed, so any row sends the tenant down the
+   * productive path, first, whatever the {@code ETGO_EnvironmentType} marker says — the row, not
+   * the marker, decides. Deciding on the marker or on {@code resolvePlan} alone failed open: a
+   * canceled row makes the plan {@code free}, and a tenant without the marker (every tenant
+   * provisioned before it existed) then fell into the demo path, got a legacy-transition start or
+   * no snapshot at all, and was allowed in. A tenant with a row therefore never reaches the demo
+   * path and never gets a demo or legacy-transition preference written.
+   *
    * @param clientId environment client id
    * @return lifecycle snapshot, or null when metadata is unavailable
    */
@@ -144,9 +162,14 @@ public class TenantEnvironmentLifecycleService {
     }
     try {
       String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
+      Optional<Subscription> subscription = subscriptionService.findLatest(clientId);
+      if (subscription.isPresent()) {
+        warnOnceWhenMarkerIsMissing(clientId, type);
+        return rowSnapshot(subscription.get());
+      }
       if (TYPE_PRODUCTIVE.equalsIgnoreCase(type)
           || TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
-        return productiveSnapshot(clientId);
+        return preferenceSnapshot(clientId);
       }
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
       if (StringUtils.isBlank(startedAt)
@@ -189,25 +212,36 @@ public class TenantEnvironmentLifecycleService {
    *
    * <p>The Stripe lifecycle webhooks keep the row current: {@link #applySubscriptionEvent}
    * writes their outcome onto the row they resolved, so the row's {@code STATUS} and
-   * {@code CURRENT_PERIOD_END} are what the access policy reads here.
+   * {@code GRACE_ANCHOR} are what the access policy reads here.
+   *
+   * @param subscription the tenant's latest row ({@link SubscriptionService#findLatest}): the open
+   *     one, else the most recently closed one, which reads as canceled
+   * @return the productive snapshot, never null
+   */
+  private static EnvironmentSnapshot rowSnapshot(Subscription subscription) {
+    Instant renewalDueAt = SubscriptionService.graceAnchorOf(subscription);
+    return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
+        subscriptionStatusOf(SubscriptionService.effectiveStatusOf(subscription)), renewalDueAt,
+        false);
+  }
+
+  private static void warnOnceWhenMarkerIsMissing(String clientId, String type) {
+    if (!TYPE_PRODUCTIVE.equalsIgnoreCase(type) && MISSING_MARKER_REPORTED.add(clientId)) {
+      log.warn("Tenant {} has an ETGO_SUBSCRIPTION row but its {} marker is '{}', not {}; it is"
+          + " treated as productive because the row decides", clientId,
+          ENVIRONMENT_TYPE_ATTRIBUTE, StringUtils.defaultString(type), TYPE_PRODUCTIVE);
+    }
+  }
+
+  /**
+   * ETP-5046-TRANSITIONAL-FALLBACK — the productive snapshot of a tenant with no subscription row
+   * at all, open or closed, read from the lifecycle preferences. Delete in Phase F, once every
+   * productive tenant has a row.
    *
    * @param clientId environment client id, already known to be productive
    * @return the productive snapshot, never null
    */
-  private EnvironmentSnapshot productiveSnapshot(String clientId) {
-    // ETP-5047 — the open row, else the latest closed one: a canceled subscription is closed, and
-    // must keep reading as EXPIRED rather than fall through to the preference fallback below.
-    Optional<Subscription> latestSubscription = subscriptionService.findLatest(clientId);
-    if (latestSubscription.isPresent()) {
-      Subscription subscription = latestSubscription.get();
-      Instant renewalDueAt = SubscriptionService.graceAnchorOf(subscription);
-      return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-          subscriptionStatusOf(SubscriptionService.effectiveStatusOf(subscription)), renewalDueAt,
-          false);
-    }
-    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant at all, open or closed.
-    // Delete this part of the condition together with the rest of the fallback in Phase F, once
-    // every productive tenant has one.
+  private EnvironmentSnapshot preferenceSnapshot(String clientId) {
     EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
         readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId),
         EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
@@ -294,7 +328,7 @@ public class TenantEnvironmentLifecycleService {
     }
     Subscription subscription = row.get();
     String clientId = subscription.getEnvironmentClient().getId();
-    return LifecycleTarget.row(clientId, subscription, rowState(subscription));
+    return LifecycleTarget.row(clientId, subscription, rowState(clientId, subscription));
   }
 
   /**
@@ -340,25 +374,36 @@ public class TenantEnvironmentLifecycleService {
     if (otherSubscription) {
       return LifecycleTarget.ignored(clientId, "event for another subscription");
     }
-    return LifecycleTarget.row(clientId, subscription, rowState(subscription));
+    return LifecycleTarget.row(clientId, subscription, rowState(clientId, subscription));
   }
 
   /**
-   * The stored state of a row target, read from the row alone (ETP-5047): status, the grace
-   * anchor ({@code GRACE_ANCHOR}, with the pre-split fallback of
-   * {@link SubscriptionService#graceAnchorOf}) and the ordering watermark
-   * ({@code LAST_EVENT_AT}). The row route reads no preference.
+   * The stored state of a row target (ETP-5047): status, the grace anchor ({@code GRACE_ANCHOR},
+   * with the pre-split fallback of {@link SubscriptionService#graceAnchorOf}) and the ordering
+   * watermark ({@code LAST_EVENT_AT}).
+   *
+   * <p><b>Watermark fallback for rows older than the column.</b> A row written before ETP-5047
+   * has {@code LAST_EVENT_AT} null while its watermark sits in the {@code ETGO_SubscriptionEventAt}
+   * preference; reading only the column would let the first out-of-order event after the deploy
+   * pass as fresh. So a null column falls back to the preference — read-only, the same way
+   * {@code graceAnchorOf} reads the old anchor shape: the write always goes to the row, and the
+   * first applied event moves the row off the fallback for good.
    */
-  private static SubscriptionLifecycleApplier.StoredState rowState(Subscription subscription) {
+  private SubscriptionLifecycleApplier.StoredState rowState(String clientId,
+      Subscription subscription) {
+    Instant lastEventAt = SubscriptionService.lastEventAtOf(subscription);
+    if (lastEventAt == null) {
+      lastEventAt = readEventWatermark(clientId);
+    }
     return new SubscriptionLifecycleApplier.StoredState(
         subscriptionStatusOf(subscription.getSubscriptionStatus()),
-        SubscriptionService.graceAnchorOf(subscription),
-        SubscriptionService.lastEventAtOf(subscription));
+        SubscriptionService.graceAnchorOf(subscription), lastEventAt);
   }
 
   /**
-   * The ordering watermark of a tenant with no subscription row: the
-   * {@code ETGO_SubscriptionEventAt} preference ({@code ETP-5046-TRANSITIONAL-FALLBACK}).
+   * The {@code ETGO_SubscriptionEventAt} preference: the ordering watermark of a tenant with no
+   * subscription row ({@code ETP-5046-TRANSITIONAL-FALLBACK}), and the read-only fallback of a row
+   * that predates {@code LAST_EVENT_AT}.
    */
   private Instant readEventWatermark(String clientId) {
     return parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId));
