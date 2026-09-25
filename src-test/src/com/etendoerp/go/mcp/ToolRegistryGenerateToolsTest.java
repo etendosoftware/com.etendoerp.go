@@ -197,6 +197,15 @@ class ToolRegistryGenerateToolsTest {
       NeoReportParam.optional("daysStep", NeoReportParam.TYPE_INTEGER, "Bucket width."),
       NeoReportParam.optional("showDetails", NeoReportParam.TYPE_BOOLEAN, "Per-document rows.")));
 
+  /**
+   * ETP-5447: the report tools now render through the shared {@code McpJsonSchema}
+   * renderer, which also knows {@code array} and {@code object} (the handler-action vocabulary).
+   */
+  private static final Optional<NeoReportContract> ARRAY_OBJECT_CONTRACT = declaredContract(
+      List.of(
+          NeoReportParam.required("rows", NeoReportParam.TYPE_ARRAY, "Rows to include."),
+          NeoReportParam.optional("options", NeoReportParam.TYPE_OBJECT, "Extra options.")));
+
   private static Optional<NeoReportContract> declaredContract(List<NeoReportParam> params) {
     NeoHandler handler = new NeoHandler() {
       @Override
@@ -784,6 +793,28 @@ class ToolRegistryGenerateToolsTest {
 
       assertEquals("integer", ((Map<String, Object>) props.get("daysStep")).get("type"));
       assertEquals("boolean", ((Map<String, Object>) props.get("showDetails")).get("type"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testReportToolRendersArrayAndObjectParametersThroughTheSharedRenderer() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.resolveReportContract(spec))
+          .thenReturn(ARRAY_OBJECT_CONTRACT);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(spec));
+
+      Map<String, Object> parameters = reportParametersSchema(
+          registry.generateTools(scopesOf("neo:report")));
+      Map<String, Object> props = (Map<String, Object>) parameters.get("properties");
+
+      Map<String, Object> rows = (Map<String, Object>) props.get("rows");
+      assertEquals("array", rows.get("type"));
+      assertEquals(Map.of("type", "object"), rows.get("items"));
+      Map<String, Object> options = (Map<String, Object>) props.get("options");
+      assertEquals("object", options.get("type"));
+      assertEquals(List.of("rows"), parameters.get("required"));
     }
 
     @Test
@@ -1621,6 +1652,28 @@ class ToolRegistryGenerateToolsTest {
 
       Map<String, Object> props = (Map<String, Object>) schema.get("properties");
       assertTrue(props.containsKey("parameters"), "neo_action should have optional parameters prop");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void testNeoActionToolDescribesHandlerDeclaredActions() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      McpToolDefinition actionTool = registry.generateTools(scopesOf("neo:write")).stream()
+          .filter(t -> "neo_action".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(actionTool);
+
+      assertTrue(actionTool.getDescription().contains("source:\"handler\""),
+          actionTool.getDescription());
+      Map<String, Object> props =
+          (Map<String, Object>) actionTool.getInputSchema().get("properties");
+      String actionDescription =
+          (String) ((Map<String, Object>) props.get("action")).get("description");
+      assertTrue(actionDescription.contains("view:\"actions\""), actionDescription);
     }
 
     @Test

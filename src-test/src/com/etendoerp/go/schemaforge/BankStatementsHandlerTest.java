@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -46,6 +47,8 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
@@ -138,6 +141,7 @@ public class BankStatementsHandlerTest {
     if (aggMock != null) {
       aggMock.close();
     }
+    // Null when a test released it early to run the real pruner (see runImport).
     if (prunerMock != null) {
       prunerMock.close();
     }
@@ -2314,5 +2318,188 @@ public class BankStatementsHandlerTest {
       assertTrue("each statement row must expose its creation instant", row.has("created"));
       assertTrue(row.getString("created"), !row.getString("created").trim().isEmpty());
     }
+  }
+
+  // ── ETP-5447: a file import dates the statement by its last movement ────
+  //
+  // ?action=import used to leave statementdate at the "now" newBankStatement stamps, so a file
+  // imported today with August movements sorted as today's statement. After the lines are parsed
+  // and pruned, the statement's transactionDate is the calendar day of the latest KEPT line date;
+  // importdate stays now; with no dated line it stays today. The date is set before
+  // processStatement, whose first save + flush persists it.
+  //
+  // These run the REAL newBankStatement and the REAL BankStatementLinePruner (only the parser,
+  // processStatement and the aggregates are stubbed), so they pin the whole wiring, not a stub.
+
+  private static final String IMPORT_FILE_NAME = "extracto-agosto.c43";
+  private static final String ACTION_IMPORT = "import";
+  private static final LocalDate EARLIER_LINE_DAY = LocalDate.of(2026, 8, 28);
+  private static final LocalDate LATEST_LINE_DAY = LocalDate.of(2026, 8, 29);
+
+  @Mock private FIN_BankStatementLine earlierImportedLine;
+  @Mock private FIN_BankStatementLine latestImportedLine;
+
+  /** Stateful fields of {@link #dateStatement}, so a getter returns what the code last set. */
+  private Date statementTransactionDate;
+  private Date statementImportDate;
+  /** The statement's transactionDate observed at the moment processStatement ran. */
+  private Date transactionDateSeenByProcess;
+  private boolean processStatementCalled;
+  /** False when a test programs the prune result itself through {@link #stubPrune}. */
+  private boolean useRealPrune = true;
+
+  /** A local-time instant on {@code day} — a parsed line date carries a time of day. */
+  private static Date atLocalTime(LocalDate day, int hour, int minute) {
+    return Date.from(day.atTime(hour, minute).atZone(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** Midnight, in the server zone, of {@code day}. */
+  private static Date serverMidnightOf(LocalDate day) {
+    return Date.from(day.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** A kept (credit-only) imported line dated {@code date} ({@code null} = undated). */
+  private static void stubImportedLine(FIN_BankStatementLine line, long lineNo, Date date) {
+    when(line.getLineNo()).thenReturn(lineNo);
+    when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
+    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getTransactionDate()).thenReturn(date);
+  }
+
+  /**
+   * Runs ?action=import for a C43 file whose parsed lines, as the pruner reads them back from the
+   * DB, are {@code parsedLines}. {@link #dateStatement} keeps its transaction / import dates as real
+   * state, and processStatement records the transactionDate it sees.
+   */
+  private NeoResponse runImport(FIN_BankStatementLine... parsedLines) throws Exception {
+    when(dateContext.getRequestBody())
+        .thenReturn(body(ACCOUNT_ID, IMPORT_FILE_NAME, encode(c43LineEighty())));
+    when(dateStatement.getId()).thenReturn("stmt-new");
+    doAnswer(inv -> {
+      statementTransactionDate = inv.getArgument(0);
+      return null;
+    }).when(dateStatement).setTransactionDate(any());
+    when(dateStatement.getTransactionDate()).thenAnswer(inv -> statementTransactionDate);
+    doAnswer(inv -> {
+      statementImportDate = inv.getArgument(0);
+      return null;
+    }).when(dateStatement).setImportdate(any());
+    when(dateStatement.getImportdate()).thenAnswer(inv -> statementImportDate);
+
+    doReturn(parsedLines.length).when(handler).parseC43(any(ByteArrayInputStream.class), eq(dateStatement));
+    doAnswer(inv -> {
+      processStatementCalled = true;
+      transactionDateSeenByProcess = ((FIN_BankStatement) inv.getArgument(0)).getTransactionDate();
+      return null;
+    }).when(handler).processStatement(any());
+    if (useRealPrune) {
+      // Let the real prune run: it is where the latest kept-line date is collected. A
+      // MockedStatic intercepts EVERY static of the class — thenCallRealMethod() on the entry
+      // point would still route its private helpers (readLines, hasUnusableAmounts, later) to
+      // the mock defaults, so readLines would return an empty list. Release the class-level
+      // static mock instead, so the pruner runs entirely un-mocked; clearMocks() skips it.
+      prunerMock.close();
+      prunerMock = null;
+    }
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dateDal);
+      when(dateDal.get(eq(FIN_FinancialAccount.class), eq(ACCOUNT_ID))).thenReturn(dateAccount);
+      when(dateDal.createCriteria(DocumentType.class)).thenReturn(docTypeCriteria);
+      when(docTypeCriteria.add(any())).thenReturn(docTypeCriteria);
+      when(docTypeCriteria.list()).thenReturn(Collections.singletonList(bsfDocType));
+      when(dateDal.createCriteria(FIN_BankStatementLine.class)).thenReturn(dateLineCriteria);
+      when(dateLineCriteria.add(any())).thenReturn(dateLineCriteria);
+      when(dateLineCriteria.list()).thenReturn(new ArrayList<>(Arrays.asList(parsedLines)));
+      providerMock.when(OBProvider::getInstance).thenReturn(dateProvider);
+      when(dateProvider.get(FIN_BankStatement.class)).thenReturn(dateStatement);
+      return handler.handle(postCtx(dateContext, ACTION_IMPORT));
+    }
+  }
+
+  private static void assertWithin(String what, Date value, Date from, Date to) {
+    assertNotNull(what + " must be set", value);
+    assertTrue(what + " " + value + " must be within [" + from + ", " + to + "]",
+        !value.before(from) && !value.after(to));
+  }
+
+  /**
+   * The ticket's scenario: lines dated the 28th and the 29th (the later one listed FIRST, so the
+   * result cannot come from "the last line of the file") → the statement is dated the 29th, as the
+   * calendar day at server midnight; the import date is still the moment of the import.
+   */
+  @Test
+  public void testImportDatesTheStatementByItsLatestLine() throws Exception {
+    stubImportedLine(latestImportedLine, 10L, atLocalTime(LATEST_LINE_DAY, 18, 45));
+    stubImportedLine(earlierImportedLine, 20L, atLocalTime(EARLIER_LINE_DAY, 9, 0));
+    Date before = new Date();
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+    Date after = new Date();
+
+    assertEquals(201, r.getHttpStatus());
+    assertEquals(serverMidnightOf(LATEST_LINE_DAY), statementTransactionDate);
+    assertEquals(LATEST_LINE_DAY,
+        statementTransactionDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate());
+    // importdate is the import instant, set once, and never moved to a line date.
+    assertWithin("importdate", statementImportDate, before, after);
+    verify(dateStatement, times(1)).setImportdate(any());
+  }
+
+  /** No parsed line carries a date → the statement keeps today (newBankStatement's stamp). */
+  @Test
+  public void testImportKeepsTodayWhenNoLineHasADate() throws Exception {
+    stubImportedLine(latestImportedLine, 10L, null);
+    stubImportedLine(earlierImportedLine, 20L, null);
+    Date before = new Date();
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+    Date after = new Date();
+
+    assertEquals(201, r.getHttpStatus());
+    assertWithin("transactionDate", statementTransactionDate, before, after);
+    assertEquals(LocalDate.now(),
+        statementTransactionDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate());
+    assertWithin("importdate", statementImportDate, before, after);
+  }
+
+  /**
+   * The line date must already be on the statement when processStatement runs — its first
+   * save + flush is what persists the header, so setting it afterwards would store today.
+   */
+  @Test
+  public void testImportSetsTheLineDateBeforeProcessingTheStatement() throws Exception {
+    stubImportedLine(latestImportedLine, 10L, atLocalTime(LATEST_LINE_DAY, 12, 0));
+    stubImportedLine(earlierImportedLine, 20L, atLocalTime(EARLIER_LINE_DAY, 12, 0));
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+
+    assertEquals(201, r.getHttpStatus());
+    assertTrue("processStatement must run on a successful import", processStatementCalled);
+    assertEquals(serverMidnightOf(LATEST_LINE_DAY), transactionDateSeenByProcess);
+    InOrder order = inOrder(dateStatement, handler);
+    order.verify(dateStatement).setTransactionDate(serverMidnightOf(LATEST_LINE_DAY));
+    order.verify(handler).processStatement(dateStatement);
+  }
+
+  /**
+   * A prune result without a latest date (the legacy two-argument {@code PruneResult}, e.g. every
+   * kept line undated) must not clear or move the date: the statement keeps newBankStatement's today.
+   */
+  @Test
+  public void testImportKeepsTodayWhenThePruneReportsNoLatestDate() throws Exception {
+    useRealPrune = false;
+    stubPrune(dateStatement, 2, 0);
+    Date before = new Date();
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+    Date after = new Date();
+
+    assertEquals(201, r.getHttpStatus());
+    assertWithin("transactionDate", statementTransactionDate, before, after);
+    assertWithin("transactionDate seen by processStatement", transactionDateSeenByProcess,
+        before, after);
   }
 }

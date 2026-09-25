@@ -71,6 +71,7 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -114,6 +115,8 @@ class McpToolRouterRouteTest {
   private static final Set<String> REPORT_SCOPES = Set.of("neo:report");
 
   @Mock private OBDal mockOBDal;
+  /** A handler that declares named actions (ETP-5447), for the neo_action declared branch. */
+  @Mock private NeoHandler declaringHandler;
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
@@ -2033,6 +2036,148 @@ class McpToolRouterRouteTest {
 
         assertTrue(contentText(result).contains("warning"));
       }
+    }
+
+    // ── ETP-5447: handler-declared named actions ──────────────────────────
+
+    private static final String METHOD_GET = "GET";
+    private static final String OTHER_DECLARED = "createStatement";
+
+    /**
+     * A declared action runs through {@link McpDeclaredActions#run} with its declared method and
+     * never reaches the AD button path, which could only answer "Action not found" for it.
+     */
+    @Test
+    void testActionDeclaredByTheHandlerRunsWithItsMethodAndSkipsTheButtonPath()
+        throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+      NeoActionContract declared = NeoActionContract.builder(ACTION_NAME)
+          .method(METHOD_GET)
+          .readOnly(true)
+          .build();
+      when(declaringHandler.declaredActions(SPEC_NAME, ENTITY_NAME))
+          .thenReturn(List.of(declared));
+      JSONObject handled = McpToolRouter.wrapAsTextContent("{\"statements\":[]}");
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(declaringHandler);
+        hookMock.when(() -> McpHookExecutor.runPreHook(eq(declaringHandler), any()))
+            .thenReturn(handled);
+
+        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertTrue(contentText(result).contains("statements"), result.toString());
+        hookMock.verify(() -> McpHookExecutor.buildActionHookContext(eq(SPEC_NAME),
+            eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME), eq(METHOD_GET), any(), any(),
+            eq(tab), eq(entity)));
+        hookMock.verify(() -> McpHookExecutor.runPostHook(any(), any(), any()), never());
+        buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+            any(), any(), any(), any()), never());
+      }
+    }
+
+    /** A declared action missing a required parameter is refused before the handler runs. */
+    @Test
+    void testActionDeclaredWithMissingRequiredParameterAnswers422BeforeTheHandler()
+        throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+      NeoActionContract declared = NeoActionContract.builder(ACTION_NAME)
+          .param(NeoReportParam.required("transactionDate", NeoReportParam.TYPE_DATE, "Date"))
+          .build();
+      when(declaringHandler.declaredActions(SPEC_NAME, ENTITY_NAME))
+          .thenReturn(List.of(declared));
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(declaringHandler);
+
+        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject envelope = new JSONObject(contentText(result));
+        assertEquals(422, envelope.getInt("status"));
+        assertEquals("transactionDate", envelope
+            .getJSONArray(McpDeclaredActions.KEY_MISSING_PARAMETERS).getString(0));
+        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()), never());
+        buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+            any(), any(), any(), any()), never());
+      }
+    }
+
+    /** An action the handler does not declare keeps the pre-ETP-5447 button path, unchanged. */
+    @Test
+    void testActionNotDeclaredByTheHandlerKeepsTheButtonPath() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+      when(declaringHandler.declaredActions(SPEC_NAME, ENTITY_NAME))
+          .thenReturn(List.of(NeoActionContract.builder(OTHER_DECLARED).build()));
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(NeoResponse.ok(responseBody));
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(declaringHandler);
+
+        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+        assertFalse(result.has("isError"));
+        assertEquals("success", new JSONObject(contentText(result)).getString("processResult"));
+        hookMock.verify(() -> McpHookExecutor.buildActionHookContext(eq(SPEC_NAME),
+            eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME), any(), eq(tab), eq(entity)));
+        hookMock.verify(() -> McpHookExecutor.buildActionHookContext(any(), any(), any(),
+            any(), eq(METHOD_GET), any(), any(), any(), any()), never());
+        buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+            eq(entity), eq(RECORD_ID), eq(ACTION_NAME), any()));
+      }
+    }
+
+    /**
+     * {@code handleSchema} needs {@code ModelProvider} (excluded from this class, see the class
+     * javadoc), so the {@code view:"actions"} wiring is asserted on the source, as
+     * {@code McpSchemaViewRequiredTest} does for the view guard.
+     */
+    @Test
+    void testSchemaActionsViewPassesTheHandlerDeclarationsToTheCatalog() {
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleSchema");
+
+      int view = body.indexOf("isActionsView");
+      int catalog = body.indexOf("McpDeclaredActions.forCatalog(sfEntity, specName, entityName)");
+      assertTrue(view >= 0, "view:\"actions\" no longer dispatches");
+      assertTrue(catalog > view,
+          "view:\"actions\" no longer appends the handler-declared actions to the catalog");
+      int build = body.indexOf("McpActionsView.buildResponse(", view);
+      assertTrue(build > view && build < catalog,
+          "the declarations must be passed to McpActionsView.buildResponse");
+    }
+
+    /** The declared branch must be taken before the ACTION hook context of the button path. */
+    @Test
+    void testHandleActionChecksDeclaredActionsBeforeTheButtonPath() {
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleAction");
+
+      int find = body.indexOf("McpDeclaredActions.find(");
+      int run = body.indexOf("McpDeclaredActions.run(");
+      int button = body.indexOf("NeoButtonActionHelper.executeButtonActionCore(");
+      assertTrue(find >= 0 && run > find, "handleAction no longer runs declared actions");
+      assertTrue(button > run, "the declared branch must come before the AD button path");
     }
   }
 

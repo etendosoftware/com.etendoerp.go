@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -26,12 +28,17 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
 
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -419,5 +426,127 @@ public class BankStatementLinePrunerTest {
       assertEquals(0, r.getKept());
       assertEquals(0, r.getDiscarded());
     }
+  }
+
+  // ── latest kept-line transaction date (ETP-5447) ─────────────────────────
+  //
+  // handleImport dates the statement by the latest transactionDate among the lines that SURVIVE
+  // the prune; the pruner collects it while renumbering, as the parser stored it (no calendar-day
+  // normalisation — that is BankStatementsSupport.statementDateFromLastLine's job).
+
+  private static final String KEPT_AMOUNT = "100.00";
+  private static final String ZERO = "0";
+
+  @Mock private FIN_BankStatementLine firstDatedLine;
+  @Mock private FIN_BankStatementLine secondDatedLine;
+  @Mock private FIN_BankStatementLine thirdDatedLine;
+  @Mock private FIN_BankStatement datedStatement;
+
+  private static Date at(int year, int month, int day, int hour) {
+    return Date.from(LocalDate.of(year, month, day).atTime(hour, 0)
+        .atZone(ZoneId.systemDefault()).toInstant());
+  }
+
+  private static void stubDatedLine(FIN_BankStatementLine line, long lineNo, String cr, String dr,
+      Date date) {
+    when(line.getLineNo()).thenReturn(lineNo);
+    when(line.getCramount()).thenReturn(new BigDecimal(cr));
+    when(line.getDramount()).thenReturn(new BigDecimal(dr));
+    when(line.getTransactionDate()).thenReturn(date);
+  }
+
+  private BankStatementLinePruner.PruneResult pruneDated(FIN_BankStatementLine... lines) {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      stubDal(obDalMock, new ArrayList<>(Arrays.asList(lines)));
+      return BankStatementLinePruner.pruneZeroAmountLines(datedStatement);
+    }
+  }
+
+  /** Line order is line-number order, not date order: the latest must be found, not the last. */
+  @Test
+  public void testPruneReportsTheLatestKeptLineDateWhateverTheLineOrder() {
+    Date latest = at(2026, 8, 29, 18);
+    stubDatedLine(firstDatedLine, 10L, KEPT_AMOUNT, ZERO, latest);
+    stubDatedLine(secondDatedLine, 20L, KEPT_AMOUNT, ZERO, at(2026, 8, 28, 9));
+    stubDatedLine(thirdDatedLine, 30L, ZERO, "5.00", at(2026, 8, 27, 12));
+
+    BankStatementLinePruner.PruneResult r =
+        pruneDated(firstDatedLine, secondDatedLine, thirdDatedLine);
+
+    assertEquals(3, r.getKept());
+    // Exactly the stored value, time of day included.
+    assertSame(latest, r.getLatestTransactionDate());
+  }
+
+  @Test
+  public void testPruneReportsTheLatestDateWhenItIsOnTheLastLine() {
+    Date latest = at(2026, 8, 29, 10);
+    stubDatedLine(firstDatedLine, 10L, KEPT_AMOUNT, ZERO, at(2026, 8, 28, 10));
+    stubDatedLine(secondDatedLine, 20L, KEPT_AMOUNT, ZERO, latest);
+
+    assertSame(latest, pruneDated(firstDatedLine, secondDatedLine).getLatestTransactionDate());
+  }
+
+  /** An undated line neither wins nor wipes the date already found. */
+  @Test
+  public void testPruneSkipsUndatedLinesWhenPickingTheLatest() {
+    Date only = at(2026, 8, 28, 9);
+    stubDatedLine(firstDatedLine, 10L, KEPT_AMOUNT, ZERO, null);
+    stubDatedLine(secondDatedLine, 20L, KEPT_AMOUNT, ZERO, only);
+    stubDatedLine(thirdDatedLine, 30L, KEPT_AMOUNT, ZERO, null);
+
+    BankStatementLinePruner.PruneResult r =
+        pruneDated(firstDatedLine, secondDatedLine, thirdDatedLine);
+
+    assertEquals(3, r.getKept());
+    assertSame(only, r.getLatestTransactionDate());
+  }
+
+  @Test
+  public void testPruneReportsNoLatestDateWhenNoKeptLineIsDated() {
+    stubDatedLine(firstDatedLine, 10L, KEPT_AMOUNT, ZERO, null);
+    stubDatedLine(secondDatedLine, 20L, ZERO, KEPT_AMOUNT, null);
+
+    BankStatementLinePruner.PruneResult r = pruneDated(firstDatedLine, secondDatedLine);
+
+    assertEquals(2, r.getKept());
+    assertNull(r.getLatestTransactionDate());
+  }
+
+  /** A discarded line is not part of the imported statement, so its (later) date never counts. */
+  @Test
+  public void testPruneIgnoresTheDateOfADiscardedLine() {
+    Date keptDate = at(2026, 8, 28, 9);
+    stubDatedLine(firstDatedLine, 10L, KEPT_AMOUNT, ZERO, keptDate);
+    stubDatedLine(secondDatedLine, 20L, ZERO, ZERO, at(2026, 8, 30, 9));        // zero/zero
+    stubDatedLine(thirdDatedLine, 30L, "-5.00", ZERO, at(2026, 8, 31, 9));      // negative
+
+    BankStatementLinePruner.PruneResult r =
+        pruneDated(firstDatedLine, secondDatedLine, thirdDatedLine);
+
+    assertEquals(1, r.getKept());
+    assertEquals(2, r.getDiscarded());
+    assertSame(keptDate, r.getLatestTransactionDate());
+  }
+
+  @Test
+  public void testPruneReportsNoLatestDateWhenEveryLineIsDiscarded() {
+    stubDatedLine(firstDatedLine, 10L, ZERO, ZERO, at(2026, 8, 29, 9));
+
+    BankStatementLinePruner.PruneResult r = pruneDated(firstDatedLine);
+
+    assertEquals(0, r.getKept());
+    assertNull(r.getLatestTransactionDate());
+  }
+
+  @Test
+  public void testPruneReportsNoLatestDateForAFileWithNoLines() {
+    assertNull(pruneDated().getLatestTransactionDate());
+  }
+
+  /** The legacy two-argument result (still used by callers and tests) carries no date. */
+  @Test
+  public void testTwoArgumentPruneResultHasNoLatestDate() {
+    assertNull(new BankStatementLinePruner.PruneResult(3, 1).getLatestTransactionDate());
   }
 }

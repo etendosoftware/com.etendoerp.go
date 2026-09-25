@@ -20,12 +20,15 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -315,6 +318,75 @@ public class McpHookExecutorTest {
       assertEquals("CO", ctx.getRequestBody().getString("docAction"));
       assertEquals(adTab, ctx.getAdTab());
       assertEquals(sfEntity, ctx.getSfEntity());
+    }
+  }
+
+  // ── buildActionHookContext with method + query params (ETP-5447) ──────
+
+  private static final String SPEC_FA = "financial-account";
+  private static final String ENTITY_ACCOUNT = "account";
+  private static final String ACC_ID = "ACC-1";
+  private static final String LIST_STATEMENTS = "listStatements";
+
+  @Test
+  public void testBuildActionHookContextNineArgCarriesMethodAndQueryParams() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put("limit", "5");
+    Map<String, String> queryParams = Map.of("limit", "5");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      NeoContext ctx = McpHookExecutor.buildActionHookContext(SPEC_FA, ENTITY_ACCOUNT, ACC_ID,
+          LIST_STATEMENTS, "GET", params, queryParams, null, null);
+
+      assertEquals("GET", ctx.getHttpMethod());
+      assertEquals(NeoEndpointType.ACTION, ctx.getEndpointType());
+      assertEquals(LIST_STATEMENTS, ctx.getFieldName());
+      assertEquals(SPEC_FA, ctx.getSpecName());
+      assertEquals(ENTITY_ACCOUNT, ctx.getEntityName());
+      assertEquals(ACC_ID, ctx.getRecordId());
+      assertSame(params, ctx.getRequestBody());
+      assertEquals(queryParams, ctx.getQueryParams());
+      assertTrue(ctx.isMcpOrigin());
+      assertNull(ctx.getAdTab());
+      assertNull(ctx.getSfEntity());
+    }
+  }
+
+  @Test
+  public void testBuildActionHookContextNineArgTurnsNullQueryParamsIntoAnEmptyMap()
+      throws Exception {
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      NeoContext ctx = McpHookExecutor.buildActionHookContext(SPEC_FA, ENTITY_ACCOUNT, ACC_ID,
+          "createStatement", "POST", new JSONObject(), null, null, null);
+
+      assertEquals("POST", ctx.getHttpMethod());
+      assertNotNull(ctx.getQueryParams());
+      assertTrue(ctx.getQueryParams().isEmpty());
+    }
+  }
+
+  @Test
+  public void testBuildActionHookContextSevenArgDefaultsToPostWithEmptyQueryParams()
+      throws Exception {
+    JSONObject params = new JSONObject();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      NeoContext ctx = McpHookExecutor.buildActionHookContext(SPEC_FA, ENTITY_ACCOUNT, ACC_ID,
+          LIST_STATEMENTS, params, null, null);
+
+      assertEquals("POST", ctx.getHttpMethod());
+      assertNotNull(ctx.getQueryParams());
+      assertTrue(ctx.getQueryParams().isEmpty());
+      assertEquals(NeoEndpointType.ACTION, ctx.getEndpointType());
+      assertEquals(LIST_STATEMENTS, ctx.getFieldName());
+      assertSame(params, ctx.getRequestBody());
+      assertTrue(ctx.isMcpOrigin());
     }
   }
 }

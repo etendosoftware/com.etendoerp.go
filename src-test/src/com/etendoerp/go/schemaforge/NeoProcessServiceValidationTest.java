@@ -63,6 +63,10 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  */
 public class NeoProcessServiceValidationTest {
 
+  private static final String DOC_ACTION = "docAction";
+  private static final String ACTION = "action";
+  private static final String DOC_ACTION_PROCESS = "P";
+
   private static Method buildBundleParams;
   private static Method translateObuiappResult;
 
@@ -581,6 +585,89 @@ public class NeoProcessServiceValidationTest {
     Map<String, Object> result = invokeBuildBundleParams(params);
     assertTrue(result.containsKey("nullKey"));
     assertNull(result.get("nullKey"));
+  }
+
+  // ---- buildBundleParams: docAction -> action alias (ETP-5447) ----
+
+  @Test
+  public void testBuildBundleParamsAliasesDocActionToActionWhenActionMissing() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put(DOC_ACTION, DOC_ACTION_PROCESS);
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertEquals(DOC_ACTION_PROCESS, result.get(DOC_ACTION));
+    assertEquals(DOC_ACTION_PROCESS, result.get(ACTION));
+    assertEquals(2, result.size());
+  }
+
+  @Test
+  public void testBuildBundleParamsKeepsExplicitActionOverDocAction() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put(DOC_ACTION, DOC_ACTION_PROCESS);
+    params.put(ACTION, "R");
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertEquals(DOC_ACTION_PROCESS, result.get(DOC_ACTION));
+    assertEquals("R", result.get(ACTION));
+    assertEquals(2, result.size());
+  }
+
+  @Test
+  public void testBuildBundleParamsBlankDocActionDoesNotAddAction() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put(DOC_ACTION, "   ");
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertFalse(result.containsKey(ACTION));
+    assertEquals("   ", result.get(DOC_ACTION));
+  }
+
+  @Test
+  public void testBuildBundleParamsEmptyDocActionDoesNotAddAction() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put(DOC_ACTION, "");
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertFalse(result.containsKey(ACTION));
+  }
+
+  @Test
+  public void testBuildBundleParamsNullDocActionDoesNotAddAction() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put(DOC_ACTION, JSONObject.NULL);
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertFalse(result.containsKey(ACTION));
+    assertTrue(result.containsKey(DOC_ACTION));
+    assertNull(result.get(DOC_ACTION));
+  }
+
+  @Test
+  public void testBuildBundleParamsWithoutDocActionDoesNotAddAction() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put("customParam", "value1");
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertFalse(result.containsKey(ACTION));
+    assertFalse(result.containsKey(DOC_ACTION));
+    assertEquals(1, result.size());
+  }
+
+  @Test
+  public void testBuildBundleParamsDocActionAliasCoexistsWithKeyMappings() throws Exception {
+    JSONObject params = new JSONObject();
+    params.put("inpRecordId", "rec-9");
+    params.put("inpTabId", "tab-9");
+    params.put(DOC_ACTION, DOC_ACTION_PROCESS);
+
+    Map<String, Object> result = invokeBuildBundleParams(params);
+    assertEquals("rec-9", result.get("recordID"));
+    assertEquals("tab-9", result.get("tabId"));
+    assertFalse(result.containsKey("inpRecordId"));
+    assertFalse(result.containsKey("inpTabId"));
+    assertEquals(DOC_ACTION_PROCESS, result.get(DOC_ACTION));
+    assertEquals(DOC_ACTION_PROCESS, result.get(ACTION));
+    assertEquals(4, result.size());
   }
 
   // ===================== translateObuiappResult branches =====================
