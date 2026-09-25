@@ -206,7 +206,7 @@ final class WidgetQueryPolicyRegistry {
             + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
             + "  AND i.ad_client_id = :clientId "
             + "  AND i.dateinvoiced > (SELECT last_date - CAST('30 days' AS interval) FROM max_date) "
-            + "ORDER BY i.dateinvoiced DESC LIMIT 5",
+            + "ORDER BY i.dateinvoiced DESC, i.created DESC, i.c_invoice_id DESC LIMIT 5",
         "SELECT i.c_invoice_id, i.documentno, bp.name AS client, "
             + "  TO_CHAR(i.dateinvoiced, 'DD-MM-YYYY') AS date, i.grandtotal AS amount, i.docstatus AS status "
             + "FROM c_invoice i "
@@ -214,7 +214,7 @@ final class WidgetQueryPolicyRegistry {
             + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
             + "  AND i.ad_client_id = :clientId "
             + "  AND i.dateinvoiced >= %s "
-            + "ORDER BY i.dateinvoiced DESC LIMIT 5");
+            + "ORDER BY i.dateinvoiced DESC, i.created DESC, i.c_invoice_id DESC LIMIT 5");
   }
 
   static WidgetQueryPolicy topClients() {
