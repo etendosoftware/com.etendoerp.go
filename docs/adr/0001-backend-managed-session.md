@@ -65,6 +65,18 @@ context-derivation logic that `/sws/neo/*` depends on is unchanged — only its 
 > validators alive indefinitely; storing plain context columns is simpler and lets us delete the
 > browser-facing JWT path after migration.
 
+**Addendum (ETP-5289) — `/sws/copilot/*`.** Copilot's `CopilotJwtServlet` belongs to
+`com.etendoerp.copilot` and accepts only `Authorization: Bearer <SWS JWT>`. Under the cookie scheme
+every SPA call to it (OCR upload, `executeTool`, …) got a 401, and the SPA read that as an expired
+session and logged the user out. `CopilotSessionBridgeFilter` (`@WebFilter("/sws/copilot/*")`)
+resolves the cookie with the same `GoSessionAuthenticator` (CSRF/Origin on unsafe methods
+included). It then mints a short-lived SWS JWT for the session's environment and injects it as the
+`Authorization` header, so the Copilot servlet keeps validating and routing unchanged. This is the
+one place the JWT survives, and only as a server-side credential translator for a module that
+cannot read the cookie. It never reaches the browser. A request that already carries
+`Authorization` is untouched. Without a session cookie the request passes through, so the servlet
+answers its own 401.
+
 ### D2 — Session store: new table `ETGO_GO_SESSION`
 
 A dedicated table (not an extension of `ETGO_ACCOUNT.SESSION_TOKEN`, which is 1:1 and has no
