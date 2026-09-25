@@ -32,6 +32,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -389,6 +392,149 @@ public class CandidatesSupportTest {
       assertTrue(sql, sql.contains(
           "LEFT JOIN c_currency acur ON acur.c_currency_id = ft.c_currency_id"));
     }
+  }
+
+  // ── buildLinkedTransactions: QA edge cases (ETP-5450) ───────────────────────
+  //
+  // Multi-row groups: appendForeignOriginal reads some columns only for foreign rows, so a
+  // sequential (thenReturn(a, b, c)) stub would drift between rows. These tests drive the mocked
+  // ResultSet from a per-row column map indexed by a cursor that advances on next().
+
+  /** One linked-movement row as a column map (null values model SQL NULL). */
+  private static Map<String, Object> linkedData(String id, String amount, String foreignAmount,
+      String rate, String foreignId, String foreignIso, String accountIso) {
+    Map<String, Object> row = new HashMap<>();
+    row.put("fin_finacc_transaction_id", id);
+    row.put("document_no", "DOC-" + id);
+    row.put("partner_name", "BP-" + id);
+    row.put("amount", amount == null ? null : new BigDecimal(amount));
+    row.put("foreign_amount", foreignAmount == null ? null : new BigDecimal(foreignAmount));
+    row.put("foreign_convert_rate", rate == null ? null : new BigDecimal(rate));
+    row.put("foreign_currency_id", foreignId);
+    row.put("foreign_currency_iso", foreignIso);
+    row.put("account_currency_iso", accountIso);
+    return row;
+  }
+
+  /** A ResultSet over {@code rows}, answering every column read from the current row's map. */
+  private static ResultSet resultSetOf(List<Map<String, Object>> rows) throws Exception {
+    int[] cursor = { -1 };
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenAnswer(inv -> ++cursor[0] < rows.size());
+    when(rs.getString(anyString()))
+        .thenAnswer(inv -> (String) rows.get(cursor[0]).get(inv.<String> getArgument(0)));
+    when(rs.getBigDecimal(anyString()))
+        .thenAnswer(inv -> (BigDecimal) rows.get(cursor[0]).get(inv.<String> getArgument(0)));
+    when(rs.getTimestamp(anyString())).thenReturn(null);
+    return rs;
+  }
+
+  private JSONArray runLinkedRows(List<Map<String, Object>> rows) throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = resultSetOf(rows);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      return candidatesOf(CandidatesSupport.buildLinkedTransactions(LINE_ID));
+    }
+  }
+
+  /**
+   * A 1:N match group mixing a USD receipt, a EUR bank fee (payment-less movement: no foreign data
+   * at all) and a GBP payment: each row is re-expressed independently, with its own currency and
+   * sign, and the same-currency fee keeps the plain account-currency shape — no key leaks from one
+   * row into the next.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildLinkedTransactionsMixedCurrencyGroupIsPerRow() throws Exception {
+    JSONArray rows = runLinkedRows(List.of(
+        linkedData("t-usd", "29.03", "42.67", "0.6803", USD_ID, USD, EUR),
+        linkedData("t-fee", "-2.50", null, null, null, null, EUR),
+        linkedData("t-gbp", "-12.00", "10.00", "1.2", "cur-gbp", "GBP", EUR)));
+
+    assertEquals(3, rows.length());
+
+    JSONObject usd = rows.getJSONObject(0);
+    assertEquals("t-usd", usd.getString("id"));
+    assertAmount("42.67", usd, "amount");
+    assertAmount("29.03", usd, "amountBase");
+    assertEquals(USD, usd.getString("currency"));
+    assertEquals(USD_ID, usd.getString("currencyId"));
+
+    JSONObject fee = rows.getJSONObject(1);
+    assertEquals("t-fee", fee.getString("id"));
+    assertAmount("-2.50", fee, "amount");
+    assertAmount("-2.50", fee, "pendingBalance");
+    assertNoForeignKeys(fee);
+
+    JSONObject gbp = rows.getJSONObject(2);
+    assertEquals("t-gbp", gbp.getString("id"));
+    assertAmount("-10.00", gbp, "amount");
+    assertAmount("-10.00", gbp, "pendingBalance");
+    assertAmount("-12.00", gbp, "amountBase");
+    assertEquals("GBP", gbp.getString("currency"));
+    assertEquals("cur-gbp", gbp.getString("currencyId"));
+    assertEquals(EUR, gbp.getString("baseCurrency"));
+    assertAmount("1.2", gbp, "rate");
+  }
+
+  /**
+   * Non-EUR account (USD) with a EUR payment — the real Core shape: 500 EUR stored as
+   * foreign_amount, 1250 USD deposit, rate 2.5. Nothing is EUR-hardcoded: the document currency is
+   * EUR and the base currency is the account's USD.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildLinkedTransactionsNonEurAccount() throws Exception {
+    JSONObject row = runLinkedRows(List.of(
+        linkedData("t1", "1250", "500", "2.5", "cur-eur", EUR, USD))).getJSONObject(0);
+
+    assertAmount("500", row, "amount");
+    assertAmount("500", row, "pendingBalance");
+    assertAmount("1250", row, "amountBase");
+    assertEquals(EUR, row.getString("currency"));
+    assertEquals("cur-eur", row.getString("currencyId"));
+    assertEquals(USD, row.getString("baseCurrency"));
+    assertAmount("2.5", row, "rate");
+  }
+
+  /**
+   * A zero account-currency amount (deposit = payment) with a stored foreign amount: signum 0 is
+   * treated as non-negative, so the foreign amount is emitted positive and amountBase stays 0.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildLinkedTransactionsZeroAmountForeignIsNonNegative() throws Exception {
+    JSONObject row = runLinkedRows(List.of(
+        linkedData("t1", "0", "5.00", "0.6803", USD_ID, USD, EUR))).getJSONObject(0);
+
+    assertAmount("5.00", row, "amount");
+    assertAmount("0", row, "amountBase");
+    assertEquals(USD, row.getString("currency"));
+  }
+
+  /**
+   * A null account-currency amount is normalised to 0 before the foreign re-expression, so a
+   * foreign row never throws on a missing deposit/payment (the SQL COALESCEs, this guards the Java).
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildLinkedTransactionsNullAmountForeignDoesNotThrow() throws Exception {
+    JSONObject row = runLinkedRows(List.of(
+        linkedData("t1", null, "5.00", null, USD_ID, USD, EUR))).getJSONObject(0);
+
+    assertAmount("5.00", row, "amount");
+    assertAmount("0", row, "amountBase");
+    assertFalse(row.has("rate"));
   }
 
   // ── candidateCounts ─────────────────────────────────────────────────────────

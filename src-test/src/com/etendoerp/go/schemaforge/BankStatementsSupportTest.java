@@ -342,6 +342,94 @@ public class BankStatementsSupportTest {
     assertEquals(0, BankStatementsSupport.buildLineTxns(rs, false).length());
   }
 
+  // ── buildLineTxns / mergeMatchGroups: QA edge cases (ETP-5450) ───────────
+
+  /** Non-EUR account (USD) with a EUR payment: nothing is EUR-hardcoded. */
+  @Test
+  public void buildLineTxnsNonEurAccountKeepsAccountAmountInUsd() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("1250"), new BigDecimal("500"),
+        new BigDecimal("2.5"), "EUR", "USD"));
+
+    assertAmount("1250", t, "amount");
+    assertAmount("500", t, "foreignAmount");
+    assertEquals("EUR", t.getString("foreignCurrency"));
+    assertEquals("USD", t.getString("currency"));
+    assertAmount("2.5", t, "foreignRate");
+  }
+
+  /** A zero txn amount keeps the foreign amount non-negative (signum 0 is not a payment). */
+  @Test
+  public void buildLineTxnsZeroAmountKeepsForeignAmountNonNegative() throws Exception {
+    JSONObject t = singleTxn(txnRow(BigDecimal.ZERO, new BigDecimal("5.00"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertAmount("0", t, "amount");
+    assertAmount("5.00", t, "foreignAmount");
+  }
+
+  /** A null txn amount (no txn columns) is normalised to 0 and does not throw on a foreign row. */
+  @Test
+  public void buildLineTxnsNullAmountForeignDoesNotThrow() throws Exception {
+    JSONObject t = singleTxn(txnRow(null, new BigDecimal("5.00"), null, "USD", "EUR"));
+
+    assertAmount("0", t, "amount");
+    assertAmount("5.00", t, "foreignAmount");
+    assertFalse(t.has("foreignRate"));
+  }
+
+  private static JSONObject subLine(String id, String amount, String pending, boolean matched,
+      JSONObject txn) throws Exception {
+    JSONObject line = new JSONObject();
+    line.put("id", id);
+    line.put("matchGroupId", "G1");
+    line.put("matched", matched);
+    line.put("in", new BigDecimal(amount));
+    line.put("out", BigDecimal.ZERO);
+    line.put("amount", new BigDecimal(amount));
+    line.put("pendingAmount", new BigDecimal(pending));
+    JSONArray txns = new JSONArray();
+    if (txn != null) {
+      txns.put(txn);
+    }
+    line.put("txns", txns);
+    return line;
+  }
+
+  /**
+   * A PARTIAL 1:N group whose sub-lines were matched to a USD document and a EUR document plus a
+   * pending remainder: the merged head keeps each txn's own foreign keys untouched, and its
+   * amount/pendingAmount totals are the account-currency sums of the sub-lines — the foreign
+   * amounts never leak into the line totals the "conciliado" block and the modal rely on.
+   */
+  @Test
+  public void mergeMatchGroupsKeepsPerTxnForeignKeysAndAccountCurrencyTotals() throws Exception {
+    JSONObject usdTxn = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+    JSONObject eurTxn = singleTxn(txnRow(new BigDecimal("10.00"), null, null, null, "EUR"));
+
+    JSONArray lines = new JSONArray();
+    lines.put(subLine("L-a", "29.03", "0", true, usdTxn));
+    lines.put(subLine("L-b", "10.00", "0", true, eurTxn));
+    lines.put(subLine("L-rem", "60.97", "60.97", false, null));
+
+    JSONArray merged = BankStatementsSupport.mergeMatchGroups(lines);
+
+    assertEquals(1, merged.length());
+    JSONObject head = merged.getJSONObject(0);
+    assertAmount("100.00", head, "amount");
+    assertAmount("60.97", head, "pendingAmount");
+    assertEquals("PARTIAL", head.getString("reconcileStatus"));
+    assertEquals("L-rem", head.getString("remainderLineId"));
+
+    JSONArray txns = head.getJSONArray("txns");
+    assertEquals(2, txns.length());
+    JSONObject first = txns.getJSONObject(0);
+    assertAmount("29.03", first, "amount");
+    assertAmount("42.67", first, "foreignAmount");
+    assertEquals("USD", first.getString("foreignCurrency"));
+    assertNoForeignKeys(txns.getJSONObject(1));
+  }
+
   // ── line SQLs select the txn_* foreign aliases (ETP-5450) ────────────────
   //
   // buildLineTxns reads txn_foreign_amount / txn_foreign_rate / txn_foreign_currency /
