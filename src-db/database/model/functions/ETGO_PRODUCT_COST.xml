@@ -31,7 +31,7 @@ BEGIN
   --
   -- Known, accepted staleness - the only clock read is that now(), and a stored
   -- value is recomputed only when an M_Costing row of the product changes. If a
-  -- future-dated cost reaches its start date and nothing touches that product's
+  -- future-dated cost reaches its start DATE and nothing touches that product's
   -- costing, the column keeps the previous cost until the next M_Costing change
   -- (or an ad_scd_rebuild). The same behavior the purchase/sale price columns
   -- already accept. The engine's own rows always start at the transaction date,
