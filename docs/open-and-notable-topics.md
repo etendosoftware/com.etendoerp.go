@@ -492,6 +492,48 @@ changed for this** (reviewed and declined in ETP-5047): it is already written, a
 to it would widen a fix whose scope is the subscription backfill. Converges the WARN count to zero;
 the per-tenant WARN is the operator-visible worklist until then.
 
+### 🟠 3.10 A JWT minted before the block keeps working on Copilot until it expires
+
+The environment-access check (§3.8) runs where a request enters a tenant through this module: NEO,
+MCP, the `JwtAuthUtils` servlets, and `GET /sws/go/login`, which refuses to mint a new token for a
+blocked tenant. Token renewal (`SFRefreshToken`) is a NEO pseudo-spec, so it is refused too. But an
+Etendo JWT **already issued** before the tenant was blocked is still valid on
+`com.etendoerp.copilot`'s `/sws/copilot/*`, which authenticates it through Etendo's secure web
+services and never asks the guard. It keeps working until it expires —
+`SMFSWS_CONFIG.EXPIRATIONTIME`, 1440 minutes (24 h) on the development database. Found in ETP-5047
+QA (BUG-1).
+
+**Proposal — to decide, not scheduled; Copilot is another module, so no code here:** either
+(a) Copilot's request authentication calls `EnvironmentAccessGuard.check` (or an equivalent hook
+this module exposes) with the token's client, answering the same 402 body — the durable fix, and
+the same rule §3.8 states for any new tenant servlet; or (b) shorten the secure-web-services token
+lifetime so the window closes sooner — cheaper, but it bounds the leak rather than closing it and
+affects every client of those tokens. Until then a blocked tenant can keep using Copilot for at
+most one token lifetime after the block.
+
+### 🟠 3.11 Two R37 edge cases found in ETP-5047 QA
+
+- **`past_due` with no grace anchor means zero grace — blocked at once.** The access policy grants
+  grace only from a non-null anchor (`EnvironmentAccessPolicy.evaluate`), and
+  `SubscriptionService.graceAnchorOf` returns null for a `past_due` row with neither
+  `GRACE_ANCHOR` nor the old-shape `CURRENT_PERIOD_END`. The webhook never writes that shape (an
+  outcome with no anchor is ignored as `missing period end`), but **R37 can**: a tenant whose
+  `ETGO_SubscriptionStatus` preference is `PAST_DUE` while `ETGO_SubscriptionDueAt` is missing or
+  not ISO-shaped is backfilled as `past_due` with no anchor. That preserves its access rather
+  than changing it — the preference route already read the same pair as "past due, no due date",
+  i.e. blocked — but it is a lockout nobody chose. Worth a report query before running R37 on an
+  environment: tenants with `ETGO_SubscriptionStatus = PAST_DUE` and no valid
+  `ETGO_SubscriptionDueAt`.
+- **R37's `@check` keys on "no OPEN row", so it can re-subscribe a canceled tenant.** A tenant
+  that still carries the `ETGO_TenantPlan = productive` preference and whose only rows are closed
+  — a subscription canceled since ETP-5047 closes its row, and a failed
+  `retireProductivePreference` leaves the preference behind — matches `@check`, and R37 inserts a
+  fresh **active** row: a canceled tenant reads as paying again. **Proposal:** key R37's
+  `@check` and its statement-2 guard on "no row at all" (`NOT EXISTS` any `ETGO_SUBSCRIPTION` row
+  for the tenant) instead of "no open row". That also keeps it idempotent (§3.7's reason for
+  leaving backfilled canceled rows open). Not changed in ETP-5047 by decision; decide before R37
+  runs on an environment where subscriptions have already been canceled live.
+
 ## 4. Known issues
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
