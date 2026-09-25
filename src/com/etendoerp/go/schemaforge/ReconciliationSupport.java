@@ -73,9 +73,15 @@ final class ReconciliationSupport {
   }
 
   /**
-   * Binds the four parameters of the two optional date-range clauses
-   * ({@code (CAST(? AS date) IS NULL OR col >= ?)} and the {@code <=} twin): dateFrom, dateFrom,
-   * dateTo, dateTo. Blank bounds are bound as SQL NULL, which makes the clause a no-op.
+   * Binds the four parameters of the two optional date-range clauses:
+   * {@code (CAST(? AS date) IS NULL OR col >= ?)} and
+   * {@code (CAST(? AS date) IS NULL OR col < CAST(? AS date) + 1)} — dateFrom, dateFrom,
+   * dateTo, dateTo. The upper bound is expressed as a strict {@code <} against the day AFTER
+   * {@code dateTo}, not {@code col <= dateTo}: every date column this feature reads is a
+   * TIMESTAMP, and a {@code DATE} bound widened to midnight by {@code <=} silently drops rows
+   * with a non-zero time of day on the last day of the range (ETP-5449). The {@code + 1} form
+   * stays sargable, unlike wrapping {@code col} in {@code CAST(col AS date)}.
+   * Blank bounds are bound as SQL NULL, which makes the clause a no-op.
    *
    * @return the next free parameter index
    */

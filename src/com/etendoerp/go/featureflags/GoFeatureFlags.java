@@ -132,14 +132,14 @@ public final class GoFeatureFlags {
   public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
 
   /**
-   * ETP-5443 — the demo-to-productive data transfer (ETP-5364): whether a paid productive tenant
-   * copies products/contacts from the account's demo, and whether {@code /sws/go/demo-data-transfer}
-   * exists at all. Environment-level, not per account: the endpoints are routed before any
-   * credential is read, so every toggle point evaluates the same context. Backend-only for the
-   * same reason as {@link #FLAG_BP_PORTAL_LINK} — the browser learns it from the endpoint answering
-   * 404. Its only caller is {@code DemoDataTransferFlag}.
+   * ETP-5389 — pre-provisioned tenant pool for onboarding. On, {@code POST /sws/go/onboarding}
+   * claims a READY tenant from {@code ETGO_TENANT_POOL} (when the request is the supported
+   * EUR/ES/es_ES combination) and the pool filler process keeps the pool topped up; off, both the
+   * claim and the filler are inert and onboarding is the classic from-scratch path. Environment
+   * level and backend-only: the browser never reads it. Its only caller is
+   * {@code TenantPoolConfig}.
    */
-  public static final String FLAG_DEMO_DATA_TRANSFER = "demo-data-transfer";
+  public static final String FLAG_ONBOARDING_TENANT_POOL = "onboarding-tenant-pool";
 
   /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset

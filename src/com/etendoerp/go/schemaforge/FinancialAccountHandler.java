@@ -207,6 +207,11 @@ public class FinancialAccountHandler implements NeoHandler {
     if (!SPEC.equals(context.getSpecName())) {
       return null;
     }
+    if (!NeoEndpointTypes.isCrud(context)) {
+      // Button actions, callouts, display logic and selectors are not account writes: let the
+      // generic sub-endpoint run untouched. Account create/update/delete rules do not apply.
+      return null;
+    }
     String method = context.getHttpMethod();
     try {
       enterAdminMode();
@@ -260,7 +265,9 @@ public class FinancialAccountHandler implements NeoHandler {
     if (METHOD_GET.equals(context.getHttpMethod()) && NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return injectHasTransactions(context);
     }
-    if (!METHOD_POST.equals(context.getHttpMethod())) {
+    if (!METHOD_POST.equals(context.getHttpMethod()) || !NeoEndpointTypes.isCrud(context)) {
+      // ETP-5468: a POST to a sub-endpoint (button action, callout) did not create an account,
+      // so it must not be provisioned as if it had.
       return null;
     }
     try {

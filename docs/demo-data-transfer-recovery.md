@@ -10,7 +10,7 @@ rows, and its Location/Address rows with their `C_Location` address data. Contac
 and passwords are not transferred. Product and contact progress reads use the most recently updated
 status preference because older retries may leave duplicate preference rows.
 
-Run after deploying the corrected Go code with `demo-data-transfer` enabled. Confirm the account's
+Run after deploying the corrected Go code. Confirm the account's
 original choice with the buyer before setting `products` and `contacts`; do not infer it from the
 presence of source rows. Use a transaction and keep the purchase ID and client IDs in the operator
 record. The values below are placeholders, never application defaults.

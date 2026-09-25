@@ -86,6 +86,9 @@ class Fiscal303SubmissionSupport {
   private static final String ERR_SUBMISSION_FAILED = "SUBMISSION_FAILED";
   private static final String ERR_ALREADY_SUBMITTED = "ALREADY_SUBMITTED";
   private static final String ERR_INVALID_DECL_TYPE = "INVALID_DECL_TYPE";
+  private static final String ERR_SNAPSHOT_FAILED = "SNAPSHOT_FAILED";
+  /** Log marker for a filed declaration whose snapshot could not be stored (see applySubmittedSnapshot). */
+  static final String SNAPSHOT_MISSING_MARKER = "ETGO_FISCAL_SNAPSHOT_MISSING";
 
   /**
    * Query params consumed structurally by this handler's own routing (year/period/tipo/id) —
@@ -312,6 +315,35 @@ class Fiscal303SubmissionSupport {
       return;
     }
 
+    // ETP-5438 — a production filing freezes the declaration on a snapshot of the
+    // GET /fiscal303/boxes figures (boxes + summary; the per-invoice sources are not kept). It is computed BEFORE the AEAT call: once Hacienda accepts
+    // the filing there is no going back, so a declaration whose figures cannot be computed must
+    // never reach the AEAT at all. Test mode never changes the declaration, so it takes none.
+    // It is also validated against the column's AD definition here (ETP-5438 QA BUG-1): a
+    // snapshot the entity would reject (too long for the AD length, or the property missing from
+    // the runtime model) must fail NOW, while nothing is filed, not in persistSuccessfulSubmission
+    // after Hacienda already accepted the filing. Validated, not assigned: the declaration is a
+    // managed entity and the request commits even when the AEAT call fails, so assigning it here
+    // would persist a snapshot on a declaration that was never submitted.
+    String submittedSnapshot = null;
+    if (!testMode) {
+      try {
+        submittedSnapshot = owner.computeSubmittedSnapshot(orgId, year, period).toString();
+        FiscalSubmittedSnapshotSupport.validateSubmittedSnapshot(decl, submittedSnapshot);
+      } catch (Exception e) {
+        AbstractFiscalHandler.log.error("Could not compute the submission snapshot for decl="
+            + declId + "; the declaration was not sent to the AEAT", e);
+        writeJson(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            owner.buildFailureJson(false, ERR_SNAPSHOT_FAILED,
+                "The declaration was not submitted: its figures could not be computed ("
+                    + StringUtils.defaultIfBlank(
+                        NeoMessageTranslator.safeParseTranslation(e.getMessage()),
+                        e.getClass().getSimpleName())
+                    + ")."));
+        return;
+      }
+    }
+
     AEAT303DeclarationData data = AEAT303DeclarationDataExtractor.extract(fileContent);
     String nrcToSubmit =
         Fiscal303BoxesHandler.resolveNrcForSubmission(data.getDeclarationType(), nrc);
@@ -342,17 +374,30 @@ class Fiscal303SubmissionSupport {
 
     persistIncidentsBestEffort(decl, declId, result);
 
-    if (result.isSuccessful()) {
-      if (testMode) {
-        attachTestJustificante(decl, org, data, result);
-      } else {
-        persistSuccessfulSubmission(decl, org, data, result);
-      }
-    }
+    persistSuccessfulOutcome(testMode, decl, org, data, result, submittedSnapshot);
 
     commitSubmissionBestEffort(declId);
 
     writeJson(response, HttpServletResponse.SC_OK, owner.buildSubmissionResultJson(result, data));
+  }
+
+  /**
+   * Stages the declaration-side effects of a SUCCESSFUL submission (nothing for a failed one):
+   * the test-labelled justificante for test mode ({@link #attachTestJustificante}), or the
+   * status/snapshot update plus justificante for production ({@link #persistSuccessfulSubmission}).
+   * Extracted from {@link #handleSubmit} to keep its cognitive complexity under the SonarQube
+   * {@code java:S3776} threshold; same branches, same order.
+   */
+  private void persistSuccessfulOutcome(boolean testMode, FiscalDecl decl, Organization org,
+      AEAT303DeclarationData data, AEAT303SubmissionResult result, String submittedSnapshot) {
+    if (!result.isSuccessful()) {
+      return;
+    }
+    if (testMode) {
+      attachTestJustificante(decl, org, data, result);
+    } else {
+      persistSuccessfulSubmission(decl, org, data, result, submittedSnapshot);
+    }
   }
 
   /**
@@ -458,7 +503,8 @@ class Fiscal303SubmissionSupport {
   /**
    * Persists the outcome of a successful PRODUCTION submission: declaration status →
    * {@code submitted_ack}, declaration file name set to the justificante file,
-   * {@code submissionMethod} → {@link #SUBMISSION_METHOD_AEAT_TELEMATIC} (ETP-4755), and the PDF
+   * {@code submissionMethod} → {@link #SUBMISSION_METHOD_AEAT_TELEMATIC} (ETP-4755), the
+   * submission snapshot {@link #handleSubmit} computed before calling the AEAT (ETP-5438), and the PDF
    * attached (best-effort — see {@link #attachJustificante}). Never called for test-mode results
    * (see {@link #attachTestJustificante} for that path, which attaches the PDF too but never
    * touches the declaration record) or failed submissions (see {@link #handleSubmit}).
@@ -469,7 +515,7 @@ class Fiscal303SubmissionSupport {
    * atomicity fix).</p>
    */
   private void persistSuccessfulSubmission(FiscalDecl decl, Organization org,
-      AEAT303DeclarationData data, AEAT303SubmissionResult result) {
+      AEAT303DeclarationData data, AEAT303SubmissionResult result, String submittedSnapshot) {
     String fileName = "justificante-303-" + Fiscal303BoxesHandler.safeFileToken(data.getFiscalYear())
         + "-" + Fiscal303BoxesHandler.safeFileToken(data.getPeriod()) + ".pdf";
     try {
@@ -477,6 +523,7 @@ class Fiscal303SubmissionSupport {
       decl.setDeclarationFileName(fileName);
       decl.setFileExternal(false);
       decl.setSubmissionMethod(SUBMISSION_METHOD_AEAT_TELEMATIC);
+      applySubmittedSnapshot(decl, submittedSnapshot);
       OBDal.getInstance().save(decl);
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not update declaration " + decl.getId()
@@ -485,6 +532,27 @@ class Fiscal303SubmissionSupport {
 
     if (result.getPdfContent() != null) {
       attachJustificante(decl, org, fileName, result.getPdfContent());
+    }
+  }
+
+  /**
+   * Stores the snapshot on a declaration Hacienda has ALREADY accepted (ETP-5438 QA BUG-1). It
+   * was validated against the column before the AEAT call, so a failure here is not expected;
+   * should one happen anyway it must not undo the rest of the record: the declaration IS filed,
+   * so it keeps {@code submitted_ack}/{@code aeat_telematic} and simply has no snapshot, which the
+   * reads treat exactly like a legacy submitted declaration (served live). The failure is logged
+   * as an error, never swallowed into a half-written status.
+   */
+  private void applySubmittedSnapshot(FiscalDecl decl, String submittedSnapshot) {
+    try {
+      decl.setSubmittedSnapshot(submittedSnapshot);
+    } catch (Exception e) {
+      // Distinct, greppable marker (ETP-5438 review S2): such a declaration is filed with
+      // Hacienda but NOT frozen — find it with `grep ETGO_FISCAL_SNAPSHOT_MISSING`.
+      AbstractFiscalHandler.log.error(SNAPSHOT_MISSING_MARKER + " decl=" + decl.getId() + " year="
+          + decl.getFiscalYear() + " period=" + decl.getPeriod() + " — filed with the AEAT but the"
+          + " submission snapshot could not be stored; it will be served live, like a declaration"
+          + " presented before snapshots existed", e);
     }
   }
 

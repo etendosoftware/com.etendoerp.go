@@ -43,20 +43,14 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
-import com.etendoerp.go.session.GoLegacyBearer;
-import com.etendoerp.go.session.GoNeoAuth;
-import com.etendoerp.go.session.GoSessionAuthResult;
-import com.etendoerp.go.session.GoSessionAuthenticator;
-import com.etendoerp.go.session.GoSessionRecord;
-import com.etendoerp.go.session.GoSessionService;
-import com.etendoerp.go.session.JdbcGoSessionStore;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Support Chat REST API servlet.
@@ -85,9 +79,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final Logger log = LogManager.getLogger(SupportConversationsServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json";
-  private static final String HEADER_AUTHORIZATION = "Authorization";
-  private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
-      new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
+  private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
+      new EnvironmentRequestAuthenticator();
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
   private static final String FIELD_MESSAGES    = "messages";
@@ -710,82 +703,22 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * ETP-4575 — the `__Host-` cookie session is honoured first; the Bearer path below is the
-   * fallback for callers that have not migrated. This endpoint used to be bearer-only, and since
-   * the frontend logs out on a 401, the support widget asking for its conversations was enough to
-   * revoke a valid cookie session and blank every window behind it.
+   * ETP-5455 — the shared environment pipeline under {@link SurfacePolicy#NEO_AUXILIARY}: support
+   * is exactly what a commercially blocked customer still needs, so no access check applies, and
+   * the cookie / Bearer / kill-switch rules are the ones every other environment surface uses.
+   * {@code identify} rather than {@code authenticate} because this servlet installs its own
+   * per-operation tenant context from the identity ({@code setTenantContext}).
    */
   private AuthContext authenticate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    GoSessionAuthResult sessionAuth = SESSION_AUTHENTICATOR.authenticate(request);
-    switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
-      case USE_SESSION:
-        return sessionAuthContext(response, sessionAuth.getRecord());
-      case CSRF_REJECTED:
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
-        return null;
-      case SESSION_INVALID:
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired session");
-        return null;
-      case NO_CREDENTIALS:
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-            "Missing or invalid Authorization header");
-        return null;
-      case USE_LEGACY_BEARER:
-      default:
-        GoLegacyBearer.recordUse();
-        return authenticateBearer(request, response);
-    }
-  }
-
-  /** Builds the request context from a resolved cookie session. */
-  private AuthContext sessionAuthContext(HttpServletResponse response, GoSessionRecord session)
-      throws IOException {
-    String userId = session.getUserId();
-    String roleId = session.getRoleId();
-    if (userId == null || userId.isEmpty() || roleId == null || roleId.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Session has no environment selected");
+    EnvironmentAuthOutcome outcome = AUTHENTICATOR.identify(request, SurfacePolicy.NEO_AUXILIARY);
+    if (!outcome.isAuthenticated()) {
+      log.warn("Support chat: refused ({}): {}", outcome.getHttpStatus(), outcome.getMessage());
+      writeError(response, outcome.getHttpStatus(), outcome.getMessage());
       return null;
     }
-    String clientId = session.getCtxClientId();
-    String orgId = session.getCtxOrgId();
-    return new AuthContext(userId, roleId,
-        clientId == null || clientId.isEmpty() ? SYSTEM_USER_ID : clientId,
-        orgId == null || orgId.isEmpty() ? SYSTEM_USER_ID : orgId);
-  }
-
-  private AuthContext authenticateBearer(HttpServletRequest request, HttpServletResponse response)
-      throws IOException {
-    String authHeader = request.getHeader(HEADER_AUTHORIZATION);
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
-      return null;
-    }
-    String token = authHeader.substring(7).trim();
-    try {
-      DecodedJWT jwt = SecureWebServicesUtils.decodeToken(token);
-      String userId = jwt.getClaim("user").asString();
-      if (userId == null || userId.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid token: missing user claim");
-        return null;
-      }
-      String roleId = jwt.getClaim("role").asString();
-      if (roleId == null || roleId.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid token: missing role claim");
-        return null;
-      }
-      String clientId = jwt.getClaim("client").asString();
-      String orgId = jwt.getClaim("organization").asString();
-      return new AuthContext(userId, roleId,
-          clientId == null || clientId.isEmpty() ? SYSTEM_USER_ID : clientId,
-          orgId == null || orgId.isEmpty() ? SYSTEM_USER_ID : orgId);
-    } catch (Exception e) {
-      log.warn("Support chat: invalid JWT token", e);
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return null;
-    }
+    return new AuthContext(outcome.getUserId(), outcome.getRoleId(), outcome.getClientId(),
+        outcome.getOrgId());
   }
 
   // --- Internal webhook endpoints (ticket linking / human takeover) ---

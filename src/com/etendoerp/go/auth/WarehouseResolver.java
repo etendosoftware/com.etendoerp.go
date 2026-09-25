@@ -1,0 +1,37 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.auth;
+
+import org.openbravo.dal.core.OBContext;
+
+/**
+ * Picks a warehouse the context's role can actually read, for a context whose own warehouse sits
+ * in an organization outside the readable set (ETP-5455). A seam so the post-authentication step
+ * can be tested without a database.
+ */
+@FunctionalInterface
+public interface WarehouseResolver {
+
+  /**
+   * Finds a warehouse of the context's client that belongs to one of its readable organizations.
+   *
+   * @param context the context whose warehouse is not readable
+   * @return an accessible warehouse id, or null when the client has none
+   */
+  String findAccessibleWarehouse(OBContext context);
+}
