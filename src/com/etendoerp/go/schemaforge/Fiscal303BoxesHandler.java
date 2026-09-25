@@ -98,6 +98,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     super(servlet);
     this.submissionSupport = new Fiscal303SubmissionSupport(this);
     this.sourcesSupport = new Fiscal303SourcesSupport(this);
+    this.snapshotSupport = new Fiscal303SnapshotSupport();
   }
 
   @Override
@@ -134,9 +135,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     runDispatch(response, () -> {
       if (BOXES.equals(entityName)) {
-        guardNotAlreadySubmitted(orgId, year, period);
-        ComputeResult cr = computeBoxes(orgId, year, period);
-        JSONObject result = buildResponse(cr.boxes, cr.sources);
+        // Deliberately NOT guarded (ETP-5438): boxes is a pure read. A submitted declaration is
+        // served from its persisted submission snapshot (never recomputed); a legacy submitted
+        // one without a snapshot, and every draft/ready one, is computed live. Only the
+        // side-effecting generate (file generation) is blocked once submitted.
+        JSONObject result = snapshotOrCompute(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
@@ -157,11 +160,13 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   /**
    * ETP-5438 — thin, model-fixed wrapper around the shared {@link
    * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)} (see its
-   * javadoc). {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
+   * javadoc). Applied to {@code generate} only — the {@code boxes} read stays open for a
+   * submitted declaration so the frontend can render (and freeze) its figures on a cold session
+   * cache. {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
    * it already has its own, narrower, {@code submitted_ack}-only guard in {@link
    * Fiscal303SubmissionSupport#handleSubmit} (the {@code ALREADY_SUBMITTED} check), which this
    * does not replace or widen; that endpoint is a distinct concern (idempotency of a real AEAT
-   * filing action) from "must not silently recompute/regenerate a presented declaration".
+   * filing action) from "must not silently regenerate a presented declaration".
    */
   void guardNotAlreadySubmitted(String orgId, int year, String period) {
     guardNotAlreadySubmitted(orgId, year, period, "303");
@@ -714,38 +719,5 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       map.computeIfAbsent(pct, k -> new ArrayList<>()).add(r);
     }
     return map;
-  }
-
-  private JSONObject buildResponse(Map<Integer, BigDecimal> b,
-      List<Map<String, Object>> sources) throws Exception {
-    JSONObject boxes = new JSONObject();
-    for (Map.Entry<Integer, BigDecimal> e : b.entrySet()) {
-      boxes.put(String.valueOf(e.getKey()), e.getValue().toString());
-    }
-    BigDecimal accrued    = b.getOrDefault(27, BigDecimal.ZERO);
-    BigDecimal deductible = b.getOrDefault(45, BigDecimal.ZERO);
-    BigDecimal result     = b.getOrDefault(46, BigDecimal.ZERO);
-    JSONObject summary = new JSONObject();
-    summary.put("accrued",    accrued.toString());
-    summary.put("deductible", deductible.toString());
-    summary.put("result",     result.toString());
-    JSONArray sourcesArr = new JSONArray();
-    for (Map<String, Object> row : sources) {
-      JSONObject s = new JSONObject();
-      for (Map.Entry<String, Object> e : row.entrySet()) {
-        Object v = e.getValue();
-        if (v instanceof BigDecimal) {
-          s.put(e.getKey(), v.toString());
-        } else {
-          s.put(e.getKey(), v != null ? v.toString() : "");
-        }
-      }
-      sourcesArr.put(s);
-    }
-    JSONObject root = new JSONObject();
-    root.put(BOXES,     boxes);
-    root.put("summary", summary);
-    root.put("sources", sourcesArr);
-    return root;
   }
 }
