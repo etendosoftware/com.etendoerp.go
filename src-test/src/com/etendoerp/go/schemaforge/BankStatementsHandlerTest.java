@@ -78,6 +78,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Unit tests for {@link BankStatementsHandler}.
  *
@@ -105,6 +109,9 @@ public class BankStatementsHandlerTest {
   /** The model's default connection status for a financial account, i.e. not bank-connected. */
   private static final String PSD2_DISCONNECTED = "DC";
 
+  /** The report spec (and its one entity) the ETP-5447 agent actions are served on. */
+  private static final String BANK_STATEMENTS_SPEC = "bank-statements";
+
   /**
    * The bank-connected delete rejection (ETP-5111), byte-for-byte in sync with the handler's own
    * constant and with the frontend's {@code backendError.statementBankConnectedNotDeletable}
@@ -114,6 +121,15 @@ public class BankStatementsHandlerTest {
       "Statements from a bank-connected account cannot be deleted.";
 
   private BankStatementsHandler handler;
+
+  /** ETP-5447: the spec / entity an agent ACTION context carries. */
+  @Mock
+  private SFSpec agentSpec;
+  @Mock
+  private SFEntity agentSfEntity;
+  /** ETP-5447: a SPA-shaped ?action=create context (no ACTION endpoint type). */
+  @Mock
+  private NeoContext spaCreateCtx;
   private MockedStatic<BankStatementAggregates> aggMock;
   private MockedStatic<BankStatementLinePruner> prunerMock;
 
@@ -824,19 +840,6 @@ public class BankStatementsHandlerTest {
 
   // ── ?action=create (manual statement) ──────────────────────────────────
 
-  /**
-   * Invokes the private static {@code validateCreateBody} via reflection — it
-   * only reads the JSON body, so this covers every 400 branch without the
-   * {@code mockStatic(OBContext)} that going through {@code handle()} would
-   * otherwise force just to get past admin mode.
-   */
-  private static NeoResponse invokeValidateCreate(JSONObject body) throws Exception {
-    java.lang.reflect.Method m =
-        BankStatementsHandler.class.getDeclaredMethod("validateCreateBody", JSONObject.class);
-    m.setAccessible(true);
-    return (NeoResponse) m.invoke(null, body);
-  }
-
   private static JSONObject createLine(String date, String desc, String cp, Object in, Object out)
       throws Exception {
     JSONObject l = new JSONObject();
@@ -857,36 +860,36 @@ public class BankStatementsHandlerTest {
   }
 
   @Test
-  public void validateCreateBodyRejectsMissingAccount() throws Exception {
-    NeoResponse r = invokeValidateCreate(new JSONObject());
+  public void testValidateCreateBodyRejectsMissingAccount() throws Exception {
+    NeoResponse r = BankStatementsSupport.validateCreateBody(new JSONObject());
     assertEquals(400, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message")
         .contains("FIN_Financial_Account_ID"));
   }
 
   @Test
-  public void validateCreateBodyRejectsMissingName() throws Exception {
+  public void testValidateCreateBodyRejectsMissingName() throws Exception {
     JSONObject body = withStatementDates(new JSONObject());
     body.put("FIN_Financial_Account_ID", "acc-1");
-    NeoResponse r = invokeValidateCreate(body);
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
     assertEquals(400, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message").contains("name"));
   }
 
   @Test
-  public void validateCreateBodyRejectsEmptyLines() throws Exception {
+  public void testValidateCreateBodyRejectsEmptyLines() throws Exception {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
     withStatementDates(body);
     body.put("lines", new JSONArray());
-    NeoResponse r = invokeValidateCreate(body);
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
     assertEquals(400, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message").contains("line"));
   }
 
   @Test
-  public void validateCreateBodyAcceptsValidBody() throws Exception {
+  public void testValidateCreateBodyAcceptsValidBody() throws Exception {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
@@ -894,7 +897,134 @@ public class BankStatementsHandlerTest {
     JSONArray lines = new JSONArray();
     lines.put(createLine("2026-06-02T00:00:00Z", "Transferencia", "Acme", 3500.0, 0));
     body.put("lines", lines);
-    assertNull(invokeValidateCreate(body));
+    assertNull(BankStatementsSupport.validateCreateBody(body));
+  }
+
+  @Test
+  public void testValidateCreateBodyRejectsAbsentLines() throws Exception {
+    JSONObject body = withStatementDates(new JSONObject());
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(BankStatementsHandler.MSG_LINE_REQUIRED,
+        r.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  public void testValidateCreateBodyRejectsMissingTransactionDate() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    body.put("importDate", "2026-06-02");
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
+    assertEquals(400, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").getString("message")
+        .contains(BankStatementsHandler.FIELD_TRANSACTION_DATE));
+  }
+
+  // ── ETP-5447: neo_action surface ───────────────────────────────────────
+
+  @Test
+  public void testActionContractsReturnsTheSevenAgentActions() {
+    assertSame(BankStatementAgentActions.CONTRACTS, handler.actionContracts());
+    assertEquals(Arrays.asList("createStatement", "previewStatement", "importStatement",
+        "updateStatement", "processStatement", "reactivateStatement", "deleteStatement"),
+        new ArrayList<>(handler.actionContracts().keySet()));
+    assertTrue(handler.servesActions());
+  }
+
+  /** An ACTION context as neo_action builds it for the bank-statements spec. */
+  private static NeoContext agentActionCtx(String action, String recordId, JSONObject params,
+      Map<String, String> queryParams) {
+    return NeoContext.builder()
+        .specName(BANK_STATEMENTS_SPEC)
+        .entityName(BANK_STATEMENTS_SPEC)
+        .httpMethod("POST")
+        .recordId(recordId)
+        .requestBody(params)
+        .queryParams(queryParams)
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(action)
+        .build();
+  }
+
+  @Test
+  public void testActionContextWithUnknownActionIsRefusedByTheDispatcher() throws Exception {
+    NeoResponse r = handler.handle(agentActionCtx("matchStatement", "acc-1", null, null));
+
+    assertEquals(422, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").has("availableActions"));
+    // Only the outer call: the dispatcher refused before re-entering the engine.
+    verify(handler, times(1)).handle(any());
+  }
+
+  @Test
+  public void testActionContextIgnoresTheSpaActionQueryParam() throws Exception {
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "create");
+    // "create" is the SPA's engine action, not an agent action: the ACTION branch judges the
+    // fieldName against the contract and never falls through to ?action= routing.
+    NeoResponse r = handler.handle(agentActionCtx("create", "acc-1", new JSONObject(), qp));
+
+    assertEquals(422, r.getHttpStatus());
+    verify(handler, times(1)).handle(any());
+    verify(handler, never()).newManualBankStatement(any(), any());
+  }
+
+  @Test
+  public void testActionContextReentersTheSameHandlerWithTheEngineRequest() throws Exception {
+    when(agentSfEntity.getETGOSFSpec()).thenReturn(agentSpec);
+    NeoResponse engineAnswer = NeoResponse.error(409, "connected to the bank");
+    doReturn(engineAnswer).when(handler)
+        .handle(Mockito.argThat(c -> c != null && c.getEndpointType() == null));
+    NeoContext ctx = NeoContext.builder()
+        .specName(BANK_STATEMENTS_SPEC)
+        .entityName(BANK_STATEMENTS_SPEC)
+        .httpMethod("POST")
+        .recordId("stmt-1")
+        .sfEntity(agentSfEntity)
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("deleteStatement")
+        .build();
+
+    NeoResponse r;
+    try (MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class)) {
+      access.when(() -> NeoAccessHelper.hasReportSpecAccess(agentSpec, "POST")).thenReturn(true);
+      r = handler.handle(ctx);
+    }
+
+    assertSame(engineAnswer, r);
+    ArgumentCaptor<NeoContext> captor = ArgumentCaptor.forClass(NeoContext.class);
+    verify(handler, times(2)).handle(captor.capture());
+    NeoContext derived = captor.getAllValues().get(1);
+    assertNull(derived.getEndpointType());
+    assertEquals("POST", derived.getHttpMethod());
+    assertEquals("delete", derived.getQueryParams().get("action"));
+    assertEquals("stmt-1", derived.getRequestBody().getString("id"));
+    assertEquals(1, derived.getRequestBody().length());
+  }
+
+  @Test
+  public void testNonActionCreateStillRoutesToTheEngine() {
+    when(spaCreateCtx.getEndpointType()).thenReturn(null);
+    when(spaCreateCtx.getRequestBody()).thenReturn(null);
+
+    NeoResponse r = handler.handle(postCtx(spaCreateCtx, "create"));
+
+    // The engine's own create refusal (400 body required), not the agent contract's 422.
+    assertEquals(400, r.getHttpStatus());
+    verify(handler, times(1)).handle(any());
+  }
+
+  @Test
+  public void testCrudTypedContextIsNotDivertedToTheDispatcher() {
+    when(spaCreateCtx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(spaCreateCtx.getRequestBody()).thenReturn(null);
+
+    NeoResponse r = handler.handle(postCtx(spaCreateCtx, "create"));
+
+    assertEquals(400, r.getHttpStatus());
   }
 
   @Test

@@ -49,6 +49,8 @@ class BankStatementEntityHandlerTest {
   private static final List<String> WRITE_METHODS = List.of(POST, PUT, PATCH, DELETE);
   private static final String ACTIONS_SPEC = "bank-statements";
   private static final int METHOD_NOT_ALLOWED = 405;
+  private static final String NEO_ACTION = "neo_action";
+  private static final String STATEMENT_ID_HINT = "bank statement id";
 
   private BankStatementEntityHandler handler;
 
@@ -151,6 +153,46 @@ class BankStatementEntityHandlerTest {
         errorMessageOf(BankStatementEntityHandler.refuseGenericWrite(STATEMENTS, "post")));
     assertEquals(BankStatementEntityHandler.MSG_STATEMENT_DELETE_DISABLED,
         errorMessageOf(BankStatementEntityHandler.refuseGenericWrite(STATEMENTS, "delete")));
+  }
+
+  /**
+   * The message names a concrete neo_action action, and that action really is declared by
+   * {@link BankStatementAgentActions}: a renamed action would otherwise leave the refusal pointing
+   * the agent at an action that no longer exists.
+   */
+  private static void assertNamesDeclaredAction(String message, String action) {
+    assertTrue(message.contains("action " + action), message);
+    assertTrue(message.contains(NEO_ACTION), message);
+    assertTrue(BankStatementAgentActions.CONTRACTS.containsKey(action), action);
+  }
+
+  @Test
+  void testTheCreateMessageNamesCreateStatementAndImportStatement() {
+    String message = BankStatementEntityHandler.MSG_STATEMENT_CREATE_DISABLED;
+    assertNamesDeclaredAction(message, BankStatementAgentActions.CREATE_STATEMENT);
+    assertTrue(message.contains(BankStatementAgentActions.IMPORT_STATEMENT), message);
+    assertTrue(message.contains("financial account id"), message);
+  }
+
+  @Test
+  void testTheUpdateMessageNamesUpdateStatement() {
+    String message = BankStatementEntityHandler.MSG_STATEMENT_UPDATE_DISABLED;
+    assertNamesDeclaredAction(message, BankStatementAgentActions.UPDATE_STATEMENT);
+    assertTrue(message.contains(STATEMENT_ID_HINT), message);
+  }
+
+  @Test
+  void testTheDeleteMessageNamesDeleteStatement() {
+    String message = BankStatementEntityHandler.MSG_STATEMENT_DELETE_DISABLED;
+    assertNamesDeclaredAction(message, BankStatementAgentActions.DELETE_STATEMENT);
+    assertTrue(message.contains(STATEMENT_ID_HINT), message);
+  }
+
+  @Test
+  void testTheLinesMessageNamesUpdateStatementOnTheirStatement() {
+    String message = BankStatementEntityHandler.MSG_LINES_WRITE_DISABLED;
+    assertNamesDeclaredAction(message, BankStatementAgentActions.UPDATE_STATEMENT);
+    assertTrue(message.contains(STATEMENT_ID_HINT), message);
   }
 
   /** Named actions are served by the ETP-5468 mechanism, not this handler: ACTION passes through. */
