@@ -217,6 +217,36 @@ class WidgetQueryPolicyRegistryTest {
   }
 
   /**
+   * Regression guard for ETP-5367: {@code dateinvoiced} is a DATE column, so same-day
+   * invoices tie under a single-column ORDER BY and were returned in arbitrary join-plan
+   * order, causing the dashboard "Ventas Recientes" panel to skip the newest invoices.
+   * Verifies that rangedSql breaks ties deterministically via {@code created DESC} then
+   * {@code c_invoice_id DESC}, immediately followed by {@code LIMIT 5}.
+   */
+  @Test
+  void recentInvoicesRangedSqlBreaksSameDayTiesDeterministically() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.recentInvoices();
+
+    assertTrue(
+        policy.rangedSql.contains("ORDER BY i.dateinvoiced DESC, i.created DESC, i.c_invoice_id DESC LIMIT 5"),
+        "rangedSql must break same-day dateinvoiced ties via created DESC, c_invoice_id DESC (ETP-5367)");
+  }
+
+  /**
+   * Regression guard for ETP-5367: verifies that fallbackSql (the no-range path) applies
+   * the same deterministic tiebreaker as rangedSql, so same-day invoices are not dropped
+   * or reordered depending on which SQL variant serves the request.
+   */
+  @Test
+  void recentInvoicesFallbackSqlBreaksSameDayTiesDeterministically() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.recentInvoices();
+
+    assertTrue(
+        policy.fallbackSql.contains("ORDER BY i.dateinvoiced DESC, i.created DESC, i.c_invoice_id DESC LIMIT 5"),
+        "fallbackSql must break same-day dateinvoiced ties via created DESC, c_invoice_id DESC (ETP-5367)");
+  }
+
+  /**
    * Verifies that rangedSql includes {@code LIMIT 5} to match the five rows rendered
    * by {@code RecentSalesList} and avoid fetching unnecessary records.
    */
