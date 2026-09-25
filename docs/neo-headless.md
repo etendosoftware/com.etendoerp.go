@@ -166,6 +166,27 @@ The token is decoded via `SecureWebServicesUtils.decodeToken()`. Required JWT cl
 
 A missing or invalid token returns `401 Unauthorized`.
 
+**Commercial access — `402 Payment Required` (ETP-5443, body since ETP-5047).** Once the caller is
+authenticated, every NEO request (bearer, cookie session or OAuth2 alike) is refused when the
+tenant's commercial access is cut off — a demo past its trial, or a subscription canceled or past
+due beyond its payment grace. The check is `EnvironmentAccessGuard`, shared with MCP (§4.12), the
+`JwtAuthUtils` servlets and `GET /sws/go/login`, so all of them answer the same body:
+
+```json
+{ "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
+             "status": 402,
+             "code": "ENVIRONMENT_ACCESS_DENIED",
+             "decision": "SUBSCRIPTION_REQUIRED" } }
+```
+
+`decision` is `DEMO_TRIAL_EXPIRED` or `SUBSCRIPTION_REQUIRED`. Read `error.code` / `error.decision`;
+`message` keeps its pre-ETP-5047 text only so older clients that parse the prefix keep working. The
+backend-only kill switch `environment-access-enforcement-off` turns the refusal into an INFO log
+line. Pseudo-specs are refused too (the SPA's blocked screen is driven by the 402 on
+`windowaccessmap`); the account-level billing, portal and upgrade endpoints are not NEO and never
+refuse. Rules, entry points and the kill switch: `open-and-notable-topics.md` §3.8 and
+`feature-flags-and-tenant-upgrade.md` §1.
+
 ### 4.2 URL Patterns
 
 All URLs are relative to the servlet root `/sws/neo`.
@@ -3272,6 +3293,8 @@ NEO Headless enforces security at multiple levels:
    but the declaration keeps the catalog honest if the spec ever loses its tabs.
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
+
+9a. **Commercial access (ETP-5443 / ETP-5047).** Right after authentication, before any of the checks above, `NeoAuthenticator` asks `EnvironmentAccessGuard` whether the tenant may be entered at all; a demo past its trial or a subscription past its payment grace answers `402 Payment Required` with `error.code = ENVIRONMENT_ACCESS_DENIED` and `error.decision` (§4.1). The same guard runs in MCP, the `JwtAuthUtils` servlets and `GET /sws/go/login`; a new tenant servlet inherits it only by authenticating through `NeoAuthenticator` or `JwtAuthUtils.authenticateOrFail` (`open-and-notable-topics.md` §3.8).
 
 10. **Tenant-owner protection (ETP-4830).** `AD_User.EM_ETGO_Is_Owner` (`char(1)`, `NOT NULL DEFAULT 'N'`, an `EM_ETGO_`-prefixed extension column on core's `AD_User` table — same convention as `AD_Role.EM_ETGO_Show_Acct_Fields`, added via the `/etendo:alter-db` webhook mechanism, never by hand-editing core's model XML) flags the ONE `AD_User` who completed self-service onboarding/registration for a client — that client's owner. Read/written via native SQL only (`OwnerSupport`, `schemaforge/util/OwnerSupport.java`), never a DAL getter/setter — the column is not mapped as a typed entity property, exactly the same reasoning `SFWindowAccessMap#resolveShowAccountingFields` documents for its own precedent column.
 

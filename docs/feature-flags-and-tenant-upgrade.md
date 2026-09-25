@@ -68,6 +68,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
 | `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
+| `environment-access-enforcement-off` | `etendo.go.flags.environment-access-enforcement-off` | `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF` | absent ⇒ **`false`** = enforcing (an OFF switch — see its section below) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -262,8 +263,76 @@ never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off
 It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
 tenant free access. No key exists in the web client's `flag-keys.js`, and none must be added: the
 SPA follows the 402 it is given. The 402 body and the entry points are described in
-`open-and-notable-topics.md` §3.7; the registry entry is `environment-access-enforcement-kill-switch`
-in `schema_forge/flags-registry.json`.
+`open-and-notable-topics.md` §3.8 (the row lifecycle behind the decision in §3.7); the registry entry
+is `environment-access-enforcement-kill-switch` in `schema_forge/flags-registry.json`.
+
+### Operating environment-access enforcement (ETP-5047) — deploy, switch off, support
+
+The one operator-facing page for the commercial block. Enforcement needs **no switch to turn on**:
+it is live from the moment the module is deployed.
+
+**Deploy order.**
+
+1. Deploy the ETP-5047 module (`update.database` adds `ETGO_SUBSCRIPTION.GRACE_ANCHOR` and
+   `LAST_EVENT_AT`).
+2. Only then run the `R37-tenant-subscription-backfill` data-fix. It now inserts into those two
+   columns, so run before the deploy it fails on every tenant (`FAILED`, retried by the runner — an
+   error, not a silent skip). An environment that already ran the pre-ETP-5047 R37 needs nothing
+   re-run: its rows are read through the `GRACE_ANCHOR` / watermark fallbacks
+   (`open-and-notable-topics.md` §2.3, §3.7).
+3. Before running R37 on an environment, settle the two edge cases in `open-and-notable-topics.md`
+   §3.11: list the tenants whose `ETGO_SubscriptionStatus` is `PAST_DUE` with no valid
+   `ETGO_SubscriptionDueAt` (R37 backfills them `past_due` with no anchor — blocked at once), and,
+   if subscriptions have already been canceled live on that environment, decide the `@check`
+   change first.
+
+**Switching enforcement off (incident only).**
+
+| Where | How | Scope | Takes effect |
+|---|---|---|---|
+| ConfigCat (SDK key configured) | boolean setting `environment-access-enforcement-off` served as `true` | everyone, or one tenant through a targeting rule on the `clientId` attribute (the tenant's `AD_Client_ID`) | without a restart, on the next poll |
+| Local configuration (no SDK key) | `etendo.go.flags.environment-access-enforcement-off=true` in `Openbravo.properties` (or the JVM property, or `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF=true`) | the whole environment — there is no per-tenant form locally | after a Tomcat restart |
+
+Confirm it took: a would-be refusal logs `Environment access enforcement is switched off: <entry
+point> would have refused tenant <id> (<DECISION>) and allowed it` at INFO, and
+`GET /sws/go/environments` reports that tenant's `accessState` as `ALLOWED`. Undo by removing the
+rule/property (or setting `false`). Anything that is not a clean `true` keeps enforcing.
+
+**What support sees for a blocked tenant.**
+
+- **The customer**, after entering the environment (entry is never refused), gets the blocked
+  screen instead of the app: *"Access suspended for non-payment"* with **Manage subscription** →
+  `/account` (`SUBSCRIPTION_REQUIRED`), or *"Your trial period has ended"* with **Upgrade plan** →
+  `/upgrade` (`DEMO_TRIAL_EXPIRED`). `/account` (billing, Stripe Customer Portal) and `/upgrade`
+  keep working, and the environment picker labels the tenant *Access suspended* / trial expired
+  from `accessState`.
+- **An API client or AI agent** gets HTTP 402 with
+  `{"error":{"message":"Environment access is not available: <DECISION>","status":402,"code":"ENVIRONMENT_ACCESS_DENIED","decision":"<DECISION>"}}`
+  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error), the `JwtAuthUtils` servlets and
+  `GET /sws/go/login`. One gap: an Etendo JWT minted **before** the block keeps working on Copilot
+  until it expires (`open-and-notable-topics.md` §3.10).
+- **The log** has an INFO line per refused request — `Commercial access denied for NEO request:
+  Environment access is not available: <DECISION>`, `... for MCP request: ...`, or `... for
+  <endpoint>: ...` from the `JwtAuthUtils` servlets. `GET /sws/go/login` refuses without a log line.
+- **Why it is blocked**: `GET /sws/go/environments` (`accessState`, `subscriptionStatus`, trial
+  fields) and the tenant's subscription rows —
+
+  ```sql
+  select status, start_date, end_date, grace_anchor, current_period_start, current_period_end,
+         last_event_at, stripe_subscription_id
+    from etgo_subscription
+   where environment_client_id = '<AD_Client_ID>' and isactive = 'Y'
+   order by end_date desc nulls first, created desc;
+  ```
+
+  A `past_due` row is blocked once `grace_anchor + etendo.go.billing.grace.days` (default 15) has
+  passed; a `canceled` or closed row is blocked at once. The lifecycle events that led there are in
+  `ETGO_BILLING_EVENT` (`event_result`, `failure_reason`); a `charge.dispute.created` there never
+  blocks anyone.
+- **Unblocking** is the customer paying: for a `past_due` row, through `/account` (the Stripe
+  Customer Portal) — the resulting `invoice.paid` sets the open row back to `active`; for a canceled
+  subscription, a new purchase, which opens a fresh row (`open-and-notable-topics.md` §3.7). A hand edit of the row is overwritten by the next
+  lifecycle event; the kill switch is for incidents, not for granting access.
 
 ## 2. The onboarding paywall
 
@@ -621,11 +690,13 @@ tenant after R37 has; see §8.2 of
 `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
 
 The read side therefore tolerates the gap. `com.etendoerp.go.payment.TenantPlanPreferenceFallback`
-answers for a tenant **only when it has no open subscription at all**:
+answers for a tenant **only when it has no subscription row at all** (open or closed — since
+ETP-5047 a canceled subscription closes its row, and a closed row reads as `canceled`, so it must not
+fall through to the preference):
 
 | Path | Where | Cost |
 |---|---|---|
-| Single tenant | `TenantPlanService.resolvePlan` | one extra query, and only when there is no open subscription |
+| Single tenant | `TenantPlanService.resolvePlan` | one extra query, and only when the tenant has no subscription row |
 | Bulk (`GET /environments`) | `EnvironmentPlanCache.of(allClientIds, openSubscriptions)` | **one** extra query for all the missing ids at once; none when every tenant has a row |
 
 Both paths must fall back or neither: if only one did, the environment list and `resolvePlan` would
@@ -675,6 +746,10 @@ The `GET /sws/go/environments` response gained two additive fields:
   badges as *Demo* / *Productivo*. This field is the user-visible end of the whole chain: when
   ETP-4966 was reported as "I paid and it still says Demo", this is the value that was wrong.
 - **`accountEmail`** (top level) is the account identity described in §1.
+- **`accessState`** (per environment, when the tenant has lifecycle metadata) is the
+  `EnvironmentAccessPolicy.Decision` name. Since ETP-5047 it is the decision **actually enforced**
+  (`EnvironmentAccessGuard.enforcedDecision`): with the kill switch on for that tenant a refusal
+  reads `ALLOWED`, while `subscriptionStatus` and the trial fields keep reporting the facts.
 
 Both are backward compatible; clients that ignore them are unaffected.
 
