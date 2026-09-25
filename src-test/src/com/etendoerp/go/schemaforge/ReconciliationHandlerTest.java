@@ -371,6 +371,48 @@ public class ReconciliationHandlerTest {
     }
   }
 
+  /**
+   * {@code bsl.datetrx} is a TIMESTAMP; the upper bound must be an EXCLUSIVE {@code < next day},
+   * not {@code <= dateTo}. A DATE bound compared with {@code <=} against a TIMESTAMP column widens
+   * to that day's midnight and silently drops rows with a non-zero time of day on the last day of
+   * the range (ETP-5449).
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesSqlUsesExclusiveUpperBoundForDateTo() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(false);
+    Connection conn = mock(Connection.class);
+
+    Map<String, String> filters = new HashMap<>();
+    filters.put("dateFrom", "2026-01-01");
+    filters.put("dateTo", "2026-01-31");
+
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(conn.createArrayOf(anyString(), any())).thenReturn(null);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      handler.buildPendingLines(ACC_ID, CLIENT_ID, new HashSet<>(Arrays.asList(ORG_ID)), filters);
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      String generated = sql.getValue();
+      assertTrue("dateTo must be an exclusive bound against the day after it; got: " + generated,
+          generated.contains("bsl.datetrx < CAST(? AS date) + 1"));
+      assertFalse("dateTo must not truncate the TIMESTAMP column to midnight via <=; got: " + generated,
+          generated.contains("bsl.datetrx <= ?"));
+    }
+  }
+
   // ── pendingLines: draftReconciliationCount (ETP-4502 "Reactivar" warning) ──────
   // Core allows only ONE editable (draft) reconciliation per account, so a non-zero count means the
   // next "Reactivar" will first CONFIRM that draft. The envelope reports it so the confirm dialog can
@@ -535,6 +577,43 @@ public class ReconciliationHandlerTest {
       // parameter any more, since the old draftRec branch of the candidates query is gone.
       verify(ps).setString(1, ACC_ID);
       verify(ps).setString(6, "N");
+    }
+  }
+
+  /**
+   * {@code ft.statementdate} is a TIMESTAMP; the upper bound must be an EXCLUSIVE {@code < next
+   * day}, not {@code <= dateTo} (ETP-5449) — same reasoning as the pendingLines query, see
+   * {@link #testPendingLinesSqlUsesExclusiveUpperBoundForDateTo()}.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testCandidatesSqlUsesExclusiveUpperBoundForDateTo() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(false);
+    Connection conn = mock(Connection.class);
+    doReturn(new HashSet<String>()).when(handler)
+        .suggestedTransactionIds(eq(ACC_ID), eq(LINE_ID), anyInt());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // buildCandidates now resolves the account for the ownership gate (ETP-4950).
+      doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
+      handler.buildCandidates(ACC_ID, LINE_ID, null, "2026-01-01", "2026-01-31");
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      String generated = sql.getValue();
+      assertTrue("dateTo must be an exclusive bound against the day after it; got: " + generated,
+          generated.contains("ft.statementdate < CAST(? AS date) + 1"));
+      assertFalse("dateTo must not truncate the TIMESTAMP column to midnight via <=; got: " + generated,
+          generated.contains("ft.statementdate <= ?"));
     }
   }
 
@@ -2177,6 +2256,49 @@ public class ReconciliationHandlerTest {
       assertEquals(0, new BigDecimal("-75.00").compareTo(new BigDecimal(row.getString("amount"))));
       // A purchase invoice query binds issotrx = 'N'.
       verify(ps).setString(1, "N");
+    }
+  }
+
+  /**
+   * {@code inv.dateinvoiced} is a TIMESTAMP and, unlike the bank-side date columns, real data
+   * routinely carries a non-midnight time of day (measured: ~8.7% of invoices in a representative
+   * dataset). The upper bound must be an EXCLUSIVE {@code < next day}, not {@code <= dateTo} — a
+   * {@code <=} bound would silently drop those invoices from the last day of the range whenever the
+   * frontend's off-by-one (ETP-5449) is not there to accidentally push the bound a day late.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildInvoiceCandidatesSqlUsesExclusiveUpperBoundForDateTo() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(false);
+    Connection conn = mock(Connection.class);
+
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    FIN_FinancialAccount account = accountWithClientOrg(CLIENT_ID, ORG_ID);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(conn.createArrayOf(anyString(), any())).thenReturn(null);
+      when(ps.executeQuery()).thenReturn(rs);
+      stubNaturalTree(obContext, CLIENT_ID, ORG_ID, new HashSet<>(Arrays.asList(ORG_ID)));
+
+      handler.buildInvoiceCandidates(ACC_ID, LINE_ID, null, "2026-01-01", "2026-01-31");
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      String generated = sql.getValue();
+      assertTrue("dateTo must be an exclusive bound against the day after it; got: " + generated,
+          generated.contains("inv.dateinvoiced < CAST(? AS date) + 1"));
+      assertFalse("dateTo must not truncate the TIMESTAMP column to midnight via <=; got: " + generated,
+          generated.contains("inv.dateinvoiced <= ?"));
     }
   }
 
