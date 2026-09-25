@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.rest;
 
+import java.util.UUID;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -75,26 +77,47 @@ public class PooledTenantClaimService {
    * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
    */
   public String claim(OnboardingProgressSink sink, ClaimRequest request) {
+    return claim(sink, request, UUID.randomUUID().toString());
+  }
+
+  /**
+   * Claims and personalizes a tenant while attaching a caller supplied correlation id to the
+   * performance log entries.
+   *
+   * @param sink progress sink used while personalizing the tenant
+   * @param request account and tenant data supplied by the signup request
+   * @param correlationId identifier shared by the claim and residual onboarding log entries
+   * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
+   */
+  public String claim(OnboardingProgressSink sink, ClaimRequest request, String correlationId) {
     if (!isEligible(request)) {
       return null;
     }
+    long claimStartedAt = System.nanoTime();
     TenantPoolStore.Claim claim;
     try {
+      long storeStartedAt = System.nanoTime();
       claim = store.claimReady(OnboardingProvisioningChain.provisioningVersion());
+      log.info("[ONBOARDING-PERF] phase=pool_claim_store correlationId={} elapsedMs={}",
+          correlationId, elapsedMillis(storeStartedAt));
     } catch (RuntimeException e) {
       log.error("Could not read the tenant pool; onboarding falls back to the classic path", e);
       EtendoGoDalHelper.rollbackDalChanges("tenant pool claim", e, log);
       return null;
     }
     if (claim == null) {
-      log.info("Tenant pool is empty; onboarding '{}' takes the classic path",
-          request.clientName());
+      log.info("[ONBOARDING-PERF] phase=pool_claim outcome=empty mode=classic correlationId={} "
+          + "elapsedMs={}", correlationId, elapsedMillis(claimStartedAt));
       return null;
     }
     sink.progress(PROGRESS_CLIENT, OnboardingProvisioningChain.PROGRESS_IN_PROGRESS,
         "Preparing your environment: " + request.clientName() + "...");
     try {
+      long personalizeStartedAt = System.nanoTime();
       personalize(claim.clientId(), request);
+      log.info("[ONBOARDING-PERF] phase=pool_personalization mode=pool correlationId={} "
+          + "clientId={} poolRowId={} elapsedMs={}", correlationId, claim.clientId(),
+          claim.poolRowId(), elapsedMillis(personalizeStartedAt));
     } catch (RuntimeException e) {
       log.error("Claimed pooled tenant {} (pool row {}) could not be personalized; onboarding "
           + "falls back to the classic path", claim.clientId(), claim.poolRowId(), e);
@@ -106,7 +129,14 @@ public class PooledTenantClaimService {
         "Client created successfully");
     log.info("Onboarding '{}' claimed pooled tenant {} (pool row {})", request.clientName(),
         claim.clientId(), claim.poolRowId());
+    log.info("[ONBOARDING-PERF] phase=pool_claim outcome=claimed mode=pool correlationId={} "
+        + "clientId={} poolRowId={} elapsedMs={}", correlationId, claim.clientId(),
+        claim.poolRowId(), elapsedMillis(claimStartedAt));
     return claim.clientId();
+  }
+
+  private static long elapsedMillis(long startedAt) {
+    return (System.nanoTime() - startedAt) / 1_000_000L;
   }
 
   /** The cheap checks, all before the pool is touched. */

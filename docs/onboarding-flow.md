@@ -490,6 +490,15 @@ data — then data transfer, `markDemoReady` (the trial clock starts at the clai
 commit, the `environment-ready` email and costing activation. The stream skips the `organization`
 and `dataset`…`baseline` steps.
 
+### Performance observability (ETP-5500)
+
+The server writes structured performance entries at `INFO` level with the `[ONBOARDING-PERF]`
+marker. Each entry includes a request-scoped `correlationId`, a phase, the `pool` or `classic`
+mode, elapsed milliseconds, and only non-secret tenant identifiers. The pool claim emits separate
+timings for the row claim, tenant personalization, and the complete claim. The servlet emits
+tenant selection and residual onboarding time through commit. These entries make pool and classic
+runs directly comparable without changing the NDJSON response or the provisioning transaction.
+
 ### Where `POOL-…` stays visible after a claim (known gap, not renamed yet)
 
 Everything derived from the client name at provisioning time keeps the placeholder:

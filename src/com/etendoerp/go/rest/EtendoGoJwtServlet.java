@@ -3298,6 +3298,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private boolean executeOnboardingProvisioning(PrintWriter writer,
       OnboardingPreparation preparation, String adminPassword) throws Exception {
+    long onboardingStartedAt = System.nanoTime();
+    String correlationId = UUID.randomUUID().toString();
     OnboardingRequestData onboardingRequest = preparation.request;
     String accountId = preparation.accountId;
     String accountEmail = preparation.accountEmail;
@@ -3307,12 +3309,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETP-5389: a pre-provisioned tenant when the pool can serve this request, otherwise null and
     // everything below is the classic path, unchanged.
     String pooledClientId = claimPooledTenant(writer, accountEmail, onboardingRequest,
-        adminPassword);
+        adminPassword, correlationId);
     boolean pooled = pooledClientId != null;
     String clientId = pooled ? pooledClientId
         : resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
             adminPassword);
+    log.info("[ONBOARDING-PERF] phase=tenant_selection mode={} correlationId={} clientId={} "
+        + "elapsedMs={}", pooled ? "pool" : "classic", correlationId, clientId,
+        elapsedMillis(onboardingStartedAt));
     if (clientId == null) return false;
+    long residualStartedAt = System.nanoTime();
     String demoSourceClientId = resolveDemoSourceClientId(paidUpgrade, onboardingRequest);
     OnboardingProvisioningChain.AdminContext adminContext =
         resolveAdminContextData(clientId, writer);
@@ -3344,6 +3350,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
+    log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
+        + "elapsedMs={}", pooled ? "pool" : "classic", correlationId, clientId,
+        elapsedMillis(residualStartedAt));
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     onboardingCostingScheduleService.activateSchedule(clientId);
@@ -3358,11 +3367,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * caller runs the classic path. See {@link PooledTenantClaimService} for when that happens.
    */
   private String claimPooledTenant(PrintWriter writer, String accountEmail,
-      OnboardingRequestData request, String adminPassword) {
+      OnboardingRequestData request, String adminPassword, String correlationId) {
     return pooledTenantClaimService.claim(new NdjsonOnboardingProgressSink(writer),
         new PooledTenantClaimService.ClaimRequest(accountEmail, request.clientName,
             request.fullName, request.currencyIso, request.countryCode, request.language,
-            request.address, adminPassword));
+            request.address, adminPassword), correlationId);
+  }
+
+  private static long elapsedMillis(long startedAt) {
+    return (System.nanoTime() - startedAt) / 1_000_000L;
   }
 
   /**
