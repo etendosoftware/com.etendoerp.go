@@ -116,13 +116,21 @@ public class ToolRegistry {
     List<String> updatableWindowSpecs = new ArrayList<>();
     List<String> deletableWindowSpecs = new ArrayList<>();
 
+    // ETP-5468: report specs whose handler declares named actions (bank-reconciliation). They
+    // are not window specs — neo_list/neo_get cannot serve them — so they join ONLY the enums of
+    // the two tools that can: neo_schema (to read the action contracts) and neo_action.
+    List<String> actionReportSpecs = new ArrayList<>();
+
     for (SFSpec spec : specs) {
       processSpec(spec, accessibleWindowSpecs, creatableWindowSpecs, updatableWindowSpecs,
           deletableWindowSpecs, tools, permissions);
+      if (ToolRegistryActionSpecs.isActionReportSpec(spec)) {
+        actionReportSpecs.add(spec.getName());
+      }
     }
 
     registerCrudTools(tools, accessibleWindowSpecs, creatableWindowSpecs,
-        updatableWindowSpecs, deletableWindowSpecs, permissions);
+        updatableWindowSpecs, deletableWindowSpecs, permissions, actionReportSpecs);
 
     // ETP-5184: the image-upload tools are built-in and type-driven, not spec-driven — they create
     // an AD_Image row and nothing else, and the same three tools serve every image-typed field in
@@ -240,7 +248,8 @@ public class ToolRegistry {
    */
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
       List<String> creatableWindowSpecs, List<String> updatableWindowSpecs,
-      List<String> deletableWindowSpecs, ScopePermissions permissions) {
+      List<String> deletableWindowSpecs, ScopePermissions permissions,
+      List<String> actionReportSpecs) {
     // Register the amortization plan tool independently of window specs availability:
     // it is a built-in endpoint that does not require a window spec to be accessible.
     if (permissions.canProcess) {
@@ -255,7 +264,7 @@ public class ToolRegistry {
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
       tools.add(buildDefaultsTool(accessibleWindowSpecs));
-      tools.add(buildSchemaTool(accessibleWindowSpecs));
+      tools.add(buildSchemaTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
     if (permissions.canWrite) {
       if (!creatableWindowSpecs.isEmpty()) {
@@ -273,7 +282,7 @@ public class ToolRegistry {
       if (McpConstants.BATCH_TOOL_ENABLED) {
         tools.add(buildBatchTool());
       }
-      tools.add(buildActionTool(accessibleWindowSpecs));
+      tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
     }
   }
 
@@ -1095,7 +1104,10 @@ public class ToolRegistry {
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
             + "rules, and neo_get the record first if unsure. "
-            + "Returns {processResult: success|error|warning, processMessage: ...}.",
+            + "Returns {processResult: success|error|warning, processMessage: ...}. "
+            + "Handler-served actions are listed by neo_schema view:\"actions\" with a JSON "
+            + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "
+            + "the handler's own JSON.",
         buildObjectSchema(props,
             List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
   }
@@ -1115,7 +1127,8 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_PARAMETERS, objectProp("Process input parameters", paramProps));
 
-    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()),
+        McpToolTitles.forSpec(spec));
   }
 
   // ── Report tool ────────────────────────────────────────────────────────
@@ -1165,7 +1178,8 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_FORMAT, enumProp(
         "Output format (default: " + contract.getDefaultFormat() + ")", contract.getFormats()));
 
-    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()),
+        McpToolTitles.forSpec(spec));
   }
 
   /**
