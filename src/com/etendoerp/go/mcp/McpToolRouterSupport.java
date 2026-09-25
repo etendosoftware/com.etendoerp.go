@@ -46,6 +46,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 final class McpToolRouterSupport {
@@ -436,6 +437,12 @@ final class McpToolRouterSupport {
    *                         spec-level read-only marker without a second query; {@code null}
    *                         for non-W specs (and then no marker is emitted)
    */
+  /**
+   * {@code neo_discover} status of a report spec that is not a report generator but whose handler
+   * declares named actions reachable through {@code neo_action} (ETP-5468).
+   */
+  static final String STATUS_ACTIONS_ONLY = "actions_only";
+
   static JSONObject buildDiscoverSpec(SFSpec spec, String specType, JSONArray entities,
       String primaryEntity, List<SFEntity> includedEntities) throws Exception {
     JSONObject specObj = new JSONObject();
@@ -465,11 +472,27 @@ final class McpToolRouterSupport {
       specObj.put("isReport", true);
       boolean callable = NeoReportCallability.isReportCallable(spec);
       specObj.put("callable", callable);
+      // ETP-5468: "not a report generator" (callable:false, IMP-19) is not "nothing to do" — a
+      // handler may still serve named actions. Such a spec gets its own status instead of
+      // not_configured_for_report_generation, so the agent is sent to neo_action rather than told
+      // the spec is unconfigured (or left to go looking for Core buttons).
+      java.util.Optional<NeoActionContract.SpecActions> declared = callable
+          ? java.util.Optional.empty() : NeoActionContract.resolve(spec);
       if (callable) {
         // Surface the concrete report tool so the agent can call it directly instead of
         // guessing an entity for neo_list (ETP-4257). Client sees it as etendo_<reportTool>.
         specObj.put("reportTool",
             McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName()));
+      } else if (declared.isPresent()) {
+        String entity = declared.get().getEntityName();
+        specObj.put("status", STATUS_ACTIONS_ONLY);
+        specObj.put("message", "Not a report generator; '" + spec.getName()
+            + "' serves named actions through neo_action (entity " + entity + ").");
+        specObj.put("actionEntity", entity);
+        specObj.put("actions", new JSONArray(declared.get().getContracts().keySet()));
+        specObj.put("actionsHint", "Run these with neo_action (spec '" + spec.getName()
+            + "', entity '" + entity + "'); neo_schema with view:\"actions\" returns each "
+            + "action's parameters.");
       } else {
         specObj.put("status", NeoReportCallability.STATUS_NOT_CONFIGURED);
         specObj.put("message", NeoReportCallability.buildNotConfiguredMessage(spec.getName()));

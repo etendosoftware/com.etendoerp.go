@@ -58,7 +58,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetup;
-import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
@@ -83,7 +82,6 @@ import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
-import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -91,7 +89,6 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
-import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -100,6 +97,7 @@ import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
+import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
@@ -117,8 +115,9 @@ import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
-import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usageevents.SessionLoginUsage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -254,24 +253,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
-  private static final String PROGRESS_ACCOUNTING = "accounting";
-  private static final String PROGRESS_PERIOD_CONTROL = "periodControl";
-  private static final String PROGRESS_SEQUENCES = "sequences";
-  private static final String PROGRESS_FISCAL = "fiscal";
-  private static final String PROGRESS_ORG_READY = "orgReady";
-  private static final String PROGRESS_ORG_INFO = "orgInfo";
-  private static final String PROGRESS_WAREHOUSE_ADDRESS = "warehouseAddress";
-  private static final String PROGRESS_BASELINE = "baseline";
-  private static final String PROGRESS_COSTING_SCHEDULE = "costingSchedule";
-  private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
-  private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
-  private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
-  private static final String PROGRESS_FORCE_TEST_MODE = "forceTestMode";
-  private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
-  private static final String ERROR_CODE_CLIENT_CREATION_FAILED = "CLIENT_CREATION_FAILED";
-  private static final String ERROR_CODE_ORG_CREATION_FAILED = "ORG_CREATION_FAILED";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
       "If an account exists for that email, password reset instructions will be sent.";
@@ -341,8 +324,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
-  OnboardingDataTransferService onboardingDataTransferService =
-      new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingCompanyProfileTransferService onboardingCompanyProfileTransferService =
       new OnboardingCompanyProfileTransferService();
@@ -370,6 +351,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingForceTestModeService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
+  PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
       new TenantEnvironmentLifecycleService();
@@ -458,7 +440,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetFirstSteps(request, response);
     } else if (isPath(path, PATH_ONBOARDING_COMPANY_DATA)) {
       handleGetCompanyData(request, response);
-    } else if (isPath(path, "/demo-data-transfer") && DemoDataTransferFlag.isEnabled()) {
+    } else if (isPath(path, "/demo-data-transfer")) {
       handleDemoDataTransferStatus(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
@@ -633,7 +615,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
-    } else if (isPath(path, "/demo-data-transfer/retry") && DemoDataTransferFlag.isEnabled()) {
+    } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
@@ -2191,8 +2173,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleRemoveAuthMethod(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
+    if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
@@ -2213,14 +2194,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      // ETP-5455 — through the account surface's single resolver: it used to read the Bearer
+      // header inline, so the SPA's cookie session got 401 here (and the frontend logs out on a
+      // 401), and the legacy kill switch did not apply.
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
-      removeAuthMethod(account, method, currentPassword, response);
+      removeAuthMethod(authenticated.account, method, currentPassword, response);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("remove auth method", e, log);
       log.error("Database error removing an authentication method", e);
@@ -2376,35 +2357,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolve the platform account under the system admin context. Always enters admin mode (so
-   * callers can restore it in their finally block) and writes the error response, returning null,
-   * when the request is not authenticated.
+   * Resolve the platform account for a billing / checkout / upgrade endpoint. Always enters admin
+   * mode (so callers can restore it in their finally block) and writes the error response,
+   * returning null, when the request is not authenticated.
    *
-   * <p>A request carrying the {@code __Host-go_session} cookie (ADR-0001, the only credential the
-   * SPA sends) is resolved by {@link #resolveAuthenticatedAccountContext}, the same resolver the
-   * already-migrated endpoints use — so an unsafe method without a valid {@code X-Go-CSRF} proof
-   * answers 403 there, and a dead session 401. A request without the cookie keeps the legacy
-   * narrow bearer lookup unchanged.
+   * <p>ETP-5455 — the account surface's single resolver under
+   * {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}. It used to carry its own Bearer branch,
+   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
+   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
+   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
    */
   private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if (hasSessionCookie(request)) {
-      return resolveAuthenticatedAccount(request, response);
-    }
-    OBContext.setOBContext("0", "0", "0", "0");
-    OBContext.setAdminMode(true);
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
-      return null;
-    }
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
-    if (account == null) writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
-    return account;
-  }
-
-  private Account resolveAuthenticatedAccount(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+    AuthenticatedAccount authenticated =
+        resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
     return authenticated == null ? null : authenticated.account;
   }
 
@@ -2432,6 +2397,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private AuthenticatedAccount resolveAuthenticatedAccountContext(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
+    return resolveAccount(request, response, AccountRequirement.ANY_ACCOUNT_CREDENTIAL);
+  }
+
+  /**
+   * Which Bearer an account endpoint accepts when no session cookie is present (ETP-5455). The
+   * ONLY thing that may differ between account endpoints: the cookie, CSRF, kill-switch and
+   * counting rules are the same for all of them.
+   */
+  enum AccountRequirement {
+    /** An account session token or an environment JWT (the wide lookup). */
+    ANY_ACCOUNT_CREDENTIAL,
+    /** The account session (platform) token only: environment JWTs are refused for billing. */
+    PLATFORM_CREDENTIAL_ONLY
+  }
+
+  /**
+   * The account surface's single resolver (ETP-5455). Enters admin mode unconditionally, so the
+   * callers' {@code finally} can always restore it, and writes the error response itself.
+   *
+   * <p>The cookie session wins whenever it is present and valid; a dead one is final (401, no
+   * fallback to a Bearer sent alongside). Only without a session does a Bearer count — gated by
+   * the legacy kill switch, counted as a legacy use, and looked up as the requirement says.
+   */
+  private AuthenticatedAccount resolveAccount(HttpServletRequest request,
+      HttpServletResponse response, AccountRequirement requirement) throws IOException {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
@@ -2459,13 +2449,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     GoLegacyBearer.recordUse();
-    // The wide lookup, not findActiveAccountByToken: the legacy path has to keep
-    // accepting Etendo's JWTs, and only this one falls back to decoding the token and
+    // The wide lookup, not findActiveAccountByToken, for ANY_ACCOUNT_CREDENTIAL: the legacy path
+    // has to keep accepting Etendo's JWTs, and only this one falls back to decoding the token and
     // resolving the account from its `user` claim when no opaque sessionToken matches.
-    // Centralising the resolution here narrowed it by accident, which answered 401 to
-    // every JWT-bearing client on /me, /environments, the onboarding draft and the
-    // invitation endpoints — the exact callers GoLegacyBearer stays enabled for.
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+    // Centralising the resolution here narrowed it by accident once, which answered 401 to every
+    // JWT-bearing client on /me, /environments, the onboarding draft and the invitation
+    // endpoints — the exact callers GoLegacyBearer stays enabled for.
+    Account account = requirement == AccountRequirement.PLATFORM_CREDENTIAL_ONLY
+        ? EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token)
+        : EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     if (account == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
       return null;
@@ -2819,11 +2811,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /**
-   * Persists checkout selection before the hosted-provider redirect loses browser state. A no-op
-   * with flag {@code demo-data-transfer} off, where the body's selection is ignored as it was
-   * before ETP-5364.
-   */
+  /** Persists checkout selection before the hosted-provider redirect loses browser state. */
   void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult,
       CheckoutSelection selection) {
     recordDemoDataTransferSelection(body, checkoutResult.optString(FIELD_REQUEST_ID, ""),
@@ -2833,8 +2821,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** A purchase without a demo source never records a transfer selection. */
   private void recordDemoDataTransferSelection(JSONObject body, String requestId,
       CheckoutSelection selection) {
-    if (!DemoDataTransferFlag.isEnabled() || selection == null
-        || StringUtils.isBlank(selection.demoClientId)) return;
+    if (selection == null || StringUtils.isBlank(selection.demoClientId)) return;
     JSONObject transferSelection = body.optJSONObject(FIELD_DATA_TRANSFER);
     if (transferSelection == null) return;
     demoDataTransferService.recordSelection(requestId,
@@ -2881,13 +2868,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String clientId = authenticated.sessionRecord == null ? null
         : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
     if (authenticated.sessionRecord == null) {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) clientId = StringUtils.trimToNull(
-            jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
-      } catch (Exception e) {
-        log.debug("Bearer token carries no environment context for checkout", e);
-      }
+      DecodedJWT jwt = bearerTenantClaims(request);
+      if (jwt != null) clientId = StringUtils.trimToNull(
+          jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
     }
     if (clientId == null) return "";
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
@@ -2960,9 +2943,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void addDemoDataTransferSelection(JSONObject result, String requestId, String demoClientId)
       throws JSONException {
     if (StringUtils.isBlank(demoClientId)) return;
-    boolean enabled = DemoDataTransferFlag.isEnabled();
-    result.put("dataTransferEnabled", enabled);
-    if (!enabled) return;
+    // Always true since ETP-5480 retired the flag; kept because the upgrade page still reads it.
+    result.put("dataTransferEnabled", true);
     JSONObject selection = demoDataTransferService.selection(requestId);
     if (selection != null) result.put(FIELD_DATA_TRANSFER, selection);
   }
@@ -2995,6 +2977,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * The tenant claims of a legacy bearer caller that has no cookie session: the single place this
+   * servlet decodes an inbound bearer to read its environment ({@code resolveTenantSession} and the
+   * checkout's {@code currentSessionClientId} both go through here, so the credential is read in
+   * one spot — see {@code AuthenticationEntryPointGuardTest}). {@code null} when there is no bearer
+   * or it does not decode.
+   */
+  private DecodedJWT bearerTenantClaims(HttpServletRequest request) {
+    try {
+      return SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+    } catch (Exception e) {
+      log.debug("Bearer token carries no environment claims", e);
+      return null;
+    }
+  }
+
+  /**
    * The tenant behind the presented credential.
    *
    * The onboarding endpoints authenticate an ACCOUNT, which on its own does not say which
@@ -3022,14 +3020,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       clientId = authenticated.sessionRecord.getCtxClientId();
       orgId = authenticated.sessionRecord.getCtxOrgId();
     } else {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) {
-          clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
-          orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
-        }
-      } catch (Exception e) {
-        log.debug("Bearer token carries no NEO session claims", e);
+      DecodedJWT jwt = bearerTenantClaims(request);
+      if (jwt != null) {
+        clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
+        orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
       }
     }
     // ETP-4576 — under the cookie session there is no bearer JWT to read claims from, so the
@@ -3054,6 +3048,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, account.getEmail())) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
           "The session client is not owned by this account");
+      return null;
+    }
+    // ETP-5455 (decision 2) — a commercially blocked environment's data is fully inaccessible,
+    // not only through NEO: every account endpoint that acts on the session's tenant is refused
+    // with the same 402 NEO answers. The account itself (billing, upgrade, /me) stays reachable so
+    // the owner can pay. null = a tenant that predates lifecycle metadata, the legacy transition.
+    EnvironmentAccessPolicy.Decision access =
+        tenantEnvironmentLifecycleService.evaluateAccess(clientId, true, Instant.now());
+    if (access != null && access != EnvironmentAccessPolicy.Decision.ALLOWED) {
+      writeError(response, SC_PAYMENT_REQUIRED,
+          "Environment access is not available: " + access.name());
       return null;
     }
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
@@ -3193,6 +3198,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleEnvironmentLogin(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    long startNanos = System.nanoTime();
     String token = extractBearerToken(request);
     if (token == null || !GoLegacyBearer.isEnabled()) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
@@ -3225,7 +3231,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoJwtSupport.RoleListData roleListData =
           EtendoGoJwtSupport.loadRoleListData(userId);
-      writeEnvironmentLoginResponse(response, userId, roleListData);
+      writeEnvironmentLoginResponse(response, userId, roleListData, startNanos);
 
     } catch (RuntimeException e) {
       log.error("Database error in /login", e);
@@ -3320,18 +3326,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String currencyId = preparation.currencyId;
     boolean paidUpgrade = preparation.paidUpgrade;
     VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
-    String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest,
-        currencyId, adminPassword);
+    // ETP-5389: a pre-provisioned tenant when the pool can serve this request, otherwise null and
+    // everything below is the classic path, unchanged.
+    String pooledClientId = claimPooledTenant(writer, accountEmail, onboardingRequest,
+        adminPassword);
+    boolean pooled = pooledClientId != null;
+    String clientId = pooled ? pooledClientId
+        : resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
+            adminPassword);
     if (clientId == null) return false;
     String demoSourceClientId = resolveDemoSourceClientId(paidUpgrade, onboardingRequest);
-    AdminContextData adminContext = resolveAdminContextData(clientId, writer);
+    OnboardingProvisioningChain.AdminContext adminContext =
+        resolveAdminContextData(clientId, writer);
     if (adminContext == null) return false;
     if (paidUpgrade) {
       applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
           accountEmail);
     }
-    if (ensureOrganization(writer, onboardingRequest.clientName, clientId, adminContext,
-        currencyId) == null) return false;
+    if (!pooled && ensureOrganization(writer, onboardingRequest.clientName, clientId,
+        adminContext, currencyId) == null) return false;
     String orgId = resolveOrganizationId(clientId);
     if (orgId == null) {
       sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR,
@@ -3339,13 +3352,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, "Organization not found after onboarding");
       return false;
     }
-    if (!ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
-        adminContext.adminRoleId, onboardingRequest)) return false;
+    boolean provisioned = pooled
+        ? finishPooledTenant(writer, clientId, orgId, adminContext, onboardingRequest)
+        : ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
+            adminContext.adminRoleId, onboardingRequest);
+    if (!provisioned) return false;
     if (paidUpgrade) {
       transferDemoCompanyProfile(accountEmail, demoSourceClientId, clientId, orgId);
     }
-    transferSelectedData(writer, onboardingRequest, paidUpgrade, demoSourceClientId, clientId,
-        orgId);
     if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
@@ -3357,6 +3371,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, "finalize", "done", "Environment ready");
     sendFinalResult(writer, true, "Environment created successfully");
     return true;
+  }
+
+  /**
+   * ETP-5389 — takes a pre-provisioned tenant for this request, or answers {@code null} so the
+   * caller runs the classic path. See {@link PooledTenantClaimService} for when that happens.
+   */
+  private String claimPooledTenant(PrintWriter writer, String accountEmail,
+      OnboardingRequestData request, String adminPassword) {
+    return pooledTenantClaimService.claim(new NdjsonOnboardingProgressSink(writer),
+        new PooledTenantClaimService.ClaimRequest(accountEmail, request.clientName,
+            request.fullName, request.currencyIso, request.countryCode, request.language,
+            request.address, adminPassword));
+  }
+
+  /**
+   * ETP-5389 — the per-request steps a claimed pooled tenant still needs. The pool already ran the
+   * whole chain; only the steps that consume signup data are repeated: {@code orgInfo} (tax id —
+   * the address was written by the claim) and {@code warehouseAddress}, which re-copies the now
+   * complete fiscal address. Both are the chain's own idempotent steps.
+   */
+  private boolean finishPooledTenant(PrintWriter writer, String clientId, String orgId,
+      OnboardingProvisioningChain.AdminContext adminContext, OnboardingRequestData request) {
+    return wireOrgInfo(writer, clientId, orgId, adminContext.adminUserId,
+        adminContext.adminRoleId, request)
+        && wireWarehouseAddress(writer, clientId, orgId, adminContext.adminUserId,
+            adminContext.adminRoleId);
   }
 
   /**
@@ -3382,28 +3422,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static String resolveDemoSourceClientId(boolean paidUpgrade,
       OnboardingRequestData onboardingRequest) {
     return paidUpgrade ? StringUtils.trimToNull(onboardingRequest.demoClientId) : null;
-  }
-
-  private void transferSelectedData(PrintWriter writer, OnboardingRequestData onboardingRequest,
-      boolean paidUpgrade, String demoSourceClientId, String clientId, String orgId) {
-    if (!shouldRunSynchronousDataTransfer(paidUpgrade, onboardingRequest.transferProducts,
-        onboardingRequest.transferContacts)) return;
-    sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
-    OnboardingDataTransferService.TransferResult result = onboardingDataTransferService.transfer(
-        demoSourceClientId, clientId, orgId, onboardingRequest.transferProducts,
-        onboardingRequest.transferContacts);
-    if (result.failures() > 0) {
-      throw new IllegalStateException("Demo data transfer failed: "
-          + StringUtils.defaultIfBlank(result.failureReason(), "unknown reason"));
-    }
-    sendProgress(writer, "data-transfer", "done",
-        "Selected demo data transferred (products=" + result.productsCopied()
-            + ", contacts=" + result.contactsCopied() + ")");
-  }
-
-  static boolean shouldRunSynchronousDataTransfer(boolean paidUpgrade, boolean products,
-      boolean contacts) {
-    return paidUpgrade && !DemoDataTransferFlag.isEnabled() && (products || contacts);
   }
 
   private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
@@ -3471,8 +3489,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Legacy paid requests never saved a source or transfer intent. Resume them as a new
       // productive environment without inferring a demo or copying/revoking any tenant.
       onboardingRequest.demoClientId = null;
-      onboardingRequest.transferProducts = false;
-      onboardingRequest.transferContacts = false;
       return true;
     }
 
@@ -3487,12 +3503,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           e.getMessage(), e.getMessage());
       return false;
     }
-    CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
-        .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
-    onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
-        && transferSelection != null && transferSelection.isProducts();
-    onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
-        && transferSelection != null && transferSelection.isContacts();
     return true;
   }
 
@@ -3619,9 +3629,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing with
-   * flag {@code demo-data-transfer} off. Best-effort in its own right: a failure here is logged as
-   * a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
+   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing
+   * when the purchase has no demo source. Best-effort in its own right: a failure here is logged
+   * as a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
@@ -3629,7 +3639,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   void startDemoDataTransferBestEffort(String paymentToken, String demoClientId, String clientId,
       String accountId, String accountEmail) {
-    if (!DemoDataTransferFlag.isEnabled() || StringUtils.isBlank(demoClientId)) return;
+    if (StringUtils.isBlank(demoClientId)) return;
     try {
       CheckoutRequestStore.TransferSelection selection = checkoutRequestStore
           .findTransferSelection(paymentToken, accountId, accountEmail);
@@ -3832,7 +3842,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
-      EtendoGoJwtSupport.RoleListData roleListData) throws Exception {
+      EtendoGoJwtSupport.RoleListData roleListData, long startNanos) throws Exception {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     try {
@@ -3850,8 +3860,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_TOKEN, jwtToken);
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
+      recordLegacyEnvironmentLogin(jwtToken, startNanos);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5462: {@code session.login} for the cookie-session path, from the ids the rotated session
+   * now stores. Last on the success path and never throws: a failure here must not reach the
+   * caller's catch blocks, which would write an error over the answer already sent.
+   */
+  private static void recordCookieEnvironmentLogin(GoSessionRecord entered, long startNanos) {
+    try {
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
+          entered.getCtxOrgId(), entered.getUserId(), entered.getRoleId(),
+          entered.getAuthMethod(), startNanos);
+    } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
+      log.debug("Could not record the cookie environment login usage event.", e);
+    }
+  }
+
+  /**
+   * ETP-5462: {@code session.login} for the legacy bearer path. The ids come from the claims of the
+   * environment JWT just issued (decoded, not re-verified: it is ours and a microsecond old), the
+   * same source the cookie path stores in its session. Runs after the response is written and never
+   * throws, so it cannot turn a successful login into an error.
+   */
+  private static void recordLegacyEnvironmentLogin(String jwtToken, long startNanos) {
+    try {
+      DecodedJWT claims = JWT.decode(jwtToken);
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN,
+          claims.getClaim(PROGRESS_CLIENT).asString(),
+          claims.getClaim(PROGRESS_ORGANIZATION).asString(),
+          claims.getClaim("user").asString(),
+          claims.getClaim("role").asString(),
+          null, startNanos);
+    } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
+      log.debug("Could not record the legacy environment login usage event.", e);
     }
   }
 
@@ -3881,9 +3927,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
-      JSONObject transfer = body.optJSONObject(FIELD_DATA_TRANSFER);
-      data.transferProducts = transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false);
-      data.transferContacts = transfer != null && transfer.optBoolean(FIELD_CONTACTS, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -4049,87 +4092,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private String createClient(VariablesSecureApp vars, String currencyId, String clientName,
       String clientUser, String adminPassword, PrintWriter writer) {
-    InitialClientSetup clientSetup = new InitialClientSetup();
-    OBError clientResult = clientSetup.createClient(vars, currencyId, clientName, clientUser,
-        adminPassword, "", "Account", "Calendar", false, null, false, false, false,
-        false, false);
-    if (!"Success".equals(clientResult.getType())) {
-      // InitialClientSetup reports failures as UNRESOLVED AD message keys ("@CreateClientFailed@")
-      // whose text says nothing about the actual cause — the real exception only reaches the
-      // server log. Keep the raw value here for diagnostics and hand the client a stable code it
-      // can localize (ETP-4665).
-      String errorMsg = clientResult.getMessage() != null
-          ? clientResult.getMessage()
-          : "Client creation failed";
-      log.error("Client creation failed for '{}': {}", clientName, errorMsg);
-      sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMsg);
-      sendFinalResult(writer, false, errorMsg, ERROR_CODE_CLIENT_CREATION_FAILED);
-      return null;
-    }
-    String createdClientId = StringUtils.trimToNull(vars.getSessionValue("AD_Client_ID"));
-    if (createdClientId == null) {
-      String errorMessage = "Client creation succeeded but did not return the created client ID";
-      log.error("Client creation for '{}' returned success without AD_Client_ID in session",
-          clientName);
-      sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage, ERROR_CODE_CLIENT_CREATION_FAILED);
-      return null;
-    }
-    sendProgress(writer, PROGRESS_CLIENT, "done", "Client created successfully");
-    return createdClientId;
+    return provisioningChain().createClient(new NdjsonOnboardingProgressSink(writer), vars,
+        currencyId, clientName, clientUser, adminPassword);
   }
 
-  private AdminContextData resolveAdminContextData(String clientId,
+  private OnboardingProvisioningChain.AdminContext resolveAdminContextData(String clientId,
       PrintWriter writer) {
-    AdminContextData data = new AdminContextData();
-    var adminUserRole = EtendoGoJwtDalHelper.findClientAdminUserRole(clientId);
-    if (adminUserRole != null) {
-      data.adminRoleId = adminUserRole.getRole().getId();
-      data.adminUserId = adminUserRole.getUserContact().getId();
-    }
-    if (data.adminRoleId == null || data.adminUserId == null) {
-      sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR,
-          "Could not find admin role for new client");
-      sendFinalResult(writer, false, "Admin role not found — client may be incomplete");
-      return null;
-    }
-    data.starOrgId = EtendoGoJwtSupport.findStarOrgId(clientId);
-    OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
-    markTenantOwnerBestEffort(clientId, data.adminUserId);
-    return data;
-  }
-
-  /**
-   * ETP-4830 — flags {@code adminUserId} as {@code clientId}'s owner (see {@link
-   * OwnerSupport#markAsOwnerIfNoneExists}), the very first time this resolves for a brand-new
-   * client: at this exact point in the provisioning chain (right after {@link #createClient}
-   * created the client's real, single {@code AD_User} and BEFORE {@link
-   * #importOnboardingDataset} brings in the GOClient sample dataset's own {@code AD_User} rows —
-   * see {@code referencedata/sampledata/GOClient/AD_USER.xml}), {@code adminUserId} is
-   * unambiguously the one true founder, never a bundled sample/demo user. {@link
-   * OwnerSupport#markAsOwnerIfNoneExists} is itself idempotent (no-op once an owner already
-   * exists for the client), so calling this on every resumed/retried onboarding pass — this
-   * method runs on both the create AND the resume path — is safe and never re-assigns or moves
-   * ownership.
-   *
-   * <p>Best-effort by design (ETP-4830 scope decision): a failure here must never fail the
-   * onboarding chain — every owner-protection check downstream ({@code
-   * UserRoleAssignmentHandler}/{@code UserRoleCompositionService}) already treats a
-   * false/unset {@code is_owner} as "guard never triggers", so a tenant that failed to get an
-   * owner marked here simply ships with no owner-lock yet, exactly like every pre-existing
-   * tenant from before this column existed.</p>
-   */
-  private void markTenantOwnerBestEffort(String clientId, String adminUserId) {
-    try {
-      OwnerSupport.markAsOwnerIfNoneExists(clientId, adminUserId);
-    } catch (RuntimeException e) {
-      log.warn("markTenantOwnerBestEffort: failed to flag owner for client {} user {}: {}",
-          clientId, adminUserId, e.getMessage(), e);
-    }
+    return provisioningChain().resolveAdminContext(new NdjsonOnboardingProgressSink(writer),
+        clientId);
   }
 
   private Boolean ensureOrganization(PrintWriter writer, String clientName,
-      String clientId, AdminContextData adminContext, String currencyId) {
+      String clientId, OnboardingProvisioningChain.AdminContext adminContext, String currencyId) {
     sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_IN_PROGRESS,
         "Creating organization: " + clientName + "...");
     if (EtendoGoJwtSupport.organizationExists(clientId)) {
@@ -4144,467 +4118,79 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private boolean createOrganization(PrintWriter writer, String clientName, String clientId,
       String starOrgId, String currencyId) {
-    Client client = OBDal.getInstance().get(Client.class, clientId);
-    if (client == null) {
-      sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR,
-          "Could not load client entity");
-      sendFinalResult(writer, false, "Client entity not found in DAL");
-      return false;
-    }
-    InitialOrgSetup orgSetup = new InitialOrgSetup(client);
-    // Onboarding imports accounting-ready sample data after the organization exists.
-    // For fresh clients there is no ready package organization yet, so forcing accounting
-    // during InitialOrgSetup would fail before dataset import can run.
-    OBError orgResult = orgSetup.createOrganization(clientName, "",
-        LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID, starOrgId, null, "", "", false, null, currencyId,
-        false, false, false, false, false);
-    if (!"Success".equals(orgResult.getType())) {
-      // Same as createClient: InitialOrgSetup yields raw AD keys such as "@CreateOrgFailed@".
-      String errorMsg = orgResult.getMessage() != null
-          ? orgResult.getMessage()
-          : "Organization creation failed";
-      log.error("Organization creation failed for '{}': {}", clientName, errorMsg);
-      sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR, errorMsg);
-      sendFinalResult(writer, false, errorMsg, ERROR_CODE_ORG_CREATION_FAILED);
-      return false;
-    }
-    // ETP-4749: AD_Org.SocialName ("Nombre comercial" in the Organization settings window)
-    // was never set anywhere in the onboarding flow — InitialOrgSetup/InitialSetupUtility
-    // (Etendo core) only set Name/SearchKey. The wizard has no separate "trade name" field,
-    // so reuse the same clientName already used for Name — it already resolves to the
-    // user's Full Name for Freelancers (CompanyStep.jsx has no Company Name field for
-    // that business type). A missing SocialName write here must not fail an otherwise
-    // successful organization creation; log and move on.
-    applySocialName(clientId, clientName);
-    sendProgress(writer, PROGRESS_ORGANIZATION, "done", "Organization created successfully");
-    return true;
+    return provisioningChain().createOrganization(new NdjsonOnboardingProgressSink(writer),
+        clientName, clientId, starOrgId, currencyId);
   }
 
-  /**
-   * Sets {@code AD_Org.SocialName} from the onboarding {@code clientName}, once, right after
-   * organization creation succeeds. Deliberately NOT part of {@link OnboardingOrgInfoService}'s
-   * idempotent reconcile chain (which re-runs on every resumed/retried onboarding call): a
-   * resumed tenant may already have had its "Nombre comercial" edited by hand in the
-   * Organization settings window, and re-running this on every retry would silently overwrite
-   * that edit. Organization creation itself only happens once (guarded by
-   * {@code organizationExists()} in {@link #ensureOrganization}), so this call site shares the
-   * same one-time guarantee.
-   *
-   * @return {@code true} when the organization was found and updated; {@code false} otherwise
-   *     (logged, non-fatal — the organization itself was already created successfully).
-   */
+  /** @see OnboardingProvisioningChain#applySocialName */
   boolean applySocialName(String clientId, String clientName) {
-    Organization org = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
-    if (org == null) {
-      log.warn("applySocialName: no organization found for client {} right after creation",
-          clientId);
-      return false;
-    }
-    org.setSocialName(clientName);
-    OBDal.getInstance().save(org);
-    OBDal.getInstance().flush();
-    return true;
+    return provisioningChain().applySocialName(clientId, clientName);
   }
 
   private String resolveOrganizationId(String clientId) {
-    Organization organization = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
-    return organization != null ? organization.getId() : null;
+    return provisioningChain().resolveOrganizationId(clientId);
   }
 
+
   /**
-   * Runs the tenant-provisioning chain under a reconcile model (ETP-4428): every step is
-   * idempotent or self-guarding, so the full chain runs unconditionally. On a retry after a
-   * partial failure this repairs whatever is missing and no-ops what already exists. Previously
-   * the dataset/accounting/period-control steps were gated on whether the organization had just
-   * been created, which left a resumed tenant (client+org survive the rollback, dataset does not)
-   * without seed data, ledger or fiscal periods.
+   * Builds the provisioning chain over this servlet's own service instances. Built per call, not
+   * cached, so a service swapped on the servlet (tests do this) is always the one that runs.
    */
+  OnboardingProvisioningChain provisioningChain() {
+    OnboardingProvisioningChain chain = new OnboardingProvisioningChain();
+    chain.onboardingDatasetImportService = onboardingDatasetImportService;
+    chain.onboardingAccountingWiringService = onboardingAccountingWiringService;
+    chain.onboardingPeriodControlService = onboardingPeriodControlService;
+    chain.onboardingSequenceGeneratorService = onboardingSequenceGeneratorService;
+    chain.onboardingMarkOrgReadyService = onboardingMarkOrgReadyService;
+    chain.onboardingFiscalDataSetupService = onboardingFiscalDataSetupService;
+    chain.onboardingOrgInfoService = onboardingOrgInfoService;
+    chain.onboardingWarehouseAddressService = onboardingWarehouseAddressService;
+    chain.onboardingAcctdimCentrallyMaintainedService = onboardingAcctdimCentrallyMaintainedService;
+    chain.onboardingAdminIdentityService = onboardingAdminIdentityService;
+    chain.onboardingBaselineService = onboardingBaselineService;
+    chain.onboardingForceTestModeService = onboardingForceTestModeService;
+    chain.onboardingCostingScheduleService = onboardingCostingScheduleService;
+    return chain;
+  }
+
+  private static OnboardingProvisioningChain.OrgInfoInput orgInfoInput(
+      OnboardingRequestData requestData) {
+    return requestData == null ? null
+        : new OnboardingProvisioningChain.OrgInfoInput(requestData.countryCode,
+            requestData.address, requestData.taxId);
+  }
+
+  /** @see OnboardingProvisioningChain#ensureOnboardingDataset */
   boolean ensureOnboardingDataset(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId,
       OnboardingRequestData requestData) {
-    if (!importOnboardingDataset(writer, clientId, orgId)) {
-      return false;
-    }
-    if (!wireAccounting(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    if (!wirePeriodControl(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    if (!generateOnboardingSequences(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    if (!markOrgReady(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    if (!setupFiscalData(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
-      return false;
-    }
-    // Depends on AD_ORGINFO already being located by wireOrgInfo above.
-    if (!wireWarehouseAddress(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    if (!scheduleCostingBackground(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    // ETP-4720: patch the 5 C_BP_Group_Acct columns neither the core c_bp_group_trg() trigger nor
-    // OnboardingAccountingWiringService's own BP_GROUP_ACCT_SQL populate. Runs LAST among the
-    // provisioning steps (right before the data-fix baseline) since it only needs C_BP_Group and
-    // C_AcctSchema_Default, both already provisioned by step 1 -- see
-    // OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns for the full root-cause
-    // explanation and its lockstep corrective twin (R21-bp-group-acct-remaining-columns.sql).
-    if (!patchBpGroupAcctMissingColumns(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    // ETP-4854 (gap K1): force flat, per-dimension accounting-dimension visibility for the new
-    // tenant. Runs AFTER the accounting-wiring steps (which created this client's
-    // C_AcctSchema_Element rows, all defaulting isactive='Y') and BEFORE the baseline stamp — see
-    // OnboardingAcctdimCentrallyMaintainedService for the full root-cause explanation and its
-    // lockstep corrective twin (R23-acctdim-centrally-maintained.sql).
-    if (!forceFlatAccountingDimensionVisibility(writer, clientId)) {
-      return false;
-    }
-    // ETP-4999 (gap M1): wire the onboarding admin's own session defaults to the REAL business
-    // org, not the root/wildcard '0' InitialClientSetup left them at. Runs AFTER the org and its
-    // warehouse both exist (step 1) and BEFORE the baseline stamp — see
-    // OnboardingAdminIdentityService for the full root-cause explanation (including why this does
-    // NOT touch AD_User_Roles) and its lockstep corrective twin (R26-admin-identity-real-org.sql).
-    if (!wireAdminIdentity(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
-    // ETP-5117 (gap N1): force SII/TicketBAI/VeriFactu into test/sandbox mode for Demo/free
-    // tenants, so no manual step in Classic is needed to trial the fiscal submission modules.
-    // Runs AFTER the org exists (needed as the new preference row's visibility scope) and BEFORE
-    // the baseline stamp — see OnboardingForceTestModeService for the full explanation (including
-    // why it must never touch the System-level default preference row) and its lockstep
-    // corrective twin (R31-force-test-mode-demo-tenants.sql).
-    if (!forceTestModeForFreeTenant(writer, clientId, orgId)) {
-      return false;
-    }
-    // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
-    // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
-    // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
-    //
-    // The baseline applied_utc is a hardcoded CUT (ONBOARDING_PROVISIONED_THROUGH in
-    // OnboardingBaselineService), NOT now(). It represents the last corrective data-fix that
-    // this version of onboarding already provisions natively, so the runner skips all fixes
-    // at-or-before that cutoff for freshly-onboarded tenants.
-    //
-    // WHEN ADDING A NEW ONBOARDING SERVICE (gap fix): bump ONBOARDING_PROVISIONED_THROUGH to the
-    // timestamp of the corresponding .sql fix in cli/src/data-fixes/sql/. See the gap-closing
-    // workflow in docs/etendo-ad/onboarding-and-datafixes-map.md §0.
-    return registerBaseline(writer, clientId);
+    return provisioningChain().ensureOnboardingDataset(new NdjsonOnboardingProgressSink(writer),
+        clientId, orgId, adminUserId, adminRoleId, orgInfoInput(requestData));
   }
 
   boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
-    sendProgress(writer, PROGRESS_DATASET, PROGRESS_IN_PROGRESS,
-        "Importing onboarding dataset...");
-    try {
-      onboardingDatasetImportService.importDataset(clientId, orgId);
-      sendProgress(writer, PROGRESS_DATASET, "done", "Onboarding dataset imported");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding dataset import", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Onboarding dataset import failed";
-      sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  boolean wireAccounting(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_ACCOUNTING, PROGRESS_IN_PROGRESS,
-        "Wiring organization general ledger...");
-    try {
-      onboardingAccountingWiringService.wire(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_ACCOUNTING, "done", "Organization general ledger wired");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding accounting wiring", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Organization accounting wiring failed";
-      sendProgress(writer, PROGRESS_ACCOUNTING, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  boolean wirePeriodControl(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_PERIOD_CONTROL, PROGRESS_IN_PROGRESS,
-        "Enabling fiscal period control...");
-    try {
-      onboardingPeriodControlService.wire(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_PERIOD_CONTROL, "done", "Fiscal period control enabled");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding period-control wiring", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Organization period-control wiring failed";
-      sendProgress(writer, PROGRESS_PERIOD_CONTROL, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  boolean generateOnboardingSequences(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_IN_PROGRESS,
-        "Generating organization sequences...");
-    try {
-      int count = onboardingSequenceGeneratorService.generateSequences(clientId, orgId, adminUserId,
-          adminRoleId);
-      sendProgress(writer, PROGRESS_SEQUENCES, "done",
-          "Organization sequences generated: " + count);
-      return true;
-    } catch (Exception e) {
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Organization sequence generation failed";
-      sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  boolean markOrgReady(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_ORG_READY, PROGRESS_IN_PROGRESS,
-        "Marking organization as ready...");
-    try {
-      onboardingMarkOrgReadyService.markOrgReady(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_ORG_READY, "done", "Organization is ready");
-      return true;
-    } catch (Exception e) {
-      log.error("Error marking organization as ready", e);
-      String errorMessage = e.getMessage() != null ? e.getMessage() : "Mark org ready failed";
-      sendProgress(writer, PROGRESS_ORG_READY, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  boolean setupFiscalData(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_FISCAL, PROGRESS_IN_PROGRESS,
-        "Setting up fiscal data...");
-    try {
-      onboardingFiscalDataSetupService.setup(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_FISCAL, "done", "Fiscal data ready");
-      return true;
-    } catch (Exception e) {
-      log.error("Error during fiscal data setup", e);
-      String errorMessage = e.getMessage() != null ? e.getMessage() : "Fiscal data setup failed";
-      sendProgress(writer, PROGRESS_FISCAL, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
+    return provisioningChain().importOnboardingDataset(new NdjsonOnboardingProgressSink(writer),
+        clientId, orgId);
   }
 
   boolean wireOrgInfo(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId, OnboardingRequestData requestData) {
-    sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_IN_PROGRESS,
-        "Setting up organization address...");
-    try {
-      String countryCode = requestData != null ? requestData.countryCode : null;
-      String address = requestData != null ? requestData.address : null;
-      String taxId = requestData != null ? requestData.taxId : null;
-      onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
-          countryCode, address, taxId);
-      sendProgress(writer, PROGRESS_ORG_INFO, "done", "Organization address ready");
-      return true;
-    } catch (Exception e) {
-      log.error("Error during organization info setup", e);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Organization info setup failed";
-      sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
+    return provisioningChain().wireOrgInfo(new NdjsonOnboardingProgressSink(writer), clientId,
+        orgId, adminUserId, adminRoleId, orgInfoInput(requestData));
   }
 
   boolean wireWarehouseAddress(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, PROGRESS_IN_PROGRESS,
-        "Aligning warehouse address...");
-    try {
-      onboardingWarehouseAddressService.alignDefaultWarehouseAddress(clientId, orgId, adminUserId,
-          adminRoleId);
-      sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, "done", "Warehouse address aligned");
-      return true;
-    } catch (Exception e) {
-      log.error("Error during warehouse-address alignment", e);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Warehouse address alignment failed";
-      sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  /**
-   * Patches any {@code C_BP_Group_Acct} row still missing one of the 5 columns that neither the
-   * core {@code c_bp_group_trg()} trigger nor {@code OnboardingAccountingWiringService}'s own
-   * {@code BP_GROUP_ACCT_SQL} populate (ETP-4720) — see
-   * {@code OnboardingAccountingWiringService#patchBpGroupAcctMissingColumns} for the full
-   * explanation and its corrective twin ({@code R21-bp-group-acct-remaining-columns.sql}).
-   */
-  boolean patchBpGroupAcctMissingColumns(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_IN_PROGRESS,
-        "Patching business-partner group posting accounts...");
-    try {
-      onboardingAccountingWiringService.patchBpGroupAcctMissingColumns(clientId, orgId,
-          adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, "done",
-          "Business-partner group posting accounts patched");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding bp-group-acct patch", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Business-partner group posting-account patch failed";
-      sendProgress(writer, PROGRESS_BP_GROUP_ACCT_PATCH, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  /**
-   * Forces flat, per-dimension accounting-dimension visibility ({@code Acctdim_Centrally_Maintained
-   * = 'N'}) for the new tenant, backfilling {@code C_AcctSchema_Element.isactive} first so the
-   * flip does not change what the tenant would otherwise see (ETP-4854, gap K1) — see
-   * {@link OnboardingAcctdimCentrallyMaintainedService} for the full explanation.
-   */
-  boolean forceFlatAccountingDimensionVisibility(PrintWriter writer, String clientId) {
-    sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_IN_PROGRESS,
-        "Configuring accounting-dimension visibility...");
-    try {
-      onboardingAcctdimCentrallyMaintainedService.forceFlatAccountingDimensionVisibility(clientId);
-      sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, "done",
-          "Accounting-dimension visibility configured");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding acctdim-visibility", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Accounting-dimension visibility configuration failed";
-      sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  /**
-   * Wires the onboarding admin's session defaults to the real business organization (ETP-4999,
-   * gap M1) — see {@link OnboardingAdminIdentityService} for the full explanation and its
-   * corrective twin ({@code R26-admin-identity-real-org.sql}).
-   */
-  boolean wireAdminIdentity(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_IN_PROGRESS,
-        "Wiring admin identity to organization...");
-    try {
-      onboardingAdminIdentityService.wireAdminIdentity(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, "done", "Admin identity wired");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding admin-identity wiring", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Admin identity wiring failed";
-      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  /**
-   * Forces SII/TicketBAI/VeriFactu submissions into test/sandbox mode for a Demo/free tenant
-   * (ETP-5117, gap N1) — see {@link OnboardingForceTestModeService} for the full explanation and
-   * its corrective twin ({@code R31-force-test-mode-demo-tenants.sql}).
-   */
-  boolean forceTestModeForFreeTenant(PrintWriter writer, String clientId, String orgId) {
-    sendProgress(writer, PROGRESS_FORCE_TEST_MODE, PROGRESS_IN_PROGRESS,
-        "Configuring fiscal test mode...");
-    try {
-      onboardingForceTestModeService.forceTestModeForFreeTenant(clientId, orgId);
-      sendProgress(writer, PROGRESS_FORCE_TEST_MODE, "done", "Fiscal test mode configured");
-      return true;
-    } catch (Exception e) {
-      EtendoGoDalHelper.rollbackDalChanges("onboarding force-test-mode", e, log);
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Fiscal test mode configuration failed";
-      sendProgress(writer, PROGRESS_FORCE_TEST_MODE, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  /**
-   * Registers the tenant's data-fix baseline row (the LIVE preventive counterpart of the corrective
-   * runner's DETECTED sweep) as the final onboarding action before the commit.
-   *
-   * <p>Unlike the other steps, a genuine SQL failure here is NOT caught-and-returned-false: it
-   * propagates so {@code handleOnboarding}'s catch performs a clean {@code rollbackDalChanges}.
-   * Swallowing it would poison the shared transaction and abort the otherwise-successful commit.
-   * The expected {@code ON CONFLICT DO NOTHING} → 0-rows outcome never throws (DETECTED conserved).</p>
-   */
-  boolean registerBaseline(PrintWriter writer, String clientId) {
-    sendProgress(writer, PROGRESS_BASELINE, PROGRESS_IN_PROGRESS,
-        "Registering data-fix baseline...");
-    onboardingBaselineService.registerBaseline(clientId);
-    sendProgress(writer, PROGRESS_BASELINE, "done", "Data-fix baseline registered");
-    return true;
-  }
-
-  /**
-   * Creates the per-client 5-minute costing schedule, backed by core's "Costing Background process"
-   * (idempotent). Onboarding already imports a VALIDATED costing rule, so without this schedule the
-   * rule sits there and no cost is ever calculated. Non-fatal: a missing costing schedule is worth
-   * a log line, never a failed environment creation. The Quartz job is activated after the commit
-   * (see {@code handleOnboarding}); even if that activation does not run, the {@code SCH} row is
-   * picked up on the next scheduler initialization.
-   */
-  boolean scheduleCostingBackground(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_COSTING_SCHEDULE, PROGRESS_IN_PROGRESS,
-        "Scheduling automatic cost calculation...");
-    try {
-      onboardingCostingScheduleService.scheduleCostingBackground(clientId, orgId, adminUserId,
-          adminRoleId);
-      sendProgress(writer, PROGRESS_COSTING_SCHEDULE, "done", "Automatic cost calculation scheduled");
-    } catch (Exception e) {
-      log.warn("Could not schedule cost calculation for client {}: {}", clientId, e.getMessage());
-      sendProgress(writer, PROGRESS_COSTING_SCHEDULE, "done", "Automatic cost calculation skipped");
-    }
-    return true;
+    return provisioningChain().wireWarehouseAddress(new NdjsonOnboardingProgressSink(writer),
+        clientId, orgId, adminUserId, adminRoleId);
   }
 
   /**
    * Write a NDJSON progress line.
    */
   void sendProgress(PrintWriter writer, String step, String status, String message) {
-    try {
-      JSONObject progress = new JSONObject();
-      progress.put("type", "progress");
-      progress.put("step", step);
-      progress.put(FIELD_STATUS, status);
-      progress.put(FIELD_MESSAGE, message);
-      progress.put(FIELD_TIMESTAMP, Instant.now().toString());
-      writer.println(progress.toString());
-      writer.flush();
-      // If the flush failed the client is already gone (broken pipe, swallowed by
-      // PrintWriter). Log at DEBUG which step was streaming so the cut point is
-      // identifiable when onboarding-stream logging is enabled.
-      if (writer.checkError()) {
-        log.debug("Client connection lost while streaming onboarding step '{}' (status={})",
-            step, status);
-      }
-    } catch (JSONException e) {
-      log.warn("Error writing progress", e);
-    }
+    new NdjsonOnboardingProgressSink(writer).progress(step, status, message);
   }
 
   /**
@@ -4615,37 +4201,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Write the final NDJSON result line, tagged with a stable error code.
-   *
-   * <p>Provisioning failures carry unresolved Etendo AD message keys (e.g.
-   * {@code @CreateClientFailed@}) that the UI cannot translate and must never display. The code
-   * gives the client something stable to localize, while {@code message} stays in the payload for
-   * non-UI callers and logs (ETP-4665).
+   * Write the final NDJSON result line, tagged with a stable error code (ETP-4665).
    */
   void sendFinalResult(PrintWriter writer, boolean success, String message, String code) {
-    try {
-      JSONObject result = new JSONObject();
-      result.put("type", "result");
-      result.put(FIELD_SUCCESS, success);
-      result.put(FIELD_MESSAGE, message);
-      if (code != null) {
-        result.put(FIELD_CODE, code);
-      }
-      result.put(FIELD_TIMESTAMP, Instant.now().toString());
-      writer.println(result.toString());
-      writer.flush();
-      // The final result line is what the UI waits for. If the flush failed the client
-      // never received it (broken pipe swallowed by PrintWriter) — the UI will report a
-      // false failure even though the backend finished. Make that explicit.
-      if (writer.checkError()) {
-        log.warn("Onboarding final result (success={}) could not be delivered to the client; "
-            + "the connection was already closed (likely a CloudFront/proxy stream timeout).",
-            success);
-      }
-    } catch (JSONException e) {
-      log.warn("Error writing final result", e);
-    }
+    new NdjsonOnboardingProgressSink(writer).result(success, message, code);
   }
+
 
 
   // --- Password utilities ---
@@ -5063,6 +4624,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    long startNanos = System.nanoTime();
     JSONObject body;
     try {
       body = readJsonBody(request);
@@ -5143,6 +4705,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
+      recordCookieEnvironmentLogin(rotated.getRecord(), startNanos);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);
@@ -5571,13 +5134,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Resolved only from the account-scoped checkout row; onboarding never trusts a browser value.
     private String demoClientId;
     private String upgradeAction;
-    private boolean transferProducts;
-    private boolean transferContacts;
   }
 
-  private static class AdminContextData {
-    private String adminRoleId;
-    private String adminUserId;
-    private String starOrgId;
-  }
 }
