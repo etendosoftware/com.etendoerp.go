@@ -63,17 +63,24 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  * MCP write path ({@code McpToolRouter}) invoke {@link #handle(NeoContext)}.
  *
  * <p>Request body uses the DAL property names of {@code FIN_Financial_Account}:
- * {@code { "name", "currency", "type"?, "iBAN"?, "swiftCode"? }}.
+ * {@code { "name", "currency", "country", "type"?, "iBAN"?, "swiftCode"? }}.
  * {@code type} is {@code 'B'} (Bank, default), {@code 'C'} (Cash) or
  * {@code 'CA'} (Card). Bank connection / "Con conexión" wiring is out of scope (T3).
  *
  * <p>The pre-hook does NOT persist the record itself: on create/update it
- * validates and then <b>mutates the request body</b> (injecting {@code country}
- * derived from the IBAN and a default {@code matchingAlgorithm}) and returns
+ * validates and then <b>mutates the request body</b> (normalizing {@code iBAN} /
+ * {@code country} and injecting a default {@code matchingAlgorithm}) and returns
  * {@code null}, letting the generic CRUD service persist within its single
- * transaction. Injecting {@code country} before the insert is mandatory because
- * the row-level trigger {@code FIN_FINANCIAL_ACCOUNT_TRG2} ({@code @COUNTRY_IBAN@})
- * rejects a bank account that carries an IBAN without a country.
+ * transaction.
+ *
+ * <p>ETP-5473: {@code country} is mandatory on create for EVERY account type (Bank, Cash,
+ * Card), and on update it can only be cleared where the SPA's Edit modal allows it (Cash, Card,
+ * or a Bank account with no IBAN) — the same rules the SPA's account forms enforce, so an
+ * API/MCP caller can no longer create an account the UI would refuse. It is never derived from
+ * the IBAN prefix: a caller that sends an IBAN without a country is rejected, not "helped". The
+ * (IBAN, country) pair is still validated before the insert because the row-level trigger
+ * {@code FIN_FINANCIAL_ACCOUNT_TRG2} ({@code @COUNTRY_IBAN@}) would otherwise reject an
+ * inconsistent pair with a raw 500.
  *
  * <p>ETP-4871: DELETE now attempts a real hard delete (see {@link #deleteAccount}) —
  * every FK from another table into {@code FIN_Financial_Account} is RESTRICT (no
@@ -104,6 +111,11 @@ public class FinancialAccountHandler implements NeoHandler {
   static final String FIELD_IBAN = "iBAN";
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
+  /** ETP-5473. Fixed English literals on purpose: the SPA translates them by exact match through
+   *  {@code tools/app-shell/src/lib/backendErrors.js} ({@code BACKEND_ERROR_MAP}), so the wording
+   *  is a wire contract — rewording any of them silently un-translates the toast. */
+  private static final String MSG_COUNTRY_REQUIRED = "Country is required";
+  private static final String MSG_INVALID_COUNTRY = "Invalid country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
   /** DAL property of {@code EM_ETGO_Amount_Tolerance} — Etendo drops the "EM_" module prefix. */
   private static final String FIELD_AMOUNT_TOLERANCE = "eTGOAmountTolerance";
@@ -582,19 +594,21 @@ public class FinancialAccountHandler implements NeoHandler {
     String type = normalizeType(body.optString(FIELD_TYPE, TYPE_BANK).trim());
     body.put(FIELD_TYPE, type);
 
-    // Persist the chosen Salt Edge provider (offline "with bank selected" flow): upsert the
-    // provider and inject the FK so the account remembers its bank. The account stays offline —
-    // this is metadata only — but a later bank connect can then preselect that provider.
-    enrichProvider(body, type);
-
-    // Validates the (IBAN, country) pair and injects/normalizes both in the body before the
-    // insert — the trigger FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no
-    // country, and a mismatched pair would otherwise surface as a raw 500 (see
+    // Requires a valid country for every account type (ETP-5473), then validates the (IBAN,
+    // country) pair and normalizes both in the body before the insert — a mismatched pair would
+    // otherwise surface as a raw 500 from FIN_FINANCIAL_ACCOUNT_TRG2 (see
     // FinancialAccountCountrySupport#validateIbanCountryPair).
     NeoResponse countryError = validateCountryAndIban(body, null);
     if (countryError != null) {
       return countryError;
     }
+    // Persist the chosen Salt Edge provider (offline "with bank selected" flow): upsert the
+    // provider and inject the FK so the account remembers its bank. The account stays offline —
+    // this is metadata only — but a later bank connect can then preselect that provider.
+    // Runs only AFTER every validation above (ETP-5473): it upserts and flushes, so a create
+    // rejected for a missing/invalid country or a bad IBAN pair must not leave a provider row
+    // behind. validateCountryAndIban reads only type/iBAN/country, none of which this touches.
+    enrichProvider(body, type);
     // Inject a default matching algorithm when the caller did not provide one,
     // so reconciliation has an algorithm to work with.
     injectDefaultMatchingAlgorithm(body);
@@ -621,7 +635,7 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Update (pre-hook: validate + keep country in sync with the IBAN)
+  // Update (pre-hook: validate; country clearable unless Bank+IBAN, IBAN pair stays consistent)
   // ---------------------------------------------------------------------------
 
   NeoResponse validateAndEnrichUpdate(String id, JSONObject body) throws JSONException {
@@ -640,7 +654,7 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     String name = body.has(FIELD_NAME) ? body.optString(FIELD_NAME, "").trim() : null;
     // isNull-aware: optString() on a JSON null would yield the literal "null" string, which a
-    // PATCH {"iBAN": null} (clearing the IBAN) used to feed straight into the country-derivation
+    // PATCH {"iBAN": null} (clearing the IBAN) used to feed straight into the IBAN/country pair
     // check below as if it were a real, non-blank IBAN.
     String iban = StringUtils.trimToEmpty(FinancialAccountCountrySupport.bodyString(body, FIELD_IBAN));
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
@@ -664,34 +678,58 @@ public class FinancialAccountHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Resolves the (IBAN, country) pair that will actually be persisted and rejects it with a
-   * friendly 400 before {@code FIN_FINANCIAL_ACCOUNT_TRG2} can raise {@code @COUNTRY_IBAN@} /
-   * {@code @20257@} / {@code @20259@} — which {@code NeoErrorSanitizer} would otherwise flatten
-   * into a 500 "Service temporarily unavailable".
+   * Validates the account's country and the (IBAN, country) pair that will actually be persisted,
+   * rejecting a bad write with a friendly 400 before {@code FIN_FINANCIAL_ACCOUNT_TRG2} can raise
+   * {@code @COUNTRY_IBAN@} / {@code @20257@} / {@code @20259@} — which {@code NeoErrorSanitizer}
+   * would otherwise flatten into a 500 "Service temporarily unavailable".
    *
-   * <p>Precedence: a country present in the body WINS. IBAN-derivation from the prefix
-   * ({@link #resolveCountryFromIban}) is only a fallback for a body that carries no country at
-   * all, so the SPA's country picker is authoritative while older API/MCP callers that only ever
-   * sent an IBAN keep working unchanged.
+   * <p>Country rule (ETP-5473) — mirrors the SPA exactly: the New Account form on create,
+   * {@code EditAccountModal} on update.
+   * <ul>
+   *   <li><b>Create</b>, any type (Bank, Cash, Card): {@code country} is mandatory — missing,
+   *       {@code null} or blank is {@value #MSG_COUNTRY_REQUIRED}; an id that does not resolve is
+   *       {@value #MSG_INVALID_COUNTRY}.</li>
+   *   <li><b>Update</b>: a new value must resolve ({@value #MSG_INVALID_COUNTRY} otherwise). An
+   *       explicit clear ({@code null} / blank) is allowed — and normalized to JSON {@code null}
+   *       so it persists as {@code NULL}, never {@code ''} — EXCEPT on a Bank account whose
+   *       effective IBAN is non-blank, which the pair check below rejects. A body that does not
+   *       touch {@code country} is never checked against the stored value, so legacy rows stored
+   *       without a country (seed data, pre-ETP-4896 accounts) keep accepting unrelated edits.</li>
+   *   <li>The country is <b>never derived from the IBAN prefix</b>. Before ETP-5473 an IBAN-only
+   *       body got its country filled in from the prefix; the UI never did that, so the API no
+   *       longer does either.</li>
+   * </ul>
    *
-   * <p>Neither field touched by the body is treated as a no-op — deliberately mirroring the
-   * trigger's own {@code COALESCE(:OLD…)<>COALESCE(:NEW…)} guard, which does not re-validate
-   * either. This matters for legacy or externally-imported rows whose stored pair may already be
-   * inconsistent: an unrelated edit (renaming the account, say) must not suddenly reject them. It
-   * is also why the account is loaded LAZILY, only when the body actually touches {@code iBAN} or
+   * <p>IBAN pair rule (Bank accounts only): when the effective IBAN is non-blank, the effective
+   * country — the body's (including an explicit clear), else the stored account's — must exist
+   * ({@value FinancialAccountCountrySupport#MSG_IBAN_REQUIRES_COUNTRY} otherwise: clearing the country of a bank account that
+   * keeps an IBAN, or a PATCH adding an IBAN to a legacy country-less bank account) and match the
+   * IBAN's prefix, length and checksum. On create the body country was already required above, so
+   * that message is only reachable on update.
+   *
+   * <p>On update, a body that touches neither {@code iBAN} nor {@code country} is a no-op —
+   * deliberately mirroring the trigger's own {@code COALESCE(:OLD…)<>COALESCE(:NEW…)} guard. This
+   * matters for legacy or externally-imported rows whose stored pair may already be inconsistent:
+   * an unrelated edit (renaming the account, say) must not suddenly reject them. It is also why
+   * the account is loaded LAZILY, only when the body actually touches {@code iBAN} or
    * {@code country} — the overwhelming majority of partial updates (rename, tolerances,
    * accounting config, …) never reach a DAL call here at all.
    *
    * @param accountId the record id on update, {@code null}/blank on create (nothing to load).
    */
   NeoResponse validateCountryAndIban(JSONObject body, String accountId) throws JSONException {
+    boolean isCreate = StringUtils.isBlank(accountId);
     boolean bodyHasIban = body.has(FIELD_IBAN);
     boolean bodyHasCountry = body.has(FIELD_COUNTRY);
-    if (!bodyHasIban && !bodyHasCountry) {
+    if (!isCreate && !bodyHasIban && !bodyHasCountry) {
       return null;
     }
+    NeoResponse countryError = validateBodyCountry(body, isCreate);
+    if (countryError != null) {
+      return countryError;
+    }
 
-    FIN_FinancialAccount stored = StringUtils.isNotBlank(accountId) ? loadAccount(accountId) : null;
+    FIN_FinancialAccount stored = isCreate ? null : loadAccount(accountId);
     // On create, validateAndEnrichCreate already normalized and wrote FIELD_TYPE into the body
     // before calling here, so the body branch always wins there; the stored-type fallback only
     // ever applies on update. normalizeType maps a null (neither source had one) to Bank, and is
@@ -711,62 +749,60 @@ public class FinancialAccountHandler implements NeoHandler {
       return null;
     }
 
-    if (bodyHasCountry && FinancialAccountCountrySupport.isExplicitClear(body, FIELD_COUNTRY)) {
-      // Do not silently re-derive here: that would contradict "the user's choice wins" and hide
-      // the user's own action of clearing the field.
+    // validateBodyCountry already proved a non-cleared body id resolves (and wrote back the trimmed
+    // id); a cleared one is JSON null here. The repeated loadCountry is a session-cache hit.
+    Country effectiveCountry = bodyHasCountry
+        ? loadCountryOrNull(FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY))
+        : FinancialAccountCountrySupport.storedCountry(stored);
+    if (effectiveCountry == null) {
+      // Update only: the country was explicitly cleared, or left untouched on a legacy row that
+      // has none, while the account keeps/gets an IBAN. No derivation from the IBAN prefix
+      // (ETP-5473) — the caller must send the country, as the UI does.
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "A bank account with an IBAN must have a country.");
-    }
-
-    Country effectiveCountry = resolveEffectiveCountry(body, bodyHasCountry, stored, effectiveIban);
-    // Only meaningful when the body supplied one: there, null means the id does not resolve to a
-    // country at all. When it did not, null just means "nothing to derive from the IBAN either",
-    // which validateIbanCountryPair reports with its own, more specific message.
-    if (bodyHasCountry && effectiveCountry == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid country");
+          FinancialAccountCountrySupport.MSG_IBAN_REQUIRES_COUNTRY);
     }
 
     String pairError = FinancialAccountCountrySupport.validateIbanCountryPair(effectiveIban, effectiveCountry);
     if (pairError != null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, pairError);
     }
-    // Always write back what was actually validated, so the generic CRUD persists exactly that —
-    // not a caller-supplied IBAN with stray separators, nor a country resolved here but never
-    // reflected in the body.
+    // Always write back the normalized IBAN that was actually validated, so the generic CRUD
+    // persists exactly that — not a caller-supplied IBAN with stray separators.
     body.put(FIELD_IBAN, effectiveIban);
-    if (effectiveCountry != null) {
-      body.put(FIELD_COUNTRY, effectiveCountry.getId());
-    }
     return null;
   }
 
   /**
-   * The country the write will end up with, in strict precedence order (ETP-4896):
-   *
-   * <ol>
-   *   <li>the one the body carries — the SPA's picker is authoritative, so it wins outright and
-   *       {@link #resolveCountryFromIban} is not even consulted;</li>
-   *   <li>the stored account's, when the body is silent on the field;</li>
-   *   <li>derived from the IBAN prefix — the pre-ETP-4896 behavior, kept only as a fallback for
-   *       API/MCP callers that send an IBAN and no country at all.</li>
-   * </ol>
-   *
-   * <p>Returns {@code null} when nothing resolves; the caller decides what that means, since it
-   * reads differently per branch (an invalid id the caller sent vs. an unrecognized IBAN prefix).
-   *
-   * <p>Kept in this class rather than {@link FinancialAccountCountrySupport} — unlike the two
-   * resolvers there, this one goes through the {@link #loadCountry} / {@link #resolveCountryFromIban}
-   * seams, which the unit tests spy on to run without a database.</p>
+   * The body-level half of the ETP-5473 country rule. Create: {@code country} must be present and
+   * non-blank. Both: a non-blank id must resolve, and is written back trimmed. Update: an explicit
+   * clear ({@code null} / blank) is normalized to JSON {@code null} so it persists as a real
+   * {@code NULL} rather than {@code ''}; whether that clear is allowed at all (not on a Bank
+   * account that keeps an IBAN) is decided by the pair check in {@link #validateCountryAndIban}.
+   * A body without the key on update is left alone.
    */
-  private Country resolveEffectiveCountry(JSONObject body, boolean bodyHasCountry,
-      FIN_FinancialAccount stored, String effectiveIban) {
-    if (bodyHasCountry) {
-      return loadCountry(FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY));
+  private NeoResponse validateBodyCountry(JSONObject body, boolean isCreate) throws JSONException {
+    boolean bodyHasCountry = body.has(FIELD_COUNTRY);
+    boolean cleared = FinancialAccountCountrySupport.isExplicitClear(body, FIELD_COUNTRY);
+    if (isCreate && (!bodyHasCountry || cleared)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_COUNTRY_REQUIRED);
     }
-    if (stored != null && stored.getCountry() != null) {
-      return stored.getCountry();
+    if (cleared) {
+      body.put(FIELD_COUNTRY, JSONObject.NULL);
+      return null;
     }
-    return resolveCountryFromIban(effectiveIban);
+    if (!bodyHasCountry) {
+      return null;
+    }
+    String countryId = FinancialAccountCountrySupport.bodyString(body, FIELD_COUNTRY).trim();
+    if (loadCountry(countryId) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVALID_COUNTRY);
+    }
+    body.put(FIELD_COUNTRY, countryId);
+    return null;
+  }
+
+  private Country loadCountryOrNull(String countryId) {
+    return StringUtils.isBlank(countryId) ? null : loadCountry(countryId);
   }
 
   // ---------------------------------------------------------------------------
@@ -965,24 +1001,6 @@ public class FinancialAccountHandler implements NeoHandler {
   Country resolveOrgCountry() {
     return FinancialAccountCountrySupport.resolveOrganizationCountry(
         OBContext.getOBContext().getCurrentOrganization().getId());
-  }
-
-  /**
-   * Resolves the {@link Country} an IBAN belongs to from its first two characters
-   * (the ISO 3166-1 alpha-2 code, e.g. {@code ES} -> Spain). The financial account
-   * trigger requires the country to be set whenever a bank account stores an IBAN.
-   *
-   * <p>Delegates to {@link FinancialAccountCountrySupport#resolveCountryForIbanPrefix}, which
-   * prefers a match on {@code IBANCODE} over the plain ISO code (ETP-4896): only ~45 of 243
-   * seeded countries carry IBAN metadata, and matching on the ISO code alone can return one of
-   * the other ~198, which {@code FIN_FINANCIAL_ACCOUNT_TRG2} then rejects.
-   *
-   * @return the matching country, or {@code null} when the IBAN is too short or no
-   *         active country matches the prefix either way.
-   */
-  Country resolveCountryFromIban(String iban) {
-    return FinancialAccountCountrySupport.resolveCountryForIbanPrefix(
-        FinancialAccountCountrySupport.normalizeIban(iban));
   }
 
   boolean nameExists(String name, String excludeId) {
