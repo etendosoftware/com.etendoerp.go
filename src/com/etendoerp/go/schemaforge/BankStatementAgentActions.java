@@ -86,6 +86,8 @@ final class BankStatementAgentActions {
   static final String P_CONTENT_BASE64 = "contentBase64";
 
   private static final String S = NeoActionContract.TYPE_STRING;
+  /** Tail of the "at most N characters." parameter descriptions (Sonar S1192). */
+  private static final String CHARACTERS_SUFFIX = " characters.";
 
   private static final String ACCOUNT_ID_DESC =
       "The financial account id (FIN_Financial_Account) the statements belong to.";
@@ -190,15 +192,15 @@ final class BankStatementAgentActions {
                 + "their column are refused, not truncated. Returns {id, name, lineCount, "
                 + "processed}.",
             required(P_NAME, S, "Statement name, at most "
-                + BankStatementAgentValidation.MAX_NAME + " characters."),
+                + BankStatementAgentValidation.MAX_NAME + CHARACTERS_SUFFIX),
             optional(P_TRANSACTION_DATE, NeoActionContract.TYPE_DATE,
                 "Statement date (yyyy-MM-dd). Defaults to today."),
             optional(P_IMPORT_DATE, NeoActionContract.TYPE_DATE,
                 "Import date (yyyy-MM-dd). Defaults to today."),
             optional(P_FILE_NAME, S, "Optional source file name, at most "
-                + BankStatementAgentValidation.MAX_TEXT + " characters."),
+                + BankStatementAgentValidation.MAX_TEXT + CHARACTERS_SUFFIX),
             optional(P_NOTES, S, "Optional notes, at most "
-                + BankStatementAgentValidation.MAX_TEXT + " characters."),
+                + BankStatementAgentValidation.MAX_TEXT + CHARACTERS_SUFFIX),
             optional(P_PROCESS, NeoActionContract.TYPE_BOOLEAN,
                 "true (default) processes the statement right away; false saves it as a draft."),
             array(P_LINES, NeoActionContract.TYPE_OBJECT, true,
