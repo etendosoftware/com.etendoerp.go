@@ -749,7 +749,7 @@ public class ReconciliationHandlerTest {
   public void testWillSplitLineEmptyOperationsReturnsFalse() {
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
 
-    assertFalse(handler.willSplitLine(line, java.util.Collections.emptyList()));
+    assertFalse(ReconciliationHandlerSupport.willSplitLine(handler, line, java.util.Collections.emptyList()));
   }
 
   /**
@@ -762,7 +762,7 @@ public class ReconciliationHandlerTest {
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     doReturn(null).when(handler).loadTransaction("t-missing");
 
-    assertTrue(handler.willSplitLine(line, java.util.Collections.singletonList("t-missing")));
+    assertTrue(ReconciliationHandlerSupport.willSplitLine(handler, line, java.util.Collections.singletonList("t-missing")));
   }
 
   /**

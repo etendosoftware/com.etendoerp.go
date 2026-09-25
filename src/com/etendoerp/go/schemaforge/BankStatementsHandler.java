@@ -30,6 +30,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.wrapInEnvelope;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
@@ -43,6 +44,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -65,6 +67,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
@@ -329,8 +332,23 @@ public class BankStatementsHandler implements NeoHandler {
     return String.format(LINES_SQL_HEAD, BankStatementsSupport.descriptionExpr()); // NOSONAR java:S2077 — value is a hardcoded SQL expression, never user input
   }
 
+  /**
+   * The actions an agent can run through {@code neo_action} (ETP-5469) — see
+   * {@link BankStatementAgentActions}. Declaring them also makes {@link #servesActions()} true.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return BankStatementAgentActions.CONTRACTS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    // ETP-5469: purely additive. Only neo_action produces an ACTION context for this spec; the
+    // SPA's ?action= calls arrive as report-spec requests with no endpoint type and never enter
+    // this branch, so their routing below is untouched.
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      return BankStatementAgentActions.dispatch(this, context);
+    }
     String method = context.getHttpMethod();
     String action = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_ACTION)
@@ -357,7 +375,7 @@ public class BankStatementsHandler implements NeoHandler {
     return NeoResponse.error(405, "Method not allowed.");
   }
 
-  private NeoResponse handleList(NeoContext context) {
+  NeoResponse handleList(NeoContext context) {
     String accountId = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_ACCOUNT_ID)
         : null;
@@ -378,7 +396,7 @@ public class BankStatementsHandler implements NeoHandler {
     }
   }
 
-  private NeoResponse handleGetLines(NeoContext context) {
+  NeoResponse handleGetLines(NeoContext context) {
     String multi = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_STATEMENT_IDS)
         : null;
@@ -410,22 +428,7 @@ public class BankStatementsHandler implements NeoHandler {
     }
   }
 
-  /**
-   * Builds the {@code { "response": { "data": { <key>: <payload> } } }} envelope
-   * shared by every successful GET endpoint here. Pulled out so the literal
-   * keys "response" / "data" only appear once (S1192).
-   */
-  private static JSONObject wrapInEnvelope(String key, Object payload) throws Exception {
-    JSONObject data = new JSONObject();
-    data.put(key, payload);
-    JSONObject responseData = new JSONObject();
-    responseData.put(JSON_DATA, data);
-    JSONObject env = new JSONObject();
-    env.put(JSON_RESPONSE, responseData);
-    return env;
-  }
-
-  private NeoResponse handleImport(NeoContext context) {
+  NeoResponse handleImport(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) {
       return NeoResponse.error(400, MSG_BODY_REQUIRED);
@@ -497,7 +500,7 @@ public class BankStatementsHandler implements NeoHandler {
    * }
    * </pre>
    */
-  private NeoResponse handleCreate(NeoContext context) {
+  NeoResponse handleCreate(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -557,7 +560,7 @@ public class BankStatementsHandler implements NeoHandler {
    * reconcilable, mirroring "Save and process" on the create flow. Only drafts
    * (unprocessed) can be processed. Body: {@code { "id": "..." }}.
    */
-  private NeoResponse handleProcess(NeoContext context) {
+  NeoResponse handleProcess(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -600,7 +603,7 @@ public class BankStatementsHandler implements NeoHandler {
    * line at all, which Classic never did).
    * Body: {@code { "id": "..." }}.
    */
-  private NeoResponse handleReactivate(NeoContext context) {
+  NeoResponse handleReactivate(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
