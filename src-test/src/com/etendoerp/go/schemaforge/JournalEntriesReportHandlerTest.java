@@ -425,7 +425,7 @@ class JournalEntriesReportHandlerTest {
   void toIsoDateRendersMidnightTimestampAsPlainDate() {
     Timestamp value = Timestamp.valueOf("2026-01-01 00:00:00");
 
-    assertEquals("2026-01-01", JournalEntriesReportHandler.toIsoDate(value));
+    assertEquals("2026-01-01", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
@@ -433,7 +433,7 @@ class JournalEntriesReportHandlerTest {
   void toIsoDateRendersLateTimestampWithNoDayShift() {
     Timestamp value = Timestamp.valueOf("2026-03-31 23:59:59");
 
-    assertEquals("2026-03-31", JournalEntriesReportHandler.toIsoDate(value));
+    assertEquals("2026-03-31", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
@@ -441,7 +441,7 @@ class JournalEntriesReportHandlerTest {
   void toIsoDateRendersSqlDate() {
     Date value = Date.valueOf("2026-02-15");
 
-    assertEquals("2026-02-15", JournalEntriesReportHandler.toIsoDate(value));
+    assertEquals("2026-02-15", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
@@ -449,7 +449,7 @@ class JournalEntriesReportHandlerTest {
   void toIsoDateRendersLocalDateTime() {
     LocalDateTime value = LocalDateTime.of(2026, 4, 7, 13, 45, 0);
 
-    assertEquals("2026-04-07", JournalEntriesReportHandler.toIsoDate(value));
+    assertEquals("2026-04-07", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
@@ -457,25 +457,25 @@ class JournalEntriesReportHandlerTest {
   void toIsoDateRendersLocalDate() {
     LocalDate value = LocalDate.of(2026, 6, 30);
 
-    assertEquals("2026-06-30", JournalEntriesReportHandler.toIsoDate(value));
+    assertEquals("2026-06-30", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
   @DisplayName("toIsoDate truncates a raw timestamp-shaped String to its date prefix")
   void toIsoDateTruncatesRawTimestampString() {
-    assertEquals("2026-05-06", JournalEntriesReportHandler.toIsoDate("2026-05-06 00:00:00.0"));
+    assertEquals("2026-05-06", AbstractSqlReportHandler.toIsoDate("2026-05-06 00:00:00.0"));
   }
 
   @Test
   @DisplayName("toIsoDate returns a short, non-date String unchanged")
   void toIsoDateReturnsShortStringUnchanged() {
-    assertEquals("abc", JournalEntriesReportHandler.toIsoDate("abc"));
+    assertEquals("abc", AbstractSqlReportHandler.toIsoDate("abc"));
   }
 
   @Test
   @DisplayName("toIsoDate returns an empty string for null")
   void toIsoDateReturnsEmptyForNull() {
-    assertEquals("", JournalEntriesReportHandler.toIsoDate(null));
+    assertEquals("", AbstractSqlReportHandler.toIsoDate(null));
   }
 
   // -------------------------------------------------------------------------

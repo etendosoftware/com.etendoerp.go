@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -54,7 +53,7 @@ final class JournalEntriesGrouping {
   }
 
   /** One flat, line-grain input row — the shape {@link JournalEntriesReportHandler}'s SQL returns. */
-  static final class Row {
+  static final class Row extends DimensionedAmounts {
     final String dateacct;
     final long entryNo;
     final String documentType;
@@ -65,19 +64,14 @@ final class JournalEntriesGrouping {
     final String docQueryKey;
     final String docQueryValue;
     final String entryDescription;
-    final String bpname;
-    final String productname;
-    final String projectname;
-    final String costcentername;
     final String factAcctGroupId;
     final String recordId;
     final String adTableId;
     final String accountNo;
     final String accountName;
-    final BigDecimal amtacctdr;
-    final BigDecimal amtacctcr;
 
     private Row(Builder b) {
+      super(b);
       this.dateacct = b.dateacct;
       this.entryNo = b.entryNo;
       this.documentType = b.documentType;
@@ -88,25 +82,22 @@ final class JournalEntriesGrouping {
       this.docQueryKey = b.docQueryKey;
       this.docQueryValue = b.docQueryValue;
       this.entryDescription = b.entryDescription;
-      this.bpname = b.bpname;
-      this.productname = b.productname;
-      this.projectname = b.projectname;
-      this.costcentername = b.costcentername;
       this.factAcctGroupId = b.factAcctGroupId;
       this.recordId = b.recordId;
       this.adTableId = b.adTableId;
       this.accountNo = b.accountNo;
       this.accountName = b.accountName;
-      this.amtacctdr = b.amtacctdr == null ? BigDecimal.ZERO : b.amtacctdr;
-      this.amtacctcr = b.amtacctcr == null ? BigDecimal.ZERO : b.amtacctcr;
     }
 
     static Builder builder() {
       return new Builder();
     }
 
-    /** Fluent builder — {@link Row} has too many fields for a plain constructor (java:S107). */
-    static final class Builder {
+    /**
+     * Fluent builder — {@link Row} has too many fields for a plain constructor (java:S107). The
+     * amounts and dimension names come from {@link DimensionedAmounts.FieldsBuilder}.
+     */
+    static final class Builder extends DimensionedAmounts.FieldsBuilder<Builder> {
       private String dateacct;
       private long entryNo;
       private String documentType;
@@ -117,17 +108,16 @@ final class JournalEntriesGrouping {
       private String docQueryKey;
       private String docQueryValue;
       private String entryDescription;
-      private String bpname;
-      private String productname;
-      private String projectname;
-      private String costcentername;
       private String factAcctGroupId;
       private String recordId;
       private String adTableId;
       private String accountNo;
       private String accountName;
-      private BigDecimal amtacctdr;
-      private BigDecimal amtacctcr;
+
+      @Override
+      Builder self() {
+        return this;
+      }
 
       Builder dateacct(String v) {
         this.dateacct = v;
@@ -179,26 +169,6 @@ final class JournalEntriesGrouping {
         return this;
       }
 
-      Builder bpname(String v) {
-        this.bpname = v;
-        return this;
-      }
-
-      Builder productname(String v) {
-        this.productname = v;
-        return this;
-      }
-
-      Builder projectname(String v) {
-        this.projectname = v;
-        return this;
-      }
-
-      Builder costcentername(String v) {
-        this.costcentername = v;
-        return this;
-      }
-
       Builder factAcctGroupId(String v) {
         this.factAcctGroupId = v;
         return this;
@@ -224,102 +194,24 @@ final class JournalEntriesGrouping {
         return this;
       }
 
-      Builder amtacctdr(BigDecimal v) {
-        this.amtacctdr = v;
-        return this;
-      }
-
-      Builder amtacctcr(BigDecimal v) {
-        this.amtacctcr = v;
-        return this;
-      }
-
       Row build() {
         return new Row(this);
       }
     }
   }
 
-  /** One account line of a journal entry. */
-  static final class Line {
+  /**
+   * One account line of a journal entry: the input {@link Row}'s account, amounts and dimension
+   * names, copied as-is.
+   */
+  static final class Line extends DimensionedAmounts {
     final String accountNo;
     final String accountName;
-    final BigDecimal amtacctdr;
-    final BigDecimal amtacctcr;
-    final String bpname;
-    final String productname;
-    final String projectname;
-    final String costcentername;
 
-    private Line(Builder b) {
-      this.accountNo = b.accountNo;
-      this.accountName = b.accountName;
-      this.amtacctdr = b.amtacctdr;
-      this.amtacctcr = b.amtacctcr;
-      this.bpname = b.bpname;
-      this.productname = b.productname;
-      this.projectname = b.projectname;
-      this.costcentername = b.costcentername;
-    }
-
-    static Builder builder() {
-      return new Builder();
-    }
-
-    /** Fluent builder — {@link Line} has too many fields for a plain constructor (java:S107). */
-    static final class Builder {
-      private String accountNo;
-      private String accountName;
-      private BigDecimal amtacctdr;
-      private BigDecimal amtacctcr;
-      private String bpname;
-      private String productname;
-      private String projectname;
-      private String costcentername;
-
-      Builder accountNo(String v) {
-        this.accountNo = v;
-        return this;
-      }
-
-      Builder accountName(String v) {
-        this.accountName = v;
-        return this;
-      }
-
-      Builder amtacctdr(BigDecimal v) {
-        this.amtacctdr = v;
-        return this;
-      }
-
-      Builder amtacctcr(BigDecimal v) {
-        this.amtacctcr = v;
-        return this;
-      }
-
-      Builder bpname(String v) {
-        this.bpname = v;
-        return this;
-      }
-
-      Builder productname(String v) {
-        this.productname = v;
-        return this;
-      }
-
-      Builder projectname(String v) {
-        this.projectname = v;
-        return this;
-      }
-
-      Builder costcentername(String v) {
-        this.costcentername = v;
-        return this;
-      }
-
-      Line build() {
-        return new Line(this);
-      }
+    private Line(Row source) {
+      super(source);
+      this.accountNo = source.accountNo;
+      this.accountName = source.accountName;
     }
   }
 
@@ -372,16 +264,7 @@ final class JournalEntriesGrouping {
     if (rows != null) {
       for (Row r : rows) {
         Entry entry = byGroup.computeIfAbsent(r.factAcctGroupId, k -> new Entry(r));
-        entry.lines.add(Line.builder()
-            .accountNo(r.accountNo)
-            .accountName(r.accountName)
-            .amtacctdr(r.amtacctdr)
-            .amtacctcr(r.amtacctcr)
-            .bpname(r.bpname)
-            .productname(r.productname)
-            .projectname(r.projectname)
-            .costcentername(r.costcentername)
-            .build());
+        entry.lines.add(new Line(r));
       }
     }
     return new ArrayList<>(byGroup.values());

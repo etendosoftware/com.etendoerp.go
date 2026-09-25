@@ -162,82 +162,17 @@ final class TrialBalanceFolding {
     final BigDecimal activityCredit;
     final BigDecimal closingBalance;
 
-    private FoldedRow(Builder b) {
-      this.accountNo = b.accountNo;
-      this.accountId = b.accountId;
-      this.accountName = b.accountName;
-      this.dimensionValue = b.dimensionValue;
-      this.dimensionId = b.dimensionId;
-      this.openingBalance = b.openingBalance;
-      this.activityDebit = b.activityDebit;
-      this.activityCredit = b.activityCredit;
-      this.closingBalance = b.closingBalance;
-    }
-
-    static Builder builder() {
-      return new Builder();
-    }
-
-    /** Fluent builder — {@link FoldedRow} has too many fields for a plain constructor (java:S107). */
-    static final class Builder {
-      private String accountNo;
-      private String accountId;
-      private String accountName;
-      private String dimensionValue;
-      private String dimensionId;
-      private BigDecimal openingBalance;
-      private BigDecimal activityDebit;
-      private BigDecimal activityCredit;
-      private BigDecimal closingBalance;
-
-      Builder accountNo(String v) {
-        this.accountNo = v;
-        return this;
-      }
-
-      Builder accountId(String v) {
-        this.accountId = v;
-        return this;
-      }
-
-      Builder accountName(String v) {
-        this.accountName = v;
-        return this;
-      }
-
-      Builder dimensionValue(String v) {
-        this.dimensionValue = v;
-        return this;
-      }
-
-      Builder dimensionId(String v) {
-        this.dimensionId = v;
-        return this;
-      }
-
-      Builder openingBalance(BigDecimal v) {
-        this.openingBalance = v;
-        return this;
-      }
-
-      Builder activityDebit(BigDecimal v) {
-        this.activityDebit = v;
-        return this;
-      }
-
-      Builder activityCredit(BigDecimal v) {
-        this.activityCredit = v;
-        return this;
-      }
-
-      Builder closingBalance(BigDecimal v) {
-        this.closingBalance = v;
-        return this;
-      }
-
-      FoldedRow build() {
-        return new FoldedRow(this);
-      }
+    /** Snapshot of a finished accumulator; its amounts are never {@code null} (they start at ZERO). */
+    private FoldedRow(MutableAccumulator acc) {
+      this.accountNo = acc.accountNo;
+      this.accountId = acc.accountId;
+      this.accountName = acc.accountName;
+      this.dimensionValue = acc.dimensionValue;
+      this.dimensionId = acc.dimensionId;
+      this.openingBalance = acc.openingBalance;
+      this.activityDebit = acc.activityDebit;
+      this.activityCredit = acc.activityCredit;
+      this.closingBalance = acc.closingBalance;
     }
   }
 
@@ -324,17 +259,7 @@ final class TrialBalanceFolding {
       if (!hasActivity(acc)) {
         continue;
       }
-      result.add(FoldedRow.builder()
-          .accountNo(acc.accountNo)
-          .accountId(acc.accountId)
-          .accountName(acc.accountName)
-          .dimensionValue(acc.dimensionValue)
-          .dimensionId(acc.dimensionId)
-          .openingBalance(acc.openingBalance)
-          .activityDebit(acc.activityDebit)
-          .activityCredit(acc.activityCredit)
-          .closingBalance(acc.closingBalance)
-          .build());
+      result.add(new FoldedRow(acc));
     }
     return result;
   }

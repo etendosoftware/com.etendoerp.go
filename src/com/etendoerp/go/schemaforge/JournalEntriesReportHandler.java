@@ -17,28 +17,19 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.sql.Date;
-import java.time.DateTimeException;
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 import javax.inject.Named;
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -102,29 +93,9 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * {@link #PARAM_LIMIT}, {@link #DEFAULT_LIMIT}, {@link #MAX_LIMIT} and {@link #countTotalEntries}.
  */
 @Named("journalEntriesReportHandler")
-public class JournalEntriesReportHandler implements NeoHandler {
+public class JournalEntriesReportHandler extends AbstractSqlReportHandler {
 
-  private static final Logger log = LogManager.getLogger(JournalEntriesReportHandler.class);
-
-  private static final String DATE_FORMAT = "yyyy-MM-dd";
-  private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern(DATE_FORMAT);
-  /** Etendo ids are either a legacy numeric string or a 32-char hex/alnum id — never blank, never whitespace. */
-  private static final Pattern ID_SHAPE = Pattern.compile("^[0-9A-Za-z]{1,32}$");
-
-  /** Native-query bind name for the client id — not a report-facing parameter (unlike the PARAM_* below). */
-  private static final String SQL_PARAM_CLIENT_ID = "clientId";
-  private static final String PARAM_DATE_FROM = "dateFrom";
-  private static final String PARAM_DATE_TO = "dateTo";
-  private static final String PARAM_ORG_ID = "orgId";
-  private static final String PARAM_ACCT_SCHEMA_ID = "acctSchemaId";
-  private static final String PARAM_FROM_ACCOUNT_ID = "fromAccountId";
-  private static final String PARAM_TO_ACCOUNT_ID = "toAccountId";
-  private static final String PARAM_BPARTNER_ID = "bPartnerId";
-  private static final String PARAM_PRODUCT_ID = "productId";
-  private static final String PARAM_PROJECT_ID = "projectId";
-  private static final String PARAM_COST_CENTER_ID = "costCenterId";
   private static final String PARAM_FACT_ACCT_GROUP_ID = "factAcctGroupId";
-  private static final String PARAM_SHOW_DIMENSIONS = "showDimensions";
   private static final String PARAM_SHOW_REGULAR = "showRegularEntries";
   private static final String PARAM_SHOW_PL_CLOSING = "showPlClosingEntries";
   private static final String PARAM_SHOW_CLOSING = "showClosingEntries";
@@ -218,284 +189,86 @@ public class JournalEntriesReportHandler implements NeoHandler {
                 + "or add an account/dimension filter to see the rest.")));
   }
 
-  // -------------------------------------------------------------------------
-  // NeoHandler entry point
-  // -------------------------------------------------------------------------
+  @Override
+  String reportName() {
+    return "Journal Entries";
+  }
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    if (!isAccessibleForCurrentRole()) {
-      return NeoResponse.error(403, "Access denied");
-    }
-    if ("GET".equals(context.getHttpMethod())) {
-      return describeReport();
-    }
-    if ("POST".equals(context.getHttpMethod())) {
-      return executeReport(context);
-    }
-    return NeoResponse.error(405, "Method not allowed");
+  String reportDescription() {
+    return "Diario de Asientos — every accounting entry posted in the "
+        + "period, nested as one object per journal entry with its account lines. Use "
+        + "doc_window + doc_record_id (per entry) with neo_get to read the source document.";
   }
 
-  private NeoResponse describeReport() {
-    try {
-      JSONObject desc = new JSONObject();
-      desc.put("name", "Journal Entries");
-      desc.put("description", "Diario de Asientos — every accounting entry posted in the "
-          + "period, nested as one object per journal entry with its account lines. Use "
-          + "doc_window + doc_record_id (per entry) with neo_get to read the source document.");
-
-      JSONArray params = new JSONArray();
-      for (NeoReportParam declared : reportParameters().orElse(List.of())) {
-        params.put(param(declared));
-      }
-      desc.put("parameters", params);
-
-      return NeoResponse.ok(desc);
-    } catch (Exception e) {
-      log.error("Error building journal entries report descriptor", e);
-      return NeoResponse.error(500, "Internal Server Error");
-    }
-  }
-
-  private static JSONObject param(NeoReportParam declared) throws Exception {
-    JSONObject p = new JSONObject();
-    p.put("name", declared.getName());
-    p.put("type", declared.getType());
-    p.put("required", declared.isRequired());
-    p.put("description", declared.getDescription());
-    if (!declared.getAllowedValues().isEmpty()) {
-      p.put("allowedValues", new JSONArray(declared.getAllowedValues()));
-    }
-    return p;
+  @Override
+  String reportLabel() {
+    return "journal entries";
   }
 
   // -------------------------------------------------------------------------
   // POST — execute
   // -------------------------------------------------------------------------
 
-  private NeoResponse executeReport(NeoContext context) {
-    try {
-      JSONObject body = context.getRequestBody() == null ? new JSONObject() : context.getRequestBody();
-
-      NeoResponse validationError = validateDates(body);
-      if (validationError != null) {
-        return validationError;
-      }
-      LocalDate dateFrom = LocalDate.parse(body.optString(PARAM_DATE_FROM, ""), DATE_FORMATTER);
-      LocalDate dateTo = LocalDate.parse(body.optString(PARAM_DATE_TO, ""), DATE_FORMATTER);
-
-      // Pure input checks run before anything touches OBContext or the database, so a malformed
-      // request is refused without a single query.
-      int limit = body.optInt(PARAM_LIMIT, DEFAULT_LIMIT);
-      if (limit <= 0) {
-        return actionableError(400, "limit_invalid",
-            "limit must be a positive integer.",
-            "Pass a positive number of entries, or omit limit to use the default (" + DEFAULT_LIMIT
-                + ").");
-      }
-      limit = Math.min(limit, MAX_LIMIT);
-
-      String orgId = resolveOrgId(body);
-      if (!orgId.isEmpty() && !isValidId(orgId)) {
-        return actionableError(400, "org_id_invalid",
-            "orgId '" + orgId + "' does not look like a valid Etendo organization id.",
-            "Pass a real C_Organization id, or omit orgId to use the session's organization, or "
-                + "pass an empty string to report on every organization.");
-      }
-      if (!orgId.isEmpty() && OBDal.getInstance().get(Organization.class, orgId) == null) {
-        return actionableError(400, "organization_not_resolved",
-            "Could not resolve organization " + orgId + " for the journal entries report.",
-            "Pass a valid orgId (a C_Organization id readable by your role), an empty string for "
-                + "every organization, or omit it to use the session's current organization.");
-      }
-
-      String acctSchemaId = resolveAcctSchemaId(body, orgId);
-      if (acctSchemaId == null || acctSchemaId.isEmpty()) {
-        return actionableError(422, "accounting_schema_unresolved",
-            "Could not resolve an accounting schema for organization "
-                + (orgId.isEmpty() ? "(none — client-wide)" : orgId) + ".",
-            "Check that the organization (or an ancestor in its tree) has a general ledger "
-                + "configured, or pass acctSchemaId explicitly.");
-      }
-
-      boolean showDimensions = body.optBoolean(PARAM_SHOW_DIMENSIONS, false);
-      boolean showEntryDescription = body.optBoolean(PARAM_SHOW_ENTRY_DESCRIPTION, false);
-      boolean showRegular = body.optBoolean(PARAM_SHOW_REGULAR, true);
-      boolean showPlClosing = body.optBoolean(PARAM_SHOW_PL_CLOSING, true);
-      boolean showClosing = body.optBoolean(PARAM_SHOW_CLOSING, true);
-      boolean showOpening = body.optBoolean(PARAM_SHOW_OPENING, true);
-      boolean showDivideUp = body.optBoolean(PARAM_SHOW_DIVIDE_UP, true);
-
-      List<String> bPartnerIds = parseIds(body.optString(PARAM_BPARTNER_ID, ""));
-      List<String> productIds = parseIds(body.optString(PARAM_PRODUCT_ID, ""));
-      List<String> projectIds = parseIds(body.optString(PARAM_PROJECT_ID, ""));
-      List<String> costCenterIds = parseIds(body.optString(PARAM_COST_CENTER_ID, ""));
-      String factAcctGroupId = body.optString(PARAM_FACT_ACCT_GROUP_ID, "");
-      String fromAccountId = body.optString(PARAM_FROM_ACCOUNT_ID, "");
-      String toAccountId = body.optString(PARAM_TO_ACCOUNT_ID, "");
-
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      String language = OBContext.getOBContext().getLanguage().getLanguage();
-
-      EntryTypeFilter entryTypeFilter = new EntryTypeFilter(showRegular, showPlClosing,
-          showClosing, showOpening, showDivideUp);
-
-      Filters filters = Filters.builder()
-          .clientId(clientId)
-          .orgId(orgId)
-          .acctSchemaId(acctSchemaId)
-          .dateFrom(dateFrom)
-          .dateTo(dateTo)
-          .entryTypeFilter(entryTypeFilter)
-          .bPartnerIds(bPartnerIds)
-          .productIds(productIds)
-          .projectIds(projectIds)
-          .costCenterIds(costCenterIds)
-          .factAcctGroupId(factAcctGroupId)
-          .fromAccountId(fromAccountId)
-          .toAccountId(toAccountId)
-          .build();
-
-      List<Object[]> rawRows = queryRows(filters, language, limit);
-
-      List<JournalEntriesGrouping.Row> foldingRows = toFoldingRows(rawRows);
-      List<JournalEntriesGrouping.Entry> entries = JournalEntriesGrouping.nest(foldingRows);
-
-      long totalEntries = countTotalEntries(filters);
-      boolean truncated = JournalEntriesGrouping.isTruncated(entries.size(), totalEntries);
-
-      JSONArray data = buildDataArray(entries, showDimensions, showEntryDescription);
-
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      responseData.put("count", data.length());
-      responseData.put("meta", buildMeta(filters, limit, truncated, totalEntries));
-
-      JSONObject wrapper = new JSONObject();
-      wrapper.put("response", responseData);
-      return NeoResponse.ok(wrapper);
-
-    } catch (Exception e) {
-      log.error("Error executing journal entries report", e);
-      return NeoResponse.error(500, "Internal Server Error");
+  @Override
+  NeoResponse executeReport(JSONObject body) throws Exception {
+    NeoResponse validationError = validateDateRange(body);
+    if (validationError != null) {
+      return validationError;
     }
-  }
+    LocalDate dateFrom = parseDate(body, PARAM_DATE_FROM);
+    LocalDate dateTo = parseDate(body, PARAM_DATE_TO);
 
-  // -------------------------------------------------------------------------
-  // Validation
-  // -------------------------------------------------------------------------
+    // Pure input checks run before anything touches OBContext or the database, so a malformed
+    // request is refused without a single query.
+    int limit = body.optInt(PARAM_LIMIT, DEFAULT_LIMIT);
+    if (limit <= 0) {
+      return actionableError(400, "limit_invalid",
+          "limit must be a positive integer.",
+          "Pass a positive number of entries, or omit limit to use the default (" + DEFAULT_LIMIT
+              + ").");
+    }
+    limit = Math.min(limit, MAX_LIMIT);
 
-  private static NeoResponse validateDates(JSONObject body) {
-    String dateFromRaw = body.optString(PARAM_DATE_FROM, "");
-    String dateToRaw = body.optString(PARAM_DATE_TO, "");
-    if (dateFromRaw.isEmpty() || dateToRaw.isEmpty()) {
-      return actionableError(400, "dates_required",
-          "Both dateFrom and dateTo are required.",
-          "Pass both as yyyy-MM-dd strings, e.g. dateFrom=\"2026-01-01\", dateTo=\"2026-09-24\".");
+    String orgId = resolveOrgId(body);
+    NeoResponse orgIdError = validateOrgId(orgId);
+    if (orgIdError != null) {
+      return orgIdError;
     }
-    LocalDate dateFrom;
-    LocalDate dateTo;
-    try {
-      dateFrom = LocalDate.parse(dateFromRaw, DATE_FORMATTER);
-    } catch (DateTimeException e) {
-      return actionableError(400, "date_from_invalid",
-          "dateFrom '" + dateFromRaw + "' is not a valid yyyy-MM-dd date.",
-          "Pass dateFrom as yyyy-MM-dd, e.g. \"2026-01-01\".");
-    }
-    try {
-      dateTo = LocalDate.parse(dateToRaw, DATE_FORMATTER);
-    } catch (DateTimeException e) {
-      return actionableError(400, "date_to_invalid",
-          "dateTo '" + dateToRaw + "' is not a valid yyyy-MM-dd date.",
-          "Pass dateTo as yyyy-MM-dd, e.g. \"2026-09-24\".");
-    }
-    if (dateFrom.isAfter(dateTo)) {
-      return actionableError(400, "date_range_invalid",
-          "dateFrom (" + dateFromRaw + ") is after dateTo (" + dateToRaw + ").",
-          "Swap the dates, or widen dateTo so it is on or after dateFrom.");
-    }
-    return null;
-  }
 
-  private static boolean isValidId(String id) {
-    return id != null && ID_SHAPE.matcher(id).matches();
-  }
-
-  // -------------------------------------------------------------------------
-  // Parameter resolution
-  // -------------------------------------------------------------------------
-
-  /** Same convention as {@link TrialBalanceReportHandler#resolveOrgId}. */
-  private static String resolveOrgId(JSONObject body) {
-    if (body.has(PARAM_ORG_ID)) {
-      return body.optString(PARAM_ORG_ID, "");
+    String acctSchemaId = resolveAcctSchemaId(body, orgId);
+    NeoResponse acctSchemaError = validateAcctSchemaResolved(acctSchemaId, orgId);
+    if (acctSchemaError != null) {
+      return acctSchemaError;
     }
-    return OBContext.getOBContext().getCurrentOrganization().getId();
-  }
 
-  /** Same convention as {@link TrialBalanceReportHandler#resolveAcctSchemaId}. */
-  private String resolveAcctSchemaId(JSONObject body, String orgId) {
-    String explicit = body.optString(PARAM_ACCT_SCHEMA_ID, "");
-    if (!explicit.isEmpty()) {
-      return explicit;
-    }
-    try {
-      OBContext.setAdminMode(true);
-      AcctSchema schema = null;
-      if (!orgId.isEmpty()) {
-        Organization org = OBDal.getInstance().get(Organization.class, orgId);
-        AcctSchema ledger = org != null ? org.getGeneralLedger() : null;
-        if (ledger != null) {
-          schema = ledger;
-        }
-      }
-      if (schema == null) {
-        String clientId = OBContext.getOBContext().getCurrentClient().getId();
-        StringBuilder hql = new StringBuilder("ad_client.id = :clientId and active = true");
-        if (!orgId.isEmpty()) {
-          hql.append(" and exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
-              + " and oas.organization.id=:orgId and oas.active=true)");
-        }
-        org.openbravo.dal.service.OBQuery<AcctSchema> query =
-            OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
-        query.setNamedParameter(SQL_PARAM_CLIENT_ID, clientId);
-        if (!orgId.isEmpty()) {
-          query.setNamedParameter(PARAM_ORG_ID, orgId);
-        }
-        query.setMaxResult(1);
-        schema = query.uniqueResult();
-      }
-      return schema != null ? schema.getId() : null;
-    } catch (Exception e) {
-      log.warn("Could not resolve accounting schema for org {}", orgId, e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
+    boolean showDimensions = body.optBoolean(PARAM_SHOW_DIMENSIONS, false);
+    boolean showEntryDescription = body.optBoolean(PARAM_SHOW_ENTRY_DESCRIPTION, false);
+    EntryTypeFilter entryTypeFilter = new EntryTypeFilter(
+        body.optBoolean(PARAM_SHOW_REGULAR, true),
+        body.optBoolean(PARAM_SHOW_PL_CLOSING, true),
+        body.optBoolean(PARAM_SHOW_CLOSING, true),
+        body.optBoolean(PARAM_SHOW_OPENING, true),
+        body.optBoolean(PARAM_SHOW_DIVIDE_UP, true));
 
-  private static List<String> parseIds(String rawValue) {
-    if (StringUtils.isBlank(rawValue) || "null".equalsIgnoreCase(rawValue)) {
-      return List.of();
-    }
-    return java.util.Arrays.stream(rawValue.split(","))
-        .map(String::trim)
-        .filter(StringUtils::isNotBlank)
-        .toList();
-  }
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String language = OBContext.getOBContext().getLanguage().getLanguage();
 
-  private static NeoResponse actionableError(int status, String errorCode, String detail, String hint) {
-    try {
-      JSONObject envelope = new JSONObject();
-      envelope.put("status", status);
-      envelope.put("error", errorCode);
-      envelope.put("detail", detail);
-      envelope.put("hint", hint);
-      return NeoResponse.error(status, envelope);
-    } catch (Exception e) {
-      log.warn("Could not build actionable error envelope for '{}': {}", errorCode, e.getMessage());
-      return NeoResponse.error(status, detail);
-    }
+    Filters filters = new Filters(
+        LedgerFilters.fromRequest(body, clientId, orgId, acctSchemaId, dateFrom, dateTo),
+        entryTypeFilter, body.optString(PARAM_FACT_ACCT_GROUP_ID, ""));
+
+    List<Object[]> rawRows = queryRows(filters, language, limit);
+
+    List<JournalEntriesGrouping.Row> foldingRows = toFoldingRows(rawRows);
+    List<JournalEntriesGrouping.Entry> entries = JournalEntriesGrouping.nest(foldingRows);
+
+    long totalEntries = countTotalEntries(filters);
+    boolean truncated = JournalEntriesGrouping.isTruncated(entries.size(), totalEntries);
+
+    JSONArray data = buildDataArray(entries, showDimensions, showEntryDescription);
+    return reportResponse(data, data.length(), buildMeta(filters.ledger, limit, truncated,
+        totalEntries));
   }
 
   // -------------------------------------------------------------------------
@@ -503,129 +276,32 @@ public class JournalEntriesReportHandler implements NeoHandler {
   // -------------------------------------------------------------------------
 
   /**
-   * Bundles this report's resolved request parameters (everything BUT {@code language}, which only
-   * {@link #queryRows} needs) so the SQL-building/count/meta methods don't need an oversized
-   * parameter list (java:S107). Built once in {@link #executeReport} after all validation has
-   * passed.
+   * This report's resolved request filters: the {@link LedgerFilters} every {@code fact_acct}
+   * period report shares, plus the entry-type toggles and the single-entry filter only this
+   * report has. Built once in {@link #executeReport} after all validation has passed.
    */
   private static final class Filters {
-    final String clientId;
-    final String orgId;
-    final String acctSchemaId;
-    final LocalDate dateFrom;
-    final LocalDate dateTo;
+    final LedgerFilters ledger;
     final EntryTypeFilter entryTypeFilter;
-    final List<String> bPartnerIds;
-    final List<String> productIds;
-    final List<String> projectIds;
-    final List<String> costCenterIds;
     final String factAcctGroupId;
-    final String fromAccountId;
-    final String toAccountId;
 
-    private Filters(Builder b) {
-      this.clientId = b.clientId;
-      this.orgId = b.orgId;
-      this.acctSchemaId = b.acctSchemaId;
-      this.dateFrom = b.dateFrom;
-      this.dateTo = b.dateTo;
-      this.entryTypeFilter = b.entryTypeFilter;
-      this.bPartnerIds = b.bPartnerIds;
-      this.productIds = b.productIds;
-      this.projectIds = b.projectIds;
-      this.costCenterIds = b.costCenterIds;
-      this.factAcctGroupId = b.factAcctGroupId;
-      this.fromAccountId = b.fromAccountId;
-      this.toAccountId = b.toAccountId;
+    Filters(LedgerFilters ledger, EntryTypeFilter entryTypeFilter, String factAcctGroupId) {
+      this.ledger = ledger;
+      this.entryTypeFilter = entryTypeFilter;
+      this.factAcctGroupId = factAcctGroupId;
     }
 
-    static Builder builder() {
-      return new Builder();
-    }
-
-    static final class Builder {
-      private String clientId;
-      private String orgId;
-      private String acctSchemaId;
-      private LocalDate dateFrom;
-      private LocalDate dateTo;
-      private EntryTypeFilter entryTypeFilter;
-      private List<String> bPartnerIds;
-      private List<String> productIds;
-      private List<String> projectIds;
-      private List<String> costCenterIds;
-      private String factAcctGroupId;
-      private String fromAccountId;
-      private String toAccountId;
-
-      Builder clientId(String v) {
-        this.clientId = v;
-        return this;
+    /**
+     * Appends the shared WHERE clauses of the main and count queries: dimensions, then this
+     * report's own {@code fact_acct_group_id} filter, then the account range on {@code
+     * fact_acct.acctvalue}.
+     */
+    void appendWhere(StringBuilder sql, String indent) {
+      ledger.appendDimensionWhere(sql, indent);
+      if (!factAcctGroupId.isEmpty()) {
+        sql.append(indent).append("AND fa.fact_acct_group_id = :factAcctGroupId ");
       }
-
-      Builder orgId(String v) {
-        this.orgId = v;
-        return this;
-      }
-
-      Builder acctSchemaId(String v) {
-        this.acctSchemaId = v;
-        return this;
-      }
-
-      Builder dateFrom(LocalDate v) {
-        this.dateFrom = v;
-        return this;
-      }
-
-      Builder dateTo(LocalDate v) {
-        this.dateTo = v;
-        return this;
-      }
-
-      Builder entryTypeFilter(EntryTypeFilter v) {
-        this.entryTypeFilter = v;
-        return this;
-      }
-
-      Builder bPartnerIds(List<String> v) {
-        this.bPartnerIds = v;
-        return this;
-      }
-
-      Builder productIds(List<String> v) {
-        this.productIds = v;
-        return this;
-      }
-
-      Builder projectIds(List<String> v) {
-        this.projectIds = v;
-        return this;
-      }
-
-      Builder costCenterIds(List<String> v) {
-        this.costCenterIds = v;
-        return this;
-      }
-
-      Builder factAcctGroupId(String v) {
-        this.factAcctGroupId = v;
-        return this;
-      }
-
-      Builder fromAccountId(String v) {
-        this.fromAccountId = v;
-        return this;
-      }
-
-      Builder toAccountId(String v) {
-        this.toAccountId = v;
-        return this;
-      }
-
-      Filters build() {
-        return new Filters(this);
-      }
+      ledger.appendAccountRangeWhere(sql, indent, "fa.acctvalue");
     }
   }
 
@@ -723,15 +399,6 @@ public class JournalEntriesReportHandler implements NeoHandler {
    */
   @SuppressWarnings("unchecked")
   private List<Object[]> queryRows(Filters f, String language, int limit) {
-    String orgId = f.orgId;
-    List<String> bPartnerIds = f.bPartnerIds;
-    List<String> productIds = f.productIds;
-    List<String> projectIds = f.projectIds;
-    List<String> costCenterIds = f.costCenterIds;
-    String factAcctGroupId = f.factAcctGroupId;
-    String fromAccountId = f.fromAccountId;
-    String toAccountId = f.toAccountId;
-
     StringBuilder sql = new StringBuilder(
         "WITH je AS ( "
             + "  SELECT fa.dateacct, "
@@ -773,30 +440,7 @@ public class JournalEntriesReportHandler implements NeoHandler {
             + "    AND fa.dateacct >= :dateFrom AND fa.dateacct <= :dateTo "
             + "    AND fa.c_acctschema_id = :acctSchemaId ");
 
-    if (!orgId.isEmpty()) {
-      sql.append("    AND fa.ad_org_id = :orgId ");
-    }
-    if (!bPartnerIds.isEmpty()) {
-      sql.append("    AND fa.c_bpartner_id IN (:bPartnerIds) ");
-    }
-    if (!productIds.isEmpty()) {
-      sql.append("    AND fa.m_product_id IN (:productIds) ");
-    }
-    if (!projectIds.isEmpty()) {
-      sql.append("    AND fa.c_project_id IN (:projectIds) ");
-    }
-    if (!costCenterIds.isEmpty()) {
-      sql.append("    AND fa.c_costcenter_id IN (:costCenterIds) ");
-    }
-    if (!factAcctGroupId.isEmpty()) {
-      sql.append("    AND fa.fact_acct_group_id = :factAcctGroupId ");
-    }
-    if (!fromAccountId.isEmpty()) {
-      sql.append("    AND fa.acctvalue >= :fromAccountId ");
-    }
-    if (!toAccountId.isEmpty()) {
-      sql.append("    AND fa.acctvalue <= :toAccountId ");
-    }
+    f.appendWhere(sql, "    ");
 
     sql.append(
         "  GROUP BY fa.fact_acct_group_id, fa.dateacct, fa.acctvalue, fa.acctdescription, "
@@ -838,15 +482,6 @@ public class JournalEntriesReportHandler implements NeoHandler {
    */
   @SuppressWarnings("unchecked")
   private long countTotalEntries(Filters f) {
-    String orgId = f.orgId;
-    List<String> bPartnerIds = f.bPartnerIds;
-    List<String> productIds = f.productIds;
-    List<String> projectIds = f.projectIds;
-    List<String> costCenterIds = f.costCenterIds;
-    String factAcctGroupId = f.factAcctGroupId;
-    String fromAccountId = f.fromAccountId;
-    String toAccountId = f.toAccountId;
-
     StringBuilder sql = new StringBuilder(
         "SELECT COUNT(DISTINCT fa.fact_acct_group_id) FROM fact_acct fa "
             + "WHERE fa.ad_client_id = :clientId "
@@ -854,30 +489,7 @@ public class JournalEntriesReportHandler implements NeoHandler {
             + "  AND fa.dateacct >= :dateFrom AND fa.dateacct <= :dateTo "
             + "  AND fa.c_acctschema_id = :acctSchemaId ");
 
-    if (!orgId.isEmpty()) {
-      sql.append("  AND fa.ad_org_id = :orgId ");
-    }
-    if (!bPartnerIds.isEmpty()) {
-      sql.append("  AND fa.c_bpartner_id IN (:bPartnerIds) ");
-    }
-    if (!productIds.isEmpty()) {
-      sql.append("  AND fa.m_product_id IN (:productIds) ");
-    }
-    if (!projectIds.isEmpty()) {
-      sql.append("  AND fa.c_project_id IN (:projectIds) ");
-    }
-    if (!costCenterIds.isEmpty()) {
-      sql.append("  AND fa.c_costcenter_id IN (:costCenterIds) ");
-    }
-    if (!factAcctGroupId.isEmpty()) {
-      sql.append("  AND fa.fact_acct_group_id = :factAcctGroupId ");
-    }
-    if (!fromAccountId.isEmpty()) {
-      sql.append("  AND fa.acctvalue >= :fromAccountId ");
-    }
-    if (!toAccountId.isEmpty()) {
-      sql.append("  AND fa.acctvalue <= :toAccountId ");
-    }
+    f.appendWhere(sql, "  ");
 
     NativeQuery<Number> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
     bindCommonParams(query, f, null);
@@ -887,38 +499,20 @@ public class JournalEntriesReportHandler implements NeoHandler {
   }
 
   private static void bindCommonParams(NativeQuery<?> query, Filters f, String language) {
-    query.setParameter(SQL_PARAM_CLIENT_ID, f.clientId);
+    LedgerFilters ledger = f.ledger;
+    query.setParameter(SQL_PARAM_CLIENT_ID, ledger.clientId);
     if (language != null) {
       query.setParameter("language", language);
     }
-    query.setParameter(PARAM_ACCT_SCHEMA_ID, f.acctSchemaId);
-    query.setParameter(PARAM_DATE_FROM, Date.valueOf(f.dateFrom));
-    query.setParameter(PARAM_DATE_TO, Date.valueOf(f.dateTo));
+    query.setParameter(PARAM_ACCT_SCHEMA_ID, ledger.acctSchemaId);
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(ledger.dateFrom));
+    query.setParameter(PARAM_DATE_TO, Date.valueOf(ledger.dateTo));
     f.entryTypeFilter.bind(query);
-    if (!f.orgId.isEmpty()) {
-      query.setParameter(PARAM_ORG_ID, f.orgId);
-    }
-    if (!f.bPartnerIds.isEmpty()) {
-      query.setParameterList("bPartnerIds", f.bPartnerIds);
-    }
-    if (!f.productIds.isEmpty()) {
-      query.setParameterList("productIds", f.productIds);
-    }
-    if (!f.projectIds.isEmpty()) {
-      query.setParameterList("projectIds", f.projectIds);
-    }
-    if (!f.costCenterIds.isEmpty()) {
-      query.setParameterList("costCenterIds", f.costCenterIds);
-    }
+    ledger.bindDimensions(query);
     if (!f.factAcctGroupId.isEmpty()) {
       query.setParameter(PARAM_FACT_ACCT_GROUP_ID, f.factAcctGroupId);
     }
-    if (!f.fromAccountId.isEmpty()) {
-      query.setParameter(PARAM_FROM_ACCOUNT_ID, f.fromAccountId);
-    }
-    if (!f.toAccountId.isEmpty()) {
-      query.setParameter(PARAM_TO_ACCOUNT_ID, f.toAccountId);
-    }
+    ledger.bindAccountRange(query);
   }
 
   // -------------------------------------------------------------------------
@@ -1026,25 +620,15 @@ public class JournalEntriesReportHandler implements NeoHandler {
     l.put("amtacctdr", line.amtacctdr);
     l.put("amtacctcr", line.amtacctcr);
     if (showDimensions) {
-      l.put("bpname", orEmpty(line.bpname));
-      l.put("productname", orEmpty(line.productname));
-      l.put("projectname", orEmpty(line.projectname));
-      l.put("costcentername", orEmpty(line.costcentername));
+      putDimensionNames(l, line);
     }
     return l;
   }
 
-  private static String orEmpty(String s) {
-    return s == null ? "" : s;
-  }
-
-  private static JSONObject buildMeta(Filters f, int limit, boolean truncated, long totalEntries)
-      throws Exception {
+  private static JSONObject buildMeta(LedgerFilters f, int limit, boolean truncated,
+      long totalEntries) throws Exception {
     JSONObject meta = new JSONObject();
-    meta.put(PARAM_DATE_FROM, f.dateFrom.format(DATE_FORMATTER));
-    meta.put(PARAM_DATE_TO, f.dateTo.format(DATE_FORMATTER));
-    meta.put(PARAM_ORG_ID, f.orgId);
-    meta.put(PARAM_ACCT_SCHEMA_ID, f.acctSchemaId);
+    f.putScopeMeta(meta);
     meta.put(PARAM_LIMIT, limit);
     meta.put("truncated", truncated);
     meta.put("totalEntries", totalEntries);
@@ -1053,79 +637,7 @@ public class JournalEntriesReportHandler implements NeoHandler {
           + "returned. Narrow dateFrom/dateTo, or filter by account/bPartner/product/project/"
           + "costCenter, to see the rest.");
     }
-    meta.put(PARAM_FROM_ACCOUNT_ID, f.fromAccountId);
-    meta.put(PARAM_TO_ACCOUNT_ID, f.toAccountId);
-    meta.put(PARAM_BPARTNER_ID, String.join(",", f.bPartnerIds));
-    meta.put(PARAM_PRODUCT_ID, String.join(",", f.productIds));
-    meta.put(PARAM_PROJECT_ID, String.join(",", f.projectIds));
-    meta.put(PARAM_COST_CENTER_ID, String.join(",", f.costCenterIds));
+    f.putFilterMeta(meta);
     return meta;
-  }
-
-  private static String str(Object value) {
-    return value == null ? "" : String.valueOf(value);
-  }
-
-  /**
-   * Renders {@code fact_acct.dateacct} as a plain {@code yyyy-MM-dd} calendar date, the same format
-   * every other report date in this response (and the other report handlers) uses.
-   *
-   * <p>The column is a {@code timestamp}, so the driver hands back a {@link java.sql.Timestamp}
-   * whose {@code toString()} is {@code "2026-01-01 00:00:00.0"}. It is converted through
-   * {@link LocalDate} (not a {@code java.util.Date} formatter) so no timezone offset can shift the
-   * accounting day.</p>
-   *
-   * @param value the raw column value, or {@code null}
-   * @return the date as {@code yyyy-MM-dd}, or {@code ""} when absent
-   */
-  static String toIsoDate(Object value) {
-    if (value == null) {
-      return "";
-    }
-    if (value instanceof java.sql.Timestamp) {
-      return ((java.sql.Timestamp) value).toLocalDateTime().toLocalDate().format(DATE_FORMATTER);
-    }
-    if (value instanceof Date) {
-      return ((Date) value).toLocalDate().format(DATE_FORMATTER);
-    }
-    if (value instanceof java.time.LocalDateTime) {
-      return ((java.time.LocalDateTime) value).toLocalDate().format(DATE_FORMATTER);
-    }
-    if (value instanceof LocalDate) {
-      return ((LocalDate) value).format(DATE_FORMATTER);
-    }
-    String s = String.valueOf(value);
-    return s.length() >= 10 ? s.substring(0, 10) : s;
-  }
-
-  private static long toLong(Object value) {
-    if (value == null) {
-      return 0L;
-    }
-    if (value instanceof Number) {
-      return ((Number) value).longValue();
-    }
-    return Long.parseLong(String.valueOf(value));
-  }
-
-  private static boolean toBoolean(Object value) {
-    if (value == null) {
-      return false;
-    }
-    if (value instanceof Boolean) {
-      return (Boolean) value;
-    }
-    String s = String.valueOf(value);
-    return "Y".equalsIgnoreCase(s) || "true".equalsIgnoreCase(s);
-  }
-
-  private static BigDecimal toBigDecimal(Object value) {
-    if (value == null) {
-      return BigDecimal.ZERO;
-    }
-    if (value instanceof BigDecimal) {
-      return (BigDecimal) value;
-    }
-    return new BigDecimal(String.valueOf(value));
   }
 }

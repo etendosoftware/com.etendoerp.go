@@ -570,7 +570,7 @@ class GeneralLedgerReportHandlerTest {
   void toIsoDateRendersMidnightTimestampAsPlainDate() {
     java.sql.Timestamp value = java.sql.Timestamp.valueOf("2026-01-01 00:00:00");
 
-    assertEquals("2026-01-01", GeneralLedgerReportHandler.toIsoDate(value));
+    assertEquals("2026-01-01", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
@@ -578,18 +578,18 @@ class GeneralLedgerReportHandlerTest {
   void toIsoDateRendersSqlDate() {
     java.sql.Date value = java.sql.Date.valueOf("2026-02-15");
 
-    assertEquals("2026-02-15", GeneralLedgerReportHandler.toIsoDate(value));
+    assertEquals("2026-02-15", AbstractSqlReportHandler.toIsoDate(value));
   }
 
   @Test
   @DisplayName("toIsoDate truncates a raw timestamp-shaped String to its date prefix")
   void toIsoDateTruncatesRawTimestampString() {
-    assertEquals("2026-05-06", GeneralLedgerReportHandler.toIsoDate("2026-05-06 00:00:00.0"));
+    assertEquals("2026-05-06", AbstractSqlReportHandler.toIsoDate("2026-05-06 00:00:00.0"));
   }
 
   @Test
   @DisplayName("toIsoDate returns an empty string for null")
   void toIsoDateReturnsEmptyForNull() {
-    assertEquals("", GeneralLedgerReportHandler.toIsoDate(null));
+    assertEquals("", AbstractSqlReportHandler.toIsoDate(null));
   }
 }
