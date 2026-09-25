@@ -1628,6 +1628,70 @@ Multi-currency needs no parameter: conversion uses the same exchange rate as the
 `candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
 `applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
 
+The role gate, the SPA-shaped derived context and the flush-to-clean after a successful write
+(ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
+keeps only its contracts and its routing.
+
+**`bank-statements` (ETP-5469).** The second spec with declared actions is **`bank-statements`**
+(`BankStatementsHandler`, report spec, entity `bank-statements`). Before it, an agent could only
+reach statements through the generic `financial-account` entities `importedBankStatements` /
+`bankStatementLines`: a statement written there was never processed (its lines never became
+reconcilable), could not be processed, reactivated or imported at all, and skipped every check the
+UI applies to a manual statement. The writes now go through the actions below, and the generic
+writes are **closed**: both entities are `readOnly: true` in `artifacts/financial-account/decisions.json`,
+so `ETGO_SF_ENTITY` grants `GET`/`GETBYID` only and `POST`/`PUT`/`PATCH`/`DELETE` answer 405
+(`<METHOD> not enabled for <entity>`) on REST and MCP alike. The SPA is unaffected: it never wrote
+through those entities (it uses `/sws/neo/bank-statements`), and the generated `AccountPage.jsx`
+`api.crud` flags for them are inert, since the window's custom `index.jsx` renders `AccountPage`
+only for the list. The agent guidance (`AGENT_PROMPT` of `financial-account` and `bank-statements`)
+sends agents to the actions. Same mechanics as
+`bank-reconciliation`: `BankStatementsHandler.handle` sends only `NeoEndpointType.ACTION` to
+`BankStatementAgentActions.dispatch`, which validates the contract, applies the report-spec role
+gate (`POST` for writes → 403 otherwise) and re-enters the SAME handler method the SPA route uses
+(`handleList`, `handleGetLines`, `handleCreate`, `handleImport`, `handleProcess`,
+`handleReactivate`). The SPA's `?action=` routes are untouched.
+
+**What `id` is depends on the action** — each contract states it in `idDescription`: the financial
+account for `listStatements` / `createStatement` / `importStatement` (sent to the handler as
+`FIN_Financial_Account_ID`), the statement for `statementLines` (`statementId`) and
+`processStatement` / `reactivateStatement` (`id`).
+
+| Action | Kind | `id` | Parameters (required in **bold**) | SPA route reused |
+|---|---|---|---|---|
+| `listStatements` | read | financial account | — | `GET ?FIN_Financial_Account_ID=` |
+| `statementLines` | read | statement | — | `GET ?action=lines&statementId=` |
+| `createStatement` | write | financial account | **`name`**, `transactionDate`, `importDate`, `fileName`, `notes`, `process` (default `true`), **`lines[{date, in, out, description, reference, bpartnerName, bpartnerId, glItemId}]`** | `POST ?action=create` |
+| `importStatement` | write | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=import` |
+| `processStatement` | write | statement | — | `POST ?action=process` |
+| `reactivateStatement` | write | statement | — | `POST ?action=reactivate` |
+
+**Agent-only input checks (`BankStatementAgentValidation`).** The UI never sends a statement that
+fails its own client-side checks, so `handleCreate` fills the gaps silently (a missing line date
+becomes the statement date, an unparseable amount becomes 0, an over-long text is truncated, an
+unknown contact / G/L item id is dropped). Tightening the handler would change what the SPA route
+accepts, so the agent path applies the UI's checks to the agent's input instead, answering 422 with
+`lines[<i>]: <problem>`:
+
+- every line needs `date` (a real `yyyy-MM-dd` date) and an amount on exactly one side — `in` or
+  `out` > 0, the other absent/0, none negative, each a JSON number or a dot-decimal numeric string
+  (same rule as the UI's `isLineComplete` and the handler's `validateLineAmounts`, which still
+  runs);
+- a line accepts only the eight keys above (a typo such as `amount` would otherwise produce a line
+  the handler treats as blank and skips);
+- lengths are refused, not truncated: `name` / `bpartnerName` ≤ 60, `fileName` / `notes` ≤ 255,
+  `reference` ≤ 30, `description` ≤ 2000, measured on the raw value as sent (the handler
+  truncates it untrimmed); a blank `reference` is still stored as `**`;
+- `bpartnerId` / `glItemId` must be a contact / G/L item of the current tenant;
+- header `transactionDate` / `importDate`, when sent, must be real dates (the handler would fall
+  back to today);
+- `importStatement`: `contentBase64` must be standard base64 (RFC 4648 alphabet, no line breaks:
+  the handler decodes it with `Base64.getDecoder()`) and is capped at 1 MiB of file content
+  (1,398,104 base64 characters) — refused before decoding. The UI import is not limited.
+
+Business refusals keep the handler's own literals and statuses (e.g. `Only draft (unprocessed)
+statements can be modified`, `The statement is posted and cannot be reactivated`, code
+`NO_VALID_LINES`). Update and delete of a statement are not exposed to agents.
+
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a

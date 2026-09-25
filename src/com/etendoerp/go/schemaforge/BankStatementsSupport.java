@@ -450,6 +450,27 @@ public final class BankStatementsSupport {
   }
 
   /**
+   * Builds the {@code { "response": { "data": { <key>: <payload> } } }} envelope shared by every
+   * successful GET endpoint of {@link BankStatementsHandler} and by its process / reactivate /
+   * update / delete answers. Moved here from the handler (ETP-5469) to keep it under the per-class
+   * method limit (java:S1448); the literal keys still appear once (S1192).
+   *
+   * @param key     the key under {@code data}
+   * @param payload the value stored under that key
+   * @return the envelope
+   * @throws JSONException if the JSON cannot be built
+   */
+  public static JSONObject wrapInEnvelope(String key, Object payload) throws JSONException {
+    JSONObject data = new JSONObject();
+    data.put(key, payload);
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+    JSONObject env = new JSONObject();
+    env.put("response", responseData);
+    return env;
+  }
+
+  /**
    * Truncates {@code s} to at most {@code max} characters.
    *
    * @param s   the string to truncate
