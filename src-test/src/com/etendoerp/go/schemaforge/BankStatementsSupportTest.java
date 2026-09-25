@@ -18,20 +18,29 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Date;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 /**
  * Unit tests for {@link BankStatementsSupport} — the stateless helpers extracted
- * from {@link BankStatementsHandler}. All pure, no mocks required.
+ * from {@link BankStatementsHandler}. Pure helpers need no mocks; the
+ * {@code buildLineTxns} tests drive a mocked {@link ResultSet} row.
  */
 public class BankStatementsSupportTest {
 
@@ -210,5 +219,159 @@ public class BankStatementsSupportTest {
   @Test
   public void truncateCutsLongString() {
     assertEquals("abc", BankStatementsSupport.truncate("abcdef", 3));
+  }
+
+  // ── buildLineTxns: foreign-currency original (ETP-5450) ──────────────────
+  //
+  // A linked transaction whose stored foreign currency differs from the account currency also
+  // carries its original document amount (foreignAmount/foreignCurrency/foreignRate). `amount`
+  // must stay in the account currency: callers sum it against the statement line.
+
+  /**
+   * Stubs one lines-query row with a linked transaction. Any foreign argument may be {@code null}.
+   */
+  private static ResultSet txnRow(BigDecimal txnAmount, BigDecimal foreignAmount,
+      BigDecimal foreignRate, String foreignIso, String accountIso) throws Exception {
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.getString("fin_finacc_transaction_id")).thenReturn("tx-1");
+    when(rs.getString("txn_documentno")).thenReturn("PAY-1");
+    when(rs.getBigDecimal("txn_amount")).thenReturn(txnAmount);
+    when(rs.getBigDecimal("txn_foreign_amount")).thenReturn(foreignAmount);
+    when(rs.getBigDecimal("txn_foreign_rate")).thenReturn(foreignRate);
+    when(rs.getString("txn_foreign_currency")).thenReturn(foreignIso);
+    when(rs.getString("txn_currency")).thenReturn(accountIso);
+    return rs;
+  }
+
+  private static JSONObject singleTxn(ResultSet rs) throws Exception {
+    JSONArray txns = BankStatementsSupport.buildLineTxns(rs, true);
+    assertEquals(1, txns.length());
+    return txns.getJSONObject(0);
+  }
+
+  private static void assertAmount(String expected, JSONObject t, String key) throws Exception {
+    assertEquals(key + " was " + t.get(key), 0,
+        new BigDecimal(expected).compareTo(new BigDecimal(t.getString(key))));
+  }
+
+  private static void assertNoForeignKeys(JSONObject t) {
+    assertFalse(t.has("foreignAmount"));
+    assertFalse(t.has("foreignCurrency"));
+    assertFalse(t.has("foreignRate"));
+    assertFalse(t.has("currency"));
+  }
+
+  @Test
+  public void buildLineTxnsAddsForeignOriginalAndKeepsAccountAmount() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertEquals("tx-1", t.getString("transactionId"));
+    // amount stays in the account currency (EUR).
+    assertAmount("29.03", t, "amount");
+    assertAmount("42.67", t, "foreignAmount");
+    assertEquals("USD", t.getString("foreignCurrency"));
+    assertEquals("EUR", t.getString("currency"));
+    assertAmount("0.6803", t, "foreignRate");
+  }
+
+  @Test
+  public void buildLineTxnsSignsForeignAmountLikeTheTxnAmount() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("-29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertAmount("-29.03", t, "amount");
+    assertAmount("-42.67", t, "foreignAmount");
+  }
+
+  @Test
+  public void buildLineTxnsForeignWithoutRateOmitsForeignRate() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        null, "USD", "EUR"));
+
+    assertAmount("42.67", t, "foreignAmount");
+    assertEquals("USD", t.getString("foreignCurrency"));
+    assertFalse(t.has("foreignRate"));
+  }
+
+  @Test
+  public void buildLineTxnsSameCurrencyAddsNoForeignKeys() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("29.03"),
+        BigDecimal.ONE, "EUR", "EUR"));
+
+    assertAmount("29.03", t, "amount");
+    assertNoForeignKeys(t);
+  }
+
+  @Test
+  public void buildLineTxnsNullForeignAmountAddsNoForeignKeys() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), null,
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertAmount("29.03", t, "amount");
+    assertNoForeignKeys(t);
+  }
+
+  @Test
+  public void buildLineTxnsNullOrBlankForeignCurrencyAddsNoForeignKeys() throws Exception {
+    assertNoForeignKeys(singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), null, "EUR")));
+    assertNoForeignKeys(singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "  ", "EUR")));
+  }
+
+  @Test
+  public void buildLineTxnsNullOrBlankAccountCurrencyAddsNoForeignKeys() throws Exception {
+    // The tacur join found no currency: the pair cannot be described, so no foreign keys.
+    JSONObject nullIso = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", null));
+    assertAmount("29.03", nullIso, "amount");
+    assertNoForeignKeys(nullIso);
+
+    JSONObject blankIso = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "  "));
+    assertAmount("29.03", blankIso, "amount");
+    assertNoForeignKeys(blankIso);
+  }
+
+  @Test
+  public void buildLineTxnsUnmatchedLineIsEmpty() throws Exception {
+    ResultSet rs = txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR");
+
+    assertEquals(0, BankStatementsSupport.buildLineTxns(rs, false).length());
+  }
+
+  // ── line SQLs select the txn_* foreign aliases (ETP-5450) ────────────────
+  //
+  // buildLineTxns reads txn_foreign_amount / txn_foreign_rate / txn_foreign_currency /
+  // txn_currency from BOTH lines queries (bank-statement window and reconciliation panel). A mocked
+  // ResultSet cannot notice a missing alias, so assert the SQL text itself.
+
+  private static String sqlConstant(Class<?> owner, String name) throws Exception {
+    Field f = owner.getDeclaredField(name);
+    f.setAccessible(true);
+    return ((String) f.get(null)).replaceAll("\\s+", " ");
+  }
+
+  private static void assertSelectsTxnForeignAliases(String sql) {
+    assertTrue(sql, sql.contains("ft.foreign_amount AS txn_foreign_amount"));
+    assertTrue(sql, sql.contains("ft.foreign_convert_rate AS txn_foreign_rate"));
+    assertTrue(sql, sql.contains("tfcur.iso_code AS txn_foreign_currency"));
+    assertTrue(sql, sql.contains("tacur.iso_code AS txn_currency"));
+    assertTrue(sql, sql.contains(
+        "LEFT JOIN c_currency tfcur ON tfcur.c_currency_id = ft.foreign_currency_id"));
+    assertTrue(sql, sql.contains(
+        "LEFT JOIN c_currency tacur ON tacur.c_currency_id = ft.c_currency_id"));
+  }
+
+  @Test
+  public void bankStatementLinesSqlSelectsTxnForeignAliases() throws Exception {
+    assertSelectsTxnForeignAliases(sqlConstant(BankStatementsHandler.class, "LINES_SQL_HEAD"));
+  }
+
+  @Test
+  public void reconciliationPendingLinesSqlSelectsTxnForeignAliases() throws Exception {
+    assertSelectsTxnForeignAliases(sqlConstant(ReconciliationHandler.class, "PENDING_LINES_SQL"));
   }
 }
