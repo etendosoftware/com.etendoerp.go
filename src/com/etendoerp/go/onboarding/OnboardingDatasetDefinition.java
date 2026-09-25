@@ -50,15 +50,6 @@ public final class OnboardingDatasetDefinition {
       "AD_ORG_ACCTSCHEMA",
       "AD_ORG_WAREHOUSE",
       "AD_SEQUENCE",
-      // ETP-5481: AEATSII_CAUSE_EXEMPTION (org.openbravo.module.sii) ships 6 curated rows
-      // (E1-E6, the AEAT "Causa de Exencion" IVA catalog) in this dataset's own
-      // GOClient/AEATSII_CAUSE_EXEMPTION.xml, but the file was never added here — the exact
-      // same class of bug as C_ELEMENTVALUE_OPERAND below (ETP-5442): a table shipped in the
-      // curated sampledata but missing from this allowlist, so shouldIncludeTable() always
-      // returned false and the import never carried it into a new tenant. Every tenant other
-      // than the GOClient demo client itself was born with an empty "Causa de exencion"
-      // selector on the invoice SIF tab. See onboarding-gaps.md gap O1.
-      "AEATSII_CAUSE_EXEMPTION",
       "A_ASSET_GROUP",
       "A_ASSET_GROUP_ACCT",
       "C_ACCT_RPT",
