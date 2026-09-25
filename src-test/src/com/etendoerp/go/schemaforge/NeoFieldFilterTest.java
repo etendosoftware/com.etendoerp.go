@@ -572,6 +572,52 @@ class NeoFieldFilterTest {
   }
 
   @Nested
+  @DisplayName("validateClientWriteRequest")
+  class ValidateClientWriteRequest {
+    @Test
+    @DisplayName("rejects a client value for a curated read-only field")
+    void rejectsReadOnlyField() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name", "documentNo"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, writable);
+
+      JSONObject body = new JSONObject()
+          .put("name", "Changed")
+          .put("documentNo", "SO-9999");
+
+      ReadOnlyFieldRejectedException exception = assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.validateClientWriteRequest(body));
+      assertEquals("documentNo", exception.getFieldName());
+    }
+
+    @Test
+    @DisplayName("rejects an API alias while naming the key the REST client sent")
+    void rejectsReadOnlyApiAlias() throws Exception {
+      Map<String, String> apiKeyToProp = new HashMap<>();
+      apiKeyToProp.put("documentNumber", "documentNo");
+      NeoFieldFilter filter = activeFilterWithMappings(
+          new HashSet<>(Set.of("id", "documentNo")), Set.of("id"), apiKeyToProp,
+          Collections.emptyMap());
+
+      ReadOnlyFieldRejectedException exception = assertThrows(
+          ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(new JSONObject().put("documentNumber", "SO-9999")));
+      assertEquals("documentNumber", exception.getFieldName());
+    }
+
+    @Test
+    @DisplayName("does not reject a server-owned tenant field before the ownership filter strips it")
+    void keepsServerOwnedFieldsForTheOwnershipFilter() throws Exception {
+      NeoFieldFilter filter = activeFilter(
+          new HashSet<>(Set.of("id", "client", "organization")), Set.of("id"));
+
+      filter.validateClientWriteRequest(new JSONObject()
+          .put("client", "other-client")
+          .put("organization", "other-org"));
+    }
+  }
+
+  @Nested
   @DisplayName("emittableResponseKeys (IMP-18)")
   class EmittableResponseKeys {
     @Test

@@ -444,6 +444,44 @@ public class NeoFieldFilter {
   }
 
   /**
+   * Refuses a client-authored value for a curated read-only field.
+   *
+   * <p>This check deliberately runs before a REST request reaches a {@link NeoHandler}. A handler
+   * may add a derived read-only value to the body afterwards, but a value already present at this
+   * boundary can only have come from the client. Keeping this separate from
+   * {@link #filterWriteRequest(JSONObject)} preserves the latter's role of filtering the final
+   * persistence body, including values injected by server-side hooks.</p>
+   *
+   * <p>The predicate is the existing REST metadata: an included field that is not writable. It
+   * therefore honors API-key aliases and explicit writable grants for {@code id}, {@code active},
+   * and link-to-parent columns without introducing a second field-policy model.</p>
+   *
+   * @param requestBody the original request body, optionally wrapped in {@code data}
+   * @throws ReadOnlyFieldRejectedException if the client supplied a curated read-only field
+   */
+  public void validateClientWriteRequest(JSONObject requestBody) {
+    if (!active || requestBody == null || includedFields == null || writableFields == null) {
+      return;
+    }
+
+    JSONObject body = requestBody.optJSONObject("data");
+    if (body == null) {
+      body = requestBody;
+    }
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (!isMetadataKey(key)) {
+        String propertyName = apiKeyToPropName.getOrDefault(key, key);
+        if (!NeoServerOwnedFields.isServerOwned(propertyName)
+            && includedFields.contains(propertyName) && !writableFields.contains(propertyName)) {
+          throw new ReadOnlyFieldRejectedException(key);
+        }
+      }
+    }
+  }
+
+  /**
    * Resolves an API-level field key (e.g. {@code accountingDate}, the {@code java_qualifier}
    * declared in {@code ETGO_SF_FIELD}) to the DAL property name {@code filterWriteRequest}
    * actually persists (e.g. {@code dateAcct}) — the same rename {@code remapApiKeys} applies to
