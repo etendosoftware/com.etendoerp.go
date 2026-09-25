@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_GET_ORDER_DELIVERY_STATUS">
+    <function name="ETGO_GET_ORDER_DELIVERY_STATUS" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_c_order_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_cancelled character varying;
+  v_cancelledorder_id character varying;
+  v_qty_ordered numeric;
+  v_qty_delivered numeric;
+BEGIN
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction,
+  -- so ANY exception raised here rolls back the order/line save itself. Every
+  -- edge case below must therefore resolve to a value, never to an error.
+  --
+  -- Reproduces, exactly, the classic core SQLLOGIC of AD_Column DeliveryStatus
+  -- (AD_COLUMN_ID 9E82E728716246B393C40D2CDCA0133A on C_Order, used by Sales
+  -- Order / Sales Quotation), with ONE addition: it also excludes the Total
+  -- Discount line (dummy product ETGO_DTO,
+  -- TotalDiscountService.DISCOUNT_PRODUCT_ID). See ETGO_GET_ORDER_INVOICE_STATUS
+  -- for the full rationale (ETP-5317) - identical shape, different numerator.
+
+  -- Edge case 1 - null/blank target id.
+  IF p_c_order_id IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Edge case 2 - the order row is gone. SELECT ... INTO (not INTO STRICT)
+  -- assigns NULL for zero rows and does not raise.
+  SELECT o.iscancelled, o.cancelledorder_id
+    INTO v_cancelled, v_cancelledorder_id
+    FROM c_order o
+   WHERE o.c_order_id = p_c_order_id;
+
+  IF v_cancelled IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Same short-circuit as the classic SQLLOGIC.
+  IF v_cancelled = 'Y' OR v_cancelledorder_id IS NOT NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Edge case 3 - an order with zero lines (or only a discount line) yields
+  -- NULL sums from SUM() over zero rows; COALESCE(...,0) makes that total.
+  SELECT COALESCE(SUM(ABS(ol.qtyordered)), 0), COALESCE(SUM(ABS(ol.qtydelivered)), 0)
+    INTO v_qty_ordered, v_qty_delivered
+    FROM c_orderline ol
+   WHERE ol.c_order_id = p_c_order_id
+     AND ol.c_order_discount_id IS NULL
+     AND ol.m_product_id <> 'E4BC94E71D664E73A066DAF78BF39DB3';
+
+  -- Edge case 4 - zero ordered quantity (division guard, matches classic).
+  IF v_qty_ordered = 0 THEN
+    RETURN 0;
+  END IF;
+
+  RETURN ROUND(v_qty_delivered / v_qty_ordered * 100);
+
+-- Belt and braces. Nothing above should be able to raise, but an unforeseen
+-- runtime error must not take the order save down with it.
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN 0;
+END ETGO_GET_ORDER_DELIVERY_STATUS
+]]></body>
+    </function>
+  </database>
