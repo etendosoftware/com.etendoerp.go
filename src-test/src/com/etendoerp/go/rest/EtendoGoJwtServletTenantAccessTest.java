@@ -45,7 +45,6 @@ import org.openbravo.dal.core.OBContext;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
-import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -122,11 +121,7 @@ class EtendoGoJwtServletTenantAccessTest {
   void theDemoTransferStatusOfABlockedProductiveIs402() throws Exception {
     Fixture fixture = new Fixture(Decision.SUBSCRIPTION_REQUIRED);
 
-    ResponseCapture resp;
-    try (MockedStatic<DemoDataTransferFlag> flag = mockStatic(DemoDataTransferFlag.class)) {
-      flag.when(DemoDataTransferFlag::isEnabled).thenReturn(true);
-      resp = fixture.cookieGet(TRANSFER_PATH);
-    }
+    ResponseCapture resp = fixture.cookieGet(TRANSFER_PATH);
 
     assertEquals(402, resp.status);
     verifyNoInteractions(fixture.transferService);
@@ -139,11 +134,7 @@ class EtendoGoJwtServletTenantAccessTest {
     // supplier as a second, lazily-evaluated argument; the mock never invokes it.
     when(fixture.transferService.status(eq(CLIENT_ID), any())).thenReturn(new JSONObject());
 
-    ResponseCapture resp;
-    try (MockedStatic<DemoDataTransferFlag> flag = mockStatic(DemoDataTransferFlag.class)) {
-      flag.when(DemoDataTransferFlag::isEnabled).thenReturn(true);
-      resp = fixture.cookieGet(TRANSFER_PATH);
-    }
+    ResponseCapture resp = fixture.cookieGet(TRANSFER_PATH);
 
     assertEquals(200, resp.status);
     verify(fixture.transferService).status(eq(CLIENT_ID), any());
