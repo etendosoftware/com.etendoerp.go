@@ -59,6 +59,13 @@ class NeoAuthenticator {
   private final TenantEnvironmentLifecycleService environmentLifecycleService =
       new TenantEnvironmentLifecycleService();
   private final GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
+  /**
+   * ETP-5047 — one guard for the authenticator's life. It reads
+   * {@link #environmentLifecycleService} at every check, so a test that replaces that field keeps
+   * working.
+   */
+  private final EnvironmentAccessGuard environmentAccessGuard =
+      new EnvironmentAccessGuard(() -> environmentLifecycleService);
 
   NeoAuthenticator(NeoServlet servlet) {
     this.servlet = servlet;
@@ -97,8 +104,8 @@ class NeoAuthenticator {
     } catch (CommercialAccessException e) {
       log.info("Commercial access denied for NEO request: {}", e.getMessage());
       // ETP-5047 — same 402 and message text as before, plus error.code / error.decision.
-      servlet.writeResponse(response, NeoResponse.error(HttpServletResponse.SC_PAYMENT_REQUIRED,
-          e.denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED)));
+      servlet.writeResponse(response, NeoResponse.error(EnvironmentAccessGuard.Denial.STATUS,
+          e.denial.errorBody(EnvironmentAccessGuard.Denial.STATUS)));
       return false;
     } catch (OBException e) {
       // OBException messages are safe to expose (we control them)
@@ -190,12 +197,11 @@ class NeoAuthenticator {
 
   /**
    * Refuses a tenant whose commercial access was cut off. The decision and the kill switch live
-   * in {@link EnvironmentAccessGuard}, shared with MCP and the environment login endpoints; it is
-   * built over this class's lifecycle service so the NEO tests can substitute that service.
+   * in {@link EnvironmentAccessGuard}, shared with MCP, the {@code JwtAuthUtils} servlets and the
+   * environment login endpoints.
    */
   private void enforceEnvironmentAccess(String clientId) throws CommercialAccessException {
-    EnvironmentAccessGuard.Denial denial =
-        new EnvironmentAccessGuard(environmentLifecycleService).check(clientId, "neo");
+    EnvironmentAccessGuard.Denial denial = environmentAccessGuard.check(clientId, "neo");
     if (denial != null) {
       throw new CommercialAccessException(denial);
     }

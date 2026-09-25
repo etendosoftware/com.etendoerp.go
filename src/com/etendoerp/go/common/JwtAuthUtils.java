@@ -137,11 +137,7 @@ public class JwtAuthUtils {
       return true;
     }
     log.info("Commercial access denied for {}: {}", context, denial.message());
-    response.setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
-    response.setContentType("application/json");
-    response.setCharacterEncoding("UTF-8");
-    response.getWriter().write(
-        denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED).toString());
+    denial.writeTo(response);
     return false;
   }
 

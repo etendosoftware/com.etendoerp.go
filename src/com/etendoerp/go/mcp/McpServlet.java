@@ -483,7 +483,8 @@ public class McpServlet extends HttpServlet {
   /**
    * ETP-5047 — refuses an MCP request into a tenant whose commercial access was cut off (demo
    * trial expired, subscription grace elapsed), exactly as NEO does: HTTP 402 with the shared
-   * {@link EnvironmentAccessGuard} error body. Before this, MCP was the one tenant entry point that
+   * {@link EnvironmentAccessGuard} error body — a plain HTTP error, deliberately not a JSON-RPC
+   * error object, so an MCP client sees the same status NEO answers. Before this, MCP was the one tenant entry point that
    * never asked, so an agent kept reading and writing a blocked tenant's data. Every credential
    * scheme (OAuth2, legacy JWT, cookie session) reaches it with the identity's tenant. The guard
    * owns the decision and the kill switch; it runs as system because MCP has no
@@ -499,10 +500,7 @@ public class McpServlet extends HttpServlet {
       return true;
     }
     log.info("Commercial access denied for MCP request: {}", denial.message());
-    response.setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
-    response.setContentType(CONTENT_TYPE_JSON);
-    response.getWriter().write(
-        denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED).toString());
+    denial.writeTo(response);
     return false;
   }
 

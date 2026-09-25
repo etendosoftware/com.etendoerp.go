@@ -410,6 +410,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   SubscriptionLifecycleApplier subscriptionLifecycleApplier = new SubscriptionLifecycleApplier();
+  /**
+   * ETP-5047 — one guard for the servlet's life. It reads {@link #tenantEnvironmentLifecycleService}
+   * at every check, so a test that replaces that field keeps working.
+   */
+  private final EnvironmentAccessGuard environmentAccessGuard =
+      new EnvironmentAccessGuard(() -> tenantEnvironmentLifecycleService);
   StripeCustomerPortalService stripeCustomerPortalService = new StripeCustomerPortalService();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
@@ -3683,8 +3689,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (user == null || user.getClient() == null) {
       return null;
     }
-    return new EnvironmentAccessGuard(tenantEnvironmentLifecycleService)
-        .check(user.getClient().getId(), entryPoint);
+    return environmentAccessGuard.check(user.getClient().getId(), entryPoint);
   }
 
   /**
@@ -3727,8 +3732,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // service of the tenant, not only NEO: a blocked tenant must not get one.
       EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "environment-login");
       if (denial != null) {
-        writeResponse(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
-            denial.errorBody(HttpServletResponse.SC_PAYMENT_REQUIRED));
+        denial.writeTo(response);
         return;
       }
 
@@ -5655,8 +5659,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // screen and the pages it sends the customer to (/account, /upgrade) render inside the
       // entered environment, so refusing entry would lock a blocked customer out of the one place
       // that lets them pay. The tenant's data paths refuse on their own instead — NEO, MCP and the
-      // JwtAuthUtils servlets answer 402 on every request; this answer only reports the decision
-      // so a client can show the blocked screen straight away.
+      // JwtAuthUtils servlets answer 402 on every request. accessDecision is informational and
+      // backend-only: nothing in the SPA reads it; its blocked screen is driven by the NEO 402.
       EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "session-environment");
       if (denial != null) {
         result.put(FIELD_ACCESS_DECISION, denial.decision().name());

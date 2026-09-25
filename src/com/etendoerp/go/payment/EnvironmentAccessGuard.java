@@ -17,8 +17,12 @@
 
 package com.etendoerp.go.payment;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
+
+import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -68,7 +72,7 @@ public class EnvironmentAccessGuard {
    */
   public static final String MESSAGE_PREFIX = "Environment access is not available: ";
 
-  private final TenantEnvironmentLifecycleService lifecycleService;
+  private final Supplier<TenantEnvironmentLifecycleService> lifecycleService;
   private final Predicate<String> enforcementSwitchedOff;
 
   /** Creates a guard backed by the default lifecycle service and the real kill switch. */
@@ -82,10 +86,26 @@ public class EnvironmentAccessGuard {
    * @param lifecycleService the service that evaluates the access policy
    */
   public EnvironmentAccessGuard(TenantEnvironmentLifecycleService lifecycleService) {
+    this(() -> lifecycleService);
+  }
+
+  /**
+   * Creates a guard that looks its lifecycle service up at every check, with the real kill
+   * switch. For a holder that keeps one guard for its whole life but whose lifecycle service is
+   * a field a test replaces: {@code new EnvironmentAccessGuard(() -> this.lifecycleService)}.
+   *
+   * @param lifecycleService supplies the service that evaluates the access policy
+   */
+  public EnvironmentAccessGuard(Supplier<TenantEnvironmentLifecycleService> lifecycleService) {
     this(lifecycleService, EnvironmentAccessEnforcementFlag::isEnforcementSwitchedOff);
   }
 
   EnvironmentAccessGuard(TenantEnvironmentLifecycleService lifecycleService,
+      Predicate<String> enforcementSwitchedOff) {
+    this(() -> lifecycleService, enforcementSwitchedOff);
+  }
+
+  EnvironmentAccessGuard(Supplier<TenantEnvironmentLifecycleService> lifecycleService,
       Predicate<String> enforcementSwitchedOff) {
     this.lifecycleService = lifecycleService;
     this.enforcementSwitchedOff = enforcementSwitchedOff;
@@ -95,6 +115,10 @@ public class EnvironmentAccessGuard {
    * Decides whether a caller may enter a tenant. The caller must already run with an
    * {@code OBContext}; a context-less caller uses {@link #checkAsSystem}.
    *
+   * <p>Membership is passed as {@code true}: every caller has already authenticated a user of
+   * that very tenant (its session, JWT or OAuth2 token names the tenant's own user), so the
+   * policy's membership rule has nothing left to decide here.
+   *
    * @param clientId the tenant being entered
    * @param entryPoint a short label for the log line ({@code "neo"}, {@code "mcp"}, ...)
    * @return the denial to answer with, or null when access is allowed — including a tenant that
@@ -102,8 +126,8 @@ public class EnvironmentAccessGuard {
    *     switch turned off
    */
   public Denial check(String clientId, String entryPoint) {
-    EnvironmentAccessPolicy.Decision decision = lifecycleService.evaluateAccess(clientId, true,
-        Instant.now());
+    EnvironmentAccessPolicy.Decision decision = lifecycleService.get().evaluateAccess(clientId,
+        true, Instant.now());
     if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
       return null;
     }
@@ -130,6 +154,9 @@ public class EnvironmentAccessGuard {
 
   /** A refused environment entry: the policy decision plus its wire format. */
   public static final class Denial {
+    /** The HTTP status of every denial. */
+    public static final int STATUS = HttpServletResponse.SC_PAYMENT_REQUIRED;
+
     private final EnvironmentAccessPolicy.Decision decision;
 
     Denial(EnvironmentAccessPolicy.Decision decision) {
@@ -166,6 +193,22 @@ public class EnvironmentAccessGuard {
         // Every value above is a non-null string or an int: jettison cannot reject them.
         throw new IllegalStateException("Could not build the environment access denial", e);
       }
+    }
+
+    /**
+     * Writes the denial as a complete HTTP answer: status 402, {@code application/json} in UTF-8,
+     * and {@link #errorBody}. The one writer for every entry point that owns its raw response
+     * (MCP, {@code JwtAuthUtils}, the environment login); NEO sends the same body through its own
+     * {@code NeoResponse} writer, which sets the same content type.
+     *
+     * @param response the response to write to; nothing may have been written to it yet
+     * @throws IOException if the body cannot be written
+     */
+    public void writeTo(HttpServletResponse response) throws IOException {
+      response.setStatus(STATUS);
+      response.setContentType("application/json");
+      response.setCharacterEncoding("UTF-8");
+      response.getWriter().write(errorBody(STATUS).toString());
     }
   }
 }
