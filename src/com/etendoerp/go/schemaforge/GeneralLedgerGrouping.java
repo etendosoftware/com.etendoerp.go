@@ -62,6 +62,37 @@ final class GeneralLedgerGrouping {
     // Static utility, never instantiated.
   }
 
+  /** {@code dimensionField} values — shared by every row shape's own {@code dimensionValue()}. */
+  private static final String DIM_BPNAME = "bpname";
+  private static final String DIM_PRODUCTNAME = "productname";
+  private static final String DIM_PROJECTNAME = "projectname";
+  private static final String DIM_COSTCENTERNAME = "costcentername";
+
+  /**
+   * Shared implementation of {@code dimensionValue(dimensionField)} for {@link Row}, {@link
+   * OpeningRow} and {@link AccountTotal} — they all carry the exact same four dimension columns
+   * and the same field-name-to-column mapping, so this is the single place that mapping is spelled
+   * out (java:S1192).
+   */
+  private static String resolveDimensionValue(String dimensionField, String bpname,
+      String productname, String projectname, String costcentername) {
+    if (dimensionField == null) {
+      return null;
+    }
+    switch (dimensionField) {
+      case DIM_BPNAME:
+        return bpname == null ? "" : bpname;
+      case DIM_PRODUCTNAME:
+        return productname == null ? "" : productname;
+      case DIM_PROJECTNAME:
+        return projectname == null ? "" : projectname;
+      case DIM_COSTCENTERNAME:
+        return costcentername == null ? "" : costcentername;
+      default:
+        return "";
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Input shapes
   // -------------------------------------------------------------------------
@@ -81,38 +112,106 @@ final class GeneralLedgerGrouping {
     final String projectname;
     final String costcentername;
 
-    Row(String accountNo, String accountId, String accountName, String dateacct,
-        String factAcctGroupId, String groupbyname, BigDecimal amtacctdr, BigDecimal amtacctcr,
-        String bpname, String productname, String projectname, String costcentername) {
-      this.accountNo = accountNo;
-      this.accountId = accountId;
-      this.accountName = accountName;
-      this.dateacct = dateacct;
-      this.factAcctGroupId = factAcctGroupId;
-      this.groupbyname = groupbyname;
-      this.amtacctdr = amtacctdr == null ? BigDecimal.ZERO : amtacctdr;
-      this.amtacctcr = amtacctcr == null ? BigDecimal.ZERO : amtacctcr;
-      this.bpname = bpname;
-      this.productname = productname;
-      this.projectname = projectname;
-      this.costcentername = costcentername;
+    private Row(Builder b) {
+      this.accountNo = b.accountNo;
+      this.accountId = b.accountId;
+      this.accountName = b.accountName;
+      this.dateacct = b.dateacct;
+      this.factAcctGroupId = b.factAcctGroupId;
+      this.groupbyname = b.groupbyname;
+      this.amtacctdr = b.amtacctdr == null ? BigDecimal.ZERO : b.amtacctdr;
+      this.amtacctcr = b.amtacctcr == null ? BigDecimal.ZERO : b.amtacctcr;
+      this.bpname = b.bpname;
+      this.productname = b.productname;
+      this.projectname = b.projectname;
+      this.costcentername = b.costcentername;
     }
 
     String dimensionValue(String dimensionField) {
-      if (dimensionField == null) {
-        return null;
+      return resolveDimensionValue(dimensionField, bpname, productname, projectname, costcentername);
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link Row} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String accountNo;
+      private String accountId;
+      private String accountName;
+      private String dateacct;
+      private String factAcctGroupId;
+      private String groupbyname;
+      private BigDecimal amtacctdr;
+      private BigDecimal amtacctcr;
+      private String bpname;
+      private String productname;
+      private String projectname;
+      private String costcentername;
+
+      Builder accountNo(String v) {
+        this.accountNo = v;
+        return this;
       }
-      switch (dimensionField) {
-        case "bpname":
-          return bpname == null ? "" : bpname;
-        case "productname":
-          return productname == null ? "" : productname;
-        case "projectname":
-          return projectname == null ? "" : projectname;
-        case "costcentername":
-          return costcentername == null ? "" : costcentername;
-        default:
-          return "";
+
+      Builder accountId(String v) {
+        this.accountId = v;
+        return this;
+      }
+
+      Builder accountName(String v) {
+        this.accountName = v;
+        return this;
+      }
+
+      Builder dateacct(String v) {
+        this.dateacct = v;
+        return this;
+      }
+
+      Builder factAcctGroupId(String v) {
+        this.factAcctGroupId = v;
+        return this;
+      }
+
+      Builder groupbyname(String v) {
+        this.groupbyname = v;
+        return this;
+      }
+
+      Builder amtacctdr(BigDecimal v) {
+        this.amtacctdr = v;
+        return this;
+      }
+
+      Builder amtacctcr(BigDecimal v) {
+        this.amtacctcr = v;
+        return this;
+      }
+
+      Builder bpname(String v) {
+        this.bpname = v;
+        return this;
+      }
+
+      Builder productname(String v) {
+        this.productname = v;
+        return this;
+      }
+
+      Builder projectname(String v) {
+        this.projectname = v;
+        return this;
+      }
+
+      Builder costcentername(String v) {
+        this.costcentername = v;
+        return this;
+      }
+
+      Row build() {
+        return new Row(this);
       }
     }
   }
@@ -150,21 +249,7 @@ final class GeneralLedgerGrouping {
     }
 
     String dimensionValue(String dimensionField) {
-      if (dimensionField == null) {
-        return null;
-      }
-      switch (dimensionField) {
-        case "bpname":
-          return bpname == null ? "" : bpname;
-        case "productname":
-          return productname == null ? "" : productname;
-        case "projectname":
-          return projectname == null ? "" : projectname;
-        case "costcentername":
-          return costcentername == null ? "" : costcentername;
-        default:
-          return "";
-      }
+      return resolveDimensionValue(dimensionField, bpname, productname, projectname, costcentername);
     }
   }
 
@@ -191,33 +276,78 @@ final class GeneralLedgerGrouping {
     final BigDecimal amtacctcr;
     final long lineCount;
 
-    AccountTotal(String accountNo, String bpname, String productname, String projectname,
-        String costcentername, BigDecimal amtacctdr, BigDecimal amtacctcr, long lineCount) {
-      this.accountNo = accountNo;
-      this.bpname = bpname;
-      this.productname = productname;
-      this.projectname = projectname;
-      this.costcentername = costcentername;
-      this.amtacctdr = amtacctdr == null ? BigDecimal.ZERO : amtacctdr;
-      this.amtacctcr = amtacctcr == null ? BigDecimal.ZERO : amtacctcr;
-      this.lineCount = lineCount;
+    private AccountTotal(Builder b) {
+      this.accountNo = b.accountNo;
+      this.bpname = b.bpname;
+      this.productname = b.productname;
+      this.projectname = b.projectname;
+      this.costcentername = b.costcentername;
+      this.amtacctdr = b.amtacctdr == null ? BigDecimal.ZERO : b.amtacctdr;
+      this.amtacctcr = b.amtacctcr == null ? BigDecimal.ZERO : b.amtacctcr;
+      this.lineCount = b.lineCount;
     }
 
     String dimensionValue(String dimensionField) {
-      if (dimensionField == null) {
-        return null;
+      return resolveDimensionValue(dimensionField, bpname, productname, projectname, costcentername);
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link AccountTotal} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String accountNo;
+      private String bpname;
+      private String productname;
+      private String projectname;
+      private String costcentername;
+      private BigDecimal amtacctdr;
+      private BigDecimal amtacctcr;
+      private long lineCount;
+
+      Builder accountNo(String v) {
+        this.accountNo = v;
+        return this;
       }
-      switch (dimensionField) {
-        case "bpname":
-          return bpname == null ? "" : bpname;
-        case "productname":
-          return productname == null ? "" : productname;
-        case "projectname":
-          return projectname == null ? "" : projectname;
-        case "costcentername":
-          return costcentername == null ? "" : costcentername;
-        default:
-          return "";
+
+      Builder bpname(String v) {
+        this.bpname = v;
+        return this;
+      }
+
+      Builder productname(String v) {
+        this.productname = v;
+        return this;
+      }
+
+      Builder projectname(String v) {
+        this.projectname = v;
+        return this;
+      }
+
+      Builder costcentername(String v) {
+        this.costcentername = v;
+        return this;
+      }
+
+      Builder amtacctdr(BigDecimal v) {
+        this.amtacctdr = v;
+        return this;
+      }
+
+      Builder amtacctcr(BigDecimal v) {
+        this.amtacctcr = v;
+        return this;
+      }
+
+      Builder lineCount(long v) {
+        this.lineCount = v;
+        return this;
+      }
+
+      AccountTotal build() {
+        return new AccountTotal(this);
       }
     }
   }
@@ -254,19 +384,89 @@ final class GeneralLedgerGrouping {
     final String projectname;
     final String costcentername;
 
-    Line(String dateacct, String factAcctGroupId, String groupbyname, BigDecimal amtacctdr,
-        BigDecimal amtacctcr, BigDecimal runningBalance, String bpname, String productname,
-        String projectname, String costcentername) {
-      this.dateacct = dateacct;
-      this.factAcctGroupId = factAcctGroupId;
-      this.groupbyname = groupbyname;
-      this.amtacctdr = amtacctdr;
-      this.amtacctcr = amtacctcr;
-      this.runningBalance = runningBalance;
-      this.bpname = bpname;
-      this.productname = productname;
-      this.projectname = projectname;
-      this.costcentername = costcentername;
+    private Line(Builder b) {
+      this.dateacct = b.dateacct;
+      this.factAcctGroupId = b.factAcctGroupId;
+      this.groupbyname = b.groupbyname;
+      this.amtacctdr = b.amtacctdr;
+      this.amtacctcr = b.amtacctcr;
+      this.runningBalance = b.runningBalance;
+      this.bpname = b.bpname;
+      this.productname = b.productname;
+      this.projectname = b.projectname;
+      this.costcentername = b.costcentername;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link Line} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String dateacct;
+      private String factAcctGroupId;
+      private String groupbyname;
+      private BigDecimal amtacctdr;
+      private BigDecimal amtacctcr;
+      private BigDecimal runningBalance;
+      private String bpname;
+      private String productname;
+      private String projectname;
+      private String costcentername;
+
+      Builder dateacct(String v) {
+        this.dateacct = v;
+        return this;
+      }
+
+      Builder factAcctGroupId(String v) {
+        this.factAcctGroupId = v;
+        return this;
+      }
+
+      Builder groupbyname(String v) {
+        this.groupbyname = v;
+        return this;
+      }
+
+      Builder amtacctdr(BigDecimal v) {
+        this.amtacctdr = v;
+        return this;
+      }
+
+      Builder amtacctcr(BigDecimal v) {
+        this.amtacctcr = v;
+        return this;
+      }
+
+      Builder runningBalance(BigDecimal v) {
+        this.runningBalance = v;
+        return this;
+      }
+
+      Builder bpname(String v) {
+        this.bpname = v;
+        return this;
+      }
+
+      Builder productname(String v) {
+        this.productname = v;
+        return this;
+      }
+
+      Builder projectname(String v) {
+        this.projectname = v;
+        return this;
+      }
+
+      Builder costcentername(String v) {
+        this.costcentername = v;
+        return this;
+      }
+
+      Line build() {
+        return new Line(this);
+      }
     }
   }
 
@@ -316,14 +516,13 @@ final class GeneralLedgerGrouping {
     BigDecimal cr = BigDecimal.ZERO;
     if (openingRows != null) {
       for (OpeningRow r : openingRows) {
-        if (!safe(accountValue).equals(safe(r.accountNo))) {
-          continue;
+        boolean accountMatches = safe(accountValue).equals(safe(r.accountNo));
+        boolean dimensionMatches = dimensionField == null
+            || safe(dimensionValue).equals(r.dimensionValue(dimensionField));
+        if (accountMatches && dimensionMatches) {
+          dr = dr.add(r.openingDr);
+          cr = cr.add(r.openingCr);
         }
-        if (dimensionField != null && !safe(dimensionValue).equals(r.dimensionValue(dimensionField))) {
-          continue;
-        }
-        dr = dr.add(r.openingDr);
-        cr = cr.add(r.openingCr);
       }
     }
     return new Amounts(dr, cr);
@@ -356,15 +555,14 @@ final class GeneralLedgerGrouping {
     long lineCount = 0;
     if (totals != null) {
       for (AccountTotal t : totals) {
-        if (!safe(accountValue).equals(safe(t.accountNo))) {
-          continue;
+        boolean accountMatches = safe(accountValue).equals(safe(t.accountNo));
+        boolean dimensionMatches = dimensionField == null
+            || safe(dimensionValue).equals(t.dimensionValue(dimensionField));
+        if (accountMatches && dimensionMatches) {
+          dr = dr.add(t.amtacctdr);
+          cr = cr.add(t.amtacctcr);
+          lineCount += t.lineCount;
         }
-        if (dimensionField != null && !safe(dimensionValue).equals(t.dimensionValue(dimensionField))) {
-          continue;
-        }
-        dr = dr.add(t.amtacctdr);
-        cr = cr.add(t.amtacctcr);
-        lineCount += t.lineCount;
       }
     }
     return new SubtotalFold(new Amounts(dr, cr), lineCount);
@@ -432,8 +630,18 @@ final class GeneralLedgerGrouping {
         running = currentAccount.opening.total;
       }
       running = running.add(r.amtacctdr.subtract(r.amtacctcr));
-      currentAccount.lines.add(new Line(r.dateacct, r.factAcctGroupId, r.groupbyname, r.amtacctdr,
-          r.amtacctcr, running, r.bpname, r.productname, r.projectname, r.costcentername));
+      currentAccount.lines.add(Line.builder()
+          .dateacct(r.dateacct)
+          .factAcctGroupId(r.factAcctGroupId)
+          .groupbyname(r.groupbyname)
+          .amtacctdr(r.amtacctdr)
+          .amtacctcr(r.amtacctcr)
+          .runningBalance(running)
+          .bpname(r.bpname)
+          .productname(r.productname)
+          .projectname(r.projectname)
+          .costcentername(r.costcentername)
+          .build());
     }
 
     for (Group g : groups) {

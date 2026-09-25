@@ -36,8 +36,19 @@ class AccountReportTreeTest {
   private static AccountReportTree.NodeRow node(String id, String parent, String sortPath,
       String group, String value, String name, String level, boolean alwaysShown, String sign,
       String own, String ownRef) {
-    return new AccountReportTree.NodeRow(id, parent, sortPath, group, value, name, level,
-        alwaysShown, sign, new BigDecimal(own), new BigDecimal(ownRef));
+    return AccountReportTree.NodeRow.builder()
+        .nodeId(id)
+        .parentId(parent)
+        .sortPath(sortPath)
+        .groupName(group)
+        .value(value)
+        .name(name)
+        .elementLevel(level)
+        .alwaysShown(alwaysShown)
+        .accountSign(sign)
+        .ownAmt(new BigDecimal(own))
+        .ownAmtRef(new BigDecimal(ownRef))
+        .build();
   }
 
   private static AccountReportTree.OperandRow operand(String owner, String operand, int sign) {

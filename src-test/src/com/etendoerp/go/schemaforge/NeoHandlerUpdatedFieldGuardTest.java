@@ -90,7 +90,21 @@ class NeoHandlerUpdatedFieldGuardTest {
       // row mapping), not yet merged to develop as of this branch's base. Remove this entry
       // once ETP-5219 lands on develop — the file will then genuinely contain "updated" and
       // stop matching as a violation regardless, so a stale entry here is harmless, just untidy.
-      "ProductPriceHandler");
+      "ProductPriceHandler",
+      // ETP-5483 — the 5 native-SQL "grouped listing" report handlers (Trial Balance, Journal
+      // Entries, Balance Sheet, Profit & Loss, General Ledger). Unlike ChartOfAccountsHandler/
+      // ProductPriceHandler, this is DEFINITIVELY safe, not just "not yet verified": every
+      // ETGO_SF_ENTITY row of a SPEC_TYPE='R' report (all 15, including these 5) has
+      // ISPUT=N/ISPATCH=N in the database, and NeoMethodPolicy rejects PUT/PATCH with a 405
+      // before any request reaches a handler whose entity has those flags off — confirmed by
+      // reading NeoMethodPolicy#isPut/#isPatch and the ETGO_SF_ENTITY rows directly. There is no
+      // write path into these handlers to protect, unlike a report tool that happens to expose a
+      // real window entity's id.
+      "TrialBalanceReportHandler",
+      "JournalEntriesReportHandler",
+      "BalanceSheetReportHandler",
+      "ProfitLossReportHandler",
+      "GeneralLedgerReportHandler");
 
   /** Resolves the source root whether tests run from the module root or the workspace root. */
   private static Path sourceRoot() {

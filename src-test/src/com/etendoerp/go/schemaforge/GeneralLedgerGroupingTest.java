@@ -35,9 +35,20 @@ class GeneralLedgerGroupingTest {
 
   private static GeneralLedgerGrouping.Row row(String accountNo, String accountName,
       String dateacct, String factAcctGroupId, String debit, String credit) {
-    return new GeneralLedgerGrouping.Row(accountNo, "acct-id-" + accountNo, accountName, dateacct,
-        factAcctGroupId, "Some movement", new BigDecimal(debit), new BigDecimal(credit), "Acme",
-        "Widget", "Proj A", "CC1");
+    return GeneralLedgerGrouping.Row.builder()
+        .accountNo(accountNo)
+        .accountId("acct-id-" + accountNo)
+        .accountName(accountName)
+        .dateacct(dateacct)
+        .factAcctGroupId(factAcctGroupId)
+        .groupbyname("Some movement")
+        .amtacctdr(new BigDecimal(debit))
+        .amtacctcr(new BigDecimal(credit))
+        .bpname("Acme")
+        .productname("Widget")
+        .projectname("Proj A")
+        .costcentername("CC1")
+        .build();
   }
 
   private static GeneralLedgerGrouping.OpeningRow opening(String accountNo, String openingDr,
@@ -54,14 +65,23 @@ class GeneralLedgerGroupingTest {
 
   private static GeneralLedgerGrouping.AccountTotal total(String accountNo, String debit,
       String credit, long lineCount) {
-    return new GeneralLedgerGrouping.AccountTotal(accountNo, null, null, null, null,
-        new BigDecimal(debit), new BigDecimal(credit), lineCount);
+    return GeneralLedgerGrouping.AccountTotal.builder()
+        .accountNo(accountNo)
+        .amtacctdr(new BigDecimal(debit))
+        .amtacctcr(new BigDecimal(credit))
+        .lineCount(lineCount)
+        .build();
   }
 
   private static GeneralLedgerGrouping.AccountTotal totalWithDimension(String accountNo,
       String bpname, String debit, String credit, long lineCount) {
-    return new GeneralLedgerGrouping.AccountTotal(accountNo, bpname, null, null, null,
-        new BigDecimal(debit), new BigDecimal(credit), lineCount);
+    return GeneralLedgerGrouping.AccountTotal.builder()
+        .accountNo(accountNo)
+        .bpname(bpname)
+        .amtacctdr(new BigDecimal(debit))
+        .amtacctcr(new BigDecimal(credit))
+        .lineCount(lineCount)
+        .build();
   }
 
   // -------------------------------------------------------------------------
@@ -255,12 +275,16 @@ class GeneralLedgerGroupingTest {
   @Test
   @DisplayName("groupBy nests accounts inside dimension groups, in stable dimension-sorted order")
   void groupByNestsAccountsInsideDimensionGroups() {
-    GeneralLedgerGrouping.Row rowAcme430 = new GeneralLedgerGrouping.Row("430", "acct-430",
-        "Customers", "2026-01-05", "grp-1", "desc", new BigDecimal("100"), BigDecimal.ZERO,
-        "Acme", null, null, null);
-    GeneralLedgerGrouping.Row rowBeta430 = new GeneralLedgerGrouping.Row("430", "acct-430",
-        "Customers", "2026-01-06", "grp-2", "desc", new BigDecimal("50"), BigDecimal.ZERO,
-        "Beta", null, null, null);
+    GeneralLedgerGrouping.Row rowAcme430 = GeneralLedgerGrouping.Row.builder()
+        .accountNo("430").accountId("acct-430").accountName("Customers")
+        .dateacct("2026-01-05").factAcctGroupId("grp-1").groupbyname("desc")
+        .amtacctdr(new BigDecimal("100")).amtacctcr(BigDecimal.ZERO)
+        .bpname("Acme").build();
+    GeneralLedgerGrouping.Row rowBeta430 = GeneralLedgerGrouping.Row.builder()
+        .accountNo("430").accountId("acct-430").accountName("Customers")
+        .dateacct("2026-01-06").factAcctGroupId("grp-2").groupbyname("desc")
+        .amtacctdr(new BigDecimal("50")).amtacctcr(BigDecimal.ZERO)
+        .bpname("Beta").build();
     List<GeneralLedgerGrouping.Row> rows = List.of(rowAcme430, rowBeta430);
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
         totalWithDimension("430", "Acme", "100", "0", 1),
@@ -286,12 +310,16 @@ class GeneralLedgerGroupingTest {
   @Test
   @DisplayName("when grouped by dimension, each group's account subtotal is scoped to that dimension value, never the account's combined total")
   void subtotalScopedToDimensionWhenAccountSpansMultipleDimensionValues() {
-    GeneralLedgerGrouping.Row rowAcme430 = new GeneralLedgerGrouping.Row("430", "acct-430",
-        "Customers", "2026-01-05", "grp-1", "desc", new BigDecimal("100"), BigDecimal.ZERO,
-        "Acme", null, null, null);
-    GeneralLedgerGrouping.Row rowBeta430 = new GeneralLedgerGrouping.Row("430", "acct-430",
-        "Customers", "2026-01-06", "grp-2", "desc", new BigDecimal("50"), BigDecimal.ZERO,
-        "Beta", null, null, null);
+    GeneralLedgerGrouping.Row rowAcme430 = GeneralLedgerGrouping.Row.builder()
+        .accountNo("430").accountId("acct-430").accountName("Customers")
+        .dateacct("2026-01-05").factAcctGroupId("grp-1").groupbyname("desc")
+        .amtacctdr(new BigDecimal("100")).amtacctcr(BigDecimal.ZERO)
+        .bpname("Acme").build();
+    GeneralLedgerGrouping.Row rowBeta430 = GeneralLedgerGrouping.Row.builder()
+        .accountNo("430").accountId("acct-430").accountName("Customers")
+        .dateacct("2026-01-06").factAcctGroupId("grp-2").groupbyname("desc")
+        .amtacctdr(new BigDecimal("50")).amtacctcr(BigDecimal.ZERO)
+        .bpname("Beta").build();
     List<GeneralLedgerGrouping.Row> rows = List.of(rowAcme430, rowBeta430);
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
         totalWithDimension("430", "Acme", "100", "0", 1),

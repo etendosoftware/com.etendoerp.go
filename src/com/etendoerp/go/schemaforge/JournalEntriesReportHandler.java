@@ -111,6 +111,8 @@ public class JournalEntriesReportHandler implements NeoHandler {
   /** Etendo ids are either a legacy numeric string or a 32-char hex/alnum id — never blank, never whitespace. */
   private static final Pattern ID_SHAPE = Pattern.compile("^[0-9A-Za-z]{1,32}$");
 
+  /** Native-query bind name for the client id — not a report-facing parameter (unlike the PARAM_* below). */
+  private static final String SQL_PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_DATE_FROM = "dateFrom";
   private static final String PARAM_DATE_TO = "dateTo";
   private static final String PARAM_ORG_ID = "orgId";
@@ -338,16 +340,28 @@ public class JournalEntriesReportHandler implements NeoHandler {
       EntryTypeFilter entryTypeFilter = new EntryTypeFilter(showRegular, showPlClosing,
           showClosing, showOpening, showDivideUp);
 
-      List<Object[]> rawRows = queryRows(clientId, language, orgId, acctSchemaId, dateFrom, dateTo,
-          entryTypeFilter, bPartnerIds, productIds, projectIds, costCenterIds, factAcctGroupId,
-          fromAccountId, toAccountId, limit);
+      Filters filters = Filters.builder()
+          .clientId(clientId)
+          .orgId(orgId)
+          .acctSchemaId(acctSchemaId)
+          .dateFrom(dateFrom)
+          .dateTo(dateTo)
+          .entryTypeFilter(entryTypeFilter)
+          .bPartnerIds(bPartnerIds)
+          .productIds(productIds)
+          .projectIds(projectIds)
+          .costCenterIds(costCenterIds)
+          .factAcctGroupId(factAcctGroupId)
+          .fromAccountId(fromAccountId)
+          .toAccountId(toAccountId)
+          .build();
+
+      List<Object[]> rawRows = queryRows(filters, language, limit);
 
       List<JournalEntriesGrouping.Row> foldingRows = toFoldingRows(rawRows);
       List<JournalEntriesGrouping.Entry> entries = JournalEntriesGrouping.nest(foldingRows);
 
-      long totalEntries = countTotalEntries(clientId, orgId, acctSchemaId, dateFrom, dateTo,
-          entryTypeFilter, bPartnerIds, productIds, projectIds, costCenterIds, factAcctGroupId,
-          fromAccountId, toAccountId);
+      long totalEntries = countTotalEntries(filters);
       boolean truncated = JournalEntriesGrouping.isTruncated(entries.size(), totalEntries);
 
       JSONArray data = buildDataArray(entries, showDimensions, showEntryDescription);
@@ -355,9 +369,7 @@ public class JournalEntriesReportHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", data);
       responseData.put("count", data.length());
-      responseData.put("meta", buildMeta(dateFrom, dateTo, orgId, acctSchemaId, limit, truncated,
-          totalEntries, fromAccountId, toAccountId, bPartnerIds, productIds, projectIds,
-          costCenterIds));
+      responseData.put("meta", buildMeta(filters, limit, truncated, totalEntries));
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -446,9 +458,9 @@ public class JournalEntriesReportHandler implements NeoHandler {
         }
         org.openbravo.dal.service.OBQuery<AcctSchema> query =
             OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
-        query.setNamedParameter("clientId", clientId);
+        query.setNamedParameter(SQL_PARAM_CLIENT_ID, clientId);
         if (!orgId.isEmpty()) {
-          query.setNamedParameter("orgId", orgId);
+          query.setNamedParameter(PARAM_ORG_ID, orgId);
         }
         query.setMaxResult(1);
         schema = query.uniqueResult();
@@ -489,6 +501,133 @@ public class JournalEntriesReportHandler implements NeoHandler {
   // -------------------------------------------------------------------------
   // Entry-type toggle SQL — faithful port of report-contract.json's factaccttype clause
   // -------------------------------------------------------------------------
+
+  /**
+   * Bundles this report's resolved request parameters (everything BUT {@code language}, which only
+   * {@link #queryRows} needs) so the SQL-building/count/meta methods don't need an oversized
+   * parameter list (java:S107). Built once in {@link #executeReport} after all validation has
+   * passed.
+   */
+  private static final class Filters {
+    final String clientId;
+    final String orgId;
+    final String acctSchemaId;
+    final LocalDate dateFrom;
+    final LocalDate dateTo;
+    final EntryTypeFilter entryTypeFilter;
+    final List<String> bPartnerIds;
+    final List<String> productIds;
+    final List<String> projectIds;
+    final List<String> costCenterIds;
+    final String factAcctGroupId;
+    final String fromAccountId;
+    final String toAccountId;
+
+    private Filters(Builder b) {
+      this.clientId = b.clientId;
+      this.orgId = b.orgId;
+      this.acctSchemaId = b.acctSchemaId;
+      this.dateFrom = b.dateFrom;
+      this.dateTo = b.dateTo;
+      this.entryTypeFilter = b.entryTypeFilter;
+      this.bPartnerIds = b.bPartnerIds;
+      this.productIds = b.productIds;
+      this.projectIds = b.projectIds;
+      this.costCenterIds = b.costCenterIds;
+      this.factAcctGroupId = b.factAcctGroupId;
+      this.fromAccountId = b.fromAccountId;
+      this.toAccountId = b.toAccountId;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    static final class Builder {
+      private String clientId;
+      private String orgId;
+      private String acctSchemaId;
+      private LocalDate dateFrom;
+      private LocalDate dateTo;
+      private EntryTypeFilter entryTypeFilter;
+      private List<String> bPartnerIds;
+      private List<String> productIds;
+      private List<String> projectIds;
+      private List<String> costCenterIds;
+      private String factAcctGroupId;
+      private String fromAccountId;
+      private String toAccountId;
+
+      Builder clientId(String v) {
+        this.clientId = v;
+        return this;
+      }
+
+      Builder orgId(String v) {
+        this.orgId = v;
+        return this;
+      }
+
+      Builder acctSchemaId(String v) {
+        this.acctSchemaId = v;
+        return this;
+      }
+
+      Builder dateFrom(LocalDate v) {
+        this.dateFrom = v;
+        return this;
+      }
+
+      Builder dateTo(LocalDate v) {
+        this.dateTo = v;
+        return this;
+      }
+
+      Builder entryTypeFilter(EntryTypeFilter v) {
+        this.entryTypeFilter = v;
+        return this;
+      }
+
+      Builder bPartnerIds(List<String> v) {
+        this.bPartnerIds = v;
+        return this;
+      }
+
+      Builder productIds(List<String> v) {
+        this.productIds = v;
+        return this;
+      }
+
+      Builder projectIds(List<String> v) {
+        this.projectIds = v;
+        return this;
+      }
+
+      Builder costCenterIds(List<String> v) {
+        this.costCenterIds = v;
+        return this;
+      }
+
+      Builder factAcctGroupId(String v) {
+        this.factAcctGroupId = v;
+        return this;
+      }
+
+      Builder fromAccountId(String v) {
+        this.fromAccountId = v;
+        return this;
+      }
+
+      Builder toAccountId(String v) {
+        this.toAccountId = v;
+        return this;
+      }
+
+      Filters build() {
+        return new Filters(this);
+      }
+    }
+  }
 
   /**
    * The five {@code show*Entries} booleans, bundled so the SQL-building and count-query methods
@@ -583,11 +722,15 @@ public class JournalEntriesReportHandler implements NeoHandler {
    * to individual line rows.
    */
   @SuppressWarnings("unchecked")
-  private List<Object[]> queryRows(String clientId, String language, String orgId,
-      String acctSchemaId, LocalDate dateFrom, LocalDate dateTo, EntryTypeFilter entryTypeFilter,
-      List<String> bPartnerIds, List<String> productIds, List<String> projectIds,
-      List<String> costCenterIds, String factAcctGroupId, String fromAccountId,
-      String toAccountId, int limit) {
+  private List<Object[]> queryRows(Filters f, String language, int limit) {
+    String orgId = f.orgId;
+    List<String> bPartnerIds = f.bPartnerIds;
+    List<String> productIds = f.productIds;
+    List<String> projectIds = f.projectIds;
+    List<String> costCenterIds = f.costCenterIds;
+    String factAcctGroupId = f.factAcctGroupId;
+    String fromAccountId = f.fromAccountId;
+    String toAccountId = f.toAccountId;
 
     StringBuilder sql = new StringBuilder(
         "WITH je AS ( "
@@ -671,10 +814,8 @@ public class JournalEntriesReportHandler implements NeoHandler {
             + "ORDER BY dateacct, fact_acct_group_id, min_seqno");
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
-    bindCommonParams(query, clientId, language, orgId, acctSchemaId, dateFrom, dateTo,
-        entryTypeFilter, bPartnerIds, productIds, projectIds, costCenterIds, factAcctGroupId,
-        fromAccountId, toAccountId);
-    query.setParameter("limit", (long) limit);
+    bindCommonParams(query, f, language);
+    query.setParameter(PARAM_LIMIT, (long) limit);
 
     return query.list();
   }
@@ -696,11 +837,15 @@ public class JournalEntriesReportHandler implements NeoHandler {
    * than silently under-counting.
    */
   @SuppressWarnings("unchecked")
-  private long countTotalEntries(String clientId, String orgId, String acctSchemaId,
-      LocalDate dateFrom, LocalDate dateTo, EntryTypeFilter entryTypeFilter,
-      List<String> bPartnerIds, List<String> productIds, List<String> projectIds,
-      List<String> costCenterIds, String factAcctGroupId, String fromAccountId,
-      String toAccountId) {
+  private long countTotalEntries(Filters f) {
+    String orgId = f.orgId;
+    List<String> bPartnerIds = f.bPartnerIds;
+    List<String> productIds = f.productIds;
+    List<String> projectIds = f.projectIds;
+    List<String> costCenterIds = f.costCenterIds;
+    String factAcctGroupId = f.factAcctGroupId;
+    String fromAccountId = f.fromAccountId;
+    String toAccountId = f.toAccountId;
 
     StringBuilder sql = new StringBuilder(
         "SELECT COUNT(DISTINCT fa.fact_acct_group_id) FROM fact_acct fa "
@@ -735,50 +880,44 @@ public class JournalEntriesReportHandler implements NeoHandler {
     }
 
     NativeQuery<Number> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
-    bindCommonParams(query, clientId, null, orgId, acctSchemaId, dateFrom, dateTo, entryTypeFilter,
-        bPartnerIds, productIds, projectIds, costCenterIds, factAcctGroupId, fromAccountId,
-        toAccountId);
+    bindCommonParams(query, f, null);
 
     Number result = query.uniqueResult();
     return result == null ? 0L : result.longValue();
   }
 
-  private static void bindCommonParams(NativeQuery<?> query, String clientId, String language,
-      String orgId, String acctSchemaId, LocalDate dateFrom, LocalDate dateTo,
-      EntryTypeFilter entryTypeFilter, List<String> bPartnerIds, List<String> productIds,
-      List<String> projectIds, List<String> costCenterIds, String factAcctGroupId,
-      String fromAccountId, String toAccountId) {
-    query.setParameter("clientId", clientId);
+  private static void bindCommonParams(NativeQuery<?> query, Filters f, String language) {
+    query.setParameter(SQL_PARAM_CLIENT_ID, f.clientId);
     if (language != null) {
       query.setParameter("language", language);
     }
-    query.setParameter("acctSchemaId", acctSchemaId);
-    query.setParameter("dateFrom", Date.valueOf(dateFrom));
-    query.setParameter("dateTo", Date.valueOf(dateTo));
-    entryTypeFilter.bind(query);
-    if (!orgId.isEmpty()) {
-      query.setParameter("orgId", orgId);
+    query.setParameter(PARAM_ACCT_SCHEMA_ID, f.acctSchemaId);
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(f.dateFrom));
+    query.setParameter(PARAM_DATE_TO, Date.valueOf(f.dateTo));
+    f.entryTypeFilter.bind(query);
+    if (!f.orgId.isEmpty()) {
+      query.setParameter(PARAM_ORG_ID, f.orgId);
     }
-    if (!bPartnerIds.isEmpty()) {
-      query.setParameterList("bPartnerIds", bPartnerIds);
+    if (!f.bPartnerIds.isEmpty()) {
+      query.setParameterList("bPartnerIds", f.bPartnerIds);
     }
-    if (!productIds.isEmpty()) {
-      query.setParameterList("productIds", productIds);
+    if (!f.productIds.isEmpty()) {
+      query.setParameterList("productIds", f.productIds);
     }
-    if (!projectIds.isEmpty()) {
-      query.setParameterList("projectIds", projectIds);
+    if (!f.projectIds.isEmpty()) {
+      query.setParameterList("projectIds", f.projectIds);
     }
-    if (!costCenterIds.isEmpty()) {
-      query.setParameterList("costCenterIds", costCenterIds);
+    if (!f.costCenterIds.isEmpty()) {
+      query.setParameterList("costCenterIds", f.costCenterIds);
     }
-    if (!factAcctGroupId.isEmpty()) {
-      query.setParameter("factAcctGroupId", factAcctGroupId);
+    if (!f.factAcctGroupId.isEmpty()) {
+      query.setParameter(PARAM_FACT_ACCT_GROUP_ID, f.factAcctGroupId);
     }
-    if (!fromAccountId.isEmpty()) {
-      query.setParameter("fromAccountId", fromAccountId);
+    if (!f.fromAccountId.isEmpty()) {
+      query.setParameter(PARAM_FROM_ACCOUNT_ID, f.fromAccountId);
     }
-    if (!toAccountId.isEmpty()) {
-      query.setParameter("toAccountId", toAccountId);
+    if (!f.toAccountId.isEmpty()) {
+      query.setParameter(PARAM_TO_ACCOUNT_ID, f.toAccountId);
     }
   }
 
@@ -812,14 +951,29 @@ public class JournalEntriesReportHandler implements NeoHandler {
   private static List<JournalEntriesGrouping.Row> toFoldingRows(List<Object[]> rawRows) {
     List<JournalEntriesGrouping.Row> rows = new ArrayList<>();
     for (Object[] r : rawRows) {
-      rows.add(new JournalEntriesGrouping.Row(
-          toIsoDate(r[COL_DATEACCT]), toLong(r[COL_ENTRY_NO]), str(r[COL_DOCUMENT_TYPE]),
-          str(r[COL_DOCBASETYPE]), toBoolean(r[COL_ISRETURN]), str(r[COL_DOC_WINDOW]),
-          str(r[COL_DOC_RECORD_ID]), str(r[COL_DOC_QUERY_KEY]), str(r[COL_DOC_QUERY_VALUE]),
-          str(r[COL_ENTRY_DESCRIPTION]), str(r[COL_BPNAME]), str(r[COL_PRODUCTNAME]),
-          str(r[COL_PROJECTNAME]), str(r[COL_COSTCENTERNAME]), str(r[COL_FACT_ACCT_GROUP_ID]),
-          str(r[COL_RECORD_ID]), str(r[COL_AD_TABLE_ID]), str(r[COL_ACCOUNT_NO]),
-          str(r[COL_ACCOUNT_NAME]), toBigDecimal(r[COL_AMTACCTDR]), toBigDecimal(r[COL_AMTACCTCR])));
+      rows.add(JournalEntriesGrouping.Row.builder()
+          .dateacct(toIsoDate(r[COL_DATEACCT]))
+          .entryNo(toLong(r[COL_ENTRY_NO]))
+          .documentType(str(r[COL_DOCUMENT_TYPE]))
+          .docbasetype(str(r[COL_DOCBASETYPE]))
+          .isReturn(toBoolean(r[COL_ISRETURN]))
+          .docWindow(str(r[COL_DOC_WINDOW]))
+          .docRecordId(str(r[COL_DOC_RECORD_ID]))
+          .docQueryKey(str(r[COL_DOC_QUERY_KEY]))
+          .docQueryValue(str(r[COL_DOC_QUERY_VALUE]))
+          .entryDescription(str(r[COL_ENTRY_DESCRIPTION]))
+          .bpname(str(r[COL_BPNAME]))
+          .productname(str(r[COL_PRODUCTNAME]))
+          .projectname(str(r[COL_PROJECTNAME]))
+          .costcentername(str(r[COL_COSTCENTERNAME]))
+          .factAcctGroupId(str(r[COL_FACT_ACCT_GROUP_ID]))
+          .recordId(str(r[COL_RECORD_ID]))
+          .adTableId(str(r[COL_AD_TABLE_ID]))
+          .accountNo(str(r[COL_ACCOUNT_NO]))
+          .accountName(str(r[COL_ACCOUNT_NAME]))
+          .amtacctdr(toBigDecimal(r[COL_AMTACCTDR]))
+          .amtacctcr(toBigDecimal(r[COL_AMTACCTCR]))
+          .build());
     }
     return rows;
   }
@@ -828,58 +982,69 @@ public class JournalEntriesReportHandler implements NeoHandler {
       boolean showDimensions, boolean showEntryDescription) throws Exception {
     JSONArray data = new JSONArray();
     for (JournalEntriesGrouping.Entry e : entries) {
-      JSONObject entry = new JSONObject();
-      entry.put("entry_no", e.entryNo);
-      entry.put("dateacct", e.dateacct);
-      entry.put("document_type", e.documentType);
-      entry.put("docbasetype", e.docbasetype);
-      // document_type is Etendo's own ad_ref_list name for docbasetype, and that reference has no
-      // return variant: a vendor return is MMR and a customer return is MMS, like a regular receipt
-      // or shipment. isreturn is what tells them apart. The SPA's printed "Detail" label goes
-      // further (report-i18n.js relabels a few docbasetypes); that dictionary is deliberately not
-      // copied here, so a caller reads the DB name plus these two codes instead.
-      entry.put("isreturn", e.isReturn);
-      entry.put("doc_window", e.docWindow == null ? "" : e.docWindow);
-      entry.put("doc_record_id", e.docRecordId == null ? "" : e.docRecordId);
-      entry.put("doc_query_key", e.docQueryKey == null ? "" : e.docQueryKey);
-      entry.put("doc_query_value", e.docQueryValue == null ? "" : e.docQueryValue);
-      entry.put("record_id", e.recordId);
-      entry.put("ad_table_id", e.adTableId);
-      if (showEntryDescription) {
-        entry.put("entry_description", e.entryDescription);
-      }
-
-      JSONArray lines = new JSONArray();
-      for (JournalEntriesGrouping.Line line : e.lines) {
-        JSONObject l = new JSONObject();
-        l.put("account_no", line.accountNo);
-        l.put("account_name", line.accountName);
-        l.put("amtacctdr", line.amtacctdr);
-        l.put("amtacctcr", line.amtacctcr);
-        if (showDimensions) {
-          l.put("bpname", line.bpname == null ? "" : line.bpname);
-          l.put("productname", line.productname == null ? "" : line.productname);
-          l.put("projectname", line.projectname == null ? "" : line.projectname);
-          l.put("costcentername", line.costcentername == null ? "" : line.costcentername);
-        }
-        lines.put(l);
-      }
-      entry.put("lines", lines);
-
-      data.put(entry);
+      data.put(buildEntryJson(e, showDimensions, showEntryDescription));
     }
     return data;
   }
 
-  private static JSONObject buildMeta(LocalDate dateFrom, LocalDate dateTo, String orgId,
-      String acctSchemaId, int limit, boolean truncated, long totalEntries, String fromAccountId,
-      String toAccountId, List<String> bPartnerIds, List<String> productIds,
-      List<String> projectIds, List<String> costCenterIds) throws Exception {
+  private static JSONObject buildEntryJson(JournalEntriesGrouping.Entry e, boolean showDimensions,
+      boolean showEntryDescription) throws Exception {
+    JSONObject entry = new JSONObject();
+    entry.put("entry_no", e.entryNo);
+    entry.put("dateacct", e.dateacct);
+    entry.put("document_type", e.documentType);
+    entry.put("docbasetype", e.docbasetype);
+    // document_type is Etendo's own ad_ref_list name for docbasetype, and that reference has no
+    // return variant: a vendor return is MMR and a customer return is MMS, like a regular receipt
+    // or shipment. isreturn is what tells them apart. The SPA's printed "Detail" label goes
+    // further (report-i18n.js relabels a few docbasetypes); that dictionary is deliberately not
+    // copied here, so a caller reads the DB name plus these two codes instead.
+    entry.put("isreturn", e.isReturn);
+    entry.put("doc_window", orEmpty(e.docWindow));
+    entry.put("doc_record_id", orEmpty(e.docRecordId));
+    entry.put("doc_query_key", orEmpty(e.docQueryKey));
+    entry.put("doc_query_value", orEmpty(e.docQueryValue));
+    entry.put("record_id", e.recordId);
+    entry.put("ad_table_id", e.adTableId);
+    if (showEntryDescription) {
+      entry.put("entry_description", e.entryDescription);
+    }
+
+    JSONArray lines = new JSONArray();
+    for (JournalEntriesGrouping.Line line : e.lines) {
+      lines.put(buildLineJson(line, showDimensions));
+    }
+    entry.put("lines", lines);
+    return entry;
+  }
+
+  private static JSONObject buildLineJson(JournalEntriesGrouping.Line line, boolean showDimensions)
+      throws Exception {
+    JSONObject l = new JSONObject();
+    l.put("account_no", line.accountNo);
+    l.put("account_name", line.accountName);
+    l.put("amtacctdr", line.amtacctdr);
+    l.put("amtacctcr", line.amtacctcr);
+    if (showDimensions) {
+      l.put("bpname", orEmpty(line.bpname));
+      l.put("productname", orEmpty(line.productname));
+      l.put("projectname", orEmpty(line.projectname));
+      l.put("costcentername", orEmpty(line.costcentername));
+    }
+    return l;
+  }
+
+  private static String orEmpty(String s) {
+    return s == null ? "" : s;
+  }
+
+  private static JSONObject buildMeta(Filters f, int limit, boolean truncated, long totalEntries)
+      throws Exception {
     JSONObject meta = new JSONObject();
-    meta.put(PARAM_DATE_FROM, dateFrom.format(DATE_FORMATTER));
-    meta.put(PARAM_DATE_TO, dateTo.format(DATE_FORMATTER));
-    meta.put(PARAM_ORG_ID, orgId);
-    meta.put(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
+    meta.put(PARAM_DATE_FROM, f.dateFrom.format(DATE_FORMATTER));
+    meta.put(PARAM_DATE_TO, f.dateTo.format(DATE_FORMATTER));
+    meta.put(PARAM_ORG_ID, f.orgId);
+    meta.put(PARAM_ACCT_SCHEMA_ID, f.acctSchemaId);
     meta.put(PARAM_LIMIT, limit);
     meta.put("truncated", truncated);
     meta.put("totalEntries", totalEntries);
@@ -888,12 +1053,12 @@ public class JournalEntriesReportHandler implements NeoHandler {
           + "returned. Narrow dateFrom/dateTo, or filter by account/bPartner/product/project/"
           + "costCenter, to see the rest.");
     }
-    meta.put(PARAM_FROM_ACCOUNT_ID, fromAccountId);
-    meta.put(PARAM_TO_ACCOUNT_ID, toAccountId);
-    meta.put(PARAM_BPARTNER_ID, String.join(",", bPartnerIds));
-    meta.put(PARAM_PRODUCT_ID, String.join(",", productIds));
-    meta.put(PARAM_PROJECT_ID, String.join(",", projectIds));
-    meta.put(PARAM_COST_CENTER_ID, String.join(",", costCenterIds));
+    meta.put(PARAM_FROM_ACCOUNT_ID, f.fromAccountId);
+    meta.put(PARAM_TO_ACCOUNT_ID, f.toAccountId);
+    meta.put(PARAM_BPARTNER_ID, String.join(",", f.bPartnerIds));
+    meta.put(PARAM_PRODUCT_ID, String.join(",", f.productIds));
+    meta.put(PARAM_PROJECT_ID, String.join(",", f.projectIds));
+    meta.put(PARAM_COST_CENTER_ID, String.join(",", f.costCenterIds));
     return meta;
   }
 

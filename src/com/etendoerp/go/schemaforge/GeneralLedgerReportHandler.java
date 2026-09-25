@@ -122,6 +122,8 @@ public class GeneralLedgerReportHandler implements NeoHandler {
   /** Etendo ids are either a legacy numeric string or a 32-char hex/alnum id — never blank, never whitespace. */
   private static final Pattern ID_SHAPE = Pattern.compile("^[0-9A-Za-z]{1,32}$");
 
+  /** Native-query bind name for the client id — not a report-facing parameter (unlike the PARAM_* below). */
+  private static final String SQL_PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_DATE_FROM = "dateFrom";
   private static final String PARAM_DATE_TO = "dateTo";
   private static final String PARAM_ORG_ID = "orgId";
@@ -302,47 +304,31 @@ public class GeneralLedgerReportHandler implements NeoHandler {
 
       // Pure input checks run before anything touches OBContext or the database.
       int accountLimit = body.optInt(PARAM_ACCOUNT_LIMIT, DEFAULT_ACCOUNT_LIMIT);
-      if (accountLimit <= 0) {
-        return actionableError(400, "account_limit_invalid",
-            "accountLimit must be a positive integer.",
-            "Pass a positive number of accounts, or omit accountLimit to use the default ("
-                + DEFAULT_ACCOUNT_LIMIT + ").");
+      NeoResponse accountLimitError = validateAccountLimit(accountLimit);
+      if (accountLimitError != null) {
+        return accountLimitError;
       }
       accountLimit = Math.min(accountLimit, MAX_ACCOUNT_LIMIT);
 
       int linesPerAccountLimit = body.optInt(PARAM_LINES_PER_ACCOUNT_LIMIT,
           DEFAULT_LINES_PER_ACCOUNT_LIMIT);
-      if (linesPerAccountLimit <= 0) {
-        return actionableError(400, "lines_per_account_limit_invalid",
-            "linesPerAccountLimit must be a positive integer.",
-            "Pass a positive number of lines, or omit linesPerAccountLimit to use the default ("
-                + DEFAULT_LINES_PER_ACCOUNT_LIMIT + ").");
+      NeoResponse linesPerAccountLimitError = validateLinesPerAccountLimit(linesPerAccountLimit);
+      if (linesPerAccountLimitError != null) {
+        return linesPerAccountLimitError;
       }
       linesPerAccountLimit = Math.min(linesPerAccountLimit, MAX_LINES_PER_ACCOUNT_LIMIT);
 
       String groupBy = body.optString(PARAM_GROUP_BY, "");
-      String dimensionField = null;
-      if (!groupBy.isEmpty()) {
-        dimensionField = GROUP_BY_FIELDS.get(groupBy);
-        if (dimensionField == null) {
-          return actionableError(400, "group_by_invalid",
-              "groupBy '" + groupBy + "' is not a recognized grouping dimension.",
-              "Pass one of " + GROUP_BY_FIELDS.keySet() + ", or omit groupBy for a flat report.");
-        }
+      NeoResponse groupByError = validateGroupBy(groupBy);
+      if (groupByError != null) {
+        return groupByError;
       }
+      String dimensionField = groupBy.isEmpty() ? null : GROUP_BY_FIELDS.get(groupBy);
 
       String orgId = resolveOrgId(body);
-      if (!orgId.isEmpty() && !isValidId(orgId)) {
-        return actionableError(400, "org_id_invalid",
-            "orgId '" + orgId + "' does not look like a valid Etendo organization id.",
-            "Pass a real C_Organization id, or omit orgId to use the session's organization, or "
-                + "pass an empty string to report on every organization.");
-      }
-      if (!orgId.isEmpty() && OBDal.getInstance().get(Organization.class, orgId) == null) {
-        return actionableError(400, "organization_not_resolved",
-            "Could not resolve organization " + orgId + " for the general ledger report.",
-            "Pass a valid orgId (a C_Organization id readable by your role), an empty string for "
-                + "every organization, or omit it to use the session's current organization.");
+      NeoResponse orgIdError = validateOrgId(orgId);
+      if (orgIdError != null) {
+        return orgIdError;
       }
 
       String acctSchemaId = resolveAcctSchemaId(body, orgId);
@@ -366,8 +352,19 @@ public class GeneralLedgerReportHandler implements NeoHandler {
 
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
 
-      Filters filters = new Filters(clientId, orgId, acctSchemaId, dateFrom, dateTo, bPartnerIds,
-          productIds, projectIds, costCenterIds, fromAccountId, toAccountId);
+      Filters filters = Filters.builder()
+          .clientId(clientId)
+          .orgId(orgId)
+          .acctSchemaId(acctSchemaId)
+          .dateFrom(dateFrom)
+          .dateTo(dateTo)
+          .bPartnerIds(bPartnerIds)
+          .productIds(productIds)
+          .projectIds(projectIds)
+          .costCenterIds(costCenterIds)
+          .fromAccountId(fromAccountId)
+          .toAccountId(toAccountId)
+          .build();
 
       List<GeneralLedgerGrouping.Row> lineRows = buildLineRows(filters, accountLimit,
           linesPerAccountLimit);
@@ -389,9 +386,8 @@ public class GeneralLedgerReportHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", data);
       responseData.put("count", accountsReturned);
-      responseData.put("meta", buildMeta(dateFrom, dateTo, orgId, acctSchemaId, accountLimit,
-          linesPerAccountLimit, truncatedAccounts, totalAccounts, accountsReturned, groupBy,
-          fromAccountId, toAccountId, bPartnerIds, productIds, projectIds, costCenterIds));
+      responseData.put("meta", buildMeta(filters, new ResponseMeta(accountLimit,
+          linesPerAccountLimit, truncatedAccounts, totalAccounts, accountsReturned, groupBy)));
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -443,6 +439,57 @@ public class GeneralLedgerReportHandler implements NeoHandler {
     return id != null && ID_SHAPE.matcher(id).matches();
   }
 
+  private static NeoResponse validateAccountLimit(int accountLimit) {
+    if (accountLimit <= 0) {
+      return actionableError(400, "account_limit_invalid",
+          "accountLimit must be a positive integer.",
+          "Pass a positive number of accounts, or omit accountLimit to use the default ("
+              + DEFAULT_ACCOUNT_LIMIT + ").");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateLinesPerAccountLimit(int linesPerAccountLimit) {
+    if (linesPerAccountLimit <= 0) {
+      return actionableError(400, "lines_per_account_limit_invalid",
+          "linesPerAccountLimit must be a positive integer.",
+          "Pass a positive number of lines, or omit linesPerAccountLimit to use the default ("
+              + DEFAULT_LINES_PER_ACCOUNT_LIMIT + ").");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateGroupBy(String groupBy) {
+    if (groupBy.isEmpty()) {
+      return null;
+    }
+    if (!GROUP_BY_FIELDS.containsKey(groupBy)) {
+      return actionableError(400, "group_by_invalid",
+          "groupBy '" + groupBy + "' is not a recognized grouping dimension.",
+          "Pass one of " + GROUP_BY_FIELDS.keySet() + ", or omit groupBy for a flat report.");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateOrgId(String orgId) {
+    if (orgId.isEmpty()) {
+      return null;
+    }
+    if (!isValidId(orgId)) {
+      return actionableError(400, "org_id_invalid",
+          "orgId '" + orgId + "' does not look like a valid Etendo organization id.",
+          "Pass a real C_Organization id, or omit orgId to use the session's organization, or "
+              + "pass an empty string to report on every organization.");
+    }
+    if (OBDal.getInstance().get(Organization.class, orgId) == null) {
+      return actionableError(400, "organization_not_resolved",
+          "Could not resolve organization " + orgId + " for the general ledger report.",
+          "Pass a valid orgId (a C_Organization id readable by your role), an empty string for "
+              + "every organization, or omit it to use the session's current organization.");
+    }
+    return null;
+  }
+
   // -------------------------------------------------------------------------
   // Parameter resolution
   // -------------------------------------------------------------------------
@@ -480,9 +527,9 @@ public class GeneralLedgerReportHandler implements NeoHandler {
         }
         org.openbravo.dal.service.OBQuery<AcctSchema> query =
             OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
-        query.setNamedParameter("clientId", clientId);
+        query.setNamedParameter(SQL_PARAM_CLIENT_ID, clientId);
         if (!orgId.isEmpty()) {
-          query.setNamedParameter("orgId", orgId);
+          query.setNamedParameter(PARAM_ORG_ID, orgId);
         }
         query.setMaxResult(1);
         schema = query.uniqueResult();
@@ -537,21 +584,96 @@ public class GeneralLedgerReportHandler implements NeoHandler {
     final String fromAccountId;
     final String toAccountId;
 
-    Filters(String clientId, String orgId, String acctSchemaId, LocalDate dateFrom,
-        LocalDate dateTo, List<String> bPartnerIds, List<String> productIds,
-        List<String> projectIds, List<String> costCenterIds, String fromAccountId,
-        String toAccountId) {
-      this.clientId = clientId;
-      this.orgId = orgId;
-      this.acctSchemaId = acctSchemaId;
-      this.dateFrom = dateFrom;
-      this.dateTo = dateTo;
-      this.bPartnerIds = bPartnerIds;
-      this.productIds = productIds;
-      this.projectIds = projectIds;
-      this.costCenterIds = costCenterIds;
-      this.fromAccountId = fromAccountId;
-      this.toAccountId = toAccountId;
+    private Filters(Builder b) {
+      this.clientId = b.clientId;
+      this.orgId = b.orgId;
+      this.acctSchemaId = b.acctSchemaId;
+      this.dateFrom = b.dateFrom;
+      this.dateTo = b.dateTo;
+      this.bPartnerIds = b.bPartnerIds;
+      this.productIds = b.productIds;
+      this.projectIds = b.projectIds;
+      this.costCenterIds = b.costCenterIds;
+      this.fromAccountId = b.fromAccountId;
+      this.toAccountId = b.toAccountId;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link Filters} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String clientId;
+      private String orgId;
+      private String acctSchemaId;
+      private LocalDate dateFrom;
+      private LocalDate dateTo;
+      private List<String> bPartnerIds;
+      private List<String> productIds;
+      private List<String> projectIds;
+      private List<String> costCenterIds;
+      private String fromAccountId;
+      private String toAccountId;
+
+      Builder clientId(String v) {
+        this.clientId = v;
+        return this;
+      }
+
+      Builder orgId(String v) {
+        this.orgId = v;
+        return this;
+      }
+
+      Builder acctSchemaId(String v) {
+        this.acctSchemaId = v;
+        return this;
+      }
+
+      Builder dateFrom(LocalDate v) {
+        this.dateFrom = v;
+        return this;
+      }
+
+      Builder dateTo(LocalDate v) {
+        this.dateTo = v;
+        return this;
+      }
+
+      Builder bPartnerIds(List<String> v) {
+        this.bPartnerIds = v;
+        return this;
+      }
+
+      Builder productIds(List<String> v) {
+        this.productIds = v;
+        return this;
+      }
+
+      Builder projectIds(List<String> v) {
+        this.projectIds = v;
+        return this;
+      }
+
+      Builder costCenterIds(List<String> v) {
+        this.costCenterIds = v;
+        return this;
+      }
+
+      Builder fromAccountId(String v) {
+        this.fromAccountId = v;
+        return this;
+      }
+
+      Builder toAccountId(String v) {
+        this.toAccountId = v;
+        return this;
+      }
+
+      Filters build() {
+        return new Filters(this);
+      }
     }
 
     /** Appends the shared WHERE clauses common to the main, totals and count queries. */
@@ -580,10 +702,10 @@ public class GeneralLedgerReportHandler implements NeoHandler {
     }
 
     void bindCommon(NativeQuery<?> query) {
-      query.setParameter("clientId", clientId);
-      query.setParameter("acctSchemaId", acctSchemaId);
+      query.setParameter(SQL_PARAM_CLIENT_ID, clientId);
+      query.setParameter(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
       if (!orgId.isEmpty()) {
-        query.setParameter("orgId", orgId);
+        query.setParameter(PARAM_ORG_ID, orgId);
       }
       if (!bPartnerIds.isEmpty()) {
         query.setParameterList("bPartnerIds", bPartnerIds);
@@ -598,10 +720,10 @@ public class GeneralLedgerReportHandler implements NeoHandler {
         query.setParameterList("costCenterIds", costCenterIds);
       }
       if (!fromAccountId.isEmpty()) {
-        query.setParameter("fromAccountId", fromAccountId);
+        query.setParameter(PARAM_FROM_ACCOUNT_ID, fromAccountId);
       }
       if (!toAccountId.isEmpty()) {
-        query.setParameter("toAccountId", toAccountId);
+        query.setParameter(PARAM_TO_ACCOUNT_ID, toAccountId);
       }
     }
   }
@@ -671,18 +793,27 @@ public class GeneralLedgerReportHandler implements NeoHandler {
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
     f.bindCommon(query);
-    query.setParameter("dateFrom", Date.valueOf(f.dateFrom));
-    query.setParameter("dateTo", Date.valueOf(f.dateTo));
-    query.setParameter("accountLimit", (long) accountLimit);
-    query.setParameter("linesPerAccountLimit", (long) linesPerAccountLimit);
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(f.dateFrom));
+    query.setParameter(PARAM_DATE_TO, Date.valueOf(f.dateTo));
+    query.setParameter(PARAM_ACCOUNT_LIMIT, (long) accountLimit);
+    query.setParameter(PARAM_LINES_PER_ACCOUNT_LIMIT, (long) linesPerAccountLimit);
 
     List<GeneralLedgerGrouping.Row> rows = new ArrayList<>();
     for (Object[] r : query.list()) {
-      rows.add(new GeneralLedgerGrouping.Row(str(r[COL_ACCOUNT_NO]), str(r[COL_ACCOUNT_ID]),
-          str(r[COL_ACCOUNT_NAME]), toIsoDate(r[COL_DATEACCT]), str(r[COL_FACT_ACCT_GROUP_ID]),
-          str(r[COL_GROUPBYNAME]), toBigDecimal(r[COL_AMTACCTDR]), toBigDecimal(r[COL_AMTACCTCR]),
-          str(r[COL_BPNAME]), str(r[COL_PRODUCTNAME]), str(r[COL_PROJECTNAME]),
-          str(r[COL_COSTCENTERNAME])));
+      rows.add(GeneralLedgerGrouping.Row.builder()
+          .accountNo(str(r[COL_ACCOUNT_NO]))
+          .accountId(str(r[COL_ACCOUNT_ID]))
+          .accountName(str(r[COL_ACCOUNT_NAME]))
+          .dateacct(toIsoDate(r[COL_DATEACCT]))
+          .factAcctGroupId(str(r[COL_FACT_ACCT_GROUP_ID]))
+          .groupbyname(str(r[COL_GROUPBYNAME]))
+          .amtacctdr(toBigDecimal(r[COL_AMTACCTDR]))
+          .amtacctcr(toBigDecimal(r[COL_AMTACCTCR]))
+          .bpname(str(r[COL_BPNAME]))
+          .productname(str(r[COL_PRODUCTNAME]))
+          .projectname(str(r[COL_PROJECTNAME]))
+          .costcentername(str(r[COL_COSTCENTERNAME]))
+          .build());
     }
     return rows;
   }
@@ -740,14 +871,22 @@ public class GeneralLedgerReportHandler implements NeoHandler {
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
     f.bindCommon(query);
-    query.setParameter("dateFrom", Date.valueOf(f.dateFrom));
-    query.setParameter("dateTo", Date.valueOf(f.dateTo));
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(f.dateFrom));
+    query.setParameter(PARAM_DATE_TO, Date.valueOf(f.dateTo));
     query.setParameterList("accountValues", accountValues);
 
     List<GeneralLedgerGrouping.AccountTotal> totals = new ArrayList<>();
     for (Object[] r : query.list()) {
-      totals.add(new GeneralLedgerGrouping.AccountTotal(str(r[0]), str(r[1]), str(r[2]), str(r[3]),
-          str(r[4]), toBigDecimal(r[5]), toBigDecimal(r[6]), toLong(r[7])));
+      totals.add(GeneralLedgerGrouping.AccountTotal.builder()
+          .accountNo(str(r[0]))
+          .bpname(str(r[1]))
+          .productname(str(r[2]))
+          .projectname(str(r[3]))
+          .costcentername(str(r[4]))
+          .amtacctdr(toBigDecimal(r[5]))
+          .amtacctcr(toBigDecimal(r[6]))
+          .lineCount(toLong(r[7]))
+          .build());
     }
     return totals;
   }
@@ -785,7 +924,7 @@ public class GeneralLedgerReportHandler implements NeoHandler {
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
     f.bindCommon(query);
-    query.setParameter("dateFrom", Date.valueOf(f.dateFrom));
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(f.dateFrom));
     query.setParameterList("accountValues", accountValues);
 
     List<GeneralLedgerGrouping.OpeningRow> rows = new ArrayList<>();
@@ -814,8 +953,8 @@ public class GeneralLedgerReportHandler implements NeoHandler {
 
     NativeQuery<Number> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
     f.bindCommon(query);
-    query.setParameter("dateFrom", Date.valueOf(f.dateFrom));
-    query.setParameter("dateTo", Date.valueOf(f.dateTo));
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(f.dateFrom));
+    query.setParameter(PARAM_DATE_TO, Date.valueOf(f.dateTo));
 
     Number result = query.uniqueResult();
     return result == null ? 0L : result.longValue();
@@ -846,28 +985,15 @@ public class GeneralLedgerReportHandler implements NeoHandler {
   private static JSONObject buildAccountJson(GeneralLedgerGrouping.Account a,
       boolean showDimensions, boolean showOpenBalances) throws Exception {
     JSONObject account = new JSONObject();
-    account.put("account_id", a.accountId == null ? "" : a.accountId);
-    account.put("value", a.value == null ? "" : a.value);
-    account.put("name", a.name == null ? "" : a.name);
+    account.put("account_id", orEmpty(a.accountId));
+    account.put("value", orEmpty(a.value));
+    account.put("name", orEmpty(a.name));
     if (showOpenBalances) {
       account.put("opening", amountsJson(a.opening));
     }
     JSONArray lines = new JSONArray();
     for (GeneralLedgerGrouping.Line line : a.lines) {
-      JSONObject l = new JSONObject();
-      l.put("dateacct", line.dateacct);
-      l.put("fact_acct_group_id", line.factAcctGroupId);
-      l.put("groupbyname", line.groupbyname == null ? "" : line.groupbyname);
-      l.put("amtacctdr", line.amtacctdr);
-      l.put("amtacctcr", line.amtacctcr);
-      l.put("runningBalance", line.runningBalance);
-      if (showDimensions) {
-        l.put("bpname", line.bpname == null ? "" : line.bpname);
-        l.put("productname", line.productname == null ? "" : line.productname);
-        l.put("projectname", line.projectname == null ? "" : line.projectname);
-        l.put("costcentername", line.costcentername == null ? "" : line.costcentername);
-      }
-      lines.put(l);
+      lines.put(buildLineJson(line, showDimensions));
     }
     account.put("lines", lines);
     // Period movements only (opening excluded), from the uncapped SQL aggregate — so it stays
@@ -879,6 +1005,28 @@ public class GeneralLedgerReportHandler implements NeoHandler {
     return account;
   }
 
+  private static JSONObject buildLineJson(GeneralLedgerGrouping.Line line, boolean showDimensions)
+      throws Exception {
+    JSONObject l = new JSONObject();
+    l.put("dateacct", line.dateacct);
+    l.put("fact_acct_group_id", line.factAcctGroupId);
+    l.put("groupbyname", orEmpty(line.groupbyname));
+    l.put("amtacctdr", line.amtacctdr);
+    l.put("amtacctcr", line.amtacctcr);
+    l.put("runningBalance", line.runningBalance);
+    if (showDimensions) {
+      l.put("bpname", orEmpty(line.bpname));
+      l.put("productname", orEmpty(line.productname));
+      l.put("projectname", orEmpty(line.projectname));
+      l.put("costcentername", orEmpty(line.costcentername));
+    }
+    return l;
+  }
+
+  private static String orEmpty(String s) {
+    return s == null ? "" : s;
+  }
+
   private static JSONObject amountsJson(GeneralLedgerGrouping.Amounts amounts) throws Exception {
     JSONObject o = new JSONObject();
     o.put("amtacctdr", amounts.amtacctdr);
@@ -887,34 +1035,55 @@ public class GeneralLedgerReportHandler implements NeoHandler {
     return o;
   }
 
-  private static JSONObject buildMeta(LocalDate dateFrom, LocalDate dateTo, String orgId,
-      String acctSchemaId, int accountLimit, int linesPerAccountLimit, boolean truncatedAccounts,
-      long totalAccounts, int accountsReturned, String groupBy, String fromAccountId,
-      String toAccountId, List<String> bPartnerIds, List<String> productIds,
-      List<String> projectIds, List<String> costCenterIds) throws Exception {
-    JSONObject meta = new JSONObject();
-    meta.put(PARAM_DATE_FROM, dateFrom.format(DATE_FORMATTER));
-    meta.put(PARAM_DATE_TO, dateTo.format(DATE_FORMATTER));
-    meta.put(PARAM_ORG_ID, orgId);
-    meta.put(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
-    meta.put(PARAM_ACCOUNT_LIMIT, accountLimit);
-    meta.put(PARAM_LINES_PER_ACCOUNT_LIMIT, linesPerAccountLimit);
-    meta.put("truncatedAccounts", truncatedAccounts);
-    meta.put("totalAccounts", totalAccounts);
-    meta.put("accountsReturned", accountsReturned);
-    if (truncatedAccounts) {
-      meta.put("hint", "Only the first " + accountsReturned + " of " + totalAccounts + " accounts "
-          + "were returned. Narrow fromAccountId/toAccountId, or filter by bPartner/product/"
-          + "project/costCenter, to see the rest. Check each account's own linesTruncated/"
-          + "totalLines too — a single very active account can be truncated independently.");
+  /**
+   * The response-summary fields {@link #buildMeta} needs beyond what {@link Filters} already
+   * carries — kept as its own small holder (6 fields, under the java:S107 threshold on its own)
+   * so {@code buildMeta} itself only takes {@code (Filters, ResponseMeta)}.
+   */
+  private static final class ResponseMeta {
+    final int accountLimit;
+    final int linesPerAccountLimit;
+    final boolean truncatedAccounts;
+    final long totalAccounts;
+    final int accountsReturned;
+    final String groupBy;
+
+    ResponseMeta(int accountLimit, int linesPerAccountLimit, boolean truncatedAccounts,
+        long totalAccounts, int accountsReturned, String groupBy) {
+      this.accountLimit = accountLimit;
+      this.linesPerAccountLimit = linesPerAccountLimit;
+      this.truncatedAccounts = truncatedAccounts;
+      this.totalAccounts = totalAccounts;
+      this.accountsReturned = accountsReturned;
+      this.groupBy = groupBy;
     }
-    meta.put(PARAM_GROUP_BY, groupBy);
-    meta.put(PARAM_FROM_ACCOUNT_ID, fromAccountId);
-    meta.put(PARAM_TO_ACCOUNT_ID, toAccountId);
-    meta.put(PARAM_BPARTNER_ID, String.join(",", bPartnerIds));
-    meta.put(PARAM_PRODUCT_ID, String.join(",", productIds));
-    meta.put(PARAM_PROJECT_ID, String.join(",", projectIds));
-    meta.put(PARAM_COST_CENTER_ID, String.join(",", costCenterIds));
+  }
+
+  private static JSONObject buildMeta(Filters f, ResponseMeta rm) throws Exception {
+    JSONObject meta = new JSONObject();
+    meta.put(PARAM_DATE_FROM, f.dateFrom.format(DATE_FORMATTER));
+    meta.put(PARAM_DATE_TO, f.dateTo.format(DATE_FORMATTER));
+    meta.put(PARAM_ORG_ID, f.orgId);
+    meta.put(PARAM_ACCT_SCHEMA_ID, f.acctSchemaId);
+    meta.put(PARAM_ACCOUNT_LIMIT, rm.accountLimit);
+    meta.put(PARAM_LINES_PER_ACCOUNT_LIMIT, rm.linesPerAccountLimit);
+    meta.put("truncatedAccounts", rm.truncatedAccounts);
+    meta.put("totalAccounts", rm.totalAccounts);
+    meta.put("accountsReturned", rm.accountsReturned);
+    if (rm.truncatedAccounts) {
+      meta.put("hint", "Only the first " + rm.accountsReturned + " of " + rm.totalAccounts
+          + " accounts were returned. Narrow fromAccountId/toAccountId, or filter by bPartner/"
+          + "product/project/costCenter, to see the rest. Check each account's own "
+          + "linesTruncated/totalLines too — a single very active account can be truncated "
+          + "independently.");
+    }
+    meta.put(PARAM_GROUP_BY, rm.groupBy);
+    meta.put(PARAM_FROM_ACCOUNT_ID, f.fromAccountId);
+    meta.put(PARAM_TO_ACCOUNT_ID, f.toAccountId);
+    meta.put(PARAM_BPARTNER_ID, String.join(",", f.bPartnerIds));
+    meta.put(PARAM_PRODUCT_ID, String.join(",", f.productIds));
+    meta.put(PARAM_PROJECT_ID, String.join(",", f.projectIds));
+    meta.put(PARAM_COST_CENTER_ID, String.join(",", f.costCenterIds));
     return meta;
   }
 

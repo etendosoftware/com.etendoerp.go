@@ -398,9 +398,30 @@ class GeneralLedgerReportHandlerTest {
 
   private static GeneralLedgerGrouping.Row row(String accountNo, String accountName,
       String dateacct, String factAcctGroupId, String debit, String credit) {
-    return new GeneralLedgerGrouping.Row(accountNo, "acct-id-" + accountNo, accountName, dateacct,
-        factAcctGroupId, "Some movement", new BigDecimal(debit), new BigDecimal(credit), "Acme",
-        "Widget", "Proj A", "CC1");
+    return GeneralLedgerGrouping.Row.builder()
+        .accountNo(accountNo)
+        .accountId("acct-id-" + accountNo)
+        .accountName(accountName)
+        .dateacct(dateacct)
+        .factAcctGroupId(factAcctGroupId)
+        .groupbyname("Some movement")
+        .amtacctdr(new BigDecimal(debit))
+        .amtacctcr(new BigDecimal(credit))
+        .bpname("Acme")
+        .productname("Widget")
+        .projectname("Proj A")
+        .costcentername("CC1")
+        .build();
+  }
+
+  private static GeneralLedgerGrouping.AccountTotal accountTotal430(BigDecimal debit,
+      BigDecimal credit, long lineCount) {
+    return GeneralLedgerGrouping.AccountTotal.builder()
+        .accountNo("430")
+        .amtacctdr(debit)
+        .amtacctcr(credit)
+        .lineCount(lineCount)
+        .build();
   }
 
   @Test
@@ -410,7 +431,7 @@ class GeneralLedgerReportHandlerTest {
         row("430", "Customers", "2026-01-05", "grp-1", "100", "0"),
         row("430", "Customers", "2026-01-06", "grp-2", "0", "40"));
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
-        new GeneralLedgerGrouping.AccountTotal("430", null, null, null, null, new BigDecimal("100"), new BigDecimal("40"), 2));
+        accountTotal430(new BigDecimal("100"), new BigDecimal("40"), 2));
     List<GeneralLedgerGrouping.Group> groups =
         GeneralLedgerGrouping.nest(rows, null, List.of(), totals);
 
@@ -452,8 +473,7 @@ class GeneralLedgerReportHandlerTest {
         new GeneralLedgerGrouping.OpeningRow("430", null, null, null, null,
             new BigDecimal("500"), new BigDecimal("200")));
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
-        new GeneralLedgerGrouping.AccountTotal("430", null, null, null, null,
-            new BigDecimal("1000"), new BigDecimal("300"), 5));
+        accountTotal430(new BigDecimal("1000"), new BigDecimal("300"), 5));
     List<GeneralLedgerGrouping.Group> groups =
         GeneralLedgerGrouping.nest(rows, null, openingRows, totals);
 
@@ -491,7 +511,7 @@ class GeneralLedgerReportHandlerTest {
     List<GeneralLedgerGrouping.Row> rows = List.of(
         row("430", "Customers", "2026-01-05", "grp-1", "100", "0"));
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
-        new GeneralLedgerGrouping.AccountTotal("430", null, null, null, null, new BigDecimal("100"), BigDecimal.ZERO, 1));
+        accountTotal430(new BigDecimal("100"), BigDecimal.ZERO, 1));
     List<GeneralLedgerGrouping.Group> groups =
         GeneralLedgerGrouping.nest(rows, null, List.of(), totals);
 
@@ -507,7 +527,7 @@ class GeneralLedgerReportHandlerTest {
     List<GeneralLedgerGrouping.Row> rows = List.of(
         row("430", "Customers", "2026-01-05", "grp-1", "100", "0"));
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
-        new GeneralLedgerGrouping.AccountTotal("430", null, null, null, null, new BigDecimal("100"), BigDecimal.ZERO, 1));
+        accountTotal430(new BigDecimal("100"), BigDecimal.ZERO, 1));
     List<GeneralLedgerGrouping.Group> groups =
         GeneralLedgerGrouping.nest(rows, null, List.of(), totals);
 
@@ -527,7 +547,7 @@ class GeneralLedgerReportHandlerTest {
     List<GeneralLedgerGrouping.Row> rows = List.of(
         row("430", "Customers", "2026-01-05", "grp-1", "100", "0"));
     List<GeneralLedgerGrouping.AccountTotal> totals = List.of(
-        new GeneralLedgerGrouping.AccountTotal("430", null, null, null, null, new BigDecimal("100"), BigDecimal.ZERO, 1));
+        accountTotal430(new BigDecimal("100"), BigDecimal.ZERO, 1));
     List<GeneralLedgerGrouping.Group> groups =
         GeneralLedgerGrouping.nest(rows, null, List.of(), totals);
 

@@ -71,18 +71,82 @@ final class TrialBalanceFolding {
     final BigDecimal activityCredit;
     final BigDecimal closingBalance;
 
-    Row(String accountNo, String accountId, String accountName, String dimensionValue,
-        String dimensionId, BigDecimal openingBalance, BigDecimal activityDebit,
-        BigDecimal activityCredit, BigDecimal closingBalance) {
-      this.accountNo = accountNo;
-      this.accountId = accountId;
-      this.accountName = accountName;
-      this.dimensionValue = dimensionValue;
-      this.dimensionId = dimensionId;
-      this.openingBalance = openingBalance == null ? BigDecimal.ZERO : openingBalance;
-      this.activityDebit = activityDebit == null ? BigDecimal.ZERO : activityDebit;
-      this.activityCredit = activityCredit == null ? BigDecimal.ZERO : activityCredit;
-      this.closingBalance = closingBalance == null ? BigDecimal.ZERO : closingBalance;
+    private Row(Builder b) {
+      this.accountNo = b.accountNo;
+      this.accountId = b.accountId;
+      this.accountName = b.accountName;
+      this.dimensionValue = b.dimensionValue;
+      this.dimensionId = b.dimensionId;
+      this.openingBalance = b.openingBalance == null ? BigDecimal.ZERO : b.openingBalance;
+      this.activityDebit = b.activityDebit == null ? BigDecimal.ZERO : b.activityDebit;
+      this.activityCredit = b.activityCredit == null ? BigDecimal.ZERO : b.activityCredit;
+      this.closingBalance = b.closingBalance == null ? BigDecimal.ZERO : b.closingBalance;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link Row} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String accountNo;
+      private String accountId;
+      private String accountName;
+      private String dimensionValue;
+      private String dimensionId;
+      private BigDecimal openingBalance;
+      private BigDecimal activityDebit;
+      private BigDecimal activityCredit;
+      private BigDecimal closingBalance;
+
+      Builder accountNo(String v) {
+        this.accountNo = v;
+        return this;
+      }
+
+      Builder accountId(String v) {
+        this.accountId = v;
+        return this;
+      }
+
+      Builder accountName(String v) {
+        this.accountName = v;
+        return this;
+      }
+
+      Builder dimensionValue(String v) {
+        this.dimensionValue = v;
+        return this;
+      }
+
+      Builder dimensionId(String v) {
+        this.dimensionId = v;
+        return this;
+      }
+
+      Builder openingBalance(BigDecimal v) {
+        this.openingBalance = v;
+        return this;
+      }
+
+      Builder activityDebit(BigDecimal v) {
+        this.activityDebit = v;
+        return this;
+      }
+
+      Builder activityCredit(BigDecimal v) {
+        this.activityCredit = v;
+        return this;
+      }
+
+      Builder closingBalance(BigDecimal v) {
+        this.closingBalance = v;
+        return this;
+      }
+
+      Row build() {
+        return new Row(this);
+      }
     }
   }
 
@@ -98,18 +162,82 @@ final class TrialBalanceFolding {
     final BigDecimal activityCredit;
     final BigDecimal closingBalance;
 
-    FoldedRow(String accountNo, String accountId, String accountName, String dimensionValue,
-        String dimensionId, BigDecimal openingBalance, BigDecimal activityDebit,
-        BigDecimal activityCredit, BigDecimal closingBalance) {
-      this.accountNo = accountNo;
-      this.accountId = accountId;
-      this.accountName = accountName;
-      this.dimensionValue = dimensionValue;
-      this.dimensionId = dimensionId;
-      this.openingBalance = openingBalance;
-      this.activityDebit = activityDebit;
-      this.activityCredit = activityCredit;
-      this.closingBalance = closingBalance;
+    private FoldedRow(Builder b) {
+      this.accountNo = b.accountNo;
+      this.accountId = b.accountId;
+      this.accountName = b.accountName;
+      this.dimensionValue = b.dimensionValue;
+      this.dimensionId = b.dimensionId;
+      this.openingBalance = b.openingBalance;
+      this.activityDebit = b.activityDebit;
+      this.activityCredit = b.activityCredit;
+      this.closingBalance = b.closingBalance;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link FoldedRow} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String accountNo;
+      private String accountId;
+      private String accountName;
+      private String dimensionValue;
+      private String dimensionId;
+      private BigDecimal openingBalance;
+      private BigDecimal activityDebit;
+      private BigDecimal activityCredit;
+      private BigDecimal closingBalance;
+
+      Builder accountNo(String v) {
+        this.accountNo = v;
+        return this;
+      }
+
+      Builder accountId(String v) {
+        this.accountId = v;
+        return this;
+      }
+
+      Builder accountName(String v) {
+        this.accountName = v;
+        return this;
+      }
+
+      Builder dimensionValue(String v) {
+        this.dimensionValue = v;
+        return this;
+      }
+
+      Builder dimensionId(String v) {
+        this.dimensionId = v;
+        return this;
+      }
+
+      Builder openingBalance(BigDecimal v) {
+        this.openingBalance = v;
+        return this;
+      }
+
+      Builder activityDebit(BigDecimal v) {
+        this.activityDebit = v;
+        return this;
+      }
+
+      Builder activityCredit(BigDecimal v) {
+        this.activityCredit = v;
+        return this;
+      }
+
+      Builder closingBalance(BigDecimal v) {
+        this.closingBalance = v;
+        return this;
+      }
+
+      FoldedRow build() {
+        return new FoldedRow(this);
+      }
     }
   }
 
@@ -157,44 +285,72 @@ final class TrialBalanceFolding {
     Map<String, MutableAccumulator> folded = new LinkedHashMap<>();
     if (rows != null) {
       for (Row r : rows) {
-        String dimValue = grouped ? (r.dimensionValue == null ? "" : r.dimensionValue) : null;
-        String key = (grouped ? dimValue : "") + "\u0000" + safe(r.accountNo);
-        MutableAccumulator acc = folded.get(key);
-        if (acc == null) {
-          acc = new MutableAccumulator();
-          acc.accountNo = r.accountNo;
-          acc.accountId = r.accountId;
-          acc.accountName = r.accountName;
-          acc.dimensionValue = grouped ? dimValue : null;
-          acc.dimensionId = grouped ? r.dimensionId : null;
-          folded.put(key, acc);
-        }
-        acc.openingBalance = acc.openingBalance.add(r.openingBalance);
-        acc.activityDebit = acc.activityDebit.add(r.activityDebit);
-        acc.activityCredit = acc.activityCredit.add(r.activityCredit);
-        acc.closingBalance = acc.closingBalance.add(r.closingBalance);
+        accumulate(folded, r, grouped);
       }
     }
 
+    List<FoldedRow> result = toFoldedRows(folded);
+    result.sort(buildComparator(grouped));
+    return result;
+  }
+
+  /** Folds one input row into its accumulator, creating the accumulator on first sight of its key. */
+  private static void accumulate(Map<String, MutableAccumulator> folded, Row r, boolean grouped) {
+    String dimValue = null;
+    if (grouped) {
+      dimValue = r.dimensionValue == null ? "" : r.dimensionValue;
+    }
+    String key = (grouped ? dimValue : "") + "\u0000" + safe(r.accountNo);
+    MutableAccumulator acc = folded.get(key);
+    if (acc == null) {
+      acc = new MutableAccumulator();
+      acc.accountNo = r.accountNo;
+      acc.accountId = r.accountId;
+      acc.accountName = r.accountName;
+      acc.dimensionValue = grouped ? dimValue : null;
+      acc.dimensionId = grouped ? r.dimensionId : null;
+      folded.put(key, acc);
+    }
+    acc.openingBalance = acc.openingBalance.add(r.openingBalance);
+    acc.activityDebit = acc.activityDebit.add(r.activityDebit);
+    acc.activityCredit = acc.activityCredit.add(r.activityCredit);
+    acc.closingBalance = acc.closingBalance.add(r.closingBalance);
+  }
+
+  /** Converts every accumulator to an output row, dropping ones with no activity (see {@link #fold}). */
+  private static List<FoldedRow> toFoldedRows(Map<String, MutableAccumulator> folded) {
     List<FoldedRow> result = new ArrayList<>();
     for (MutableAccumulator acc : folded.values()) {
-      boolean hasActivity = acc.openingBalance.compareTo(BigDecimal.ZERO) != 0
-          || acc.activityDebit.compareTo(BigDecimal.ZERO) != 0
-          || acc.activityCredit.compareTo(BigDecimal.ZERO) != 0;
-      if (!hasActivity) {
+      if (!hasActivity(acc)) {
         continue;
       }
-      result.add(new FoldedRow(acc.accountNo, acc.accountId, acc.accountName, acc.dimensionValue,
-          acc.dimensionId, acc.openingBalance, acc.activityDebit, acc.activityCredit,
-          acc.closingBalance));
+      result.add(FoldedRow.builder()
+          .accountNo(acc.accountNo)
+          .accountId(acc.accountId)
+          .accountName(acc.accountName)
+          .dimensionValue(acc.dimensionValue)
+          .dimensionId(acc.dimensionId)
+          .openingBalance(acc.openingBalance)
+          .activityDebit(acc.activityDebit)
+          .activityCredit(acc.activityCredit)
+          .closingBalance(acc.closingBalance)
+          .build());
     }
+    return result;
+  }
 
+  private static boolean hasActivity(MutableAccumulator acc) {
+    return acc.openingBalance.compareTo(BigDecimal.ZERO) != 0
+        || acc.activityDebit.compareTo(BigDecimal.ZERO) != 0
+        || acc.activityCredit.compareTo(BigDecimal.ZERO) != 0;
+  }
+
+  private static Comparator<FoldedRow> buildComparator(boolean grouped) {
     Comparator<FoldedRow> byAccount = Comparator.comparing(r -> safe(r.accountNo).toLowerCase());
     if (grouped) {
       byAccount = byAccount.thenComparing(r -> safe(r.dimensionValue).toLowerCase());
     }
-    result.sort(byAccount);
-    return result;
+    return byAccount;
   }
 
   private static String safe(String s) {

@@ -77,32 +77,166 @@ final class JournalEntriesGrouping {
     final BigDecimal amtacctdr;
     final BigDecimal amtacctcr;
 
-    Row(String dateacct, long entryNo, String documentType, String docbasetype, boolean isReturn,
-        String docWindow, String docRecordId, String docQueryKey, String docQueryValue,
-        String entryDescription, String bpname, String productname, String projectname,
-        String costcentername, String factAcctGroupId, String recordId, String adTableId,
-        String accountNo, String accountName, BigDecimal amtacctdr, BigDecimal amtacctcr) {
-      this.dateacct = dateacct;
-      this.entryNo = entryNo;
-      this.documentType = documentType;
-      this.docbasetype = docbasetype;
-      this.isReturn = isReturn;
-      this.docWindow = docWindow;
-      this.docRecordId = docRecordId;
-      this.docQueryKey = docQueryKey;
-      this.docQueryValue = docQueryValue;
-      this.entryDescription = entryDescription;
-      this.bpname = bpname;
-      this.productname = productname;
-      this.projectname = projectname;
-      this.costcentername = costcentername;
-      this.factAcctGroupId = factAcctGroupId;
-      this.recordId = recordId;
-      this.adTableId = adTableId;
-      this.accountNo = accountNo;
-      this.accountName = accountName;
-      this.amtacctdr = amtacctdr == null ? BigDecimal.ZERO : amtacctdr;
-      this.amtacctcr = amtacctcr == null ? BigDecimal.ZERO : amtacctcr;
+    private Row(Builder b) {
+      this.dateacct = b.dateacct;
+      this.entryNo = b.entryNo;
+      this.documentType = b.documentType;
+      this.docbasetype = b.docbasetype;
+      this.isReturn = b.isReturn;
+      this.docWindow = b.docWindow;
+      this.docRecordId = b.docRecordId;
+      this.docQueryKey = b.docQueryKey;
+      this.docQueryValue = b.docQueryValue;
+      this.entryDescription = b.entryDescription;
+      this.bpname = b.bpname;
+      this.productname = b.productname;
+      this.projectname = b.projectname;
+      this.costcentername = b.costcentername;
+      this.factAcctGroupId = b.factAcctGroupId;
+      this.recordId = b.recordId;
+      this.adTableId = b.adTableId;
+      this.accountNo = b.accountNo;
+      this.accountName = b.accountName;
+      this.amtacctdr = b.amtacctdr == null ? BigDecimal.ZERO : b.amtacctdr;
+      this.amtacctcr = b.amtacctcr == null ? BigDecimal.ZERO : b.amtacctcr;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link Row} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String dateacct;
+      private long entryNo;
+      private String documentType;
+      private String docbasetype;
+      private boolean isReturn;
+      private String docWindow;
+      private String docRecordId;
+      private String docQueryKey;
+      private String docQueryValue;
+      private String entryDescription;
+      private String bpname;
+      private String productname;
+      private String projectname;
+      private String costcentername;
+      private String factAcctGroupId;
+      private String recordId;
+      private String adTableId;
+      private String accountNo;
+      private String accountName;
+      private BigDecimal amtacctdr;
+      private BigDecimal amtacctcr;
+
+      Builder dateacct(String v) {
+        this.dateacct = v;
+        return this;
+      }
+
+      Builder entryNo(long v) {
+        this.entryNo = v;
+        return this;
+      }
+
+      Builder documentType(String v) {
+        this.documentType = v;
+        return this;
+      }
+
+      Builder docbasetype(String v) {
+        this.docbasetype = v;
+        return this;
+      }
+
+      Builder isReturn(boolean v) {
+        this.isReturn = v;
+        return this;
+      }
+
+      Builder docWindow(String v) {
+        this.docWindow = v;
+        return this;
+      }
+
+      Builder docRecordId(String v) {
+        this.docRecordId = v;
+        return this;
+      }
+
+      Builder docQueryKey(String v) {
+        this.docQueryKey = v;
+        return this;
+      }
+
+      Builder docQueryValue(String v) {
+        this.docQueryValue = v;
+        return this;
+      }
+
+      Builder entryDescription(String v) {
+        this.entryDescription = v;
+        return this;
+      }
+
+      Builder bpname(String v) {
+        this.bpname = v;
+        return this;
+      }
+
+      Builder productname(String v) {
+        this.productname = v;
+        return this;
+      }
+
+      Builder projectname(String v) {
+        this.projectname = v;
+        return this;
+      }
+
+      Builder costcentername(String v) {
+        this.costcentername = v;
+        return this;
+      }
+
+      Builder factAcctGroupId(String v) {
+        this.factAcctGroupId = v;
+        return this;
+      }
+
+      Builder recordId(String v) {
+        this.recordId = v;
+        return this;
+      }
+
+      Builder adTableId(String v) {
+        this.adTableId = v;
+        return this;
+      }
+
+      Builder accountNo(String v) {
+        this.accountNo = v;
+        return this;
+      }
+
+      Builder accountName(String v) {
+        this.accountName = v;
+        return this;
+      }
+
+      Builder amtacctdr(BigDecimal v) {
+        this.amtacctdr = v;
+        return this;
+      }
+
+      Builder amtacctcr(BigDecimal v) {
+        this.amtacctcr = v;
+        return this;
+      }
+
+      Row build() {
+        return new Row(this);
+      }
     }
   }
 
@@ -117,16 +251,75 @@ final class JournalEntriesGrouping {
     final String projectname;
     final String costcentername;
 
-    Line(String accountNo, String accountName, BigDecimal amtacctdr, BigDecimal amtacctcr,
-        String bpname, String productname, String projectname, String costcentername) {
-      this.accountNo = accountNo;
-      this.accountName = accountName;
-      this.amtacctdr = amtacctdr;
-      this.amtacctcr = amtacctcr;
-      this.bpname = bpname;
-      this.productname = productname;
-      this.projectname = projectname;
-      this.costcentername = costcentername;
+    private Line(Builder b) {
+      this.accountNo = b.accountNo;
+      this.accountName = b.accountName;
+      this.amtacctdr = b.amtacctdr;
+      this.amtacctcr = b.amtacctcr;
+      this.bpname = b.bpname;
+      this.productname = b.productname;
+      this.projectname = b.projectname;
+      this.costcentername = b.costcentername;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    /** Fluent builder — {@link Line} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String accountNo;
+      private String accountName;
+      private BigDecimal amtacctdr;
+      private BigDecimal amtacctcr;
+      private String bpname;
+      private String productname;
+      private String projectname;
+      private String costcentername;
+
+      Builder accountNo(String v) {
+        this.accountNo = v;
+        return this;
+      }
+
+      Builder accountName(String v) {
+        this.accountName = v;
+        return this;
+      }
+
+      Builder amtacctdr(BigDecimal v) {
+        this.amtacctdr = v;
+        return this;
+      }
+
+      Builder amtacctcr(BigDecimal v) {
+        this.amtacctcr = v;
+        return this;
+      }
+
+      Builder bpname(String v) {
+        this.bpname = v;
+        return this;
+      }
+
+      Builder productname(String v) {
+        this.productname = v;
+        return this;
+      }
+
+      Builder projectname(String v) {
+        this.projectname = v;
+        return this;
+      }
+
+      Builder costcentername(String v) {
+        this.costcentername = v;
+        return this;
+      }
+
+      Line build() {
+        return new Line(this);
+      }
     }
   }
 
@@ -179,8 +372,16 @@ final class JournalEntriesGrouping {
     if (rows != null) {
       for (Row r : rows) {
         Entry entry = byGroup.computeIfAbsent(r.factAcctGroupId, k -> new Entry(r));
-        entry.lines.add(new Line(r.accountNo, r.accountName, r.amtacctdr, r.amtacctcr,
-            r.bpname, r.productname, r.projectname, r.costcentername));
+        entry.lines.add(Line.builder()
+            .accountNo(r.accountNo)
+            .accountName(r.accountName)
+            .amtacctdr(r.amtacctdr)
+            .amtacctcr(r.amtacctcr)
+            .bpname(r.bpname)
+            .productname(r.productname)
+            .projectname(r.projectname)
+            .costcentername(r.costcentername)
+            .build());
       }
     }
     return new ArrayList<>(byGroup.values());

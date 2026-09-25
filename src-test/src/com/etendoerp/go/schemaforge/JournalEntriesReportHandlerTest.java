@@ -491,10 +491,29 @@ class JournalEntriesReportHandlerTest {
   private static JournalEntriesGrouping.Row buildRow(String factAcctGroupId, String dateacct,
       long entryNo, String docbasetype, boolean isReturn, String recordId, String adTableId,
       String accountNo, String accountName, String debit, String credit) {
-    return new JournalEntriesGrouping.Row(dateacct, entryNo, "Receipt", docbasetype, isReturn,
-        "goods-receipt", "doc-1", null, null, "Some description", "Acme", "Widget", "Proj A",
-        "CC1", factAcctGroupId, recordId, adTableId, accountNo, accountName,
-        new BigDecimal(debit), new BigDecimal(credit));
+    return JournalEntriesGrouping.Row.builder()
+        .dateacct(dateacct)
+        .entryNo(entryNo)
+        .documentType("Receipt")
+        .docbasetype(docbasetype)
+        .isReturn(isReturn)
+        .docWindow("goods-receipt")
+        .docRecordId("doc-1")
+        .docQueryKey(null)
+        .docQueryValue(null)
+        .entryDescription("Some description")
+        .bpname("Acme")
+        .productname("Widget")
+        .projectname("Proj A")
+        .costcentername("CC1")
+        .factAcctGroupId(factAcctGroupId)
+        .recordId(recordId)
+        .adTableId(adTableId)
+        .accountNo(accountNo)
+        .accountName(accountName)
+        .amtacctdr(new BigDecimal(debit))
+        .amtacctcr(new BigDecimal(credit))
+        .build();
   }
 
   @Test

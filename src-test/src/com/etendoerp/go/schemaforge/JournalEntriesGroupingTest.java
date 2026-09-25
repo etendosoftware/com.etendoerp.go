@@ -35,10 +35,29 @@ class JournalEntriesGroupingTest {
 
   private static JournalEntriesGrouping.Row row(String factAcctGroupId, String dateacct,
       long entryNo, String accountNo, String accountName, String debit, String credit) {
-    return new JournalEntriesGrouping.Row(dateacct, entryNo, "Sales Invoice", "ARI", false,
-        "sales-invoice", "doc-1", null, null, "Some description", "Acme", "Widget", "Proj A",
-        "CC1", factAcctGroupId, "record-1", "table-1", accountNo, accountName,
-        new BigDecimal(debit), new BigDecimal(credit));
+    return JournalEntriesGrouping.Row.builder()
+        .dateacct(dateacct)
+        .entryNo(entryNo)
+        .documentType("Sales Invoice")
+        .docbasetype("ARI")
+        .isReturn(false)
+        .docWindow("sales-invoice")
+        .docRecordId("doc-1")
+        .docQueryKey(null)
+        .docQueryValue(null)
+        .entryDescription("Some description")
+        .bpname("Acme")
+        .productname("Widget")
+        .projectname("Proj A")
+        .costcentername("CC1")
+        .factAcctGroupId(factAcctGroupId)
+        .recordId("record-1")
+        .adTableId("table-1")
+        .accountNo(accountNo)
+        .accountName(accountName)
+        .amtacctdr(new BigDecimal(debit))
+        .amtacctcr(new BigDecimal(credit))
+        .build();
   }
 
   // -------------------------------------------------------------------------

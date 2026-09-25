@@ -35,9 +35,17 @@ class TrialBalanceFoldingTest {
   private static TrialBalanceFolding.Row row(String accountNo, String accountId,
       String accountName, String dimensionValue, String dimensionId, String opening,
       String debit, String credit, String closing) {
-    return new TrialBalanceFolding.Row(accountNo, accountId, accountName, dimensionValue,
-        dimensionId, new BigDecimal(opening), new BigDecimal(debit), new BigDecimal(credit),
-        new BigDecimal(closing));
+    return TrialBalanceFolding.Row.builder()
+        .accountNo(accountNo)
+        .accountId(accountId)
+        .accountName(accountName)
+        .dimensionValue(dimensionValue)
+        .dimensionId(dimensionId)
+        .openingBalance(new BigDecimal(opening))
+        .activityDebit(new BigDecimal(debit))
+        .activityCredit(new BigDecimal(credit))
+        .closingBalance(new BigDecimal(closing))
+        .build();
   }
 
   // -------------------------------------------------------------------------

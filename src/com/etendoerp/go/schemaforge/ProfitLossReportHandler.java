@@ -116,6 +116,8 @@ public class ProfitLossReportHandler implements NeoHandler {
   /** Etendo ids are either a legacy numeric string or a 32-char hex/alnum id — never blank, never whitespace. */
   private static final Pattern ID_SHAPE = Pattern.compile("^[0-9A-Za-z]{1,32}$");
 
+  /** Native-query bind name for the client id — not a report-facing parameter (unlike the PARAM_* below). */
+  private static final String SQL_PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_ACCT_SCHEMA_ID = "acctSchemaId";
   private static final String PARAM_ORG_ID = "orgId";
   private static final String PARAM_YEAR_ID = "yearId";
@@ -262,22 +264,15 @@ public class ProfitLossReportHandler implements NeoHandler {
       // Pure input checks run before anything touches OBContext or the database, so a malformed
       // request is refused without a single query.
       String yearId = body.optString(PARAM_YEAR_ID, "");
-      if (yearId.isEmpty()) {
-        return actionableError(400, "year_id_required",
-            "yearId is required.",
-            "Pass the C_Year id whose fiscal period range the P&L should be reported over.");
-      }
-      if (!isValidId(yearId)) {
-        return actionableError(400, "year_id_invalid",
-            "yearId '" + yearId + "' does not look like a valid Etendo year id.",
-            "Pass a real C_Year id.");
+      NeoResponse yearIdError = validateYearId(yearId);
+      if (yearIdError != null) {
+        return yearIdError;
       }
 
       String accountLevel = body.optString(PARAM_ACCOUNT_LEVEL, DEFAULT_ACCOUNT_LEVEL);
-      if (!ACCOUNT_LEVELS.contains(accountLevel)) {
-        return actionableError(400, "account_level_invalid",
-            "accountLevel '" + accountLevel + "' is not one of C, D, E, S.",
-            "Use one of: E (Heading), C (Account), D (Breakdown), S (Subaccount).");
+      NeoResponse accountLevelError = validateAccountLevel(accountLevel);
+      if (accountLevelError != null) {
+        return accountLevelError;
       }
 
       NeoResponse dateFromError = validateOptionalDate(body, PARAM_DATE_FROM);
@@ -294,17 +289,9 @@ public class ProfitLossReportHandler implements NeoHandler {
 
       boolean compareTo = body.optBoolean(PARAM_COMPARE_TO, false);
       String referenceYearId = body.optString(PARAM_REFERENCE_YEAR_ID, "");
-      if (compareTo) {
-        if (referenceYearId.isEmpty()) {
-          return actionableError(400, "reference_year_id_required",
-              "referenceYearId is required when compareTo is true.",
-              "Pass the C_Year id for the comparison period, or set compareTo to false.");
-        }
-        if (!isValidId(referenceYearId)) {
-          return actionableError(400, "reference_year_id_invalid",
-              "referenceYearId '" + referenceYearId + "' does not look like a valid Etendo year id.",
-              "Pass a real C_Year id.");
-        }
+      NeoResponse compareToError = validateCompareTo(compareTo, referenceYearId);
+      if (compareToError != null) {
+        return compareToError;
       }
 
       NeoResponse fromReferenceDateError = validateOptionalDate(body, PARAM_FROM_REFERENCE_DATE);
@@ -322,17 +309,9 @@ public class ProfitLossReportHandler implements NeoHandler {
       boolean showOnlyWithValue = body.optBoolean(PARAM_SHOW_ONLY_WITH_VALUE, true);
 
       String orgId = resolveOrgId(body);
-      if (!orgId.isEmpty() && !isValidId(orgId)) {
-        return actionableError(400, "org_id_invalid",
-            "orgId '" + orgId + "' does not look like a valid Etendo organization id.",
-            "Pass a real C_Organization id, or omit orgId to use the session's organization, or "
-                + "pass an empty string to report on every organization.");
-      }
-      if (!orgId.isEmpty() && OBDal.getInstance().get(Organization.class, orgId) == null) {
-        return actionableError(400, "organization_not_resolved",
-            "Could not resolve organization " + orgId + " for the profit and loss report.",
-            "Pass a valid orgId (a C_Organization id readable by your role), an empty string for "
-                + "every organization, or omit it to use the session's current organization.");
+      NeoResponse orgIdError = validateOrgId(orgId);
+      if (orgIdError != null) {
+        return orgIdError;
       }
 
       String acctSchemaId = resolveAcctSchemaId(body, orgId);
@@ -344,21 +323,29 @@ public class ProfitLossReportHandler implements NeoHandler {
                 + "configured, or pass acctSchemaId explicitly.");
       }
 
-      if (OBDal.getInstance().get(Year.class, yearId) == null) {
-        return actionableError(422, "year_not_resolved",
-            "Could not resolve year " + yearId + ".",
-            "Pass a valid C_Year id readable by your role.");
-      }
-      if (compareTo && OBDal.getInstance().get(Year.class, referenceYearId) == null) {
-        return actionableError(422, "reference_year_not_resolved",
-            "Could not resolve comparison year " + referenceYearId + ".",
-            "Pass a valid C_Year id readable by your role, or set compareTo to false.");
+      NeoResponse yearsResolvedError = validateYearsResolved(yearId, compareTo, referenceYearId);
+      if (yearsResolvedError != null) {
+        return yearsResolvedError;
       }
 
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
 
-      List<AccountReportTree.NodeRow> nodeRows = queryNodeRows(clientId, orgId, acctSchemaId, yearId,
-          dateFrom, dateTo, compareTo, referenceYearId, fromReferenceDate, toReferenceDate);
+      QueryParams params = QueryParams.builder()
+          .clientId(clientId)
+          .orgId(orgId)
+          .acctSchemaId(acctSchemaId)
+          .yearId(yearId)
+          .dateFrom(dateFrom)
+          .dateTo(dateTo)
+          .compareTo(compareTo)
+          .referenceYearId(referenceYearId)
+          .fromReferenceDate(fromReferenceDate)
+          .toReferenceDate(toReferenceDate)
+          .accountLevel(accountLevel)
+          .showOnlyWithValue(showOnlyWithValue)
+          .build();
+
+      List<AccountReportTree.NodeRow> nodeRows = queryNodeRows(params);
       List<AccountReportTree.OperandRow> operandRows = queryOperandRows(clientId, acctSchemaId);
 
       List<AccountReportTree.OutputRow> tree = AccountReportTree.build(nodeRows, operandRows,
@@ -369,9 +356,7 @@ public class ProfitLossReportHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", data);
       responseData.put("count", data.length());
-      responseData.put("meta", buildMeta(yearId, orgId, acctSchemaId, accountLevel,
-          showOnlyWithValue, dateFrom, dateTo, compareTo, referenceYearId, fromReferenceDate,
-          toReferenceDate));
+      responseData.put("meta", buildMeta(params));
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -411,6 +396,80 @@ public class ProfitLossReportHandler implements NeoHandler {
     return id != null && ID_SHAPE.matcher(id).matches();
   }
 
+  private static NeoResponse validateYearId(String yearId) {
+    if (yearId.isEmpty()) {
+      return actionableError(400, "year_id_required",
+          "yearId is required.",
+          "Pass the C_Year id whose fiscal period range the P&L should be reported over.");
+    }
+    if (!isValidId(yearId)) {
+      return actionableError(400, "year_id_invalid",
+          "yearId '" + yearId + "' does not look like a valid Etendo year id.",
+          "Pass a real C_Year id.");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateAccountLevel(String accountLevel) {
+    if (!ACCOUNT_LEVELS.contains(accountLevel)) {
+      return actionableError(400, "account_level_invalid",
+          "accountLevel '" + accountLevel + "' is not one of C, D, E, S.",
+          "Use one of: E (Heading), C (Account), D (Breakdown), S (Subaccount).");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateCompareTo(boolean compareTo, String referenceYearId) {
+    if (!compareTo) {
+      return null;
+    }
+    if (referenceYearId.isEmpty()) {
+      return actionableError(400, "reference_year_id_required",
+          "referenceYearId is required when compareTo is true.",
+          "Pass the C_Year id for the comparison period, or set compareTo to false.");
+    }
+    if (!isValidId(referenceYearId)) {
+      return actionableError(400, "reference_year_id_invalid",
+          "referenceYearId '" + referenceYearId + "' does not look like a valid Etendo year id.",
+          "Pass a real C_Year id.");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateOrgId(String orgId) {
+    if (orgId.isEmpty()) {
+      return null;
+    }
+    if (!isValidId(orgId)) {
+      return actionableError(400, "org_id_invalid",
+          "orgId '" + orgId + "' does not look like a valid Etendo organization id.",
+          "Pass a real C_Organization id, or omit orgId to use the session's organization, or "
+              + "pass an empty string to report on every organization.");
+    }
+    if (OBDal.getInstance().get(Organization.class, orgId) == null) {
+      return actionableError(400, "organization_not_resolved",
+          "Could not resolve organization " + orgId + " for the profit and loss report.",
+          "Pass a valid orgId (a C_Organization id readable by your role), an empty string for "
+              + "every organization, or omit it to use the session's current organization.");
+    }
+    return null;
+  }
+
+  private static NeoResponse validateYearsResolved(String yearId, boolean compareTo,
+      String referenceYearId) {
+    if (OBDal.getInstance().get(Year.class, yearId) == null) {
+      return actionableError(422, "year_not_resolved",
+          "Could not resolve year " + yearId + ".",
+          "Pass a valid C_Year id readable by your role.");
+    }
+    if (compareTo && OBDal.getInstance().get(Year.class, referenceYearId) == null) {
+      return actionableError(422, "reference_year_not_resolved",
+          "Could not resolve comparison year " + referenceYearId + ".",
+          "Pass a valid C_Year id readable by your role, or set compareTo to false.");
+    }
+    return null;
+  }
+
   // -------------------------------------------------------------------------
   // Parameter resolution
   // -------------------------------------------------------------------------
@@ -448,9 +507,9 @@ public class ProfitLossReportHandler implements NeoHandler {
         }
         org.openbravo.dal.service.OBQuery<AcctSchema> query =
             OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
-        query.setNamedParameter("clientId", clientId);
+        query.setNamedParameter(SQL_PARAM_CLIENT_ID, clientId);
         if (!orgId.isEmpty()) {
-          query.setNamedParameter("orgId", orgId);
+          query.setNamedParameter(PARAM_ORG_ID, orgId);
         }
         query.setMaxResult(1);
         schema = query.uniqueResult();
@@ -492,18 +551,26 @@ public class ProfitLossReportHandler implements NeoHandler {
    * applies unchanged here.
    */
   @SuppressWarnings("unchecked")
-  private List<Object[]> queryRawNodeRows(String clientId, String orgId, String acctSchemaId,
-      String yearId, LocalDate dateFrom, LocalDate dateTo, boolean compareTo,
-      String referenceYearId, LocalDate fromReferenceDate, LocalDate toReferenceDate) {
+  private List<Object[]> queryRawNodeRows(QueryParams p) {
+    String clientId = p.clientId;
+    String orgId = p.orgId;
+    String acctSchemaId = p.acctSchemaId;
+    String yearId = p.yearId;
+    LocalDate dateFrom = p.dateFrom;
+    LocalDate dateTo = p.dateTo;
+    boolean compareTo = p.compareTo;
+    String referenceYearId = p.referenceYearId;
+    LocalDate fromReferenceDate = p.fromReferenceDate;
+    LocalDate toReferenceDate = p.toReferenceDate;
 
     String orgFilter = orgId.isEmpty() ? "" :
         "    AND ad_isorgincluded(fa.ad_org_id, :orgId, fa.ad_client_id) <> -1 ";
 
-    String mainCase = buildPeriodCase(true, "yearId", dateFrom != null, "dateFrom",
-        dateTo != null, "dateTo");
+    String mainCase = buildPeriodCase(true, PARAM_YEAR_ID, dateFrom != null, PARAM_DATE_FROM,
+        dateTo != null, PARAM_DATE_TO);
     String refCase = compareTo
-        ? buildPeriodCase(true, "referenceYearId", fromReferenceDate != null, "fromReferenceDate",
-            toReferenceDate != null, "toReferenceDate")
+        ? buildPeriodCase(true, PARAM_REFERENCE_YEAR_ID, fromReferenceDate != null, PARAM_FROM_REFERENCE_DATE,
+            toReferenceDate != null, PARAM_TO_REFERENCE_DATE)
         : "0";
 
     String sql =
@@ -561,25 +628,25 @@ public class ProfitLossReportHandler implements NeoHandler {
             + "ORDER BY t.sort_path";
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter("clientId", clientId);
-    query.setParameter("acctSchemaId", acctSchemaId);
-    query.setParameter("yearId", yearId);
+    query.setParameter(SQL_PARAM_CLIENT_ID, clientId);
+    query.setParameter(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
+    query.setParameter(PARAM_YEAR_ID, yearId);
     if (dateFrom != null) {
-      query.setParameter("dateFrom", java.sql.Date.valueOf(dateFrom));
+      query.setParameter(PARAM_DATE_FROM, java.sql.Date.valueOf(dateFrom));
     }
     if (dateTo != null) {
-      query.setParameter("dateTo", java.sql.Date.valueOf(dateTo));
+      query.setParameter(PARAM_DATE_TO, java.sql.Date.valueOf(dateTo));
     }
     if (!orgId.isEmpty()) {
-      query.setParameter("orgId", orgId);
+      query.setParameter(PARAM_ORG_ID, orgId);
     }
     if (compareTo) {
-      query.setParameter("referenceYearId", referenceYearId);
+      query.setParameter(PARAM_REFERENCE_YEAR_ID, referenceYearId);
       if (fromReferenceDate != null) {
-        query.setParameter("fromReferenceDate", java.sql.Date.valueOf(fromReferenceDate));
+        query.setParameter(PARAM_FROM_REFERENCE_DATE, java.sql.Date.valueOf(fromReferenceDate));
       }
       if (toReferenceDate != null) {
-        query.setParameter("toReferenceDate", java.sql.Date.valueOf(toReferenceDate));
+        query.setParameter(PARAM_TO_REFERENCE_DATE, java.sql.Date.valueOf(toReferenceDate));
       }
     }
 
@@ -639,8 +706,8 @@ public class ProfitLossReportHandler implements NeoHandler {
             + "ORDER BY o.c_elementvalue_id, o.seqno";
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter("clientId", clientId);
-    query.setParameter("acctSchemaId", acctSchemaId);
+    query.setParameter(SQL_PARAM_CLIENT_ID, clientId);
+    query.setParameter(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
     return query.list();
   }
 
@@ -650,7 +717,6 @@ public class ProfitLossReportHandler implements NeoHandler {
 
   private static final int COL_NODE_ID = 0;
   private static final int COL_PARENT_ID = 1;
-  private static final int COL_DEPTH = 2;
   private static final int COL_SORT_PATH = 3;
   private static final int COL_GROUP_NAME = 4;
   private static final int COL_VALUE = 5;
@@ -661,18 +727,23 @@ public class ProfitLossReportHandler implements NeoHandler {
   private static final int COL_OWN_AMT = 10;
   private static final int COL_OWN_AMT_REF = 11;
 
-  private List<AccountReportTree.NodeRow> queryNodeRows(String clientId, String orgId,
-      String acctSchemaId, String yearId, LocalDate dateFrom, LocalDate dateTo, boolean compareTo,
-      String referenceYearId, LocalDate fromReferenceDate, LocalDate toReferenceDate) {
-    List<Object[]> rawRows = queryRawNodeRows(clientId, orgId, acctSchemaId, yearId, dateFrom,
-        dateTo, compareTo, referenceYearId, fromReferenceDate, toReferenceDate);
+  private List<AccountReportTree.NodeRow> queryNodeRows(QueryParams p) {
+    List<Object[]> rawRows = queryRawNodeRows(p);
     List<AccountReportTree.NodeRow> rows = new ArrayList<>();
     for (Object[] r : rawRows) {
-      rows.add(new AccountReportTree.NodeRow(
-          str(r[COL_NODE_ID]), str(r[COL_PARENT_ID]), str(r[COL_SORT_PATH]),
-          str(r[COL_GROUP_NAME]), str(r[COL_VALUE]), str(r[COL_NAME]), str(r[COL_ELEMENT_LEVEL]),
-          toBoolean(r[COL_IS_ALWAYS_SHOWN]), str(r[COL_ACCOUNT_SIGN]),
-          toBigDecimal(r[COL_OWN_AMT]), toBigDecimal(r[COL_OWN_AMT_REF])));
+      rows.add(AccountReportTree.NodeRow.builder()
+          .nodeId(str(r[COL_NODE_ID]))
+          .parentId(str(r[COL_PARENT_ID]))
+          .sortPath(str(r[COL_SORT_PATH]))
+          .groupName(str(r[COL_GROUP_NAME]))
+          .value(str(r[COL_VALUE]))
+          .name(str(r[COL_NAME]))
+          .elementLevel(str(r[COL_ELEMENT_LEVEL]))
+          .alwaysShown(toBoolean(r[COL_IS_ALWAYS_SHOWN]))
+          .accountSign(str(r[COL_ACCOUNT_SIGN]))
+          .ownAmt(toBigDecimal(r[COL_OWN_AMT]))
+          .ownAmtRef(toBigDecimal(r[COL_OWN_AMT_REF]))
+          .build());
     }
     return rows;
   }
@@ -710,25 +781,139 @@ public class ProfitLossReportHandler implements NeoHandler {
     return data;
   }
 
-  private static JSONObject buildMeta(String yearId, String orgId, String acctSchemaId,
-      String accountLevel, boolean showOnlyWithValue, LocalDate dateFrom, LocalDate dateTo,
-      boolean compareTo, String referenceYearId, LocalDate fromReferenceDate,
-      LocalDate toReferenceDate) throws Exception {
+  private static JSONObject buildMeta(QueryParams p) throws Exception {
     JSONObject meta = new JSONObject();
-    meta.put(PARAM_YEAR_ID, yearId);
-    meta.put(PARAM_ORG_ID, orgId);
-    meta.put(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
-    meta.put(PARAM_ACCOUNT_LEVEL, accountLevel);
-    meta.put(PARAM_SHOW_ONLY_WITH_VALUE, showOnlyWithValue);
-    meta.put(PARAM_DATE_FROM, dateFrom == null ? "" : dateFrom.format(DATE_FORMATTER));
-    meta.put(PARAM_DATE_TO, dateTo == null ? "" : dateTo.format(DATE_FORMATTER));
-    meta.put(PARAM_COMPARE_TO, compareTo);
-    meta.put(PARAM_REFERENCE_YEAR_ID, compareTo ? referenceYearId : "");
+    meta.put(PARAM_YEAR_ID, p.yearId);
+    meta.put(PARAM_ORG_ID, p.orgId);
+    meta.put(PARAM_ACCT_SCHEMA_ID, p.acctSchemaId);
+    meta.put(PARAM_ACCOUNT_LEVEL, p.accountLevel);
+    meta.put(PARAM_SHOW_ONLY_WITH_VALUE, p.showOnlyWithValue);
+    meta.put(PARAM_DATE_FROM, p.dateFrom == null ? "" : p.dateFrom.format(DATE_FORMATTER));
+    meta.put(PARAM_DATE_TO, p.dateTo == null ? "" : p.dateTo.format(DATE_FORMATTER));
+    meta.put(PARAM_COMPARE_TO, p.compareTo);
+    meta.put(PARAM_REFERENCE_YEAR_ID, p.compareTo ? p.referenceYearId : "");
     meta.put(PARAM_FROM_REFERENCE_DATE,
-        compareTo && fromReferenceDate != null ? fromReferenceDate.format(DATE_FORMATTER) : "");
+        p.compareTo && p.fromReferenceDate != null ? p.fromReferenceDate.format(DATE_FORMATTER) : "");
     meta.put(PARAM_TO_REFERENCE_DATE,
-        compareTo && toReferenceDate != null ? toReferenceDate.format(DATE_FORMATTER) : "");
+        p.compareTo && p.toReferenceDate != null ? p.toReferenceDate.format(DATE_FORMATTER) : "");
     return meta;
+  }
+
+  /**
+   * Bundles this report's resolved request parameters so downstream private methods don't need an
+   * oversized parameter list. Built once in {@link #executeReport} after all validation has passed.
+   */
+  private static final class QueryParams {
+    final String clientId;
+    final String orgId;
+    final String acctSchemaId;
+    final String yearId;
+    final LocalDate dateFrom;
+    final LocalDate dateTo;
+    final boolean compareTo;
+    final String referenceYearId;
+    final LocalDate fromReferenceDate;
+    final LocalDate toReferenceDate;
+    final String accountLevel;
+    final boolean showOnlyWithValue;
+
+    private QueryParams(Builder b) {
+      this.clientId = b.clientId;
+      this.orgId = b.orgId;
+      this.acctSchemaId = b.acctSchemaId;
+      this.yearId = b.yearId;
+      this.dateFrom = b.dateFrom;
+      this.dateTo = b.dateTo;
+      this.compareTo = b.compareTo;
+      this.referenceYearId = b.referenceYearId;
+      this.fromReferenceDate = b.fromReferenceDate;
+      this.toReferenceDate = b.toReferenceDate;
+      this.accountLevel = b.accountLevel;
+      this.showOnlyWithValue = b.showOnlyWithValue;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    static final class Builder {
+      private String clientId;
+      private String orgId;
+      private String acctSchemaId;
+      private String yearId;
+      private LocalDate dateFrom;
+      private LocalDate dateTo;
+      private boolean compareTo;
+      private String referenceYearId;
+      private LocalDate fromReferenceDate;
+      private LocalDate toReferenceDate;
+      private String accountLevel;
+      private boolean showOnlyWithValue;
+
+      Builder clientId(String v) {
+        this.clientId = v;
+        return this;
+      }
+
+      Builder orgId(String v) {
+        this.orgId = v;
+        return this;
+      }
+
+      Builder acctSchemaId(String v) {
+        this.acctSchemaId = v;
+        return this;
+      }
+
+      Builder yearId(String v) {
+        this.yearId = v;
+        return this;
+      }
+
+      Builder dateFrom(LocalDate v) {
+        this.dateFrom = v;
+        return this;
+      }
+
+      Builder dateTo(LocalDate v) {
+        this.dateTo = v;
+        return this;
+      }
+
+      Builder compareTo(boolean v) {
+        this.compareTo = v;
+        return this;
+      }
+
+      Builder referenceYearId(String v) {
+        this.referenceYearId = v;
+        return this;
+      }
+
+      Builder fromReferenceDate(LocalDate v) {
+        this.fromReferenceDate = v;
+        return this;
+      }
+
+      Builder toReferenceDate(LocalDate v) {
+        this.toReferenceDate = v;
+        return this;
+      }
+
+      Builder accountLevel(String v) {
+        this.accountLevel = v;
+        return this;
+      }
+
+      Builder showOnlyWithValue(boolean v) {
+        this.showOnlyWithValue = v;
+        return this;
+      }
+
+      QueryParams build() {
+        return new QueryParams(this);
+      }
+    }
   }
 
   private static String str(Object value) {

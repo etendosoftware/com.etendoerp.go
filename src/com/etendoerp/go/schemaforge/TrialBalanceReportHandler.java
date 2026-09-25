@@ -320,9 +320,24 @@ public class TrialBalanceReportHandler implements NeoHandler {
 
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
 
-      List<Object[]> rawRows = queryFineGrainRows(clientId, orgId, acctSchemaId, dateFrom, dateTo,
-          openingEntryAmount, accountLevel, bPartnerIds, productIds, projectIds, costCenterIds,
-          fromAccountId, toAccountId);
+      QueryParams params = QueryParams.builder()
+          .clientId(clientId)
+          .orgId(orgId)
+          .acctSchemaId(acctSchemaId)
+          .dateFrom(dateFrom)
+          .dateTo(dateTo)
+          .openingEntryAmount(openingEntryAmount)
+          .accountLevel(accountLevel)
+          .groupBy(groupBy)
+          .bPartnerIds(bPartnerIds)
+          .productIds(productIds)
+          .projectIds(projectIds)
+          .costCenterIds(costCenterIds)
+          .fromAccountId(fromAccountId)
+          .toAccountId(toAccountId)
+          .build();
+
+      List<Object[]> rawRows = queryFineGrainRows(params);
 
       List<TrialBalanceFolding.Row> foldingRows = toFoldingRows(rawRows, groupBy);
       List<TrialBalanceFolding.FoldedRow> folded = TrialBalanceFolding.fold(foldingRows, grouped);
@@ -332,9 +347,7 @@ public class TrialBalanceReportHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", data);
       responseData.put("count", data.length());
-      responseData.put("meta", buildMeta(dateFrom, dateTo, orgId, acctSchemaId, accountLevel,
-          groupBy, openingEntryAmount, fromAccountId, toAccountId, bPartnerIds, productIds,
-          projectIds, costCenterIds));
+      responseData.put("meta", buildMeta(params));
 
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", responseData);
@@ -437,7 +450,7 @@ public class TrialBalanceReportHandler implements NeoHandler {
             OBDal.getInstance().createQuery(AcctSchema.class, hql.toString());
         query.setNamedParameter("clientId", clientId);
         if (!orgId.isEmpty()) {
-          query.setNamedParameter("orgId", orgId);
+          query.setNamedParameter(PARAM_ORG_ID, orgId);
         }
         query.setMaxResult(1);
         schema = query.uniqueResult();
@@ -491,10 +504,20 @@ public class TrialBalanceReportHandler implements NeoHandler {
    * WHERE-clause construction, never with a blank-string bind compared against a real column.
    */
   @SuppressWarnings("unchecked")
-  private List<Object[]> queryFineGrainRows(String clientId, String orgId, String acctSchemaId,
-      LocalDate dateFrom, LocalDate dateTo, boolean openingEntryAmount, String accountLevel,
-      List<String> bPartnerIds, List<String> productIds, List<String> projectIds,
-      List<String> costCenterIds, String fromAccountId, String toAccountId) {
+  private List<Object[]> queryFineGrainRows(QueryParams p) {
+    String clientId = p.clientId;
+    String orgId = p.orgId;
+    String acctSchemaId = p.acctSchemaId;
+    LocalDate dateFrom = p.dateFrom;
+    LocalDate dateTo = p.dateTo;
+    boolean openingEntryAmount = p.openingEntryAmount;
+    String accountLevel = p.accountLevel;
+    List<String> bPartnerIds = p.bPartnerIds;
+    List<String> productIds = p.productIds;
+    List<String> projectIds = p.projectIds;
+    List<String> costCenterIds = p.costCenterIds;
+    String fromAccountId = p.fromAccountId;
+    String toAccountId = p.toAccountId;
 
     StringBuilder sql = new StringBuilder(
         "WITH RECURSIVE acct_tree AS ( "
@@ -588,13 +611,13 @@ public class TrialBalanceReportHandler implements NeoHandler {
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
     query.setParameter("clientId", clientId);
-    query.setParameter("acctSchemaId", acctSchemaId);
-    query.setParameter("dateFrom", Date.valueOf(dateFrom));
-    query.setParameter("dateTo", Date.valueOf(dateTo));
-    query.setParameter("openingEntryAmount", openingEntryAmount);
-    query.setParameter("accountLevel", accountLevel);
+    query.setParameter(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
+    query.setParameter(PARAM_DATE_FROM, Date.valueOf(dateFrom));
+    query.setParameter(PARAM_DATE_TO, Date.valueOf(dateTo));
+    query.setParameter(PARAM_OPENING_ENTRY_AMOUNT, openingEntryAmount);
+    query.setParameter(PARAM_ACCOUNT_LEVEL, accountLevel);
     if (!orgId.isEmpty()) {
-      query.setParameter("orgId", orgId);
+      query.setParameter(PARAM_ORG_ID, orgId);
     }
     if (!bPartnerIds.isEmpty()) {
       query.setParameterList("bPartnerIds", bPartnerIds);
@@ -609,10 +632,10 @@ public class TrialBalanceReportHandler implements NeoHandler {
       query.setParameterList("costCenterIds", costCenterIds);
     }
     if (!fromAccountId.isEmpty()) {
-      query.setParameter("fromAccountId", fromAccountId);
+      query.setParameter(PARAM_FROM_ACCOUNT_ID, fromAccountId);
     }
     if (!toAccountId.isEmpty()) {
-      query.setParameter("toAccountId", toAccountId);
+      query.setParameter(PARAM_TO_ACCOUNT_ID, toAccountId);
     }
 
     return query.list();
@@ -628,11 +651,8 @@ public class TrialBalanceReportHandler implements NeoHandler {
   private static final int COL_ACCOUNT_NAME = 2;
   private static final int COL_BPARTNER_ID = 3;
   private static final int COL_BPNAME = 4;
-  private static final int COL_PRODUCT_ID = 5;
   private static final int COL_PRODUCTNAME = 6;
-  private static final int COL_PROJECT_ID = 7;
   private static final int COL_PROJECTNAME = 8;
-  private static final int COL_COSTCENTER_ID = 9;
   private static final int COL_COSTCENTERNAME = 10;
   private static final int COL_OPENING_BALANCE = 11;
   private static final int COL_ACTIVITY_DEBIT = 12;
@@ -669,11 +689,17 @@ public class TrialBalanceReportHandler implements NeoHandler {
           // false) ignores them.
           break;
       }
-      rows.add(new TrialBalanceFolding.Row(
-          str(r[COL_ACCOUNT_NO]), str(r[COL_ACCOUNT_ID]), str(r[COL_ACCOUNT_NAME]),
-          dimensionValue, dimensionId,
-          toBigDecimal(r[COL_OPENING_BALANCE]), toBigDecimal(r[COL_ACTIVITY_DEBIT]),
-          toBigDecimal(r[COL_ACTIVITY_CREDIT]), toBigDecimal(r[COL_CLOSING_BALANCE])));
+      rows.add(TrialBalanceFolding.Row.builder()
+          .accountNo(str(r[COL_ACCOUNT_NO]))
+          .accountId(str(r[COL_ACCOUNT_ID]))
+          .accountName(str(r[COL_ACCOUNT_NAME]))
+          .dimensionValue(dimensionValue)
+          .dimensionId(dimensionId)
+          .openingBalance(toBigDecimal(r[COL_OPENING_BALANCE]))
+          .activityDebit(toBigDecimal(r[COL_ACTIVITY_DEBIT]))
+          .activityCredit(toBigDecimal(r[COL_ACTIVITY_CREDIT]))
+          .closingBalance(toBigDecimal(r[COL_CLOSING_BALANCE]))
+          .build());
     }
     return rows;
   }
@@ -699,25 +725,155 @@ public class TrialBalanceReportHandler implements NeoHandler {
     return data;
   }
 
-  private static JSONObject buildMeta(LocalDate dateFrom, LocalDate dateTo, String orgId,
-      String acctSchemaId, String accountLevel, String groupBy, boolean openingEntryAmount,
-      String fromAccountId, String toAccountId, List<String> bPartnerIds, List<String> productIds,
-      List<String> projectIds, List<String> costCenterIds) throws Exception {
+  private static JSONObject buildMeta(QueryParams p) throws Exception {
     JSONObject meta = new JSONObject();
-    meta.put(PARAM_DATE_FROM, dateFrom.format(DATE_FORMATTER));
-    meta.put(PARAM_DATE_TO, dateTo.format(DATE_FORMATTER));
-    meta.put(PARAM_ORG_ID, orgId);
-    meta.put(PARAM_ACCT_SCHEMA_ID, acctSchemaId);
-    meta.put(PARAM_ACCOUNT_LEVEL, accountLevel);
-    meta.put(PARAM_GROUP_BY, groupBy);
-    meta.put(PARAM_OPENING_ENTRY_AMOUNT, openingEntryAmount);
-    meta.put(PARAM_FROM_ACCOUNT_ID, fromAccountId);
-    meta.put(PARAM_TO_ACCOUNT_ID, toAccountId);
-    meta.put(PARAM_BPARTNER_ID, String.join(",", bPartnerIds));
-    meta.put(PARAM_PRODUCT_ID, String.join(",", productIds));
-    meta.put(PARAM_PROJECT_ID, String.join(",", projectIds));
-    meta.put(PARAM_COST_CENTER_ID, String.join(",", costCenterIds));
+    meta.put(PARAM_DATE_FROM, p.dateFrom.format(DATE_FORMATTER));
+    meta.put(PARAM_DATE_TO, p.dateTo.format(DATE_FORMATTER));
+    meta.put(PARAM_ORG_ID, p.orgId);
+    meta.put(PARAM_ACCT_SCHEMA_ID, p.acctSchemaId);
+    meta.put(PARAM_ACCOUNT_LEVEL, p.accountLevel);
+    meta.put(PARAM_GROUP_BY, p.groupBy);
+    meta.put(PARAM_OPENING_ENTRY_AMOUNT, p.openingEntryAmount);
+    meta.put(PARAM_FROM_ACCOUNT_ID, p.fromAccountId);
+    meta.put(PARAM_TO_ACCOUNT_ID, p.toAccountId);
+    meta.put(PARAM_BPARTNER_ID, String.join(",", p.bPartnerIds));
+    meta.put(PARAM_PRODUCT_ID, String.join(",", p.productIds));
+    meta.put(PARAM_PROJECT_ID, String.join(",", p.projectIds));
+    meta.put(PARAM_COST_CENTER_ID, String.join(",", p.costCenterIds));
     return meta;
+  }
+
+  /**
+   * Bundles this report's resolved request parameters so downstream private methods don't need an
+   * oversized parameter list. Built once in {@link #executeReport} after all validation has passed.
+   */
+  private static final class QueryParams {
+    final String clientId;
+    final String orgId;
+    final String acctSchemaId;
+    final LocalDate dateFrom;
+    final LocalDate dateTo;
+    final boolean openingEntryAmount;
+    final String accountLevel;
+    final String groupBy;
+    final List<String> bPartnerIds;
+    final List<String> productIds;
+    final List<String> projectIds;
+    final List<String> costCenterIds;
+    final String fromAccountId;
+    final String toAccountId;
+
+    private QueryParams(Builder b) {
+      this.clientId = b.clientId;
+      this.orgId = b.orgId;
+      this.acctSchemaId = b.acctSchemaId;
+      this.dateFrom = b.dateFrom;
+      this.dateTo = b.dateTo;
+      this.openingEntryAmount = b.openingEntryAmount;
+      this.accountLevel = b.accountLevel;
+      this.groupBy = b.groupBy;
+      this.bPartnerIds = b.bPartnerIds;
+      this.productIds = b.productIds;
+      this.projectIds = b.projectIds;
+      this.costCenterIds = b.costCenterIds;
+      this.fromAccountId = b.fromAccountId;
+      this.toAccountId = b.toAccountId;
+    }
+
+    static Builder builder() {
+      return new Builder();
+    }
+
+    static final class Builder {
+      private String clientId;
+      private String orgId;
+      private String acctSchemaId;
+      private LocalDate dateFrom;
+      private LocalDate dateTo;
+      private boolean openingEntryAmount;
+      private String accountLevel;
+      private String groupBy;
+      private List<String> bPartnerIds;
+      private List<String> productIds;
+      private List<String> projectIds;
+      private List<String> costCenterIds;
+      private String fromAccountId;
+      private String toAccountId;
+
+      Builder clientId(String v) {
+        this.clientId = v;
+        return this;
+      }
+
+      Builder orgId(String v) {
+        this.orgId = v;
+        return this;
+      }
+
+      Builder acctSchemaId(String v) {
+        this.acctSchemaId = v;
+        return this;
+      }
+
+      Builder dateFrom(LocalDate v) {
+        this.dateFrom = v;
+        return this;
+      }
+
+      Builder dateTo(LocalDate v) {
+        this.dateTo = v;
+        return this;
+      }
+
+      Builder openingEntryAmount(boolean v) {
+        this.openingEntryAmount = v;
+        return this;
+      }
+
+      Builder accountLevel(String v) {
+        this.accountLevel = v;
+        return this;
+      }
+
+      Builder groupBy(String v) {
+        this.groupBy = v;
+        return this;
+      }
+
+      Builder bPartnerIds(List<String> v) {
+        this.bPartnerIds = v;
+        return this;
+      }
+
+      Builder productIds(List<String> v) {
+        this.productIds = v;
+        return this;
+      }
+
+      Builder projectIds(List<String> v) {
+        this.projectIds = v;
+        return this;
+      }
+
+      Builder costCenterIds(List<String> v) {
+        this.costCenterIds = v;
+        return this;
+      }
+
+      Builder fromAccountId(String v) {
+        this.fromAccountId = v;
+        return this;
+      }
+
+      Builder toAccountId(String v) {
+        this.toAccountId = v;
+        return this;
+      }
+
+      QueryParams build() {
+        return new QueryParams(this);
+      }
+    }
   }
 
   private static String str(Object value) {
