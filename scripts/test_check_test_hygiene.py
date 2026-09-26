@@ -4,9 +4,14 @@
 Run from the module root:  python3 -m unittest discover -s scripts
 """
 
+import contextlib
 import importlib.util
+import io
 import os
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 _SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check-test-hygiene.py')
 _spec = importlib.util.spec_from_file_location('check_test_hygiene', _SCRIPT)
@@ -95,6 +100,27 @@ class ClassExistsTest(unittest.TestCase):
             'com.etendoerp.go.rest.Foo',
             fake_fs('src-test/src/com/etendoerp/go/rest/Foo.java')))
 
+    def test_finds_a_class_under_a_src_util_source_root(self):
+        script = 'src-util/modulescript/src/com/etendoerp/go/modulescript/SetupScript.java'
+        self.assertTrue(hygiene.class_exists(
+            'com.etendoerp.go.modulescript.SetupScript', fake_fs(script),
+            source_roots=('src', 'src-util/modulescript/src')))
+
+
+class FindSourceRootsTest(unittest.TestCase):
+
+    def test_returns_src_plus_every_src_util_source_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            for rel in ('src/com', 'src-util/modulescript/src/com/etendoerp',
+                        'src-util/buildvalidation/src/com', 'src-util/notes'):
+                os.makedirs(os.path.join(root, rel))
+            self.assertEqual(hygiene.find_source_roots(root),
+                             ['src', 'src-util/buildvalidation/src', 'src-util/modulescript/src'])
+
+    def test_returns_only_src_without_src_util(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(hygiene.find_source_roots(root), ['src'])
+
 
 class CheckFileTest(unittest.TestCase):
 
@@ -159,6 +185,37 @@ class CheckFileTest(unittest.TestCase):
         path = 'src-test/src/com/etendoerp/go/rest/Etp1234Test.java'
         findings = hygiene.check_file(path, 'A', 'class Etp1234Test {}\n', fake_fs())
         self.assertEqual(self.rules(findings), ['missing-covers', 'ticket-named'])
+
+
+class CheckFileSourceRootsTest(unittest.TestCase):
+
+    def test_covers_of_a_src_util_class_is_not_reported(self):
+        src = COVERED_SRC.replace('com.etendoerp.go.rest.Foo', 'com.etendoerp.go.modulescript.SetupScript')
+        script = 'src-util/modulescript/src/com/etendoerp/go/modulescript/SetupScript.java'
+        findings = hygiene.check_file(TEST_PATH, 'M', src, fake_fs(script),
+                                      source_roots=('src', 'src-util/modulescript/src'))
+        self.assertEqual(findings, [])
+
+
+class MainGitErrorTest(unittest.TestCase):
+
+    def run_main(self, mode):
+        error = subprocess.CalledProcessError(128, ['git', 'diff'], stderr='fatal: bad revision\n')
+        out = io.StringIO()
+        with mock.patch.object(hygiene, 'git', side_effect=error), contextlib.redirect_stdout(out):
+            code = hygiene.main(['--base', 'no-such-ref', '--head', 'HEAD', '--mode', mode])
+        return code, out.getvalue()
+
+    def test_annotate_mode_turns_a_git_error_into_a_warning_and_exits_0(self):
+        code, out = self.run_main('annotate')
+        self.assertEqual(code, 0)
+        self.assertIn('::warning title=test-hygiene/git-error::', out)
+        self.assertIn('fatal: bad revision', out)
+
+    def test_block_mode_still_fails_on_a_git_error(self):
+        code, out = self.run_main('block')
+        self.assertEqual(code, 1)
+        self.assertIn('::error title=test-hygiene/git-error::', out)
 
 
 class ParseNameStatusTest(unittest.TestCase):

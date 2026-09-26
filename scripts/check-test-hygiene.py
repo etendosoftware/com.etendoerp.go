@@ -16,6 +16,7 @@ Mode (flag or TEST_HYGIENE_MODE env): `annotate` prints ::warning and exits 0;
 """
 
 import argparse
+import glob
 import os
 import re
 import subprocess
@@ -47,11 +48,20 @@ def parse_covers(src):
     return found
 
 
-def class_exists(fqn, path_exists):
-    """True if `fqn` (or its outer class, for a nested `Outer.Inner`) has a file under src/."""
+def find_source_roots(root):
+    """`src` plus every Java source root under src-util (e.g. src-util/modulescript/src)."""
+    found = sorted(os.path.relpath(path, root).replace(os.sep, '/')
+                   for path in glob.glob(os.path.join(root, 'src-util', '*', 'src'))
+                   if os.path.isdir(path))
+    return ['src'] + found
+
+
+def class_exists(fqn, path_exists, source_roots=('src',)):
+    """True if `fqn` (or its outer class, for a nested `Outer.Inner`) has a file under a source root."""
     parts = fqn.replace('$', '.').split('.')
     while parts:
-        if path_exists('src/' + '/'.join(parts) + '.java'):
+        rel = '/'.join(parts) + '.java'
+        if any(path_exists(root + '/' + rel) for root in source_roots):
             return True
         if len(parts) < 2 or not parts[-2][:1].isupper():
             return False
@@ -59,7 +69,7 @@ def class_exists(fqn, path_exists):
     return False
 
 
-def check_file(path, status, src, path_exists):
+def check_file(path, status, src, path_exists, source_roots=('src',)):
     """Pure core: the findings for one changed test file."""
     findings = []
     covers = parse_covers(src)
@@ -67,9 +77,9 @@ def check_file(path, status, src, path_exists):
         findings.append((path, 1, 'missing-covers',
                          'test class has no `@covers <fully.qualified.Class>` in its Javadoc'))
     for fqn, line in covers:
-        if not class_exists(fqn, path_exists):
+        if not class_exists(fqn, path_exists, source_roots):
             findings.append((path, line, 'covers-not-found',
-                             '@covers names a class with no source under src/: ' + fqn))
+                             '@covers names a class with no source under ' + ', '.join(source_roots) + ': ' + fqn))
     if status in ('A', 'R') and is_ticket_named(path):
         findings.append((path, 1, 'ticket-named',
                          'new test file is named after a ticket; name it by behavior '
@@ -109,15 +119,25 @@ def main(argv):
                         choices=('annotate', 'block'))
     args = parser.parse_args(argv)
 
-    changed = parse_name_status(git('diff', '--name-status', '-M', args.base + '...' + args.head))
+    rng = args.base + '...' + args.head
+    roots = find_source_roots(ROOT)
 
     def path_exists(rel):
         return os.path.isfile(os.path.join(ROOT, rel))
 
-    findings = []
-    for status, path in changed:
-        src = git('show', args.head + ':' + path)
-        findings.extend(check_file(path, status, src, path_exists))
+    try:
+        changed = parse_name_status(git('diff', '--name-status', '-M', rng))
+        findings = []
+        for status, path in changed:
+            src = git('show', args.head + ':' + path)
+            findings.extend(check_file(path, status, src, path_exists, roots))
+    except subprocess.CalledProcessError as error:
+        # A git failure (shallow clone, missing ref) is an infrastructure problem, not a
+        # finding: it must not fail the job while the check is annotate-only.
+        level = 'error' if args.mode == 'block' else 'warning'
+        reason = ((error.stderr or '').strip().splitlines() or [str(error)])[0]
+        print('::{} title=test-hygiene/git-error::could not read the diff {}: {}'.format(level, rng, reason))
+        return 1 if args.mode == 'block' else 0
 
     for finding in findings:
         print(format_annotation(finding, args.mode))
