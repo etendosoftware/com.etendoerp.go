@@ -1,0 +1,34 @@
+name: Test Hygiene
+
+# Reuse-first test protocol on the JUnit classes a PR adds or modifies
+# (policy: etendo_schema_forge docs/testing/test-reuse-policy.md):
+#   - missing `@covers <FQN>` in the test class Javadoc
+#   - `@covers` naming a class that does not exist under src/
+#   - a NEW test file named after a ticket (etp-?NNNN)
+# Logic lives in scripts/check-test-hygiene.py so it can be unit-tested.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'src-test/**/*.java'
+
+jobs:
+  test-hygiene:
+    name: Validate changed test classes
+    runs-on: ubuntu-latest
+    env:
+      # ROLLOUT (ETP-5511, decision D10): annotate-only from 2026-09-26.
+      # On 2026-10-10 flip this single switch to `block` so findings fail the job.
+      TEST_HYGIENE_MODE: annotate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check changed test classes
+        run: |
+          python3 scripts/check-test-hygiene.py \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"
