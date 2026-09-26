@@ -111,8 +111,9 @@ def parse_name_status(output):
 
 
 def git(*args):
-    return subprocess.run(['git', *args], cwd=ROOT, check=True,
-                          capture_output=True, text=True).stdout
+    # errors='replace': a test file that is not UTF-8 must not crash the check.
+    return subprocess.run(['git', *args], cwd=ROOT, check=True, capture_output=True,
+                          encoding='utf-8', errors='replace').stdout
 
 
 def main(argv):
@@ -142,6 +143,12 @@ def main(argv):
         reason = ((error.stderr or '').strip().splitlines() or [str(error)])[0]
         print('::{} title=test-hygiene/git-error::could not read the diff {}: {}'.format(level, rng, reason))
         return 1 if args.mode == 'block' else 0
+    except Exception as error:  # noqa: BLE001 — annotate mode must never fail the job
+        if args.mode == 'block':
+            raise
+        print('::warning title=test-hygiene/internal-error::check skipped: {}: {}'.format(
+            type(error).__name__, error))
+        return 0
 
     for finding in findings:
         print(format_annotation(finding, args.mode))

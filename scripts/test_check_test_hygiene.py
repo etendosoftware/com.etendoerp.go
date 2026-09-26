@@ -226,6 +226,46 @@ class MainGitErrorTest(unittest.TestCase):
         self.assertIn('::error title=test-hygiene/git-error::', out)
 
 
+class GitDecodingTest(unittest.TestCase):
+
+    def test_reads_a_non_utf8_file_without_raising(self):
+        with tempfile.TemporaryDirectory() as root:
+            def run(*args):
+                subprocess.run(['git', *args], cwd=root, check=True, capture_output=True)
+            run('init', '-q')
+            with open(os.path.join(root, 'LatinTest.java'), 'wb') as handle:
+                handle.write('/** Pruebas de a\u00f1o. */\nclass LatinTest {}\n'.encode('latin-1'))
+            run('add', '-A')
+            run('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--no-gpg-sign', '-m', 'x')
+            with mock.patch.object(hygiene, 'ROOT', root):
+                text = hygiene.git('show', 'HEAD:LatinTest.java')
+        self.assertIn('class LatinTest', text)
+        self.assertIn('\ufffd', text)
+
+
+class MainUnexpectedErrorTest(unittest.TestCase):
+
+    def run_main(self, mode):
+        def fake_git(*args):
+            return 'M\t' + TEST_PATH + '\n' if args[0] == 'diff' else COVERED_SRC
+        out = io.StringIO()
+        with mock.patch.object(hygiene, 'git', side_effect=fake_git), \
+                mock.patch.object(hygiene, 'check_file', side_effect=ValueError('boom')), \
+                contextlib.redirect_stdout(out):
+            code = hygiene.main(['--base', 'a', '--head', 'b', '--mode', mode])
+        return code, out.getvalue()
+
+    def test_annotate_mode_turns_any_unexpected_error_into_a_warning_and_exits_0(self):
+        code, out = self.run_main('annotate')
+        self.assertEqual(code, 0)
+        self.assertIn('::warning title=test-hygiene/internal-error::', out)
+        self.assertIn('boom', out)
+
+    def test_block_mode_still_raises_an_unexpected_error(self):
+        with self.assertRaises(ValueError):
+            self.run_main('block')
+
+
 class ParseNameStatusTest(unittest.TestCase):
 
     def test_keeps_added_modified_and_renamed_test_files(self):

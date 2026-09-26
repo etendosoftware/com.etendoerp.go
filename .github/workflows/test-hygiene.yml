@@ -21,7 +21,7 @@ jobs:
     name: Validate changed test classes
     runs-on: ubuntu-latest
     env:
-      # ROLLOUT (ETP-5511, decision D10): annotate-only from 2026-09-26.
+      # ROLLOUT (ETP-5511, see etendo_schema_forge docs/testing/test-reuse-policy.md): annotate-only from 2026-09-26.
       # On 2026-10-10 flip this single switch to `block` so findings fail the job.
       TEST_HYGIENE_MODE: annotate
     steps:
