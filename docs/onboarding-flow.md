@@ -4,7 +4,8 @@
 
 The `POST /sws/go/onboarding` endpoint streams NDJSON progress events while
 setting up a newly registered client. The core method is
-`EtendoGoJwtServlet.ensureOnboardingDataset`, which runs the steps below in
+`OnboardingProvisioningChain.ensureOnboardingDataset` (moved out of `EtendoGoJwtServlet` by
+ETP-5389 so it runs without HTTP; the servlet keeps a thin delegate), which runs the steps below in
 order (reconcile model, ETP-4428: every step is idempotent/self-guarding, so
 the full chain runs unconditionally on every call, repairing whatever a prior
 partial failure left missing). Each step either completes or emits an
@@ -23,8 +24,9 @@ does not return that ID fails closed before provisioning continues.
 
 **Do not hardcode the step count in prose** — the list below is the source of
 truth; keep it (and this list ONLY) in sync with
-`EtendoGoJwtServlet.ensureOnboardingDataset` whenever a step is added,
-removed, or reordered.
+`OnboardingProvisioningChain.ensureOnboardingDataset` whenever a step is added,
+removed, or reordered — and bump `OnboardingProvisioningChain.CHAIN_REVISION` in the same change
+(see "Tenant pool" below: it retires pooled tenants built by the previous chain).
 
 ## Step Sequence
 
@@ -393,6 +395,117 @@ On error:
 ```
 
 The final event always carries `"success": true|false`.
+
+## Tenant pool (ETP-5389)
+
+Near-instant onboarding: a background process keeps a small pool of tenants already built by the
+full chain above, and `POST /sws/go/onboarding` hands one of them to the signup instead of building
+one. **Off by default** — with flag `onboarding-tenant-pool` off (see
+`feature-flags-and-tenant-upgrade.md`) onboarding is exactly the classic path.
+
+### Configuration
+
+| Setting | Property / env | Default |
+|---|---|---|
+| switch | flag `onboarding-tenant-pool` (`etendo.go.flags.onboarding-tenant-pool` / `ETGO_FLAG_ONBOARDING_TENANT_POOL`, or ConfigCat) | off |
+| pool size (READY tenants kept) | `etendo.go.onboarding.pool.size` / `ETGO_ONBOARDING_POOL_SIZE` | 3 (clamped 0–20) |
+| max age of a READY tenant | `etendo.go.onboarding.pool.maxAgeHours` / `ETGO_ONBOARDING_POOL_MAX_AGE_HOURS` | 168 |
+| provisioning lease | `etendo.go.onboarding.pool.leaseMinutes` / `ETGO_ONBOARDING_POOL_LEASE_MINUTES` | 60 |
+
+The switch reuses the module's OpenFeature flag stack (booleans only); the numbers are plain
+`GoRuntimeProperties`, like every other numeric runtime knob. All in `TenantPoolConfig`.
+
+### One chain, two callers
+
+The chain lives in `com.etendoerp.go.rest.OnboardingProvisioningChain` and reports through an
+`OnboardingProgressSink`: the endpoint passes `NdjsonOnboardingProgressSink` (the NDJSON wire
+format, unchanged), the filler `LoggingOnboardingProgressSink`. The servlet builds the chain per
+call over its own service fields, so the classic path produces the same tenant as before the
+extraction and a pooled tenant is built by the very same code.
+
+### `ETGO_TENANT_POOL`
+
+One row per pooled tenant, System client. `POOL_CLIENT_ID` (the tenant), `STATUS`,
+`PROVISIONING_VERSION`, `CLAIMED_AT`, `ERROR_MESSAGE`.
+
+| Status | Meaning |
+|---|---|
+| `PROVISIONING` | the filler is building it (committed before the build starts) |
+| `READY` | claimable |
+| `CLAIMED` | handed to a signup — committed together with the onboarding |
+| `FAILED` | provisioning or personalization failed; `POOL_CLIENT_ID` may point at a half-built client left for manual cleanup |
+| `STALE` | built by another `PROVISIONING_VERSION`, or older than the max age; never claimed |
+
+`PROVISIONING_VERSION` = `OnboardingProvisioningChain.CHAIN_REVISION` + `@` + the data-fix
+baseline cutoff (`OnboardingBaselineService.provisionedThrough()`). A deploy that changes either
+retires every pooled tenant built before it, so a signup never gets a tenant missing a newer step.
+
+### The filler
+
+`TenantPoolFillProcess` (`AD_Process` "Tenant Pool Filler", background, `PREVENTCONCURRENT='Y'`),
+scheduled for the System client every 5 minutes by `TenantPoolScheduleStartup` — unconditionally:
+the process reads the flag on every run and does nothing while it is off, so flipping the flag
+needs no restart. One run (`TenantPoolFiller`):
+
+1. `READY` rows of another version or past the max age → `STALE`; `PROVISIONING` rows past the
+   lease (a JVM died mid-build) → `FAILED`.
+2. deficit = size − `READY` (current version) − `PROVISIONING`.
+3. For each missing slot, one at a time: insert `PROVISIONING` + commit, build the tenant
+   (`TenantPoolProvisioner`), then `READY` + commit, or rollback + `FAILED` + commit. **Stops at
+   the first failure**, so a systematic problem costs one failed tenant per run; the next run
+   starts again normally.
+
+Never two at once: a static in-JVM guard answers a concurrent call with "skipped", and
+`PREVENTCONCURRENT` covers several scheduler nodes.
+
+A pooled tenant is built EUR / ES / es_ES under the placeholder name `POOL-<pool row id>` (client,
+organization, and the admin username lowercased), with a random, unstored admin password, no
+address, tax id or full name — and its admin user **inactive**, so nothing can log into it before a
+claim. Its costing schedule row is created by the chain but only activated in Quartz at claim time
+(the servlet's post-commit `activateSchedule`); after a restart `OBScheduler.initialize()` does pick
+it up, running `CostingBackground` for an empty tenant.
+
+### The claim
+
+`PooledTenantClaimService.claim`, first thing in `executeOnboardingProvisioning`. It answers
+`null` — classic path, transparently — when the flag is off, the request is not EUR/ES/es_ES, the
+company name already resolves to a client (resume and collision handling, ETP-4428, stay
+classic), the name starts with `POOL-`, the pool is empty, or taking/personalizing the tenant fails.
+A personalization failure rolls back, marks the row `FAILED` and falls back.
+
+The row is taken with `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`, **inside
+the onboarding transaction**: concurrent signups never get the same tenant (a locked row is
+skipped, not waited for), and a failure anywhere later rolls the claim back and the tenant is
+`READY` again. The claim then applies only:
+
+- `AD_Client` name / value / description, `AD_Org` name / value / `SocialName` ← company name;
+- admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
+  description, email, password hash, **active**;
+- the signup address onto the pooled fiscal location's street line.
+
+After it, the servlet runs its existing calls: owner marking (`resolveAdminContextData`), the paid
+upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
+`warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
+data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
+commit, the `environment-ready` email and costing activation. The stream skips the `organization`
+and `dataset`…`baseline` steps.
+
+### Where `POOL-…` stays visible after a claim (known gap, not renamed yet)
+
+Everything derived from the client name at provisioning time keeps the placeholder:
+
+- `AD_Role` "POOL-… Admin" (`InitialClientSetup.insertRoles`: client name + " Admin") — shown by
+  the roles screens;
+- the client's `AD_Tree` names ("POOL-… <tree>", `InitialClientSetup.insertTrees`);
+- the ledger (`C_AcctSchema`) name and the chart of accounts `C_Element` name/description,
+  rebranded to the client name by `OnboardingAccountingWiringService.rebrandImportedChartNames`;
+- the fiscal calendar name, rebranded by `OnboardingPeriodControlService`;
+- anything else `OnboardingSourceMoniker.replace` rewrote with the client name during the build;
+- the `ETGO_TENANT_POOL` row itself and the server log lines of the build.
+
+A pooled tenant is also a real client before it is claimed: instance-wide sweeps
+(`CostingCadenceStartup`, usage aggregation, the corrective data-fix runner) see it like any other
+tenant.
 
 ## Transactional Email Behavior
 

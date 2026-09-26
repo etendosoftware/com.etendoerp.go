@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.docTypeToIsReceipt;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -850,5 +851,44 @@ final class ReconciliationHandlerSupport {
         && rec.getId().equals(t.getReconciliation().getId()) && seenIds.add(t.getId())) {
       out.add(t);
     }
+  }
+
+  /**
+   * Whether matching {@code operationIds} against {@code line} will make Core's
+   * {@code APRM_MatchingUtility} clone the line into a reconciled portion plus a new pending
+   * remainder. Two independent triggers:
+   * <ul>
+   *   <li>More than one operation: Core's list overload chains through them one at a time,
+   *       reassigning the working line to each split's remainder — with N &gt; 1 operations at
+   *       least one split always happens, even when their amounts sum exactly to the line
+   *       (e.g. line=150 matched to 100 + 50 still splits once, on the first operation).</li>
+   *   <li>Exactly one operation whose amount does not exactly equal the line amount: a single
+   *       partial invoice/transaction match (e.g. line=100 matched to a 53.24 invoice) also
+   *       causes a split — this is the case a plain {@code operationIds.size() > 1} check used
+   *       to miss, leaving the pending remainder as an ungrouped, seemingly-separate line.</li>
+   * </ul>
+   * An empty {@code operationIds} (e.g. an invoice selection that settled nothing) never splits.
+   *
+   * <p>Moved out of {@link ReconciliationHandler} (java:S1448); {@code loadTransaction} is still
+   * called back through {@code handler}, so test spies that stub it keep intercepting it.</p>
+   *
+   * @param handler      the handler whose {@code loadTransaction} seam resolves the operation
+   * @param line         the statement line about to be matched
+   * @param operationIds the transaction ids about to be matched against it (pre-existing and/or
+   *                     invoice-derived)
+   * @return {@code true} if Core is expected to split {@code line} for this match
+   */
+  static boolean willSplitLine(ReconciliationHandler handler, FIN_BankStatementLine line,
+      List<String> operationIds) {
+    if (operationIds.isEmpty()) {
+      return false;
+    }
+    if (operationIds.size() > 1) {
+      return true;
+    }
+    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    FIN_FinaccTransaction trx = handler.loadTransaction(operationIds.get(0));
+    BigDecimal opAmount = trx == null ? BigDecimal.ZERO : signedAmount(trx);
+    return lineAmount.abs().compareTo(opAmount.abs()) != 0;
   }
 }

@@ -17,9 +17,13 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.Map;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Pure (DAL-free) re-shaper for {@code neo_schema({view:"actions"})} (IMP-6).
@@ -89,6 +93,37 @@ final class McpActionsView {
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
+    return response;
+  }
+
+  /**
+   * Builds the actions catalog for an entity whose handler declares named actions (ETP-5468) —
+   * the same {@code {spec, entity, actions, actionCount, invokableCount}} shape as
+   * {@link #buildResponse}, but each entry is a declared contract with a JSON Schema for its
+   * {@code parameters} instead of an AD button column. Every declared action is invokable.
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param contracts  the handler's declared actions
+   * @return the response
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONObject buildDeclaredResponse(String specName, String entityName,
+      Map<String, NeoActionContract> contracts) throws JSONException {
+    JSONObject response = new JSONObject();
+    response.put("spec", specName);
+    response.put("entity", entityName);
+    JSONArray actions = new JSONArray();
+    for (NeoActionContract contract : contracts.values()) {
+      actions.put(contract.toJson());
+    }
+    response.put(KEY_ACTIONS, actions);
+    response.put("actionCount", actions.length());
+    response.put(KEY_INVOKABLE_COUNT, actions.length());
+    response.put("hint", "Call neo_action with this spec and entity, id = the record each action "
+        + "acts on (its idDescription says which), action = one of the names above and "
+        + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "
+        + "before anything runs.");
     return response;
   }
 

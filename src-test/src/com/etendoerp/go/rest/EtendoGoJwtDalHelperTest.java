@@ -49,6 +49,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
@@ -554,7 +555,17 @@ class EtendoGoJwtDalHelperTest {
   class BuildEnvironmentJson {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
-    private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
+    // ETP-5488 wrapped TenantEnvironmentLifecycleService.readPreference in
+    // OBContext.setAdminMode()/restorePreviousMode(), and the ETP-5046 plan and subscription reads
+    // enter admin mode too; this class has no live session, so the real static methods NPE.
+    // mockStatic() turns them into no-ops — buildEnvironmentJson's admin-mode plumbing isn't what
+    // these tests exercise.
+    private MockedStatic<OBContext> obContextMock;
+    // With the context mocked, the lifecycle reaches its legacy-trial branch, which reads the
+    // Etendo configuration. Loading it here, in a JVM without a configured environment, left the
+    // config provider without a location for the integration tests that run after this class in
+    // the same JVM (OBBaseTest.initializeDisabledTestCases -> Paths.get(null)).
+    private MockedStatic<com.etendoerp.go.common.ConfigPropertyReader> configMock;
     private MockedStatic<org.openbravo.base.session.OBPropertiesProvider> propertiesMock;
 
     @BeforeEach
@@ -573,9 +584,8 @@ class EtendoGoJwtDalHelperTest {
       propertiesMock = mockStatic(org.openbravo.base.session.OBPropertiesProvider.class);
       propertiesMock.when(org.openbravo.base.session.OBPropertiesProvider::getInstance)
           .thenReturn(propertiesProvider);
-      // The plan and lifecycle reads enter admin mode (ETP-5046 subscription and fallback reads,
-      // ETP-5488 lifecycle preferences), which needs no real session in a unit test.
-      contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
+      obContextMock = mockStatic(OBContext.class);
+      configMock = mockStatic(com.etendoerp.go.common.ConfigPropertyReader.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
     }
@@ -583,7 +593,8 @@ class EtendoGoJwtDalHelperTest {
     @AfterEach
     void restoreOwnerLookup() {
       ownerSupportMock.close();
-      contextMock.close();
+      obContextMock.close();
+      configMock.close();
       propertiesMock.close();
     }
 
