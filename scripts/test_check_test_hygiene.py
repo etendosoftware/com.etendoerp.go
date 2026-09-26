@@ -66,6 +66,14 @@ class ParseCoversTest(unittest.TestCase):
         src = '/** Tests. */\nclass X { String s = "@covers a.b.Foo"; }\n'
         self.assertEqual(hygiene.parse_covers(src), [])
 
+    def test_ignores_covers_mentioned_in_javadoc_prose(self):
+        src = ('/**\n'
+               ' * Tests for Foo; see @covers a.b.Foo for the tag format.\n'
+               ' * Every class must declare {@code @covers a.b.Bar}.\n'
+               ' */\n'
+               'class X {}\n')
+        self.assertEqual(hygiene.parse_covers(src), [])
+
     def test_returns_empty_without_covers(self):
         self.assertEqual(hygiene.parse_covers('/** Tests. */\nclass X {}\n'), [])
 

@@ -27,7 +27,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 TEST_FILE_RE = re.compile(r'^src-test/.+Test\.java$')
 TICKET_NAME_RE = re.compile(r'etp-?\d{4}', re.IGNORECASE)
 JAVADOC_RE = re.compile(r'/\*\*.*?\*/', re.DOTALL)
-COVERS_RE = re.compile(r'@covers\s+([\w.$]+)')
+# A tag counts only when it opens a Javadoc line (`/** @covers x */` or ` * @covers x`),
+# so prose that mentions @covers inside the comment is ignored.
+COVERS_LINE_RE = re.compile(r'^\s*(?:/\*\*|\*+)?\s*@covers\s+([\w.$]+)\s*(?:\*/)?\s*$')
 
 
 def is_test_file(path):
@@ -42,9 +44,11 @@ def parse_covers(src):
     """Every `@covers <FQN>` found inside a Javadoc comment, with its 1-based line."""
     found = []
     for block in JAVADOC_RE.finditer(src):
-        for match in COVERS_RE.finditer(block.group(0)):
-            line = src.count('\n', 0, block.start() + match.start()) + 1
-            found.append((match.group(1), line))
+        first_line = src.count('\n', 0, block.start()) + 1
+        for offset, text in enumerate(block.group(0).split('\n')):
+            match = COVERS_LINE_RE.match(text)
+            if match:
+                found.append((match.group(1), first_line + offset))
     return found
 
 
