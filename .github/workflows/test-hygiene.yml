@@ -12,6 +12,9 @@ on:
     types: [opened, reopened, synchronize]
     paths:
       - 'src-test/**/*.java'
+      - 'scripts/check-test-hygiene.py'
+      - 'scripts/test_check_test_hygiene.py'
+      - '.github/workflows/test-hygiene.yml'
 
 jobs:
   test-hygiene:
@@ -26,6 +29,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Unit-test the hygiene script
+        run: python3 -m unittest discover -s scripts
 
       - name: Check changed test classes
         run: |
