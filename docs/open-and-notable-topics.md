@@ -83,7 +83,7 @@ only what is still open.
   A buyer who pays through the fallback lands on `legacy-productive`, which has zero quota rows and
   is therefore unlimited (§5.1). That costs nothing today and becomes real the moment ETP-5051
   enforces quotas. The fix is not a quota on the grandfathered plan but moving these tenants to a
-  real plan — a plan change, which only ETP-5053 provides (§5.3). Their subscription row snapshots
+  real plan — a plan change, which only ETP-5053 provides. Their subscription row snapshots
   the charged price id but no amount or currency, since the plan has none (design doc §7).
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before
@@ -569,20 +569,6 @@ no ticket owns yet, is in §5.10–§5.12.
 Stripe subscription while opening a *new* Etendo row, so two local rows legitimately share one id.
 Lifecycle webhooks must resolve to the row with `END_DATE IS NULL`, not to "the" row.
 
-### 🟠 5.3 ETP-5053: a plan change opens a new row
-
-**Ticket:** owner ETP-5053.
-
-Re-pricing a plan does **not** re-price existing subscribers — the subscription carries its own
-`PROVIDER_PRICE_ID` and amount snapshot, never rewritten by a plan edit. A plan change closes the
-current row (`END_DATE`) and inserts a successor, preserving price history. `PENDING_PLAN_ID` and
-`PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
-`END_DATE` must be set to *now*, never a future date — see §5.13.
-
-**Nothing implements it yet.** `SubscriptionService` opens and reads rows but never closes one, so
-no tenant can change plan — including a legacy-fallback buyer moving to the first real plan (§2.1)
-— and `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay unread until ETP-5053.
-
 ---
 
 **Quota definition — owner ETP-5051.**
@@ -705,7 +691,7 @@ scope**. Nobody delivers it now. **To decide:** which ticket owns it — it also
 **Ticket:** owner ETP-5053 (the `END_DATE` guard or meaning change); ETP-5047 for closing the row on cancel.
 
 **What it means today.** `END_DATE` is past tense: the moment this row stopped being the tenant's
-current row. Its only intended writer is a plan change (ETP-5053, §5.3), which sets it to *now* and
+current row. Its only intended writer is a plan change (ETP-5053), which sets it to *now* and
 inserts the successor in the same transaction. Nothing writes a non-null value yet —
 `SubscriptionService#openSubscription` sets it to null and the R37 backfill always writes null.
 
