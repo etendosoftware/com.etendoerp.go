@@ -20,7 +20,7 @@ its neighbours.
 
 ## 1. Decisions still owed
 
-### 🔴 1.1 `activeUsers` — data source, and flow versus stock (ETP-5050)
+### 🔴 1.1 The stock resources (`activeUsers`, `productiveEnvironments`) have no history (ETP-5050)
 
 **Ticket:** owner ETP-5050 (product decision owed); affects ETP-5051, which would quota it.
 
@@ -45,16 +45,16 @@ Three options, and the choice is a product decision:
 2. **Only ever record the current day**, never backfill. Cheap and honest; history begins when measurement is switched on.
 3. **Redefine the resource as a flow** — e.g. "users created that day" rather than "users active that day". A *different quantity*, so this is a product call, not a technical shortcut.
 
-Full analysis: `schema_forge/docs/usage-measurement.md` §4.
+**`productiveEnvironments` is the second stock, with the same problem.** The ticket specified it
+as `Client` bucketed by `creationDate` — clients *created* that day, a flow. The ETP-5050 design
+(§"Seeded resources") corrected that to a strategy (`S`, qualifier `productiveEnvironments`): a
+daily snapshot of the active clients, i.e. a stock — so the three options above apply to it too.
+Neither stock counter exists yet: no `@Named("activeUsers")` or `@Named("productiveEnvironments")`
+bean is deployed, so a catalog row for either would fail its run ("No UsageResourceCounter
+deployed", `UsageAggregationService`) until one is.
 
-### 🔴 1.2 `productiveEnvironments` is a flow wearing a stock's name
-
-**Ticket:** owner ETP-5050 (resource definition); affects ETP-5051, which would quota it.
-
-Specified as `Client` bucketed by `creationDate` — which is option 3 above *by accident*. It
-counts clients **created** that day (a flow) while the billable quantity is how many exist (a
-stock). With no rollup yet the difference does not bite, but **storing a flow under a stock's name
-makes every later reading of it wrong**, including any quota built on it in ETP-5051.
+Full analysis: `schema_forge/docs/usage-measurement.md` §4 (its note on `productiveEnvironments`
+still describes the ticket's `creationDate` wording, not the design's snapshot).
 
 ---
 
@@ -118,17 +118,18 @@ afterwards.
 The transitional fallback (§3.2) means this ordering is no longer *load-bearing for uptime*, only
 for completeness.
 
-### 🟠 2.4 The sandbox attestation is per-environment and blocks merge
+### 🟠 2.4 The R37 sandbox pre-check must be re-run on every target environment
 
-**Ticket:** owner ETP-5046 (R37 merge gate).
+**Ticket:** owner ETP-5046 (R37 deployment).
 
 `R37`'s `@report` carries the verbatim outcome of a manual pre-check: *re-verify that production
 Stripe checkout has not gone live since 2026-08-27; if it has, a real paying cohort exists that
 the backfill would orphan and an adoption step is required first.*
 
-The regression test **fails the build** while the `TODO-PRECHECK-R37` marker is present, so it
-cannot ship unfilled. The check must be run against the **target** environment — verifying it on a
-dev box proves nothing about staging. On the dev box (2026-09-18) the Stripe key is `sk_test`, so
+The regression test fails the build while `@report` still carries the `TODO-PRECHECK-R37`
+placeholder; that placeholder has been replaced by the settled wording, so it no longer blocks
+the merge. The pre-check itself is not portable: it must be run against the **target**
+environment — verifying it on a dev box proves nothing about staging. On the dev box (2026-09-18) the Stripe key is `sk_test`, so
 the assumption holds *there*.
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
@@ -187,8 +188,10 @@ the two edits sat in different regions so git saw no conflict. Always build afte
 
 `legacy-productive` ships as module sourcedata with `PROVIDER_PRICE_ID`, `BILLING_INTERVAL`,
 `DISPLAY_PRICE` and `CURRENCY_CODE` all NULL, and **zero quota rows**. That makes it unlimited by
-definition and a no-op for the price-derivation handler. It is purchasable only through the legacy
-price fallback (§2.1), and never on a price of its own.
+definition and a no-op for the price-derivation handler. It is sold through the legacy price
+fallback (§2.1). It is not *unsellable* on a price of its own: an operator who enters a Provider
+Price ID on the row makes `HostedCheckoutService` sell it like any priced plan — which also
+retires the fallback, since the row itself is then a priced plan.
 
 A backfilled subscription is therefore **not a full billing record**. Its two jobs are **access
 control** (`resolvePlan` reads productive) and **webhook correlation** (ETP-5047 matches on
@@ -418,46 +421,6 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
 
 ## 4. Known issues
 
-### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
-
-**Ticket:** no ticket — recurring environment issue; a `check-etgo-xml.sh` improvement would need its own ticket.
-
-Recurring. `update.database` fails `etgo_sf_fld_col_fk` on an `ETGO_SF_FIELD` row whose
-`AD_COLUMN_ID` is not in `AD_COLUMN`. **The usual cause is an unpulled module, not bad data**: the
-column belongs to another module whose local checkout predates it, so `update.database` has simply
-not created it yet. Pull first, then re-check:
-
-```bash
-cd modules && grep -rl "<THE_ID>" .        # nothing? pull every module and grep again
-for d in */; do [ -d "$d/.git" ] && (cd "$d" && git pull --ff-only); done
-```
-
-**Do not delete the `<AD_COLUMN_ID>` line.** That advice used to stand here and was reversed on
-2026-09-21: during ETP-5046 it removed a valid reference (`Invoice_Date` on
-`etvfac_inv_sent_status_v`, added to `com.etendoerp.verifactu` by ETP-5229 — the local checkout was
-simply behind), which made `update.database` green while silently desynchronising this repo from
-schema_forge's pipeline (`make regen-check` DRIFT, `offline-regen-check.yml` failing). It was
-reverted in `301de9b5`. Only if the id exists in **no** module after pulling is it genuinely
-dangling; then removing the line (never the record) is defensible, since the column is
-`required="false"` and the field stays identified by its `JAVA_QUALIFIER`.
-
-**`check-etgo-xml.sh` does not catch this** — its referential-integrity pass does not validate
-`ETGO_SF_FIELD.AD_COLUMN_ID` against core's `AD_COLUMN`, so only a failed `update.database` finds
-it (for the unpulled-module case that silence is actually correct: the reference is valid). If a
-check is ever added, it must resolve ids against every module's sourcedata, not against the local
-database. When sweeping, sweep for all of them at once — the error names only the first.
-
-### 🟡 4.3 Behaviour change: `revertTestModeForProductiveTenantBestEffort` fires more often
-
-**Ticket:** related ETP-5046 (behaviour change) and ETP-5117 (original intent); nothing to do unless it misbehaves.
-
-It previously fired only when `markProductive` succeeded. It now fires whenever the tenant was
-recorded productive by **either** store, so it also covers the success path — where it previously
-reverted test mode only as a side effect of the preference write. Same intent (ETP-5117), wider
-trigger. Given §3.4's stake, firing more often is the safe direction, but it is a behaviour change.
-
----
-
 ### 🟡 4.4 The at-sign guard is over-tested (ETP-5050)
 
 **Ticket:** owner ETP-5050.
@@ -542,25 +505,25 @@ line below is the result of reading the code, not of counting matches.
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
 | `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |
-| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 22 raw installs; the lifecycle webhook is the one site now routed through `payment/SystemContext` |
+| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 28 raw system installs (counted 2026-09-28); the lifecycle webhook is the one site routed through `payment/SystemContext` |
 
 **`CompanyInvitationService` — the real one.** Two sites, both `restorePreviousMode()`-only:
 
-- `resolveInvitation(...)` — installs at **509–510**, unwinds at **553–555**
-- `withAdminMode(...)` — installs at **755–756**, unwinds at **759–761**
+- `resolveInvitation(...)` — installs at **509**, unwinds at **554** (line numbers as of 2026-09-28)
+- `withAdminMode(...)` — installs at **758**, unwinds at **763**
 
 It is the cheapest of the three to fix, because `withAdminMode` is *already* the `runAsSystem`
 shape — a wrapper every accept path funnels through (`acceptExistingAccountInAdminMode` at 576,
-`registerAndAcceptInAdminMode` at 661). It simply never captures. `resolveInvitation` is the only
+`registerAndAcceptInAdminMode` at 664). It simply never captures. `resolveInvitation` is the only
 method opening the context inline, so routing it through `withAdminMode` would collapse the class
 to one context site and fix both at once. The case to care about is
 `registerAndAcceptInAdminMode`, which creates a user and accepts an invitation: anything continuing
 on that thread afterwards runs as system. That is the shape of the hazard; no exploit has been
 traced.
 
-**`EtendoGoJwtServlet` — deliberately left as a question.** 22 installs and one capture/restore is
-not evidence of 21 leaks, and it is not evidence of none either. A heuristic marked it "OK" on the
-strength of that single site; nobody has read the other 21. Whoever picks this up should treat the
+**`EtendoGoJwtServlet` — deliberately left as a question.** 28 installs and one capture/restore is
+not evidence of 27 leaks, and it is not evidence of none either. A heuristic marked it "OK" on the
+strength of that single site; nobody has read the other 27. Whoever picks this up should treat the
 verdict as unknown rather than inherit an unearned pass.
 
 **Left unfixed on purpose.** Neither belongs to ETP-5046, and widening an already large merge to
@@ -679,16 +642,11 @@ current row (`END_DATE`) and inserts a successor, preserving price history. `PEN
 `PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
 `END_DATE` must be set to *now*, never a future date — see §5.13.
 
-### 🟠 5.4 Known gaps: no plan-change path, a partial lifecycle on the table
+**Nothing implements it yet.** `SubscriptionService` opens and reads rows but never closes one, so
+no tenant can change plan — including a legacy-fallback buyer moving to the first real plan (§2.1)
+— and `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay unread until ETP-5053.
 
-**Ticket:** owner ETP-5053 (plan change) and ETP-5047 (rest of the lifecycle).
-
-- **No plan change exists.** `SubscriptionService` can open a row and read it; nothing closes one
-  and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
-  moving to the first real plan — until ETP-5053. `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` stay
-  unread.
-- **Lifecycle webhooks update the row's status and grace anchor only** (§3.7): no period window,
-  no event watermark on the row, no closing on cancel, no re-subscription. ETP-5047 owns the rest.
+---
 
 **Quota definition — owner ETP-5051.**
 
@@ -716,7 +674,7 @@ ETP-5047's call per §3.7; the evaluator cannot be built on these columns until 
 
 **Ticket:** no ticket — falls between ETP-5050 and ETP-5051; needs an owner.
 
-The same problem as §1.1/§1.2, one level up. `ETGO_USAGE_DAILY` stores one `QTY` per tenant,
+The same problem as §1.1, one level up. `ETGO_USAGE_DAILY` stores one `QTY` per tenant,
 resource and `USAGE_DAY`. Summing the days of a period is right for a **flow** (posted sales
 invoices) and wrong for a **stock** (active users, productive environments — daily snapshots): 5
 users every day for 30 days sums to 150. ETP-5050 delivers daily counts only (its design §10
@@ -763,6 +721,8 @@ cleared, `END_DATE` still null — §3.7). **To decide in ETP-5051:** what the e
 window — skip, treat as unlimited, or use the last known period. Latent today only because
 `legacy-productive` has no quota rows (§5.1); the first quota on a plan such a tenant can be on
 makes it live.
+
+---
 
 **Usage per subscription — owner: the ticket that introduces usage-based charging.**
 
@@ -825,7 +785,7 @@ inserts the successor in the same transaction. Nothing writes a non-null value y
 
 **Cancellation does not set `END_DATE` — maybe it should.** A `canceled` row stays open
 (`END_DATE` null, §3.7) and reads as free through `STATUS`. So "the open row" means "the latest
-row", not "the live subscription" — which is why re-subscription is unmodelled (§5.4:
+row", not "the live subscription" — which is why re-subscription is unmodelled (§3.7:
 `openSubscription` returns the canceled row untouched) and why §5.9 has a periodless canceled row.
 **To decide (ETP-5047):** whether `customer.subscription.deleted` should also close the row
 (`END_DATE = now`), so a later paid checkout opens a fresh row with its own price snapshot. Weigh
