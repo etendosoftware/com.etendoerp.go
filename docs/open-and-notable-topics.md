@@ -204,29 +204,6 @@ row`) no longer appears in the logs.
   `TenantEnvironmentLifecycleService` for a tenant with no row, and with them the write-path
   asymmetry of §3.5.
 
-### 🟠 3.4 Ordering invariant: R31/R32 versus R37 — a fiscal-compliance stake
-
-**Ticket:** owner ETP-5046; the "key on etgo_subscription" rule binds every future data-fix, no single ticket.
-
-`R31` (force test mode on demo/free tenants) and `R32` (its inverse) read `ETGO_TenantPlan`
-directly in SQL and know nothing about `etgo_subscription`. If `R31` ever ran for a tenant **after**
-`R37` deleted its preference, it would read a paying tenant as free and force
-`ETSG_ForceTestMode='Y'` — routing their real SII/TicketBAI/VeriFactu submissions to the tax
-authority's **test** endpoints. That is a compliance failure, not a config nit.
-
-Two independent mechanisms prevent it:
-
-- The runner's watermark is a **strict date** (`Math.max` over PROCESSED fix timestamps, "skip
-  everything at or before it, no look-back"). Once `R37` (2026-09-24) is processed, `R31`
-  (2026-09-01) is skipped forever.
-- If `R31` had `FAILED`, the runner halts that tenant's chain, so `R37` could never run for it.
-
-`R31`/`R32` were **not edited** — an applied data-fix is immutable per the framework README and is
-superseded by a new dated file, never modified in place.
-
-> **Any FUTURE data-fix must key on `etgo_subscription`, not on `ETGO_TenantPlan`.** After `R37`
-> the preference is present only for tenants the backfill has not reached.
-
 ---
 
 ### 🟠 3.5 An unrecognised subscription status means ENTITLED, never locked out
@@ -346,8 +323,9 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
 
 - **`canceled` makes the tenant `free` immediately** for `resolvePlan` (only `active`/`past_due`
   are productive). The environment keeps its `ETGO_EnvironmentType = PRODUCTIVE` marker, so the
-  access policy still sees a productive environment and applies `EXPIRED`. Watch §3.4: onboarding a
-  canceled tenant again would run `forceTestModeForFreeTenant` on it.
+  access policy still sees a productive environment and applies `EXPIRED`. Onboarding a canceled
+  tenant again would therefore run `forceTestModeForFreeTenant` on it, routing its SII /
+  TicketBAI / VeriFactu submissions to the test endpoints — a compliance stake, not a config nit.
 - **`canceled` does not close the row** (`END_DATE` stays null). Closing a row is how a plan change
   opens its successor (ETP-5053); a later re-subscription of the same tenant is not modelled yet —
   `openSubscription` returns the existing open row untouched. Whether it should is §5.13.
