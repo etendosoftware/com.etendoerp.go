@@ -96,7 +96,7 @@ the code shipping gets a preference and no subscription. The backfill's `@check`
 that tenant because it keys on the preference rather than on a date — but only if it runs
 afterwards.
 
-The transitional fallback (§3.2) means this ordering is no longer *load-bearing for uptime*, only
+The transitional fallback (design doc §8) means this ordering is no longer *load-bearing for uptime*, only
 for completeness.
 
 ### 🟠 2.4 The R37 sandbox pre-check must be re-run on every target environment
@@ -174,31 +174,35 @@ the two edits sat in different regions so git saw no conflict. Always build afte
 
 ## 3. Legacy plans and the cutover
 
-### 🟠 3.2 The preference is retired per tenant, not fleet-wide
+### 🟠 3.2 Phase F — deleting the transitional plan code — has no ticket
 
-**Ticket:** owner ETP-5046. The Phase F cleanup it enables has no ticket yet — needs its own once the end condition holds.
+**Ticket:** no ticket — needs its own once R37 has run on every environment.
 
-A tenant's `ETGO_TenantPlan` preference is deleted **at the moment it gains a live subscription** —
-in `R37`'s `@apply` (same transaction as the INSERT, guarded on an open subscription existing) and
-in `applyPaidUpgradeSideEffects` (on a successful subscription write).
+The `ETGO_TenantPlan` preference is retired per tenant (R37 and the paid onboarding), and a
+transitional read fallback answers for tenants not reached yet; design doc §8 describes both. What
+is open is the cleanup that ends the transition: nothing owns it, so without a ticket the
+transitional code stays indefinitely.
 
-A **transitional read fallback** (`TenantPlanPreferenceFallback`) covers the gap: no open
-subscription → fall back to the preference, so no paying tenant is ever stranded as free. It applies
-to both resolution paths — the single-tenant one and the `EnvironmentPlanCache` bulk one — because
-if only one had it, the environment list and `resolvePlan` would disagree about the same tenant,
-which is worse than the original bug.
-
-**The observable end condition**, which is the point of doing it this way:
+**Trigger** — both, checked on every environment (design doc §8.1):
 
 ```sql
 select count(*) from ad_preference where attribute = 'ETGO_TenantPlan';   -- reaches 0
 ```
 
-plus the fallback's WARN lines ceasing. When both hold, everything marked
-`ETP-5046-TRANSITIONAL-FALLBACK` plus `markProductive` and `PREFERENCE_ATTRIBUTE` can be deleted.
-That is a query, not a judgement call.
+and the fallback's WARN (`ETP-5046-TRANSITIONAL-FALLBACK: tenant … has no open ETGO_SUBSCRIPTION
+row`) no longer appears in the logs.
 
-The WARN is deliberate: a silent fallback would let the backfill be forgotten indefinitely.
+**What Phase F deletes** — every site carrying the grep marker `ETP-5046-TRANSITIONAL-FALLBACK`
+(6 source files, 5 test files as of 2026-09-28):
+
+- `TenantPlanPreferenceFallback`, and its use in `TenantPlanService.resolvePlan`;
+- `TenantPlanService.markProductive`, `retireProductivePreference` and `PREFERENCE_ATTRIBUTE`, with
+  their call sites in `EtendoGoJwtServlet.applyPaidUpgradeSideEffects`;
+- the `allClientIds` overload of `EnvironmentPlanCache.of` and its callers in
+  `EtendoGoJwtServlet` / `EtendoGoJwtDalHelper`;
+- the `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preference reads in
+  `TenantEnvironmentLifecycleService` for a tenant with no row, and with them the write-path
+  asymmetry of §3.5.
 
 ### 🟠 3.4 Ordering invariant: R31/R32 versus R37 — a fiscal-compliance stake
 
