@@ -60,51 +60,31 @@ still describes the ticket's `creationDate` wording, not the design's snapshot).
 
 ## 2. Deployment — constraints that are not visible in the code
 
-### 🟠 2.1 The legacy price fallback — why it exists and when it switches itself off
+### 🟠 2.1 What the legacy price fallback costs
 
-**Ticket:** related ETP-5046 (introduced by its develop merge). Follow-ups: the offer endpoint → ETP-5049; moving fallback buyers to a real plan → ETP-5053; fallback buyers being uncapped → ETP-5051.
+**Ticket:** owner ETP-5049 (the offer endpoint) and ETP-5053 (moving fallback buyers to a real
+plan); ETP-5051 is where the uncapped buyers start to matter. Related ETP-5046, whose develop merge
+introduced the fallback.
 
-`etendo.go.checkout.price.id` was deleted "with no fallback" on this branch, which made two deploy
-constraints hard: a priced `ETGO_PLAN` row had to exist before the code went live (no sourcedata
-row can carry a real, environment-specific Stripe price id), and the module and the app-shell had
-to ship together (`planKey` required, no default). The develop merge reinstated the property as a
-**transitional fallback** to remove both.
+How the fallback works — the one predicate, the self-retirement on the first priced plan, the
+reload edge case — is the design doc's §6.1; the operator procedure is its §6.2. This section keeps
+only what is still open.
 
-**Activation rule — one predicate, `PlanCatalogService.isLegacyFallbackActive()`:** the property is
-non-blank **and** no active plan carries a provider price id. `GET /sws/go/plans` and checkout both
-call it, so the list never offers what checkout refuses. While active, the list is exactly
-`legacy-productive` quoted from the Stripe price (`retrieveConfiguredPrice()`; a failed lookup omits
-it, never 500), and a checkout naming `legacy-productive` — or no plan — sells that price and
-records `legacy-productive` plus the charged price id on the request.
-
-**Retirement is automatic.** The first priced plan makes the predicate false on the next request:
-no redeploy, no property change. The property can be removed afterwards, with one visible effect:
-`GET /sws/go/billing/offers` still reads it and then answers `503 BILLING_OFFER_UNAVAILABLE` (see
-the price-source bullet below). The step-by-step operator procedure is the design doc's §6.2.
-
-Things to know while it is active:
-
-- **The reload edge case.** A buyer whose page loaded the fallback list before the first priced plan
-  appeared submits `legacy-productive` and gets `400 PLAN_NOT_AVAILABLE`; the page shows
-  `upgradePlanNotAvailable` ("reload the page"). Nothing is charged.
-- **Fallback buyers are unlimited.** They land on `legacy-productive`, which has zero quota rows
-  (§5.1): once ETP-5051 enforces quotas they will not be capped. Their subscription row snapshots
-  the charged price id but no amount/currency (the plan has none). Moving them to a real plan is a
-  plan change (ETP-5053).
-- **The list shows the grandfathered plan's own name** — `ETGO_PLAN.NAME` of `legacy-productive`
-  ("Legacy Productive (grandfathered)"); edit the row if buyers should see something else. Its
-  `description` is always sent **empty**: the row's `DESCRIPTION` is operator documentation that
-  names `etendo.go.checkout.price.id`, so it is never shown to a buyer (the row is kept as is).
-- **`GET /sws/go/billing/offers` quotes the legacy price, never the plan catalog.** Since develop's
-  ETP-5463 the offer has no typed configuration of its own: `BillingOfferConfiguration` derives it
-  from the configured Stripe price (`retrieveConfiguredPrice()`). While the fallback is active that
-  is exactly the charged price. Once a priced plan retires the fallback the offer keeps quoting the
-  legacy price — a different amount from what checkout now charges — and once the property is
-  removed it answers `503`. The upgrade page quotes the plan catalog and uses the offer only while
-  that lookup is in flight or has failed; any other consumer of the offer is exposed to the
-  difference. Pointing the offer at the plan catalog belongs with the plan-selection UI (ETP-5049).
-- On an environment with neither a priced plan nor the property, checkout answers
-  `PLAN_NOT_AVAILABLE` for the legacy key / no key, and `GET /sws/go/plans` is empty.
+- **`GET /sws/go/billing/offers` quotes the legacy price, never the plan catalog → ETP-5049.**
+  `BillingOfferConfiguration` derives the offer from `etendo.go.checkout.price.id`
+  (`retrieveConfiguredPrice()`). While the fallback is active that is the charged price. Once a
+  priced plan retires the fallback, the offer keeps quoting the legacy price — a different amount
+  from what checkout charges — and once the property is removed it answers
+  `503 BILLING_OFFER_UNAVAILABLE`. The upgrade page quotes the catalog and reads the offer only
+  while that lookup is in flight or has failed, so it is barely exposed; any other consumer of the
+  offer is not. ETP-5049 (plan selection in the customer UI) should point the offer at the catalog
+  or retire it. The same endpoint also leaks the Stripe price id (§4.8).
+- **Fallback buyers are uncapped and stuck on `legacy-productive` → ETP-5053, felt in ETP-5051.**
+  A buyer who pays through the fallback lands on `legacy-productive`, which has zero quota rows and
+  is therefore unlimited (§5.1). That costs nothing today and becomes real the moment ETP-5051
+  enforces quotas. The fix is not a quota on the grandfathered plan but moving these tenants to a
+  real plan — a plan change, which only ETP-5053 provides (§5.3). Their subscription row snapshots
+  the charged price id but no amount or currency, since the plan has none (§3.1).
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before
 
