@@ -559,7 +559,7 @@ guard the evaluator except this paragraph.** `ETGO_PLAN_QUOTA` is also the only 
 `ISDELETEABLE='Y'`, because deleting the last quota row is how an operator restores unlimited.
 
 The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9; usage per subscription, which
-no ticket owns yet, is in §5.10–§5.12.
+no ticket owns yet, is in §5.10 and §5.12.
 
 ### 🟠 5.2 ETP-5047: correlate to the OPEN row
 
@@ -649,32 +649,36 @@ makes it live.
 
 **Usage per subscription — owner: the ticket that introduces usage-based charging.**
 
-PRD §3 and §16 defer overage charging "with its own PRD"; period history could also fit ETP-5047 or
-ETP-5048.
+PRD §3 and §16 defer overage charging "with its own PRD"; recording the periods fits ETP-5047.
 
-### 🔴 5.10 There is no per-subscription or per-period usage figure, stored or planned
+### 🔴 5.10 Per-period usage cannot be produced — neither the periods nor the usage per period are recorded
 
-**Ticket:** no ticket — belongs to the not-yet-created usage-based charging ticket.
+**Ticket:** no ticket — recording the periods fits ETP-5047 (it handles `invoice.paid`, which
+carries them); storing usage per period belongs to the not-yet-created usage-based charging ticket.
 
-`ETGO_USAGE_DAILY` (`MEASURED_CLIENT_ID`, `ETGO_BILLING_RESOURCE_ID`, `USAGE_DAY`, `QTY`,
-`IS_SETTLED`) has no link to a subscription. It joins one only **by value**:
-`ETGO_SUBSCRIPTION.ENVIRONMENT_CLIENT_ID = MEASURED_CLIENT_ID` and `USAGE_DAY` inside the period.
-ETP-5051 computes that on the fly, for evaluation only; ETP-5048's reconciliation covers payments
-and subscription status, not usage. **To decide:** whether a period's usage is ever stored, and by
-whom.
+Overage billing bills a **closed** billing period, so it needs two things this block records
+neither of:
 
-### 🔴 5.11 Past billing periods cannot be reconstructed locally — cheap now, impossible later
+- **The periods themselves.** `ETGO_SUBSCRIPTION` has one period slot and no history; once
+  ETP-5047 fills it, each renewal overwrites it. `ETGO_BILLING_EVENT` does not keep invoice periods
+  either: `PAYLOAD_SUMMARY`'s allow-list (`WebhookPayloadSummary`) is `id, customer, subscription,
+  livemode, payment_status, amount_total, currency, mode` — no `period_start`/`period_end`.
+- **The usage per period.** `ETGO_USAGE_DAILY` (`MEASURED_CLIENT_ID`, `ETGO_BILLING_RESOURCE_ID`,
+  `USAGE_DAY`, `QTY`, `IS_SETTLED`) has no link to a subscription. It joins one only **by value**
+  (`ETGO_SUBSCRIPTION.ENVIRONMENT_CLIENT_ID = MEASURED_CLIENT_ID`, `USAGE_DAY` inside the period),
+  which ETP-5051 computes on the fly for evaluation only. ETP-5048's reconciliation covers payments
+  and subscription status, not usage.
 
-**Ticket:** no ticket — candidates ETP-5047 or ETP-5048; needs a decision.
+The second depends on the first: usage cannot be attributed to a past period whose boundaries were
+never recorded.
 
-`ETGO_SUBSCRIPTION` has one period slot and no history; once ETP-5047 fills it, each renewal will
-overwrite it. `ETGO_BILLING_EVENT` does not keep invoice periods either: `PAYLOAD_SUMMARY`'s
-allow-list (`WebhookPayloadSummary`) is `id, customer, subscription, livemode, payment_status,
-amount_total, currency, mode` — no `period_start`/`period_end`. So "usage in the last billed
-period" needs Stripe's invoice dates, and any overage billing, which bills a **closed** period,
-needs a local period history. **To decide:** a small period-history table, or recording the invoice
-period on the `invoice.paid` billing event. Starting to record now costs little; periods that were
-never recorded cannot be backfilled from local data.
+**To decide:**
+
+1. **Record each billing period as it happens** — a small period-history table, or the invoice
+   period kept on the `invoice.paid` billing event. The urgent half: it costs little now, and
+   periods that were never recorded cannot be backfilled from local data.
+2. **Whether a period's usage is ever stored, and by whom** — or always recomputed from
+   `ETGO_USAGE_DAILY` over the recorded period.
 
 ### 🔴 5.12 The would-have-billed report is scheduled in the PRD and excluded by its owner
 
