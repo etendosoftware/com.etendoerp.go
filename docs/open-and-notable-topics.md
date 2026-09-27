@@ -200,22 +200,6 @@ That is a query, not a judgement call.
 
 The WARN is deliberate: a silent fallback would let the backfill be forgotten indefinitely.
 
-### 🟠 3.3 The preference is scoped by `VISIBLEAT_CLIENT_ID`, never `AD_CLIENT_ID`
-
-**Ticket:** owner ETP-5046; a constraint until Phase F (no ticket yet, §3.2).
-
-`Preferences.setPreferenceValue` writes the row at `ad_client_id = '0'` and puts the tenant in
-`VISIBLEAT_CLIENT_ID`. Filtering on `ad_client_id` matches **zero rows for every tenant** —
-verified on live data: `via_visibleat = 6, via_adclient = 0`.
-
-This mistake nearly shipped twice on ETP-5046. On the read side it silently reclassifies every
-paying tenant as free; on the retirement side it is a silent no-op that would block the §3.2 end
-condition forever with nothing reporting why.
-
-Note `ETSG_ForceTestMode` uses the **opposite** shape — the row's own `AD_CLIENT_ID` *is* the
-tenant, because its handlers resolve on `Preference.client`. The two preferences are not
-interchangeable.
-
 ### 🟠 3.4 Ordering invariant: R31/R32 versus R37 — a fiscal-compliance stake
 
 **Ticket:** owner ETP-5046; the "key on etgo_subscription" rule binds every future data-fix, no single ticket.
@@ -386,7 +370,8 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   `ETGO_SubscriptionStatus` (same mapping as above, plus `NONE → canceled` so a locked-out tenant
   stays locked out; absent/`LEGACY_ENTITLEMENT`/unknown → `active`) and
   `CURRENT_PERIOD_END` from `ETGO_SubscriptionDueAt`, reading both by `AD_CLIENT_ID` (they are
-  owned by the tenant, unlike the plan marker of §3.3). Without that, the row — which wins once it
+  owned by the tenant, unlike the `ETGO_TenantPlan` marker, which is scoped by
+  `VISIBLEAT_CLIENT_ID`). Without that, the row — which wins once it
   exists — would have reset every past-due or expired tenant to paying. Design doc §7.0.
 
 ## 4. Known issues
