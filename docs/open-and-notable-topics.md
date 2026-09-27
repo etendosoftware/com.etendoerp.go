@@ -8,6 +8,8 @@ measurement), ETP-5046 (Subscription Plan Catalog + subscriptions), and what the
 
 **Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around
 
+**Ticket line:** every topic carries a `**Ticket:**` line under its heading. *Owner* = the ticket that must resolve or respect it. *Related* = where it came from or what it touches. **No ticket** = nothing currently covers it; it needs its own ticket or a decision on where it goes.
+
 **This register carries only what is still live.** A topic is deleted once it is fixed or settled —
 it does not graduate to a "closed" section. The history stays in the commit that resolved it, which
 is the only copy that cannot drift from the code. **Section numbers are stable**: other documents
@@ -19,6 +21,8 @@ its neighbours.
 ## 1. Decisions still owed
 
 ### 🔴 1.1 `activeUsers` — data source, and flow versus stock (ETP-5050)
+
+**Ticket:** owner ETP-5050 (product decision owed); affects ETP-5051, which would quota it.
 
 The significant unresolved issue in the usage design, and it decides whether `activeUsers` can be
 implemented at all. `AD_SESSION` is explicitly ruled out.
@@ -45,6 +49,8 @@ Full analysis: `schema_forge/docs/usage-measurement.md` §4.
 
 ### 🔴 1.2 `productiveEnvironments` is a flow wearing a stock's name
 
+**Ticket:** owner ETP-5050 (resource definition); affects ETP-5051, which would quota it.
+
 Specified as `Client` bucketed by `creationDate` — which is option 3 above *by accident*. It
 counts clients **created** that day (a flow) while the billable quantity is how many exist (a
 stock). With no rollup yet the difference does not bite, but **storing a flow under a stock's name
@@ -55,6 +61,8 @@ makes every later reading of it wrong**, including any quota built on it in ETP-
 ## 2. Deployment — constraints that are not visible in the code
 
 ### 🟠 2.1 The legacy price fallback — why it exists and when it switches itself off
+
+**Ticket:** related ETP-5046 (introduced by its develop merge). Follow-ups: the offer endpoint → ETP-5049; moving fallback buyers to a real plan → ETP-5053; fallback buyers being uncapped → ETP-5051.
 
 `etendo.go.checkout.price.id` was deleted "with no fallback" on this branch, which made two deploy
 constraints hard: a priced `ETGO_PLAN` row had to exist before the code went live (no sourcedata
@@ -100,6 +108,8 @@ Things to know while it is active:
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before
 
+**Ticket:** owner ETP-5046 (R37 deployment).
+
 `resolvePlan` reads the subscription first. A tenant provisioned between the schema landing and
 the code shipping gets a preference and no subscription. The backfill's `@check` catches exactly
 that tenant because it keys on the preference rather than on a date — but only if it runs
@@ -109,6 +119,8 @@ The transitional fallback (§3.2) means this ordering is no longer *load-bearing
 for completeness.
 
 ### 🟠 2.4 The sandbox attestation is per-environment and blocks merge
+
+**Ticket:** owner ETP-5046 (R37 merge gate).
 
 `R37`'s `@report` carries the verbatim outcome of a manual pre-check: *re-verify that production
 Stripe checkout has not gone live since 2026-08-27; if it has, a real paying cohort exists that
@@ -121,6 +133,8 @@ the assumption holds *there*.
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
 
+**Ticket:** no ticket — local build environment; confirming the CI JDK is a separate check.
+
 `build.gradle` targets Java 17; core's bundled Groovy/ASM cannot read Java 21 bytecode.
 `:compileTestGroovy` dies with `Unsupported class file major version 65` while compiling core's
 own Spock specs — so **no test runs at all**, and the failure looks unrelated to whatever you
@@ -129,11 +143,15 @@ trusting a green local run.
 
 ### 🟠 2.6 Gradle reports `UP-TO-DATE` and runs nothing
 
+**Ticket:** no ticket — build-tooling behaviour, applies to every ticket.
+
 A re-run after an unrelated change silently executes zero tests while printing `BUILD SUCCESSFUL`.
 Delete `build/test-results/{test,goIsolatedDalTest}` and pass `--rerun`, then read the task outcome
 lines — not just the build result. This produced a false "verified" claim once during ETP-5046.
 
 ### 🟠 2.7 `Hooks-Verified` seals do NOT survive a rebase, despite claiming to
+
+**Ticket:** no ticket — a bug in the git-hooks seal (`.githooks`); needs its own ticket.
 
 The trailer carries two fingerprints: one over the commit's tree, and — in `v2` — one over its
 patch-id, so that *"a rebase/cherry-pick that replays the SAME diff onto another base keeps a valid
@@ -165,6 +183,8 @@ the two edits sat in different regions so git saw no conflict. Always build afte
 
 ### 🟠 3.1 The grandfathered plan has no price, deliberately
 
+**Ticket:** owner ETP-5046. The production adoption step, if ever needed, is gated by §2.4; moving grandfathered tenants to a priced plan is ETP-5053.
+
 `legacy-productive` ships as module sourcedata with `PROVIDER_PRICE_ID`, `BILLING_INTERVAL`,
 `DISPLAY_PRICE` and `CURRENCY_CODE` all NULL, and **zero quota rows**. That makes it unlimited by
 definition and a no-op for the price-derivation handler. It is purchasable only through the legacy
@@ -182,6 +202,8 @@ subscription's price from Stripe and record it. The `StripeApiClient` built in E
 cheap; it was left out of scope while the sandbox assumption holds.
 
 ### 🟠 3.2 The preference is retired per tenant, not fleet-wide
+
+**Ticket:** owner ETP-5046. The Phase F cleanup it enables has no ticket yet — needs its own once the end condition holds.
 
 A tenant's `ETGO_TenantPlan` preference is deleted **at the moment it gains a live subscription** —
 in `R37`'s `@apply` (same transaction as the INSERT, guarded on an open subscription existing) and
@@ -207,6 +229,8 @@ The WARN is deliberate: a silent fallback would let the backfill be forgotten in
 
 ### 🟠 3.3 The preference is scoped by `VISIBLEAT_CLIENT_ID`, never `AD_CLIENT_ID`
 
+**Ticket:** owner ETP-5046; a constraint until Phase F (no ticket yet, §3.2).
+
 `Preferences.setPreferenceValue` writes the row at `ad_client_id = '0'` and puts the tenant in
 `VISIBLEAT_CLIENT_ID`. Filtering on `ad_client_id` matches **zero rows for every tenant** —
 verified on live data: `via_visibleat = 6, via_adclient = 0`.
@@ -220,6 +244,8 @@ tenant, because its handlers resolve on `Preference.client`. The two preferences
 interchangeable.
 
 ### 🟠 3.4 Ordering invariant: R31/R32 versus R37 — a fiscal-compliance stake
+
+**Ticket:** owner ETP-5046; the "key on etgo_subscription" rule binds every future data-fix, no single ticket.
 
 `R31` (force test mode on demo/free tenants) and `R32` (its inverse) read `ETGO_TenantPlan`
 directly in SQL and know nothing about `etgo_subscription`. If `R31` ever ran for a tenant **after**
@@ -243,6 +269,8 @@ superseded by a new dated file, never modified in place.
 ---
 
 ### 🟠 3.5 An unrecognised subscription status means ENTITLED, never locked out
+
+**Ticket:** owner ETP-5046 (decided). Binding on ETP-5047 and ETP-5053, whichever first adds a `STATUS` value. The write-path asymmetry is settled in Phase F (no ticket yet, §3.2).
 
 **Context — two models met in the merge.** While ETP-5046 was putting subscription state into
 `ETGO_SUBSCRIPTION`, `develop` shipped a parallel model for the same concept:
@@ -307,6 +335,8 @@ Phase F cleanup should settle which.
 
 ### 🟠 3.6 The data-fix watermark silently skips a fix dated at or below it — R37 was re-dated
 
+**Ticket:** related ETP-5046 (R37 re-dated); the rule binds every branch that carries a data-fix, no single ticket.
+
 `run.js` applies, per tenant, only fixes strictly newer than the newest `PROCESSED` fix
 (`fix.timestamp <= watermark` → skip, no look-back). A fix that waits on a branch while develop
 merges newer fixes is therefore dead on arrival on every environment that already ran them — no
@@ -331,6 +361,8 @@ is invisible to a catalog test, so the rule above stays the author's job; `sql/R
 the timestamp" states it where fixes are written.
 
 ### 🟠 3.7 Lifecycle webhooks write the open subscription row — preferences only without one
+
+**Ticket:** owner ETP-5047 for the open follow-ups (watermark column, period versus grace anchor, re-subscription); related develop ETP-5443 / ETP-5488 and ETP-5046.
 
 Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice.payment_failed`,
 `customer.subscription.updated`, `customer.subscription.deleted`) into a preference projection
@@ -357,7 +389,7 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
   canceled tenant again would run `forceTestModeForFreeTenant` on it.
 - **`canceled` does not close the row** (`END_DATE` stays null). Closing a row is how a plan change
   opens its successor (ETP-5053); a later re-subscription of the same tenant is not modelled yet —
-  `openSubscription` returns the existing open row untouched.
+  `openSubscription` returns the existing open row untouched. Whether it should is §5.13.
 - **The event-ordering watermark (`ETGO_SubscriptionEventAt`) stays a preference for both
   routes.** It is webhook-stream metadata, not subscription state, and the row has no column for
   it. Follow-up for ETP-5047: it could move onto `ETGO_SUBSCRIPTION` as its own column (new AD
@@ -388,6 +420,8 @@ role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`.
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
 
+**Ticket:** no ticket — recurring environment issue; a `check-etgo-xml.sh` improvement would need its own ticket.
+
 Recurring. `update.database` fails `etgo_sf_fld_col_fk` on an `ETGO_SF_FIELD` row whose
 `AD_COLUMN_ID` is not in `AD_COLUMN`. **The usual cause is an unpulled module, not bad data**: the
 column belongs to another module whose local checkout predates it, so `update.database` has simply
@@ -415,6 +449,8 @@ database. When sweeping, sweep for all of them at once — the error names only 
 
 ### 🟡 4.3 Behaviour change: `revertTestModeForProductiveTenantBestEffort` fires more often
 
+**Ticket:** related ETP-5046 (behaviour change) and ETP-5117 (original intent); nothing to do unless it misbehaves.
+
 It previously fired only when `markProductive` succeeded. It now fires whenever the tenant was
 recorded productive by **either** store, so it also covers the success path — where it previously
 reverted test mode only as a side effect of the preference write. Same intent (ETP-5117), wider
@@ -423,6 +459,8 @@ trigger. Given §3.4's stake, firing more often is the safe direction, but it is
 ---
 
 ### 🟡 4.4 The at-sign guard is over-tested (ETP-5050)
+
+**Ticket:** owner ETP-5050.
 
 `UsageMessages.atSafe` replaces `@` with `(at)` in any value interpolated into a user-facing
 message, because `OBMessageUtils` treats `@token@` as a substitution and an unescaped at-sign in a
@@ -467,6 +505,8 @@ Raised by Martin on 2026-09-18; not yet actioned.
 
 ### 🟡 4.6 `recordRequested` accepts a null plan that production cannot produce
 
+**Ticket:** related ETP-5045 / ETP-5046; no ticket owns the fix — small, needs its own or can ride along with the next checkout change.
+
 `CheckoutRequestStore.recordRequested(..., RequestOptions options, Plan plan)` records the Subscription Plan Catalog row being bought, so the
 subscription opened after payment reflects **what the buyer actually saw** rather than whatever the
 plan says by then. `ETGO_CHECKOUT_REQUEST.ETGO_PLAN_ID` is nullable because rows predating ETP-5046
@@ -484,6 +524,8 @@ one, and the subscription would open not knowing what was bought.
 during the ETP-5045 merge because changing a method contract mid-merge is the wrong moment.
 
 ### 🟠 4.7 The rest of the `OBContext` survey — one real, one false alarm, one unread
+
+**Ticket:** no ticket — needs its own, as stated below.
 
 Fixing the same leak twice — in `CheckoutRequestStore` (ETP-5045) and then in `BillingEventStore`
 (ETP-5046) — raised the obvious question: how many more of these are there? Below is a module-wide
@@ -526,6 +568,8 @@ mechanical once the pattern is recognised, which is the entire reason this secti
 
 ### 🟡 4.8 `priceId` still reaches the browser on two develop paths
 
+**Ticket:** related develop ETP-5463 and the ETP-5046 review (W3); no ticket owns it — ETP-5049 is the natural home if it touches the account billing UI.
+
 The plan catalog and the checkout request never carry a provider price id (`buildPlanJson`,
 `api.js`: "the server never sends a provider price id"). Two develop-owned responses still do:
 
@@ -541,6 +585,8 @@ the field. Raised in the ETP-5046 review (W3); left out of scope of the merge.
 
 ### 🟡 4.9 No short-TTL cache on Stripe price lookups
 
+**Ticket:** related ETP-5046 review (S1); no ticket — performance follow-up, needs its own.
+
 `GET /sws/go/plans` (legacy fallback: `retrieveConfiguredPrice()`) and every checkout
 (`StripePriceService.retrievePrice` on the plan's `PROVIDER_PRICE_ID`) call Stripe synchronously,
 once per request. The price for a given id is effectively immutable, so a small per-id cache with a
@@ -549,6 +595,8 @@ latency; the checkout path must keep failing closed on a lookup error rather tha
 miss. Raised in the ETP-5046 review (S1); not implemented.
 
 ### 🟡 4.10 `ETARC_VECTOR_SOURCE.DISTANCE_METRIC` is exported by this module before its column exists
+
+**Ticket:** owner ETP-5118 / ETP-5335, outside the billing block.
 
 Cross-repo inconsistency found during the ETP-5046 develop merge; owner **ETP-5118 / ETP-5335**,
 not this block. This module's `src-db/database/sourcedata/ETARC_VECTOR_SOURCE.xml` on `develop`
@@ -565,6 +613,8 @@ Until ETP-5118 merges: do not commit an `ETARC_VECTOR_SOURCE.xml` export that dr
 `db.extended` `develop`, or when ETP-5335 re-exports without the column.
 
 ### 🟡 4.11 Two Stripe price parsers, with different rules — `StripeApiClient` only half adopted
+
+**Ticket:** related ETP-5046 (`58ea090d`); no ticket — needs its own.
 
 ETP-5046 (`58ea090d`) put the Stripe transport behind `StripeApiClient` /
 `HttpUrlConnectionStripeApiClient`, but only `HostedCheckoutService` and
@@ -596,6 +646,8 @@ of static `CheckoutConfiguration` mocks. Found after the ETP-5046 develop merge;
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
 
+**Ticket:** owner ETP-5051.
+
 `ETGO_PLAN_QUOTA.INCLUDED_QTY` is `required="true"` with **no default**, in the DDL *and* in
 `AD_COLUMN.DEFAULTVALUE`. This deliberately breaks the module's own pattern — every comparable
 required DECIMAL here carries `<default>0</default>`.
@@ -610,18 +662,25 @@ no ticket owns yet, is in §5.10–§5.12.
 
 ### 🟠 5.2 ETP-5047: correlate to the OPEN row
 
+**Ticket:** owner ETP-5047.
+
 `STRIPE_SUBSCRIPTION_ID` is deliberately **not unique**: a plan change updates the item on the same
 Stripe subscription while opening a *new* Etendo row, so two local rows legitimately share one id.
 Lifecycle webhooks must resolve to the row with `END_DATE IS NULL`, not to "the" row.
 
 ### 🟠 5.3 ETP-5053: a plan change opens a new row
 
+**Ticket:** owner ETP-5053.
+
 Re-pricing a plan does **not** re-price existing subscribers — the subscription carries its own
 `PROVIDER_PRICE_ID` and amount snapshot, never rewritten by a plan edit. A plan change closes the
 current row (`END_DATE`) and inserts a successor, preserving price history. `PENDING_PLAN_ID` and
 `PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
+`END_DATE` must be set to *now*, never a future date — see §5.13.
 
 ### 🟠 5.4 Known gaps: no plan-change path, a partial lifecycle on the table
+
+**Ticket:** owner ETP-5053 (plan change) and ETP-5047 (rest of the lifecycle).
 
 - **No plan change exists.** `SubscriptionService` can open a row and read it; nothing closes one
   and opens the successor. A tenant cannot move between plans — including a legacy-fallback buyer
@@ -636,6 +695,8 @@ Facts checked against the DDL, `SubscriptionService` and the PRD on 2026-09-24; 
 is quoted from its Jira text as read that day.
 
 ### 🟠 5.5 Consumption window = the subscription billing period — decided, but no row carries one yet
+
+**Ticket:** owner ETP-5051 (reads the period); ETP-5047 must populate it first.
 
 **Decided, not open.** There is deliberately no period column on `ETGO_PLAN_QUOTA`. The PRD fixes
 the window (§4 decisions table, "Consumption window: the **subscription billing period**, never the
@@ -652,6 +713,8 @@ ETP-5047's call per §3.7; the evaluator cannot be built on these columns until 
 
 ### 🔴 5.6 Stock versus flow aggregation over the period — owned by nobody
 
+**Ticket:** no ticket — falls between ETP-5050 and ETP-5051; needs an owner.
+
 The same problem as §1.1/§1.2, one level up. `ETGO_USAGE_DAILY` stores one `QTY` per tenant,
 resource and `USAGE_DAY`. Summing the days of a period is right for a **flow** (posted sales
 invoices) and wrong for a **stock** (active users, productive environments — daily snapshots): 5
@@ -666,6 +729,8 @@ existing covers it.
 
 ### 🔴 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
 
+**Ticket:** owner ETP-5051.
+
 ETP-5046 shipped `CONSUMPTION_SOURCE` (String, list reference `ETGO_QuotaConsumptionSource`, single
 `AD_REF_LIST` value `sum`, check `ETGO_PLNQTA_SOURCE_CHK`: `NULL OR = 'sum'`) — i.e. an aggregation.
 ETP-5051 defines the field as the **data source**: the daily aggregate (lagged by up to a day)
@@ -679,6 +744,8 @@ migration once operators have filled it in.
 
 ### 🟠 5.8 A quota on a yearly plan is a yearly quota
 
+**Ticket:** owner ETP-5051 (operator docs and window help).
+
 `ETGO_PLAN_INTERVAL_CHK` allows `month` and `year`, and the window is the billing period (§5.5), so
 `INCLUDED_QTY` on a `year` plan is consumed over the whole year, not per month. Correct by the
 design, surprising to an operator. **Must be stated** in the operator docs and in the **Plans** /
@@ -686,6 +753,8 @@ design, surprising to an operator. **Must be stated** in the operator docs and i
 deferred in PRD §16, yet the schema already accepts them.)
 
 ### 🔴 5.9 A subscription with no current period needs a defined answer
+
+**Ticket:** owner ETP-5051.
 
 Beyond §5.5's "no row has a period yet", two cases stay periodless by nature: rows backfilled by
 R37 (`CURRENT_PERIOD_START` always NULL, design §7.0) and a `canceled` row (`CURRENT_PERIOD_END`
@@ -701,6 +770,8 @@ ETP-5048.
 
 ### 🔴 5.10 There is no per-subscription or per-period usage figure, stored or planned
 
+**Ticket:** no ticket — belongs to the not-yet-created usage-based charging ticket.
+
 `ETGO_USAGE_DAILY` (`MEASURED_CLIENT_ID`, `ETGO_BILLING_RESOURCE_ID`, `USAGE_DAY`, `QTY`,
 `IS_SETTLED`) has no link to a subscription. It joins one only **by value**:
 `ETGO_SUBSCRIPTION.ENVIRONMENT_CLIENT_ID = MEASURED_CLIENT_ID` and `USAGE_DAY` inside the period.
@@ -709,6 +780,8 @@ and subscription status, not usage. **To decide:** whether a period's usage is e
 whom.
 
 ### 🔴 5.11 Past billing periods cannot be reconstructed locally — cheap now, impossible later
+
+**Ticket:** no ticket — candidates ETP-5047 or ETP-5048; needs a decision.
 
 `ETGO_SUBSCRIPTION` has one period slot and no history; once ETP-5047 fills it, each renewal will
 overwrite it. `ETGO_BILLING_EVENT` does not keep invoice periods either: `PAYLOAD_SUMMARY`'s
@@ -721,11 +794,68 @@ never recorded cannot be backfilled from local data.
 
 ### 🔴 5.12 The would-have-billed report is scheduled in the PRD and excluded by its owner
 
+**Ticket:** assigned to ETP-5050 by the PRD but excluded by its design — effectively no ticket; needs an owner.
+
 PRD §14 assigns "would-have-billed report. Shadow mode" to **ETP-5050** (PRD §6 motivates the
 historical backfill by shadow mode). ETP-5050's design (`plans/2026-09-15-etp-5050-usage-measurement-design.md` §10) lists
 "Rollup of any kind — SUM or MAX over a period, the would-have-billed figure, price" as **out of
 scope**. Nobody delivers it now. **To decide:** which ticket owns it — it also depends on §5.6
 (how days combine) and §5.5 (which period).
+
+### 🔴 5.13 `END_DATE` records what happened, never what will happen — and any value closes the row
+
+**Ticket:** owner ETP-5053 (the `END_DATE` guard or meaning change); ETP-5047 for closing the row on cancel.
+
+**What it means today.** `END_DATE` is past tense: the moment this row stopped being the tenant's
+current row. Its only intended writer is a plan change (ETP-5053, §5.3), which sets it to *now* and
+inserts the successor in the same transaction. Nothing writes a non-null value yet —
+`SubscriptionService#openSubscription` sets it to null and the R37 backfill always writes null.
+
+**Future intent is not expressed on `END_DATE`; Stripe owns the timing.**
+
+- A scheduled **downgrade** lives in `PENDING_PLAN_ID` / `PENDING_EFFECTIVE_DATE` on the open row
+  (PRD §8.3). Stripe's Subscription Schedule emits `customer.subscription.updated` at the period
+  boundary, and only then is the row closed and its successor opened.
+- A scheduled **cancellation** (`cancel_at_period_end`) is not stored locally at all:
+  `SubscriptionLifecycleApplier` deliberately ignores the flag so access continues, and the
+  Subscription page reads it live from Stripe. `customer.subscription.deleted` at the boundary sets
+  `STATUS = canceled`.
+- An **upgrade** is immediate (PRD §8.1), so it never needs a future date.
+
+**Cancellation does not set `END_DATE` — maybe it should.** A `canceled` row stays open
+(`END_DATE` null, §3.7) and reads as free through `STATUS`. So "the open row" means "the latest
+row", not "the live subscription" — which is why re-subscription is unmodelled (§5.4:
+`openSubscription` returns the canceled row untouched) and why §5.9 has a periodless canceled row.
+**To decide (ETP-5047):** whether `customer.subscription.deleted` should also close the row
+(`END_DATE = now`), so a later paid checkout opens a fresh row with its own price snapshot. Weigh
+it against the fact that a tenant with no open row leaves the row route entirely: `resolvePlan`
+falls through to `TenantPlanPreferenceFallback`, and `applyLifecycleStatus` returns false so later
+lifecycle events land on the preference projection (§3.7). Closing on cancel changes both.
+
+**The trap: "open" ignores the dates.** `OPEN_ROW_PREDICATE` in `SubscriptionService` is
+`endDate is null and active = true`; the partial unique index `ETGO_SUB_OPEN_ENVCLIENT_UQ` uses the
+same condition, and `START_DATE` is never compared with now. Therefore:
+
+- a **future-dated** `END_DATE` closes the row **immediately** — the tenant drops to the preference
+  fallback and then to `free` while still inside a period it paid for;
+- a successor inserted with a **future** `START_DATE` becomes the current row **immediately** — plan
+  and quotas switch early, and lifecycle webhooks land on it.
+
+Nothing rejects either shape: `ETGO_SUB_DATES_CHK` only checks `END_DATE >= START_DATE`.
+
+**To decide (ETP-5053, before the first writer of `END_DATE` lands)** — one of:
+
+1. **Keep the past-tense meaning and guard it.** Every writer sets `END_DATE` to the current
+   timestamp and nothing else; pin that with a spec, and add a write-side assertion or DB trigger
+   that rejects a future value. Cheap, and matches the PRD (no future-dated rows anywhere).
+2. **Change the meaning to "valid until".** Make "open" date-aware —
+   `startDate <= now and (endDate is null or endDate > now)` in `OPEN_ROW_PREDICATE` and every SQL
+   copy of it (R37, reconciliation). A partial index predicate cannot reference `now()`, so "one
+   current row per tenant" would have to move to an exclusion constraint on the date range or into
+   code. Only worth it if future-dated rows become a requirement (e.g. scheduled upgrades, which
+   the PRD does not have).
+
+Option 1 is the default unless product asks for scheduled upgrades.
 
 ---
 
