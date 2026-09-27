@@ -564,6 +564,34 @@ Until ETP-5118 merges: do not commit an `ETARC_VECTOR_SOURCE.xml` export that dr
 `DISTANCE_METRIC` — revert that file from the export instead. Resolved when ETP-5118 lands in
 `db.extended` `develop`, or when ETP-5335 re-exports without the column.
 
+### 🟡 4.11 Two Stripe price parsers, with different rules — `StripeApiClient` only half adopted
+
+ETP-5046 (`58ea090d`) put the Stripe transport behind `StripeApiClient` /
+`HttpUrlConnectionStripeApiClient`, but only `HostedCheckoutService` and
+`PlanPriceDerivationHandler` use it. `StripePriceService` (the price lookup of every checkout and of
+`GET /sws/go/plans`) and `StripeCustomerPortalService` still open their own `HttpURLConnection`.
+Nothing blocks the migration; it was simply left out of scope.
+
+That leaves the same Stripe price parsed twice, and the two parsers disagree:
+
+| Price as Stripe returns it | Plan save (`PlanPriceDerivationHandler`) | Checkout (`StripePriceService.parsePrice`) |
+|---|---|---|
+| `active` field absent | accepted (`optBoolean("active", true)`) | **refused** — must be explicitly `true` |
+| Fractional minor units (e.g. 4999.5 cents, `unit_amount` null) | accepted — reads `unit_amount_decimal` | **refused** — needs a whole `unit_amount` |
+| `interval_count` absent | accepted — defaults to 1 | **refused** — defaults to 0 |
+| One-time (non-recurring) price | refused (`ETGO_PlanPriceNotRecurring`) | accepted — becomes `payment` mode |
+
+The first three rows are the dangerous ones: a plan saves cleanly, is listed as purchasable, and the
+buyer's checkout then fails on it. The old transport also turns every failure into a generic
+`IOException`, so on the checkout path "that price does not exist" (a completed 4xx) and "Stripe
+was unreachable" are indistinguishable — the split `StripeResponse` / `StripeTransportException`
+exists to prevent exactly that.
+
+Fix: move both services onto `StripeApiClient` and have plan save and checkout share ONE price
+parser, so a price that saves is a price that can be bought. Their specs
+(`StripePriceServiceTest`, `StripeCustomerPortalServiceTest`) then use the recording fake instead
+of static `CheckoutConfiguration` mocks. Found after the ETP-5046 develop merge; not implemented.
+
 ## 5. Handed forward to later tickets
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
