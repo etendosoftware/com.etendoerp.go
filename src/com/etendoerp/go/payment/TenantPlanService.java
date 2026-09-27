@@ -170,6 +170,13 @@ public class TenantPlanService {
    * cutover's end-condition count above zero forever, which is the one property that makes the
    * per-tenant design worth having.
    *
+   * <p><b>Deleted as system, whoever calls.</b> The rows live at client {@code 0} and the paid
+   * onboarding calls this from the new tenant's context, where the DAL write check refuses a
+   * client-0 row — and a refusal from that check also marks the whole request for rollback, which
+   * no {@code catch} here can undo. The lookup and the removal therefore run in
+   * {@link SystemContext}; the flush stays in the caller's context. Pinned from a real tenant
+   * context by {@code TenantContextSubscriptionWriteIntegrationTest}.
+   *
    * <p><b>Never throws.</b> Failing to retire the marker is harmless — the fallback simply keeps
    * answering for that tenant and the R37 fix retires it later — so it must never be able to fail
    * an upgrade that has already been paid for. It is logged loudly all the same.
@@ -184,23 +191,18 @@ public class TenantPlanService {
       return false;
     }
     try {
-      OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
-          "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :attribute"
-              + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :clientId");
-      query.setNamedParameter("attribute", PREFERENCE_ATTRIBUTE);
-      query.setNamedParameter("clientId", StringUtils.trimToEmpty(clientId));
-      query.setFilterOnReadableClients(false);
-      query.setFilterOnReadableOrganization(false);
-      List<Preference> stale = query.list();
-      if (stale.isEmpty()) {
+      // The marker rows are System-owned (client 0) and the paid onboarding calls this from the
+      // new tenant's context, where deleting a client-0 row is refused by the DAL write check.
+      // The lookup and the removal therefore run as system; the flush stays in the caller's
+      // context, as it always was, so nothing else pending in its session is flushed as system.
+      int retired = SystemContext.call("retiring the legacy plan marker",
+          () -> removeMarkerRowsAsSystem(clientId));
+      if (retired == 0) {
         return false;
-      }
-      for (Preference preference : stale) {
-        OBDal.getInstance().remove(preference);
       }
       OBDal.getInstance().flush();
       log.info("ETP-5046-TRANSITIONAL-FALLBACK: retired {} {} preference row(s) of tenant {}; its"
-          + " open subscription is now its only plan record", stale.size(), PREFERENCE_ATTRIBUTE,
+          + " open subscription is now its only plan record", retired, PREFERENCE_ATTRIBUTE,
           clientId);
       return true;
     } catch (RuntimeException e) {
@@ -209,6 +211,28 @@ public class TenantPlanService {
           PREFERENCE_ATTRIBUTE, clientId, e);
       return false;
     }
+  }
+
+  /**
+   * TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK) — removes every {@value #PREFERENCE_ATTRIBUTE}
+   * row visible at the tenant, whatever its value or active flag. Must run as system.
+   *
+   * @param clientId {@code AD_CLIENT_ID} of the tenant
+   * @return the number of rows removed from the session
+   */
+  private static int removeMarkerRowsAsSystem(String clientId) {
+    OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
+        "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :attribute"
+            + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :clientId");
+    query.setNamedParameter("attribute", PREFERENCE_ATTRIBUTE);
+    query.setNamedParameter("clientId", StringUtils.trimToEmpty(clientId));
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    List<Preference> stale = query.list();
+    for (Preference preference : stale) {
+      OBDal.getInstance().remove(preference);
+    }
+    return stale.size();
   }
 
   /**

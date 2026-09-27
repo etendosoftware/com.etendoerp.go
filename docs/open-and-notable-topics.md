@@ -537,7 +537,8 @@ line below is the result of reading the code, not of counting matches.
 |---|---|
 | `payment/CheckoutRequestStore` | ✅ fixed on ETP-5045; the account-id lookups develop added afterwards reintroduced raw installs and were routed through `runAsSystem` in the 2026-09-24 develop merge |
 | `payment/BillingEventStore` | ✅ fixed on ETP-5046 |
-| `payment/SubscriptionService` | ✅ admin mode only, never replaces the caller's context; the old `openSystemContextWhenAbsent()` was dead (admin mode had already installed a context) and was removed |
+| `payment/SubscriptionService` | ✅ reads are admin mode only and never replace the caller's context (the old `openSystemContextWhenAbsent()` was dead and was removed). **`openSubscription` writes through `SystemContext` since 2026-09-27**: admin mode alone was *not* enough — `setAdminMode(true)` keeps the DAL client check on, and the paid onboarding calls it as the new tenant, so every paid upgrade failed (found in the manual happy path; pinned by `TenantContextSubscriptionWriteIntegrationTest`) |
+| `payment/TenantPlanService` | ✅ `retireProductivePreference` deletes its client-0 rows through `SystemContext` since 2026-09-27, for the same reason; its flush stays in the caller's context |
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
 | `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |

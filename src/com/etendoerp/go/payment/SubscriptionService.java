@@ -213,6 +213,15 @@ public class SubscriptionService {
    * still names that same price, because a plan's display amount describes the plan's price and
    * nothing else. A null charged price falls back to the plan's price, as before.
    *
+   * <p><b>Written as system, whoever calls.</b> The row is System-owned (client {@code 0}), and
+   * the paid onboarding calls this after it has switched the thread to the new tenant.
+   * {@code SecurityChecker.checkWriteAccess} requires a client-enabled row's client to equal the
+   * <em>current</em> client, and {@code setAdminMode(true)} keeps that check on, so from the
+   * tenant's context the save is refused — and the refusal also marks the whole request for
+   * rollback. {@link SystemContext} makes client {@code 0} current for the write and hands the
+   * caller its own context back. The row is still flushed and committed by the caller's
+   * transaction, exactly as before.
+   *
    * @param environmentClientId {@code AD_CLIENT_ID} of the tenant the subscription is for
    * @param plan the purchased plan
    * @param account the Etendo Go account that paid, may be null
@@ -227,40 +236,70 @@ public class SubscriptionService {
       throw new IllegalArgumentException(
           "A subscription needs both a tenant and a plan to be opened");
     }
-    OBContext.setAdminMode(true);
+    return SystemContext.call("opening a subscription", () -> openAsSystem(environmentClientId,
+        plan, account, stripeCustomerId, stripeSubscriptionId, chargedPriceId));
+  }
+
+  private Subscription openAsSystem(String environmentClientId, Plan plan, Account account,
+      String stripeCustomerId, String stripeSubscriptionId, String chargedPriceId) {
+    Optional<Subscription> existing = findOpen(environmentClientId);
+    if (existing.isPresent()) {
+      log.info("Tenant {} already has an open subscription; leaving its price snapshot intact",
+          environmentClientId);
+      return existing.get();
+    }
+    Subscription subscription = OBProvider.getInstance().get(Subscription.class);
+    subscription.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    subscription.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    subscription.setEnvironmentClient(
+        OBDal.getInstance().get(Client.class, StringUtils.trimToEmpty(environmentClientId)));
+    subscription.setPlan(plan);
+    subscription.setEtendoGoAccount(account);
+    subscription.setSubscriptionStatus(STATUS_ACTIVE);
+    subscription.setStartDate(new Date());
+    subscription.setEndDate(null);
+    subscription.setStripeCustomer(StringUtils.trimToNull(stripeCustomerId));
+    subscription.setStripeSubscription(StringUtils.trimToNull(stripeSubscriptionId));
+    String planPriceId = StringUtils.trimToNull(plan.getProviderPriceID());
+    String charged = StringUtils.defaultIfBlank(StringUtils.trimToNull(chargedPriceId),
+        planPriceId);
+    subscription.setProviderPriceID(charged);
+    if (StringUtils.equals(charged, planPriceId)) {
+      subscription.setSnapshotAmount(plan.getDisplayPrice());
+      subscription.setSnapshotCurrency(StringUtils.trimToNull(plan.getCurrencyCode()));
+    }
+    saveOrEvict(subscription);
+    log.info("Opened subscription for tenant {} on plan '{}'", environmentClientId,
+        plan.getSearchKey());
+    return subscription;
+  }
+
+  /**
+   * Saves a new row, and takes it back out of the session when the save is refused.
+   *
+   * <p>A save refused inside Hibernate's save event leaves the object in the persistence context
+   * with an id but no database state. The caller's catch then thinks the failure is contained, but
+   * the next flush of the same transaction — in the paid onboarding, the organization setup —
+   * issues an {@code UPDATE} for a row that was never inserted and fails with a
+   * {@code StaleStateException}, taking the whole onboarding down with it. Evicting the refused
+   * row keeps the failure where it happened.
+   *
+   * @param subscription the new row
+   */
+  private static void saveOrEvict(Subscription subscription) {
     try {
-      Optional<Subscription> existing = findOpen(environmentClientId);
-      if (existing.isPresent()) {
-        log.info("Tenant {} already has an open subscription; leaving its price snapshot intact",
-            environmentClientId);
-        return existing.get();
-      }
-      Subscription subscription = OBProvider.getInstance().get(Subscription.class);
-      subscription.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
-      subscription.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
-      subscription.setEnvironmentClient(
-          OBDal.getInstance().get(Client.class, StringUtils.trimToEmpty(environmentClientId)));
-      subscription.setPlan(plan);
-      subscription.setEtendoGoAccount(account);
-      subscription.setSubscriptionStatus(STATUS_ACTIVE);
-      subscription.setStartDate(new Date());
-      subscription.setEndDate(null);
-      subscription.setStripeCustomer(StringUtils.trimToNull(stripeCustomerId));
-      subscription.setStripeSubscription(StringUtils.trimToNull(stripeSubscriptionId));
-      String planPriceId = StringUtils.trimToNull(plan.getProviderPriceID());
-      String charged = StringUtils.defaultIfBlank(StringUtils.trimToNull(chargedPriceId),
-          planPriceId);
-      subscription.setProviderPriceID(charged);
-      if (StringUtils.equals(charged, planPriceId)) {
-        subscription.setSnapshotAmount(plan.getDisplayPrice());
-        subscription.setSnapshotCurrency(StringUtils.trimToNull(plan.getCurrencyCode()));
-      }
       OBDal.getInstance().save(subscription);
-      log.info("Opened subscription for tenant {} on plan '{}'", environmentClientId,
-          plan.getSearchKey());
-      return subscription;
-    } finally {
-      OBContext.restorePreviousMode();
+    } catch (RuntimeException e) {
+      evictQuietly(subscription);
+      throw e;
+    }
+  }
+
+  private static void evictQuietly(Subscription subscription) {
+    try {
+      OBDal.getInstance().getSession().evict(subscription);
+    } catch (RuntimeException e) {
+      log.error("Could not evict the refused subscription row from the session", e);
     }
   }
 

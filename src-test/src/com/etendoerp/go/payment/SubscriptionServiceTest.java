@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -40,6 +42,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -263,6 +266,32 @@ class SubscriptionServiceTest {
       verify(created).setStripeCustomer(CUSTOMER_ID);
       verify(created).setStripeSubscription(STRIPE_SUBSCRIPTION_ID);
       verify(obDal).save(created);
+    }
+
+    @Test
+    void writesTheSystemOwnedRowAsSystem() {
+      // The paid onboarding calls this from the new tenant's context, where the DAL write check
+      // refuses a client-0 row. TenantContextSubscriptionWriteIntegrationTest pins the real check,
+      // and this spec pins that the write is routed through SystemContext at all.
+      service.openSubscription(CLIENT_ID, plan, null, CUSTOMER_ID, STRIPE_SUBSCRIPTION_ID);
+
+      obContextMock.verify(() -> OBContext.setOBContext("0", "0", "0", "0"));
+      verify(obDal).save(created);
+    }
+
+    @Test
+    void evictsARefusedRowSoTheCallersNextFlushCannotReplayIt() {
+      // A save refused inside Hibernate's save event leaves the row in the session with an id and
+      // no database state; the onboarding's next flush then UPDATEs a row that was never inserted
+      // and the whole paid onboarding fails on a StaleStateException.
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      doThrow(new OBSecurityException("refused")).when(obDal).save(created);
+
+      assertThrows(OBSecurityException.class, () -> service.openSubscription(CLIENT_ID, plan, null,
+          CUSTOMER_ID, STRIPE_SUBSCRIPTION_ID));
+
+      verify(session).evict(created);
     }
 
     @Test

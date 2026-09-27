@@ -584,6 +584,15 @@ exists that the backfill would orphan), so it cannot simply be made automatic.
 - **failure** → it calls `markProductive`, because the preference is then the only record that the
   tenant paid, and the fallback below is the only thing that will read it back.
 
+Both writes are **System-owned rows (client `0`) written from the new tenant's context**, so both
+run through `payment/SystemContext` (the subscription insert in `SubscriptionService.openSubscription`,
+the marker delete in `TenantPlanService.retireProductivePreference`). Admin mode alone is not
+enough: `setAdminMode(true)` keeps the DAL check that a row's client equals the *current* client,
+and a refusal from that check also marks the whole request for rollback, which no best-effort
+`catch` can undo. A refused subscription save is additionally evicted from the session, so it
+cannot resurface as a `StaleStateException` in the onboarding's next flush. Both are pinned from a
+real tenant context by `TenantContextSubscriptionWriteIntegrationTest`.
+
 R37 does the same thing for tenants that predate the subscription model (statement 3 of its
 `@apply`, in the same transaction as the backfilled row), so the fleet converges from both ends onto
 one **observable end condition**: `select count(*) from ad_preference where
