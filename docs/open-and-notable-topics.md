@@ -84,11 +84,12 @@ only what is still open.
   is therefore unlimited (§5.1). That costs nothing today and becomes real the moment ETP-5051
   enforces quotas. The fix is not a quota on the grandfathered plan but moving these tenants to a
   real plan — a plan change, which only ETP-5053 provides (§5.3). Their subscription row snapshots
-  the charged price id but no amount or currency, since the plan has none (§3.1).
+  the charged price id but no amount or currency, since the plan has none (design doc §7).
 
 ### 🟠 2.3 Run the backfill AFTER the deploy, never before
 
-**Ticket:** owner ETP-5046 (R37 deployment).
+**Ticket:** owner ETP-5046 (the pre-check, an R37 deployment step) and ETP-5048 (the adoption
+step, if the pre-check fails); moving grandfathered tenants to a priced plan is ETP-5053.
 
 `resolvePlan` reads the subscription first. A tenant provisioned between the schema landing and
 the code shipping gets a preference and no subscription. The backfill's `@check` catches exactly
@@ -109,8 +110,19 @@ the backfill would orphan and an adoption step is required first.*
 The regression test fails the build while `@report` still carries the `TODO-PRECHECK-R37`
 placeholder; that placeholder has been replaced by the settled wording, so it no longer blocks
 the merge. The pre-check itself is not portable: it must be run against the **target**
-environment — verifying it on a dev box proves nothing about staging. On the dev box (2026-09-18) the Stripe key is `sk_test`, so
-the assumption holds *there*.
+environment — verifying it on a dev box proves nothing about staging. On the dev box
+(2026-09-18) the Stripe key is `sk_test`, so the assumption holds *there*.
+
+**If the pre-check fails → ETP-5048.** R37 gives each backfilled tenant a row on the priceless
+`legacy-productive` plan, with the charged Stripe price id where its checkout request recorded one
+and never an amount or currency (design doc §7). That is enough for access control and webhook
+correlation, and acceptable only while every existing Stripe subscription is Test Mode. If
+production checkout has gone live, those rows describe real payers, and the adoption step is to
+read each one's subscription from Stripe and record its price, amount and currency. That is
+ETP-5048's local-to-provider reconciliation (PRD §9.3: read the real Stripe state of every locally
+active subscription and correct it locally), which fills the missing price on its first run;
+`StripeApiClient` makes the read cheap. Until ETP-5048 lands such rows stay priceless — harmless
+for access, which reads `STATUS` alone, and visible only in billing records and quota snapshots.
 
 ### 🟠 2.5 `./gradlew test` needs JDK 17, not the default 21
 
@@ -161,28 +173,6 @@ the two edits sat in different regions so git saw no conflict. Always build afte
 ---
 
 ## 3. Legacy plans and the cutover
-
-### 🟠 3.1 The grandfathered plan has no price, deliberately
-
-**Ticket:** owner ETP-5046. The production adoption step, if ever needed, is gated by §2.4; moving grandfathered tenants to a priced plan is ETP-5053.
-
-`legacy-productive` ships as module sourcedata with `PROVIDER_PRICE_ID`, `BILLING_INTERVAL`,
-`DISPLAY_PRICE` and `CURRENCY_CODE` all NULL, and **zero quota rows**. That makes it unlimited by
-definition and a no-op for the price-derivation handler. It is sold through the legacy price
-fallback (§2.1). It is not *unsellable* on a price of its own: an operator who enters a Provider
-Price ID on the row makes `HostedCheckoutService` sell it like any priced plan — which also
-retires the fallback, since the row itself is then a priced plan.
-
-A backfilled subscription is therefore **not a full billing record**. Its two jobs are **access
-control** (`resolvePlan` reads productive) and **webhook correlation** (ETP-5047 matches on
-`stripe_subscription_id`, which the backfill copies where a checkout request exists). Neither needs
-a price. Where the checkout request recorded one, the charged Stripe price id is copied into
-`PROVIDER_PRICE_ID` anyway (NULL otherwise); no amount or currency is ever snapshotted.
-
-This is acceptable *only because* every existing Stripe subscription is Test Mode. If production
-checkout has gone live, the answer is not a priceless row — it is the adoption step: read each real
-subscription's price from Stripe and record it. The `StripeApiClient` built in ETP-5046 makes that
-cheap; it was left out of scope while the sandbox assumption holds.
 
 ### 🟠 3.2 The preference is retired per tenant, not fleet-wide
 
