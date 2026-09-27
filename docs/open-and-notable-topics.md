@@ -857,6 +857,34 @@ Nothing rejects either shape: `ETGO_SUB_DATES_CHK` only checks `END_DATE >= STAR
 
 Option 1 is the default unless product asks for scheduled upgrades.
 
+### 🟠 5.14 ETP-5049: the upgrade page's Plan step does not show the plan catalog
+
+**Ticket:** owner ETP-5049 (plan selection in the customer UI). Introduced by the ETP-5046 develop
+merge, which combined two independent designs of the same page.
+
+`UpgradePage.jsx` (schema_forge) is a three-step checkout — **Plan → Add-ons → Payment** — from
+develop (ETP-5396). Its **Plan** step is a fixed layout, not a view of the catalog:
+
+- one `PlanCard` (`upgrade-plan-productive`) whose name and tagline are the static translations
+  `upgradePlanProductiveName` / `upgradePlanProductiveTagline` ("Productivo" / "Un segundo entorno
+  para trabajar de verdad"), whatever the catalog holds;
+- two `SkeletonPlanCard` placeholders (`upgrade-plan-coming-soon-1/-2`).
+
+Only the **price** on that card comes from the catalog (`formatPlanPrice` of the selected plan, or
+of the first one). ETP-5046's catalog chooser, `PlanSelector` (`upgrade-plan-single` for one plan,
+`upgrade-plan-choice` for several), renders only on the **Payment** step. Consequences:
+
+- a catalog plan's name and description are first visible two steps after the buyer "chose" it;
+- with several plans, the "Productivo" card quotes whichever plan is selected, or the first one,
+  under a name that belongs to none of them;
+- while the catalog price equals the legacy fallback price, the Plan step looks identical before
+  and after the cutover (§2.1), which reads as "the new plan does not show" during testing.
+
+Expected shape: build the Plan step from `GET /sws/go/plans` — one card per plan, "Elegir plan"
+selects its `planKey` — keeping the static card only while the catalog cannot be read, and let the
+Payment step show the chosen plan instead of a second chooser. Found in the ETP-5046 manual happy
+path test; not implemented.
+
 ---
 
 ## Related documents
