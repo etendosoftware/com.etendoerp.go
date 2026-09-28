@@ -286,7 +286,9 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doGet(request, response);
       }
 
-      assertTrue(capture.toString().contains("missing user claim"));
+      // ETP-5455: the shared pipeline answers one message for any missing claim (was
+      // "Invalid token: missing user claim"); still a 401, only the wording is unified.
+      assertTrue(capture.toString().contains("Invalid token: missing required claims"));
     }
 
     @Test

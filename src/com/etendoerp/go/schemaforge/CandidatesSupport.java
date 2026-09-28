@@ -103,7 +103,7 @@ final class CandidatesSupport {
           + "   AND ft.status <> 'RPPC'"
           + "   AND ft.fin_financial_account_id = ?"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
-          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)"
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate < CAST(? AS date) + 1)"
           + " GROUP BY COALESCE(fp.isreceipt,"
           + "          CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
           + "               THEN 'Y' ELSE 'N' END)";
@@ -120,7 +120,7 @@ final class CandidatesSupport {
           + "     AND inv.ad_client_id = ?"
           + "     AND inv.ad_org_id = ANY (?)"
           + "     AND (CAST(? AS date) IS NULL OR inv.dateinvoiced >= ?)"
-          + "     AND (CAST(? AS date) IS NULL OR inv.dateinvoiced <= ?)"
+          + "     AND (CAST(? AS date) IS NULL OR inv.dateinvoiced < CAST(? AS date) + 1)"
           + "   GROUP BY ps.fin_payment_schedule_id, inv.issotrx"
           + "   HAVING SUM(psd.amount) > 0"
           + " ) t GROUP BY t.issotrx";

@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
@@ -39,12 +41,18 @@ import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
  * filtered (see {@code selector.policy.GoodsMovementProductSelectorPolicy}), but any flow that
  * still attempts to persist one (API call, bulk import, stale form state) is blocked here.
  *
+ * <p>Callout post-hook (ETP-5445): strips the stock-derived {@code movementQuantity} the classic
+ * product callout echoes back, only when the product field triggered it — see
+ * {@link #afterCallout(NeoContext)}.
+ *
  * <p>The class (and its {@code JAVA_QUALIFIER = 'internalConsumptionLineHandler'}
  * registration on ETGO_SF_ENTITY record {@code 1EB67B71AE6445F787649951DFAEE661}) is kept so the
  * existing DB configuration keeps resolving to a valid bean.
  */
 @Named("internalConsumptionLineHandler")
 public class InternalConsumptionLineHandler implements NeoHandler {
+
+  private static final Logger log = LogManager.getLogger(InternalConsumptionLineHandler.class);
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -63,6 +71,57 @@ public class InternalConsumptionLineHandler implements NeoHandler {
     }
     return ServiceProductGuard.rejectIfServiceProduct(body, isPatch,
         () -> resolvePersistedProductId(context.getRecordId()));
+  }
+
+  /**
+   * AD column of the product FK on {@code M_Internal_ConsumptionLine}, the only field whose
+   * callout ({@code SL_Internal_Consumption_Product}) copies on-hand stock into
+   * {@code movementQuantity}.
+   */
+  private static final String PRODUCT_COLUMN = "M_Product_ID";
+
+  /**
+   * Strips the stock-derived {@code movementQuantity} the classic
+   * {@code SL_Internal_Consumption_Product} callout echoes back on product selection — core copies
+   * the selected product's on-hand stock ({@code inpmProductId_QTY}) straight into
+   * {@code inpmovementqty} ({@code SL_Internal_Consumption_Product.java:76}), overwriting whatever
+   * the user typed (ETP-5445). Same protection {@link GoodsReceiptLineHandler} (ETP-4671),
+   * {@link GoodsShipmentLineHandler} (ETP-5062) and {@link ReturnMaterialReceiptLineHandler}
+   * (ETP-5336) already have. The consumed quantity is what the user declares, never the stock on
+   * hand. See {@link NeoHandlerUtils#stripStockDerivedMovementQuantity} for the full rationale.
+   *
+   * <p>Gated to the PRODUCT trigger only. Unlike the {@code M_InOutLine} windows, this line has a
+   * second callout that legitimately writes {@code movementQuantity}:
+   * {@code SL_Internal_Consumption_Conversion}, attached to {@code M_Product_Uom_Id} and
+   * {@code QuantityOrder}, which converts the second-UOM quantity into the base-UOM movement
+   * quantity. Stripping that result would silently drop the conversion, so any trigger other than
+   * the product field keeps the callout response untouched. The shared helper is deliberately not
+   * changed — its other callers have no such conversion callout.</p>
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    if (context == null || !isProductTrigger(context.getRequestBody())) {
+      return null;
+    }
+    NeoHandlerUtils.stripStockDerivedMovementQuantity(context, log);
+    return null;
+  }
+
+  /**
+   * True when the callout request was triggered by the product field. The request's
+   * {@code field} is normally the DAL property name ({@code "product"}), but
+   * {@code NeoCalloutService#resolveCallout} also accepts the DB column name, the clean REST name
+   * and the classic {@code inp} name (all case-insensitive), so the same forms are accepted here
+   * to stay in step with which callout actually ran.
+   */
+  static boolean isProductTrigger(JSONObject requestBody) {
+    String field = requestBody != null ? StringUtils.trimToNull(requestBody.optString("field", null)) : null;
+    if (field == null) {
+      return false;
+    }
+    return InternalConsumptionLine.PROPERTY_PRODUCT.equalsIgnoreCase(field)
+        || PRODUCT_COLUMN.equalsIgnoreCase(field)
+        || NeoCalloutService.toInpName(PRODUCT_COLUMN).equalsIgnoreCase(field);
   }
 
   @Override

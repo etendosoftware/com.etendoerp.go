@@ -56,6 +56,9 @@ class NeoBuiltInEndpointHandler {
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
     this.fiscal349Handler = new Fiscal349BoxesHandler(servlet);
+    // ETP-5438 — every declaration PUT arrives through /fiscal303/declarations whatever its
+    // model, so each handler's CRUD delegate must reach both models' snapshot compute.
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(fiscal303Handler, fiscal349Handler);
     this.transactionalEmailService = transactionalEmailService;
   }
 
