@@ -382,9 +382,17 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   `openSubscription` inserts one. If the open row is `canceled` but was never closed — its delete
   event was lost, or R37 backfilled it (R37 leaves canceled rows open on purpose: its idempotency
   guard is "no open row", so closing would let a re-run insert a duplicate) — `openSubscription`
-  closes it and flushes before inserting — Hibernate runs
-  inserts before updates, and `etgo_sub_open_envclient_uq` would otherwise reject the new row.
-  ETP-5053 closes a row to open its successor with the same flush-first rule.
+  closes it before inserting. The close must be in the database first — Hibernate runs inserts
+  before updates at flush, and `etgo_sub_open_envclient_uq` would otherwise reject the new row —
+  but it is **not** a session flush: the only caller is the paid onboarding
+  (`openSubscriptionBestEffort`), and a flush there, under `SystemContext`, would write the whole
+  pending onboarding with `updatedBy='0'` and report an unrelated pending-write failure as "could
+  not have its subscription opened". `SubscriptionService.closeInDatabase` issues one HQL `update`
+  of that row alone (`END_DATE` = now, never before `START_DATE`; `UPDATED`; `UPDATEDBY` = the
+  current user, as the DAL would stamp them; guarded by `END_DATE IS NULL`), which the session's
+  `FlushMode.COMMIT` runs without flushing anything else, then refreshes the entity so a later flush
+  has nothing of it left to write. ETP-5053 closes a row to open its successor and must follow the
+  same rule: a targeted close, never a session flush.
 - **Three columns, three jobs (ETP-5047).**
   - `GRACE_ANCHOR` — the end of the period the customer already paid for, set only while
     `past_due`; the access policy counts the grace days from it. Before ETP-5047 it lived in

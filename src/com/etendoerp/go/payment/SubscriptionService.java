@@ -384,11 +384,12 @@ public class SubscriptionService {
     if (existing.isPresent()) {
       // ETP-5047 — a re-subscription. The open row is a canceled subscription whose close never
       // arrived (a lost customer.subscription.deleted); it is history now, so it is closed and a
-      // fresh row opened. The flush is load-bearing: Hibernate runs inserts before updates, and
-      // the partial unique index etgo_sub_open_envclient_uq would reject the new open row while
-      // the old one still reads as open.
-      close(existing.get(), null);
-      OBDal.getInstance().flush();
+      // fresh row opened. The close must reach the database before the new row's insert does:
+      // Hibernate runs inserts before updates at flush, and the partial unique index
+      // etgo_sub_open_envclient_uq would reject the new open row while the old one still reads as
+      // open. So that one row is closed by a targeted statement now, not by a session flush — a
+      // flush here would write the caller's whole pending onboarding as system.
+      closeInDatabase(existing.get());
       log.info("Tenant {} re-subscribed; closed its canceled subscription {}",
           environmentClientId, existing.get().getId());
     }
@@ -617,9 +618,47 @@ public class SubscriptionService {
    * {@code START_DATE} ({@code ETGO_SUB_DATES_CHK}), and "now" when the provider gave none.
    */
   private static void close(Subscription subscription, Instant endedAt) {
+    subscription.setEndDate(closingDateOf(subscription, endedAt));
+  }
+
+  private static Date closingDateOf(Subscription subscription, Instant endedAt) {
     Date end = endedAt == null ? new Date() : Date.from(endedAt);
     Date start = subscription.getStartDate();
-    subscription.setEndDate(start != null && end.before(start) ? start : end);
+    return start != null && end.before(start) ? start : end;
+  }
+
+  /**
+   * ETP-5047 — {@link #close} for an open row that must read as closed in the database
+   * <em>before</em> the session flushes: one {@code UPDATE} of that row alone, setting what the
+   * DAL would write for a {@code close(row, null)} — {@code END_DATE} ("now", never before
+   * {@code START_DATE}), {@code UPDATED} and {@code UPDATEDBY} (the current user, as the DAL
+   * interceptor stamps them). The session runs with {@code FlushMode.COMMIT}, so the statement
+   * flushes nothing else; the caller's pending changes stay pending, in the caller's context.
+   *
+   * <p>The row is then refreshed from the database, so the in-session entity reads as closed and
+   * a later flush has nothing of it left to write. The {@code END_DATE IS NULL} guard makes the
+   * statement a no-op for a row something else closed in the meantime.
+   *
+   * @param subscription the open row to close
+   */
+  private static void closeInDatabase(Subscription subscription) {
+    int closed = OBDal.getInstance().getSession()
+        .createQuery("update " + Subscription.ENTITY_NAME
+            + " set " + Subscription.PROPERTY_ENDDATE + " = :endDate, "
+            + Subscription.PROPERTY_UPDATED + " = :updated, "
+            + Subscription.PROPERTY_UPDATEDBY + " = :updatedBy"
+            + " where " + Subscription.PROPERTY_ID + " = :id"
+            + " and " + Subscription.PROPERTY_ENDDATE + " is null")
+        .setParameter("endDate", closingDateOf(subscription, null))
+        .setParameter("updated", new Date())
+        .setParameter("updatedBy", OBContext.getOBContext().getUser())
+        .setParameter("id", subscription.getId())
+        .executeUpdate();
+    if (closed == 0) {
+      log.info("Subscription {} was no longer open when the re-subscription closed it",
+          subscription.getId());
+    }
+    OBDal.getInstance().getSession().refresh(subscription);
   }
 
   private static boolean isCanceled(Subscription subscription) {

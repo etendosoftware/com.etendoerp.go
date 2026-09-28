@@ -817,8 +817,14 @@ class SubscriptionServiceTest {
   @Nested
   class OpenSubscriptionOverACanceledRow {
 
+    private static final String CANCELED_ROW_ID = "0D3C1D0C0A6B4E6C9E5E5B7C2A1F9D11";
+
     private Plan plan;
     private Subscription created;
+    private Session session;
+    @SuppressWarnings("rawtypes")
+    private org.hibernate.query.Query closeStatement;
+    private org.openbravo.model.ad.access.User systemUser;
 
     @BeforeEach
     void givenACatalogPlanAndANewRow() {
@@ -829,35 +835,95 @@ class SubscriptionServiceTest {
       when(obProvider.get(Subscription.class)).thenReturn(created);
       when(obDal.get(eq(Client.class), any())).thenReturn(mock(Client.class));
       when(obDal.get(eq(Organization.class), any())).thenReturn(mock(Organization.class));
+      session = mock(Session.class);
+      closeStatement = mock(org.hibernate.query.Query.class, org.mockito.Mockito.RETURNS_SELF);
+      when(closeStatement.executeUpdate()).thenReturn(1);
+      when(session.createQuery(anyString())).thenReturn(closeStatement);
+      when(obDal.getSession()).thenReturn(session);
+      systemUser = mock(org.openbravo.model.ad.access.User.class);
+      OBContext context = mock(OBContext.class);
+      when(context.getUser()).thenReturn(systemUser);
+      obContextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    private Subscription canceledRow(String status) {
+      Subscription canceled = subscriptionOf(CLIENT_ID);
+      when(canceled.getId()).thenReturn(CANCELED_ROW_ID);
+      when(canceled.getSubscriptionStatus()).thenReturn(status);
+      when(subscriptionQuery.uniqueResult()).thenReturn(canceled);
+      return canceled;
     }
 
     @Test
-    void closesTheOpenCanceledRowAndFlushesBeforeInsertingTheNewOne() {
-      Subscription canceled = subscriptionOf(CLIENT_ID);
-      when(canceled.getSubscriptionStatus()).thenReturn(SubscriptionService.STATUS_CANCELED);
-      when(subscriptionQuery.uniqueResult()).thenReturn(canceled);
+    void closesTheOpenCanceledRowInTheDatabaseBeforeInsertingTheNewOne() {
+      Subscription canceled = canceledRow(SubscriptionService.STATUS_CANCELED);
 
       Subscription result = service.openSubscription(CLIENT_ID, plan, null, CUSTOMER_ID,
           STRIPE_SUBSCRIPTION_ID);
 
       assertSame(created, result);
-      // The flush is load-bearing: Hibernate runs inserts before updates, and the partial unique
-      // index etgo_sub_open_envclient_uq would reject the new open row while the old one is open.
-      org.mockito.InOrder order = org.mockito.Mockito.inOrder(canceled, obDal, obProvider);
-      order.verify(canceled).setEndDate(any(java.util.Date.class));
-      order.verify(obDal).flush();
+      // The close must reach the database before the new row's insert: Hibernate runs inserts
+      // before updates, and the partial unique index etgo_sub_open_envclient_uq would reject the
+      // new open row while the old one is open. A targeted statement, then a refresh so the
+      // in-session entity reads as closed too.
+      org.mockito.InOrder order =
+          org.mockito.Mockito.inOrder(closeStatement, session, obProvider, obDal);
+      order.verify(closeStatement).executeUpdate();
+      order.verify(session).refresh(canceled);
       order.verify(obProvider).get(Subscription.class);
       order.verify(obDal).save(created);
     }
 
     @Test
-    void aCanceledStatusIsRecognisedInAnyCase() {
-      Subscription canceled = subscriptionOf(CLIENT_ID);
-      when(canceled.getSubscriptionStatus()).thenReturn(" CANCELED ");
-      when(subscriptionQuery.uniqueResult()).thenReturn(canceled);
+    void theCloseTouchesOnlyThatRowAndNeverFlushesTheCallersSession() {
+      Subscription canceled = canceledRow(SubscriptionService.STATUS_CANCELED);
+
+      service.openSubscription(CLIENT_ID, plan, null, null, null);
+
+      // W1: a flush here would write the caller's whole pending onboarding as system.
+      verify(obDal, never()).flush();
+      // The entity is refreshed, not edited: a later flush has nothing of it left to write.
+      verify(canceled, never()).setEndDate(any());
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(session).createQuery(hql.capture());
+      assertTrue(hql.getValue().startsWith("update ETGO_SUBSCRIPTION set endDate = :endDate, "
+          + "updated = :updated, updatedBy = :updatedBy where id = :id"), hql.getValue());
+      assertTrue(hql.getValue().endsWith(" and endDate is null"), hql.getValue());
+      verify(closeStatement).setParameter("id", CANCELED_ROW_ID);
+      verify(closeStatement).setParameter("updatedBy", systemUser);
+      verify(closeStatement).setParameter(eq("endDate"), any(java.util.Date.class));
+      verify(closeStatement).setParameter(eq("updated"), any(java.util.Date.class));
+    }
+
+    @Test
+    void theEndDateIsNeverBeforeTheRowsStart() {
+      Subscription canceled = canceledRow(SubscriptionService.STATUS_CANCELED);
+      java.util.Date futureStart = new java.util.Date(System.currentTimeMillis() + 86_400_000L);
+      when(canceled.getStartDate()).thenReturn(futureStart);
+
+      service.openSubscription(CLIENT_ID, plan, null, null, null);
+
+      // ETGO_SUB_DATES_CHK: END_DATE >= START_DATE, exactly as close() guarantees.
+      verify(closeStatement).setParameter("endDate", futureStart);
+    }
+
+    @Test
+    void aRowClosedMeanwhileStillLetsTheNewOneOpen() {
+      Subscription canceled = canceledRow(SubscriptionService.STATUS_CANCELED);
+      when(closeStatement.executeUpdate()).thenReturn(0);
 
       assertSame(created, service.openSubscription(CLIENT_ID, plan, null, null, null));
-      verify(canceled).setEndDate(any(java.util.Date.class));
+      verify(session).refresh(canceled);
+      verify(obDal).save(created);
+    }
+
+    @Test
+    void aCanceledStatusIsRecognisedInAnyCase() {
+      Subscription canceled = canceledRow(" CANCELED ");
+
+      assertSame(created, service.openSubscription(CLIENT_ID, plan, null, null, null));
+      verify(closeStatement).executeUpdate();
+      verify(session).refresh(canceled);
     }
 
     @ParameterizedTest
@@ -871,6 +937,7 @@ class SubscriptionServiceTest {
 
       verify(live, never()).setEndDate(any());
       verify(obDal, never()).flush();
+      verify(session, never()).createQuery(anyString());
       verify(obProvider, never()).get(Subscription.class);
       verify(obDal, never()).save(any());
     }
