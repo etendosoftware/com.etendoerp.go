@@ -238,6 +238,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     // (singular) is NoPostedDocumentDS's own raw label for this table — confirmed live,
     // it is the exact string both the grid badge and that error message render verbatim.
     DOCUMENT_TYPE_TO_TABLE_ID.put("Matched Invoice", "472");                                              // M_MatchInv
+    // ETP-5445 — Internal Consumption rows had a filter code ("IC" above) but no row-enrichment
+    // entry, so their tableId resolved to null and postRow() failed client-side. "Internal
+    // Consumption" is bulk.posting's own label (NoPostedConstans.INTERNAL_CONSUMPTION, emitted
+    // by DocumentSearchService#searchInternalConsumption).
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Internal Consumption", "800168");                                      // M_Internal_Consumption
   }
 
   @Inject

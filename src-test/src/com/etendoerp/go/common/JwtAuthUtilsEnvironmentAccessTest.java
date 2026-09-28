@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -36,49 +37,50 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.time.Instant;
 
-import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.Session;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.system.Client;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.WarehouseResolver;
 import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.NeoFavoritesServlet;
-import com.etendoerp.go.schemaforge.ReportSelectorsServlet;
-import com.etendoerp.go.schemaforge.SurveyConfigServlet;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
-import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * ETP-5047 — {@link JwtAuthUtils#authenticateOrFail} refuses a tenant whose commercial access was
  * cut off with the same HTTP 402 body NEO and MCP answer, through the shared
- * {@link EnvironmentAccessGuard} (swapped here through the package-private
- * {@code JwtAuthUtils.environmentAccessGuard} seam).
+ * {@link EnvironmentAccessGuard}.
  *
- * <p>Both credential schemes reach the check: the cookie session (its record is served by a
- * mocked {@code OBDal} session, so {@code JdbcGoSessionStore} runs for real without a database)
- * and the legacy Bearer JWT. The check runs only once the caller is authenticated, and only when
- * the installed {@link OBContext} names a tenant.
+ * <p>Since the merge with ETP-5455 the guard runs in the bind step of the shared
+ * {@link EnvironmentRequestAuthenticator} pipeline ({@code SurfacePolicy.NEO_DATA}), which hands
+ * the denial back on the outcome; {@code JwtAuthUtils} writes it with
+ * {@link EnvironmentAccessGuard.Denial#writeTo}. These tests drive the package-private overload
+ * that takes the pipeline, built over a mocked cookie authenticator and the guard under test. The
+ * scheme matrix of the pipeline itself lives in {@code EnvironmentRequestAuthenticatorTest}.
  *
  * <p>The last block drives each servlet that authenticates through this method
- * ({@link NeoFavoritesServlet}, {@link ReportSelectorsServlet}, {@link SurveyConfigServlet},
- * {@link NeoFiscalTestModeServlet}) into a blocked tenant: each must stop at the 402.
+ * ({@link NeoFavoritesServlet}, {@link NeoFiscalTestModeServlet}) into a blocked tenant: each must
+ * stop at the 402. (Survey configuration is {@code NEO_AUXILIARY} since ETP-5455 and deliberately
+ * stays reachable; report selectors authenticate through {@code NeoServletSupport} and are pinned
+ * in {@code ReportSelectorsServletTest}.)
  */
 class JwtAuthUtilsEnvironmentAccessTest {
 
@@ -88,36 +90,22 @@ class JwtAuthUtilsEnvironmentAccessTest {
   private static final String KILL_SWITCH_PROPERTY =
       "etendo.go.flags.environment-access-enforcement-off";
 
-  private EnvironmentAccessGuard originalGuard;
   private MockedStatic<SecureWebServicesUtils> sws;
   private MockedStatic<OBContext> obContext;
-  private MockedStatic<OBDal> obDal;
-  private OBContext tenantContext;
-  private Client tenant;
-  private Session hibernateSession;
+  private GoSessionAuthenticator sessionAuthenticator;
   private HttpServletResponse response;
   private StringWriter body;
   private Logger log;
 
   @BeforeEach
   void setUp() throws Exception {
-    originalGuard = JwtAuthUtils.environmentAccessGuard;
     sws = mockStatic(SecureWebServicesUtils.class);
     obContext = mockStatic(OBContext.class);
-    obDal = mockStatic(OBDal.class);
-    OBDal dal = mock(OBDal.class);
-    hibernateSession = mock(Session.class);
-    when(dal.getSession()).thenReturn(hibernateSession);
-    obDal.when(OBDal::getInstance).thenReturn(dal);
-
-    tenant = mock(Client.class);
-    when(tenant.getId()).thenReturn(CLIENT_ID);
-    tenantContext = mock(OBContext.class);
-    when(tenantContext.getCurrentClient()).thenReturn(tenant);
+    OBContext tenantContext = mock(OBContext.class);
     sws.when(() -> SecureWebServicesUtils.createContext(anyString(), anyString(), anyString(),
         any(), anyString())).thenReturn(tenantContext);
-    // The context authenticateOrFail installs is the one the access check then reads.
-    obContext.when(OBContext::getOBContext).thenReturn(tenantContext);
+    sessionAuthenticator = mock(GoSessionAuthenticator.class);
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
 
     response = mock(HttpServletResponse.class);
     body = new StringWriter();
@@ -127,8 +115,6 @@ class JwtAuthUtilsEnvironmentAccessTest {
 
   @AfterEach
   void tearDown() {
-    JwtAuthUtils.environmentAccessGuard = originalGuard;
-    obDal.close();
     obContext.close();
     sws.close();
     System.clearProperty(LEGACY_BEARER_PROPERTY);
@@ -140,17 +126,16 @@ class JwtAuthUtilsEnvironmentAccessTest {
   @Test
   void aBlockedCookieSessionIsRefusedWith402AndTheSharedBody() throws Exception {
     TenantEnvironmentLifecycleService lifecycle = lifecycleDeciding(Decision.SUBSCRIPTION_REQUIRED);
-    JwtAuthUtils.environmentAccessGuard = new EnvironmentAccessGuard(lifecycle);
 
-    boolean allowed = JwtAuthUtils.authenticateOrFail(cookieRequest(), response, log,
-        "favorites GET");
+    boolean allowed = JwtAuthUtils.authenticateOrFail(pipeline(new EnvironmentAccessGuard(lifecycle)),
+        cookieRequest(), response, log, "favorites GET");
 
     assertFalse(allowed);
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
     verify(response).setContentType("application/json");
     verify(response).setCharacterEncoding("UTF-8");
     assertSharedBody("SUBSCRIPTION_REQUIRED");
-    // The tenant is the session's environment, as installed in OBContext.
+    // The tenant is the session's environment.
     verify(lifecycle).evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class));
     verify(log).info("Commercial access denied for {}: {}", "favorites GET",
         "Environment access is not available: SUBSCRIPTION_REQUIRED");
@@ -158,11 +143,9 @@ class JwtAuthUtilsEnvironmentAccessTest {
 
   @Test
   void aBlockedBearerCallerIsRefusedWith402AndTheSharedBody() throws Exception {
-    JwtAuthUtils.environmentAccessGuard =
-        new EnvironmentAccessGuard(lifecycleDeciding(Decision.DEMO_TRIAL_EXPIRED));
-
-    boolean allowed = JwtAuthUtils.authenticateOrFail(bearerRequest(), response, log,
-        "report-selectors GET");
+    boolean allowed = JwtAuthUtils.authenticateOrFail(
+        pipeline(new EnvironmentAccessGuard(lifecycleDeciding(Decision.DEMO_TRIAL_EXPIRED))),
+        bearerRequest(), response, log, "fiscal-test-mode GET");
 
     assertFalse(allowed);
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
@@ -174,10 +157,10 @@ class JwtAuthUtilsEnvironmentAccessTest {
   @Test
   void theKillSwitchLetsABlockedTenantThrough() throws Exception {
     System.setProperty(KILL_SWITCH_PROPERTY, "true");
-    JwtAuthUtils.environmentAccessGuard =
-        new EnvironmentAccessGuard(lifecycleDeciding(Decision.SUBSCRIPTION_REQUIRED));
 
-    assertTrue(JwtAuthUtils.authenticateOrFail(cookieRequest(), response, log, "favorites GET"));
+    assertTrue(JwtAuthUtils.authenticateOrFail(
+        pipeline(new EnvironmentAccessGuard(lifecycleDeciding(Decision.SUBSCRIPTION_REQUIRED))),
+        cookieRequest(), response, log, "favorites GET"));
 
     verify(response, never()).setStatus(anyInt());
     assertEquals("", body.toString());
@@ -185,30 +168,28 @@ class JwtAuthUtilsEnvironmentAccessTest {
 
   @Test
   void anAllowedTenantProceeds() throws Exception {
-    JwtAuthUtils.environmentAccessGuard =
-        new EnvironmentAccessGuard(lifecycleDeciding(Decision.ALLOWED));
-
-    assertTrue(JwtAuthUtils.authenticateOrFail(bearerRequest(), response, log, "favorites GET"));
+    assertTrue(JwtAuthUtils.authenticateOrFail(
+        pipeline(new EnvironmentAccessGuard(lifecycleDeciding(Decision.ALLOWED))),
+        bearerRequest(), response, log, "favorites GET"));
 
     verify(response, never()).setStatus(anyInt());
   }
 
   @Test
   void aTenantThatPredatesLifecycleMetadataProceeds() throws Exception {
-    JwtAuthUtils.environmentAccessGuard = new EnvironmentAccessGuard(lifecycleDeciding(null));
-
-    assertTrue(JwtAuthUtils.authenticateOrFail(cookieRequest(), response, log, "favorites GET"));
+    assertTrue(JwtAuthUtils.authenticateOrFail(
+        pipeline(new EnvironmentAccessGuard(lifecycleDeciding(null))), cookieRequest(), response,
+        log, "favorites GET"));
   }
 
   @Test
-  void theGuardIsAskedForTheContextTenantWithTheEndpointLabel() throws Exception {
+  void theGuardIsAskedForTheIdentityTenantWithTheEndpointLabel() throws Exception {
     EnvironmentAccessGuard guard = mock(EnvironmentAccessGuard.class);
-    JwtAuthUtils.environmentAccessGuard = guard;
 
-    assertTrue(JwtAuthUtils.authenticateOrFail(bearerRequest(), response, log,
-        "survey-config POST"));
+    assertTrue(JwtAuthUtils.authenticateOrFail(pipeline(guard), bearerRequest(), response, log,
+        "favorites PUT"));
 
-    verify(guard).check(CLIENT_ID, "survey-config POST");
+    verify(guard).check(CLIENT_ID, "favorites PUT");
   }
 
   // ===================== the check runs only after authentication =====================
@@ -216,10 +197,10 @@ class JwtAuthUtilsEnvironmentAccessTest {
   @Test
   void anUnauthenticatedCallerGets401AndTheGuardIsNeverAsked() throws Exception {
     EnvironmentAccessGuard guard = mock(EnvironmentAccessGuard.class);
-    JwtAuthUtils.environmentAccessGuard = guard;
     HttpServletRequest request = mock(HttpServletRequest.class);
 
-    assertFalse(JwtAuthUtils.authenticateOrFail(request, response, log, "favorites GET"));
+    assertFalse(JwtAuthUtils.authenticateOrFail(pipeline(guard), request, response, log,
+        "favorites GET"));
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
     verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
@@ -229,37 +210,15 @@ class JwtAuthUtilsEnvironmentAccessTest {
   @Test
   void anInvalidBearerGets401AndTheGuardIsNeverAsked() throws Exception {
     EnvironmentAccessGuard guard = mock(EnvironmentAccessGuard.class);
-    JwtAuthUtils.environmentAccessGuard = guard;
     System.setProperty(LEGACY_BEARER_PROPERTY, "true");
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getHeader("Authorization")).thenReturn("Bearer bad-token");
     sws.when(() -> SecureWebServicesUtils.decodeToken("bad-token")).thenReturn(null);
 
-    assertFalse(JwtAuthUtils.authenticateOrFail(request, response, log, "favorites GET"));
+    assertFalse(JwtAuthUtils.authenticateOrFail(pipeline(guard), request, response, log,
+        "favorites GET"));
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-    verifyNoInteractions(guard);
-  }
-
-  @Test
-  void noContextAfterAuthenticationProceedsWithoutAsking() throws Exception {
-    EnvironmentAccessGuard guard = mock(EnvironmentAccessGuard.class);
-    JwtAuthUtils.environmentAccessGuard = guard;
-    obContext.when(OBContext::getOBContext).thenReturn(null);
-
-    assertTrue(JwtAuthUtils.authenticateOrFail(bearerRequest(), response, log, "favorites GET"));
-
-    verifyNoInteractions(guard);
-  }
-
-  @Test
-  void aContextWithNoClientProceedsWithoutAsking() throws Exception {
-    EnvironmentAccessGuard guard = mock(EnvironmentAccessGuard.class);
-    JwtAuthUtils.environmentAccessGuard = guard;
-    when(tenantContext.getCurrentClient()).thenReturn(null);
-
-    assertTrue(JwtAuthUtils.authenticateOrFail(cookieRequest(), response, log, "favorites GET"));
-
     verifyNoInteractions(guard);
   }
 
@@ -269,42 +228,35 @@ class JwtAuthUtilsEnvironmentAccessTest {
   class Servlets {
 
     private MockedStatic<CorsUtils> cors;
+    private MockedStatic<JwtAuthUtils> jwtAuthUtils;
 
+    /**
+     * Routes the servlets' public entry point through a pipeline whose guard refuses the tenant;
+     * everything else in {@code JwtAuthUtils} runs for real.
+     */
     @BeforeEach
     void blockTheTenant() throws Exception {
       cors = mockStatic(CorsUtils.class);
       EnvironmentAccessGuard guard = mock(EnvironmentAccessGuard.class);
       EnvironmentAccessGuard.Denial denial = denial(Decision.SUBSCRIPTION_REQUIRED);
       when(guard.check(eq(CLIENT_ID), anyString())).thenReturn(denial);
-      JwtAuthUtils.environmentAccessGuard = guard;
+      EnvironmentRequestAuthenticator blocking = pipeline(guard);
+      jwtAuthUtils = mockStatic(JwtAuthUtils.class, CALLS_REAL_METHODS);
+      jwtAuthUtils.when(() -> JwtAuthUtils.authenticateOrFail(any(HttpServletRequest.class),
+          any(HttpServletResponse.class), any(Logger.class), anyString()))
+          .thenAnswer(inv -> JwtAuthUtils.authenticateOrFail(blocking, inv.getArgument(0),
+              inv.getArgument(1), inv.getArgument(2), inv.getArgument(3)));
     }
 
     @AfterEach
-    void releaseCors() {
+    void release() {
+      jwtAuthUtils.close();
       cors.close();
     }
 
     @Test
     void neoFavorites() throws Exception {
       new NeoFavoritesServlet().doGet(bearerRequest(), response);
-
-      assertRefusedBeforeAnyWork();
-    }
-
-    @Test
-    void reportSelectors() throws Exception {
-      HttpServletRequest request = bearerRequest();
-      when(request.getPathInfo()).thenReturn("/product");
-
-      new ReportSelectorsServlet().doGet(request, response);
-
-      assertRefusedBeforeAnyWork();
-      verify(request, never()).getPathInfo();
-    }
-
-    @Test
-    void surveyConfig() throws Exception {
-      new SurveyConfigServlet().doGet(bearerRequest(), response);
 
       assertRefusedBeforeAnyWork();
     }
@@ -333,6 +285,12 @@ class JwtAuthUtilsEnvironmentAccessTest {
 
   // ===================== fixtures =====================
 
+  /** The shared pipeline over the mocked cookie authenticator and the given guard. */
+  private EnvironmentRequestAuthenticator pipeline(EnvironmentAccessGuard guard) {
+    return new EnvironmentRequestAuthenticator(sessionAuthenticator, guard,
+        mock(WarehouseResolver.class), mock(GoSessionRoleReconciler.class));
+  }
+
   private void assertSharedBody(String decision) throws Exception {
     JSONObject error = new JSONObject(body.toString()).getJSONObject("error");
     assertEquals("Environment access is not available: " + decision, error.getString("message"));
@@ -358,21 +316,18 @@ class JwtAuthUtilsEnvironmentAccessTest {
     }
   }
 
-  /** A GET carrying a live cookie session into the tenant, served by the mocked DAL session. */
+  /** A GET carrying a live cookie session into the tenant. */
   private HttpServletRequest cookieRequest() {
-    GoSessionRecord record = new GoSessionRecord();
-    record.setId("session-1");
-    record.setUserId("user-1");
-    record.setRoleId("role-1");
-    record.setCtxOrgId("org-1");
-    record.setCtxClientId(CLIENT_ID);
-    record.setExpiresAt(Instant.now().plusSeconds(30L * 24 * 3600));
-    record.setAbsoluteExpiresAt(Instant.now().plusSeconds(60L * 24 * 3600));
-    when(hibernateSession.doReturningWork(any())).thenReturn(record);
+    GoSessionRecord session = new GoSessionRecord();
+    session.setId("session-1");
+    session.setUserId("user-1");
+    session.setRoleId("role-1");
+    session.setCtxOrgId("org-1");
+    session.setCtxClientId(CLIENT_ID);
+    when(sessionAuthenticator.authenticate(any()))
+        .thenReturn(GoSessionAuthResult.authenticated(session));
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getMethod()).thenReturn("GET");
-    when(request.getCookies()).thenReturn(
-        new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "raw-session-token") });
     return request;
   }
 

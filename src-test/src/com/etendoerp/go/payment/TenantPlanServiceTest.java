@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -256,6 +257,22 @@ class TenantPlanServiceTest {
 
     @Mock private OBQuery<Preference> preferenceQuery;
 
+    private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
+
+    @BeforeEach
+    void stubTheSystemContextSwitch() {
+      // The lookup and the removal run through SystemContext, which swaps the thread's context.
+      // A unit test has no real session for that, so the static is stubbed.
+      contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
+    }
+
+    @AfterEach
+    void releaseTheContextStub() {
+      if (contextMock != null) {
+        contextMock.close();
+      }
+    }
+
     private Preference storedPreference() {
       return mock(Preference.class);
     }
@@ -313,6 +330,29 @@ class TenantPlanServiceTest {
       verify(obDal).remove(first);
       verify(obDal).remove(second);
       verify(obDal).flush();
+    }
+
+    @Test
+    void removesAsSystemButFlushesBackInTheCallersContext() {
+      // The rows are client 0 and the paid onboarding calls this as the new tenant, where the DAL
+      // write check refuses them (TenantContextSubscriptionWriteIntegrationTest pins the real
+      // check). The flush must NOT run as system: it flushes everything pending in the caller's
+      // session, and the onboarding's own rows would then be audited as written by System.
+      List<String> calls = new ArrayList<>();
+      contextMock.when(() -> org.openbravo.dal.core.OBContext.setOBContext("0", "0", "0", "0"))
+          .thenAnswer(invocation -> calls.add("enter system"));
+      contextMock.when(() -> org.openbravo.dal.core.OBContext.setOBContext(
+              (org.openbravo.dal.core.OBContext) any()))
+          .thenAnswer(invocation -> calls.add("restore caller"));
+      Preference stored = storedPreference();
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.list()).thenReturn(List.of(stored));
+      doAnswer(invocation -> calls.add("remove")).when(obDal).remove(stored);
+      doAnswer(invocation -> calls.add("flush")).when(obDal).flush();
+
+      assertTrue(service.retireProductivePreference(CLIENT_ID));
+
+      assertEquals(List.of("enter system", "remove", "restore caller", "flush"), calls);
     }
 
     @Test

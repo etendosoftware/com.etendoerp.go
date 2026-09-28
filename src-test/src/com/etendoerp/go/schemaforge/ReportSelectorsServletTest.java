@@ -25,7 +25,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -57,11 +56,17 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
-
-import com.etendoerp.go.common.JwtAuthUtils;
+import com.etendoerp.go.auth.AuthScheme;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.SurfacePolicy;
+import com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 
 /**
  * Unit tests for {@link ReportSelectorsServlet}.
@@ -100,7 +105,7 @@ class ReportSelectorsServletTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
-  private MockedStatic<JwtAuthUtils> jwtAuthMock;
+  private MockedStatic<NeoServletSupport> neoSupportMock;
   private MockedStatic<com.etendoerp.go.common.CorsUtils> corsMock;
 
   private StringWriter stringWriter;
@@ -119,7 +124,7 @@ class ReportSelectorsServletTest {
 
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
-    jwtAuthMock = mockStatic(JwtAuthUtils.class);
+    neoSupportMock = mockStatic(NeoServletSupport.class);
     corsMock = mockStatic(com.etendoerp.go.common.CorsUtils.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
@@ -146,7 +151,7 @@ class ReportSelectorsServletTest {
   @AfterEach
   void tearDown() {
     corsMock.close();
-    jwtAuthMock.close();
+    neoSupportMock.close();
     obContextMock.close();
     obDalMock.close();
   }
@@ -156,8 +161,7 @@ class ReportSelectorsServletTest {
   // ---------------------------------------------------------------------------
 
   private void configureAuthenticatedGet(String type) throws Exception {
-    jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-        .thenReturn(true);
+    neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
     when(request.getPathInfo()).thenReturn("/" + type);
     when(request.getParameter("q")).thenReturn("");
     when(request.getParameter("limit")).thenReturn("20");
@@ -198,47 +202,84 @@ class ReportSelectorsServletTest {
   class DoGetGuardTests {
 
     @Test
-    @DisplayName("authenticateOrFail returning false aborts the request: handler body never runs")
-    void authenticateOrFailFalseAbortsRequest() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(false);
+    @DisplayName("returns 401 when JWT authentication throws OBException")
+    void authFailureOBException() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "bad token"));
 
       servlet.doGet(request, response);
 
-      // JwtAuthUtils.authenticateOrFail owns writing the error response (401/403) itself —
-      // the servlet only has to stop. Assert the handler body never ran: no pathInfo read,
-      // no 200, no selector query.
-      verify(request, never()).getPathInfo();
-      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
-      verify(obDal, never()).getSession();
+      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      assertTrue(getResponseBody().contains("bad token"));
     }
 
     @Test
-    @DisplayName("authenticateOrFail returning true (cookie session) runs the handler body")
-    void authenticateOrFailTrueViaCookieSessionRunsHandler() throws Exception {
-      configureAuthenticatedGet("bpartner");
+    @DisplayName("returns 401 when JWT authentication throws generic Exception")
+    void authFailureGenericException() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED,
+              "Invalid or expired token"));
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      assertTrue(getResponseBody().contains("Invalid or expired token"));
     }
 
     @Test
-    @DisplayName("authenticateOrFail returning true (legacy bearer) still runs the handler body — "
-        + "the servlet call site cannot tell cookie session and legacy bearer apart, by design")
-    void authenticateOrFailTrueViaLegacyBearerRunsHandler() throws Exception {
-      configureAuthenticatedGet("bpartner");
+    @DisplayName("ETP-5455: authenticates through the shared pipeline under NEO_DATA")
+    void asksForTheNeoDataPolicy() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "refused"));
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_OK);
+      neoSupportMock.verify(() -> NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA));
+    }
+
+    @Test
+    @DisplayName("ETP-5455: a commercially blocked environment answers 402, not the selector")
+    void blockedEnvironmentAnswers402() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.PAYMENT_REQUIRED,
+              "Environment access is not available: SUBSCRIPTION_REQUIRED"));
+      when(request.getPathInfo()).thenReturn("/bpartner");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(402);
+      assertTrue(getResponseBody().contains("SUBSCRIPTION_REQUIRED"));
+    }
+
+    @Test
+    @DisplayName("ETP-5047: a guard denial answers the shared structured 402 body")
+    void guardDenialAnswersTheSharedBody() throws Exception {
+      EnvironmentAccessGuard.Denial denial;
+      try (MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+          mockStatic(EnvironmentAccessEnforcementFlag.class)) {
+        TenantEnvironmentLifecycleService lifecycle =
+            org.mockito.Mockito.mock(TenantEnvironmentLifecycleService.class);
+        when(lifecycle.evaluateAccess(org.mockito.ArgumentMatchers.eq("client-1"),
+            org.mockito.ArgumentMatchers.eq(true), any())).thenReturn(Decision.DEMO_TRIAL_EXPIRED);
+        denial = new EnvironmentAccessGuard(lifecycle).check("client-1", "test");
+      }
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(EnvironmentAuthOutcome.accessDenied(denial, AuthScheme.COOKIE));
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(402);
+      JSONObject error = new JSONObject(getResponseBody()).getJSONObject("error");
+      assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+      assertEquals("DEMO_TRIAL_EXPIRED", error.getString("decision"));
+      assertEquals("Environment access is not available: DEMO_TRIAL_EXPIRED",
+          error.getString("message"));
     }
 
     @Test
     @DisplayName("returns 400 when pathInfo is null")
     void missingPathInfo() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(true);
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn(null);
 
       servlet.doGet(request, response);
@@ -250,8 +291,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 400 when pathInfo is just /")
     void rootPathInfo() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(true);
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn("/");
 
       servlet.doGet(request, response);
@@ -420,8 +460,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 500 when executeSelector throws unexpected exception")
     void internalError() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(true);
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn("/bpartner");
       when(request.getParameter("q")).thenReturn("");
       when(request.getParameter("limit")).thenReturn("20");
@@ -846,5 +885,16 @@ class ReportSelectorsServletTest {
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
     }
+  }
+
+  /** ETP-5455 — an outcome the shared pipeline would hand back for an authenticated request. */
+  private static EnvironmentAuthOutcome authenticatedOutcome(OBContext ctx) {
+    return EnvironmentAuthOutcome.authenticated(AuthScheme.COOKIE, ctx, "user-1", "role-1",
+        "client-1", "org-1");
+  }
+
+  private static EnvironmentAuthOutcome refusedOutcome(EnvironmentAuthOutcome.Status status,
+      String message) {
+    return EnvironmentAuthOutcome.refused(status, message, AuthScheme.COOKIE);
   }
 }

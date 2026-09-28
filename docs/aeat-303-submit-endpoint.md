@@ -118,7 +118,8 @@ shape minus `declarationData`/`csv`/etc:
 | (none — plain `sendError`, no JSON body) | `404` | `id` doesn't resolve to a declaration belonging to the current client/org (`belongsTo`) | Same as above — no JSON body |
 | `MISSING_PRESENTER` | `400` | Production (`testMode=false`) and either `presenterNif` or `presenterName` is blank | Test mode never triggers this — presenter fields are optional there |
 | `NO_CERTIFICATE` | `409` | Production and `AEAT303SubmissionService.hasOrgCertificate(org)` is false | Checked **before** constructing `AEAT303SubmissionService` for the actual submission — session-cert upload is NOT supported by this endpoint (see below) |
-| `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already `submitted_ack` | The idempotency guard (BUG-1 fix) — see dedicated section below |
+| `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already in the submitted family (`submitted`, `submitted_ext`, `submitted_ack`) | The idempotency guard (BUG-1 fix, widened in ETP-5438) — see dedicated section below |
+| `SNAPSHOT_FAILED` | `500` | Production, file generated, but the submission snapshot (the `GET /fiscal303/boxes` figures) could not be computed or would not fit the column | Checked **before** the AEAT call — the declaration is never sent to Hacienda without its frozen figures (ETP-5438). See "Submission snapshot" below |
 | `SUBMISSION_FAILED` | `500` (file-generation failure) or `502` (AEAT call itself threw `OBException`) | File regeneration threw, or `AEAT303SubmissionService.submitProduction`/`submitValidation` threw `OBException` (e.g. connection error, unsupported-charset gate, non-JSON response) | The one case where a raised exception maps to this code; a non-`OBException` runtime exception is a known, accepted gap (see "Known gaps") |
 
 An AEAT-side rejection that the service parses successfully (e.g. the E0100803 "double space in
@@ -182,7 +183,9 @@ certificate at all, so this restriction only ever affects production submissions
 ## Idempotency guard (`ALREADY_SUBMITTED` — BUG-1 fix)
 
 **What it blocks:** a production (`testMode=false`) submission of a declaration whose
-`ETGO_Fiscal_Decl.DeclarationStatus` is already `submitted_ack` is rejected outright —
+`ETGO_Fiscal_Decl.DeclarationStatus` is already in the submitted family
+(`FiscalDeclCrudHandler.SUBMITTED_STATUSES`: `submitted`, `submitted_ext`, `submitted_ack`) is
+rejected outright —
 `409 Conflict`, `errorCode: "ALREADY_SUBMITTED"` — **before** `AEAT303SubmissionService` is even
 constructed. This is verified in `Fiscal303SubmitHandlerTest.
 testHandleSubmit_alreadySubmittedDeclaration_blocksResubmission` via Mockito's
@@ -195,7 +198,17 @@ submission to the live AEAT service**. Per the AEAT protocol, a genuine repeat p
 same declaration must be filed as a "complementaria" (a distinct declaration type with its own
 flag) — a plain resubmission is not the correct way to correct or repeat a filing.
 
-**What it does NOT block:** test-mode (`testMode=true`) resubmissions of an already-`submitted_ack`
+**Scope widened in ETP-5438.** The original BUG-1 guard only matched `submitted_ack`; ETP-5438
+widened it to the full submitted family so it matches every other "already presented" guard
+(`FiscalDeclCrudHandler#rejectRepresentation` for the PUT re-presentation path and
+`AbstractFiscalHandler#guardNotAlreadySubmitted` for `generate`, both also `409`). The pure reads
+`GET /fiscal303/boxes` and `GET /fiscal349/operators` are deliberately **not** gated — for a
+submitted declaration they return its persisted submission snapshot without recomputing, and
+only a legacy one (presented before snapshots existed) is computed live, once per browser session,
+by the frontend. Full rationale: `schema_forge/docs/generated-custom-windows/fiscal-models.md`, section
+"Freeze once presented".
+
+**What it does NOT block:** test-mode (`testMode=true`) resubmissions of an already-submitted
 declaration are explicitly allowed — ServValiDos never mutates declaration status (see
 "Persistence" below), so re-validating an already-submitted declaration is harmless. This is
 covered by its own dedicated test
@@ -215,7 +228,8 @@ locales) instead of dumping the generic AEAT error list, and — like `MISSING_P
 
 **Only a successful PRODUCTION submission mutates the declaration record**
 (`persistSuccessfulSubmission`): `DeclarationStatus` → `submitted_ack`, `DeclarationFileName` set
-to a generated justificante filename, `FileExternal` set to `false`, staged via `decl.save()`.
+to a generated justificante filename, `FileExternal` set to `false`, `Submitted_Snapshot` set to the
+figures-only boxes snapshot computed before the AEAT call (ETP-5438, see below), staged via `decl.save()`.
 Test-mode submissions (success or error) and failed production submissions never touch the
 declaration row — matching Classic's "test submissions leave no trace" rule.
 
@@ -232,6 +246,40 @@ declaration entity itself) is new. See the "Justificante" tab section in
 `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` and the "Phase 2.2" section
 in the plan doc for the frontend wiring that surfaces this (the `receiptRefreshTick` refresh, since
 test mode has no status change to key off of).
+
+### Submission snapshot (`Submitted_Snapshot`, ETP-5438)
+
+A production submission also freezes the declaration's figures: `handleSubmit` calls
+`owner.computeSubmittedSnapshot(orgId, year, period)` right after the `.303` file is generated and
+**before** `submitProduction` is called.
+
+- **Contents — figures only, size-bounded.** It is the `GET /fiscal303/boxes` payload (same code
+  path `computeLivePayload`, same effective org; re-serialized through `JSONObject`) with the
+  per-invoice `sources` array replaced by its row count, `sourceCount`: `{boxes, summary,
+  sourceCount}`. A period can hold tens of thousands of invoices, and the snapshot is also
+  returned by every `GET /declarations`, so per-invoice rows are never kept.
+- **Validated before filing.** The snapshot is checked against the entity's own
+  `submittedSnapshot` property (`FiscalSubmittedSnapshotSupport#validateSubmittedSnapshot` — AD length and
+  domain type, without assigning it). If the compute or that check fails, the request answers
+  `500` `SNAPSHOT_FAILED` and the AEAT is never contacted: once Hacienda accepts a filing it cannot
+  be undone, so a declaration must not end up presented without its snapshot. The column is a
+  TEXT/CLOB with AD `FIELDLENGTH` 1,000,000 (it first shipped with 2,000, which the entity
+  validator enforced — ETP-5438 QA BUG-1). **Deploy order:** `update.database` must ship together
+  with this Java, since every declaration read touches the new `submittedSnapshot` property.
+- **Stored with the filing.** `persistSuccessfulSubmission` stores it in
+  `ETGO_Fiscal_Decl.Submitted_Snapshot` (`FiscalDecl#setSubmittedSnapshot`) in the same single
+  commit as the status change. Should storing it still fail after the filing (not expected — it
+  was validated), the declaration keeps `submitted_ack`/`aeat_telematic` and is saved without a
+  snapshot, so it is served live like a declaration presented before snapshots existed; the
+  failure is logged as an error with the greppable marker `ETGO_FISCAL_SNAPSHOT_MISSING` (plus
+  the declaration id, year and period), never left as a half-written record.
+
+From then on `GET /fiscal303/boxes` returns that snapshot as-is (no `sources`) instead of
+recomputing from the current invoices. Test mode takes no snapshot (it never changes the
+declaration). The manual presentation paths (`PUT /fiscal303/declarations`, both models) take the
+same kind of snapshot through `FiscalSubmittedSnapshotSupport#applyTransition`; see
+`../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` ("Freeze once presented")
+for the full contract.
 
 **Single atomic commit (ETP-4456 "Phase 3" fix, commit `abf40953`, 2026-08-03).** Earlier revisions
 of `handleSubmit` issued up to 3 independent commits (incidents, declaration status, attachment) —

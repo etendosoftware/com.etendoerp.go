@@ -69,6 +69,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 |------|----------|---------------------|---------|
 | `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
 | `environment-access-enforcement-off` | `etendo.go.flags.environment-access-enforcement-off` | `ETGO_FLAG_ENVIRONMENT_ACCESS_ENFORCEMENT_OFF` | absent ⇒ **`false`** = enforcing (an OFF switch — see its section below) |
+| `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -202,32 +203,32 @@ The web client evaluates the same flags for presentation only — which pages an
 decision about permissions, data or processes is made server-side. The paywall below holds
 regardless of what the client believes.
 
-### `demo-data-transfer` (ETP-5443) — backend-only, off by default
+### `demo-data-transfer` — retired (ETP-5480)
 
-Gates the ETP-5364 demo-to-productive data transfer. Evaluated in exactly one place,
-`DemoDataTransferFlag.isEnabled()`, with an account-less context (the endpoints are routed before
-any credential is read, so every toggle point must resolve the same answer). Locally:
-`etendo.go.flags.demo-data-transfer=true` / `ETGO_FLAG_DEMO_DATA_TRANSFER=true`.
+The ETP-5443 flag that gated the ETP-5364 demo-to-productive data transfer is gone: the transfer is
+permanent. `DemoDataTransferFlag`, `GoFeatureFlags.FLAG_DEMO_DATA_TRANSFER` and the older
+synchronous NEO grid-import path it kept alive for the flag-off case (`OnboardingDataTransferService`)
+were removed. A leftover `etendo.go.flags.demo-data-transfer` / `ETGO_FLAG_DEMO_DATA_TRANSFER`
+setting, or a ConfigCat key of that name, is no longer read and can be deleted.
 
-| Toggle point (`EtendoGoJwtServlet`) | Flag off — the pre-ETP-5364 behaviour |
+What was a toggle point is now unconditional in `EtendoGoJwtServlet`:
+
+| Point | Behaviour |
 |---|---|
-| `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | 404 `Unknown endpoint: <path>`, identical to a path that does not exist |
-| `recordDemoDataTransferSelection` (checkout / purchase) | the body's `dataTransfer` selection is ignored |
-| `startDemoDataTransferBestEffort` (paid onboarding commit) | no asynchronous transfer started |
+| `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | always routed; authenticated like any other session endpoint |
+| `recordDemoDataTransferSelection` (checkout / purchase) | records the body's `dataTransfer` selection when the purchase has a demo source |
+| `startDemoDataTransferBestEffort` (paid onboarding commit) | starts the asynchronous transfer from the demo persisted on the purchase |
 
-The worker thread is created on first submission, so an instance with the flag off never starts
-one. No key exists in the web client's `flag-keys.js`: the First Steps row appears only when the
-status read answers 2xx, so the browser follows this evaluator instead of running a second one.
-With the flag off, paid onboarding retains its older synchronous grid-import transfer when the
-browser explicitly selected products or contacts. With the flag on, that synchronous path is
-disabled: only the server-recorded asynchronous job copies data. Source and target client IDs
-must differ in both paths.
+The worker thread is still created on first submission, so an instance that never receives a
+transfer never starts one. Only the server-recorded asynchronous job copies data; the onboarding
+body's `dataTransfer` is ignored. Source and target client IDs must differ.
 
-With the flag on, checkout records `{products, contacts}` under its request ID before contacting
-Stripe. The first selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and
-the billing overview include `dataTransferEnabled` and include `dataTransfer` only when a
-server-side selection exists. A flag-on older purchase with no selection therefore remains
-`NOT_REQUESTED`; the browser must not guess its choice. The recovery procedure is in
+Checkout records `{products, contacts}` under its request ID before contacting Stripe. The first
+selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and the billing overview
+include `dataTransferEnabled: true` for a purchase with a demo source (kept for the upgrade page,
+which still reads it) and include `dataTransfer` only when a server-side selection exists. An older
+purchase with no selection therefore remains `NOT_REQUESTED`; the browser must not guess its
+choice. The recovery procedure is in
 [`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
 
 ### `environment-access-enforcement-off` (ETP-5047) — backend-only kill switch, enforcing by default
@@ -244,9 +245,12 @@ A positively phrased "enforcement enabled" flag would do the opposite — a miss
 open every blocked tenant — so do not flip the polarity.
 
 Evaluated in exactly one place, `EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(clientId)`,
-called only by `EnvironmentAccessGuard` — the one check NEO (`NeoAuthenticator`), MCP
-(`McpServlet`), the `JwtAuthUtils.authenticateOrFail` servlets (favorites, report selectors,
-survey config, fiscal test mode) and the legacy environment login (`GET /sws/go/login`) share.
+called only by `EnvironmentAccessGuard` — the one check every tenant entry point shares: the bind
+step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, ETP-5455) for every surface
+whose `SurfacePolicy` requires commercial access (`NEO_API`: NEO; `NEO_DATA`: favorites, fiscal test
+mode, report selectors, the OAuth2 API-key endpoints), the `/sws/go` endpoints that act on the
+session's tenant (`resolveTenantSession`), MCP (`McpServlet`) and the legacy environment login
+(`GET /sws/go/login`). `NEO_AUXILIARY` surfaces (survey configuration, support) never ask.
 `POST /sws/go/session/environment` evaluates it but never refuses — it reports `accessDecision`,
 which is informational and backend-only (the SPA's blocked screen is driven by the NEO 402) — so
 the blocked customer reaches the pay path. The context is
@@ -257,7 +261,7 @@ never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off
 
 | Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
 |---|---|
-| unset / `false` / unreadable | 402 on NEO, MCP, the `JwtAuthUtils` servlets and `GET /sws/go/login` |
+| unset / `false` / unreadable | 402 on NEO, the `NEO_DATA` servlets, the `/sws/go` tenant-session endpoints, MCP and `GET /sws/go/login` |
 | `true` (for that `clientId`, or globally) | allowed; INFO log `Environment access enforcement is switched off: <entry point> would have refused tenant <id> (<DECISION>)` |
 
 It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
@@ -308,12 +312,15 @@ rule/property (or setting `false`). Anything that is not a clean `true` keeps en
   from `accessState`.
 - **An API client or AI agent** gets HTTP 402 with
   `{"error":{"message":"Environment access is not available: <DECISION>","status":402,"code":"ENVIRONMENT_ACCESS_DENIED","decision":"<DECISION>"}}`
-  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error), the `JwtAuthUtils` servlets and
-  `GET /sws/go/login`. One gap: an Etendo JWT minted **before** the block keeps working on Copilot
+  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error), the `NEO_DATA` servlets (favorites,
+  fiscal test mode, report selectors), the `/sws/go` tenant-session endpoints and
+  `GET /sws/go/login`. (The OAuth2 API-key endpoints refuse through the same guard, in the OAuth2
+  servlet's own error envelope.) One gap: an Etendo JWT minted **before** the block keeps working on Copilot
   until it expires (`open-and-notable-topics.md` §3.10).
 - **The log** has an INFO line per refused request — `Commercial access denied for NEO request:
   Environment access is not available: <DECISION>`, `... for MCP request: ...`, or `... for
-  <endpoint>: ...` from the `JwtAuthUtils` servlets. `GET /sws/go/login` refuses without a log line.
+  <endpoint>: ...` from the `JwtAuthUtils` servlets. `GET /sws/go/login`, report selectors and the
+  `/sws/go` tenant-session endpoints refuse without a line of their own.
 - **Why it is blocked**: `GET /sws/go/environments` (`accessState`, `subscriptionStatus`, trial
   fields) and the tenant's subscription rows —
 
@@ -333,6 +340,16 @@ rule/property (or setting `false`). Anything that is not a clean `true` keeps en
   Customer Portal) — the resulting `invoice.paid` sets the open row back to `active`; for a canceled
   subscription, a new purchase, which opens a fresh row (`open-and-notable-topics.md` §3.7). A hand edit of the row is overwritten by the next
   lifecycle event; the kill switch is for incidents, not for granting access.
+
+### `onboarding-tenant-pool` (ETP-5389) — backend-only, off by default
+
+Switches onboarding between the classic from-scratch path (off) and claiming a pre-provisioned
+tenant from `ETGO_TENANT_POOL` (on). Evaluated through `TenantPoolConfig.isEnabled(accountEmail)`
+at two points: the onboarding claim (with the signup's account, so ConfigCat can target it per
+account) and every run of the "Tenant Pool Filler" background process (account-less). Off, the
+claim never touches the pool and the filler run does nothing — onboarding is byte-for-byte the
+classic path. The pool size and the other knobs are plain runtime properties, not flags. Full
+reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
 
 ## 2. The onboarding paywall
 
@@ -452,12 +469,19 @@ that purchase. If setup is already running, the response says to refresh its sta
 again. Once an attempt is marked failed, retrying the same paid request is allowed; a stale worker
 cannot mark the newer attempt complete.
 
-With `demo-data-transfer` enabled, the paid flow starts the durable transfer after provisioning
-commits. Products, their sales/purchase prices and current cost, and contacts are copied under
-target client references; global units and tax categories remain global references. Missing
-required target references fail the job with a visible reason. Existing target search keys and
-price/cost rows are updated so a retry does not duplicate them. With the flag disabled, the older
-synchronous NEO grid-import path remains available for an explicit browser selection.
+The paid flow starts the durable transfer after provisioning commits. Active products, their
+current cost and their prices, and active contacts are copied under target client references;
+global units and tax categories remain global references. Only prices on the demo's **default**
+sales and purchase price lists are migrated (the newest version of each), onto the target's
+default lists; prices on any other list are left behind. A contact address reuses only an
+address row already used by another contact, never the organization's fiscal address. Missing
+required target references fail the job with a visible reason.
+
+Each product and each contact is committed on its own, so the First Steps counters move while
+the job runs. A failure therefore rolls back only the item in progress and leaves the earlier
+ones copied; a retry re-runs every item through the same upserts (existing target search keys,
+price and cost rows are updated, never duplicated), so it completes the job without duplicating
+what was already copied.
 
 ### Company profile transfer during paid provisioning (ETP-5443)
 
@@ -495,9 +519,7 @@ environment. An independent purchase from an existing productive environment has
 associate or revoke.
 
 When a source demo organization exists, this profile setup is required for paid productive
-provisioning. It does not depend on whether the account selected product or contact transfer, and it
-is not gated by the optional `demo-data-transfer` feature flag. That flag controls the optional
-demo-data transfer described above; turning it off must not suppress the company profile copy. The
+provisioning. It does not depend on whether the account selected product or contact transfer. The
 target's currency is retained from paid onboarding and its ledger configuration; currency is not
 copied from the demo organization.
 
@@ -672,6 +694,15 @@ exists that the backfill would orphan), so it cannot simply be made automatic.
   post-cutover state;
 - **failure** → it calls `markProductive`, because the preference is then the only record that the
   tenant paid, and the fallback below is the only thing that will read it back.
+
+Both writes are **System-owned rows (client `0`) written from the new tenant's context**, so both
+run through `payment/SystemContext` (the subscription insert in `SubscriptionService.openSubscription`,
+the marker delete in `TenantPlanService.retireProductivePreference`). Admin mode alone is not
+enough: `setAdminMode(true)` keeps the DAL check that a row's client equals the *current* client,
+and a refusal from that check also marks the whole request for rollback, which no best-effort
+`catch` can undo. A refused subscription save is additionally evicted from the session, so it
+cannot resurface as a `StaleStateException` in the onboarding's next flush. Both are pinned from a
+real tenant context by `TenantContextSubscriptionWriteIntegrationTest`.
 
 R37 does the same thing for tenants that predate the subscription model (statement 3 of its
 `@apply`, in the same transaction as the backfilled row), so the fleet converges from both ends onto
@@ -854,6 +885,6 @@ must never break the session.
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
-| Demo data transfer gate / worker | `com.etendoerp.go.payment.DemoDataTransferFlag`, `DemoDataTransferService` |
-| Environment access check (NEO, MCP, `JwtAuthUtils`, `/login`), 402 body, kill switch | `com.etendoerp.go.payment.EnvironmentAccessGuard`, `EnvironmentAccessEnforcementFlag` |
+| Demo data transfer worker | `com.etendoerp.go.payment.DemoDataTransferService` |
+| Environment access check (auth pipeline bind step, MCP, `/login`, tenant session), 402 body, kill switch | `com.etendoerp.go.payment.EnvironmentAccessGuard`, `EnvironmentAccessEnforcementFlag`; carried to the consumers by `com.etendoerp.go.auth.EnvironmentAuthOutcome#getAccessDenial` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |

@@ -95,16 +95,21 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
-   * ETP-5438 defense in depth, shared by every fiscal model's boxes/operators-and-generate
-   * handler — rejects a compute/generate call once the LATEST declaration for this {@code
+   * ETP-5438 defense in depth, shared by every fiscal model's generate handler — rejects a
+   * {@code generate} (file generation) call once the LATEST declaration for this {@code
    * (org, year, period, model)} natural key is already in {@link
-   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Calcular"/"Generar
-   * fichero <N>" once {@code isSubmitted} (every {@code FmModel<N>Page.jsx}), but the NEO
-   * compute/generate entities are otherwise unaware of any declaration's status at all — they
-   * compute purely from {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw
-   * call (or a future frontend regression) would silently recompute or regenerate an
-   * already-presented declaration, with no server-side guard, unlike the PUT path {@link
-   * FiscalDeclCrudHandler#rejectRepresentation} already covers.
+   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Generar fichero <N>"
+   * once {@code isSubmitted} (every {@code FmModel<N>Page.jsx}), but the NEO generate entities
+   * are otherwise unaware of any declaration's status at all — they compute purely from
+   * {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw call (or a future
+   * frontend regression) would silently regenerate an already-presented declaration, with no
+   * server-side guard, unlike the PUT path {@link FiscalDeclCrudHandler#rejectRepresentation}
+   * already covers.
+   *
+   * <p>The pure-read entities ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) are
+   * deliberately NOT gated: they serve a submitted declaration from its persisted snapshot (see
+   * {@link #snapshotOrCompute}), or compute it live for a legacy declaration presented before
+   * snapshots existed.
    *
    * <p>Gates on the MOST RECENT declaration (highest {@code DECL_SEQ}) for the natural key, not
    * just any match — see {@link FiscalDeclCrudHandler#findLatestDeclarationStatus}'s own javadoc
@@ -121,11 +126,103 @@ abstract class AbstractFiscalHandler {
    */
   protected void guardNotAlreadySubmitted(String orgId, int year, String period, String model) {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    String status = declHandler().findLatestDeclarationStatus(clientId, orgId, model, year, period);
+    String status = declHandler().findLatestDeclarationStatus(clientId, declarationOrgId(), model,
+        year, period);
     if (status != null && FiscalDeclCrudHandler.SUBMITTED_STATUSES.contains(status)) {
       throw new AlreadySubmittedException(
           "This declaration was already submitted (status: " + status + ") for org=" + orgId
               + " year=" + year + " period=" + period + " model=" + model);
+    }
+  }
+
+  /**
+   * The organization declarations are STORED under — the raw session org, exactly what
+   * {@link FiscalDeclCrudHandler} writes on POST and filters by on GET. Deliberately NOT the
+   * {@code orgId} {@link #dispatch} receives: that one comes from {@link #resolveEffectiveOrg},
+   * which maps a {@code *} (org {@code "0"}) session to the first leaf org so the COMPUTATION has
+   * real invoice data, but a declaration created from that same session is stored under
+   * {@code "0"}. Looking declarations up with the effective org would never find them (ETP-5438
+   * review W1: the snapshot was missed and the generate guard let a submitted declaration
+   * through). Declaration lookups use this; computations keep the effective org.
+   */
+  protected String declarationOrgId() {
+    return OBContext.getOBContext().getCurrentOrganization().getId();
+  }
+
+  /**
+   * What this model freezes as a submission snapshot, and how it computes its live payload
+   * (ETP-5438). Assigned by each subclass constructor; see {@link FiscalSnapshotSupport}.
+   * Package-private and non-final so tests can install a double.
+   */
+  FiscalSnapshotSupport snapshotSupport;
+
+  /**
+   * The bare {@code ETGO_Fiscal_Decl.model} code this handler serves ({@code "303"},
+   * {@code "349"}) — not the URL segment {@link #getModelKey()} returns.
+   */
+  protected String getDeclModel() {
+    return snapshotSupport.declModel();
+  }
+
+  /**
+   * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
+   * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) for a declaration that is
+   * not served from a snapshot. {@link #computeSubmittedSnapshot} derives the snapshot from it.
+   * Passes {@code this} to the support so a Mockito spy of the handler stays in the call chain.
+   */
+  @SuppressWarnings("java:S112")
+  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
+    return snapshotSupport.computeLivePayload(this, orgId, year, period);
+  }
+
+  /**
+   * ETP-5438 — the submission snapshot: {@link #computeLivePayload}'s payload reduced to its
+   * fixed-size figures by {@link FiscalSnapshotSupport#toSnapshot} — see there for what is kept,
+   * why, and the known 349 size limit.
+   */
+  @SuppressWarnings("java:S112")
+  final JSONObject computeSubmittedSnapshot(String orgId, int year, String period)
+      throws Exception {
+    return snapshotSupport.toSnapshot(computeLivePayload(orgId, year, period));
+  }
+
+  /**
+   * ETP-5438 — the payload the read endpoint serves: the persisted submission snapshot when the
+   * latest declaration for the natural key is submitted and has one, otherwise a live
+   * {@link #computeLivePayload}. A submitted declaration WITHOUT a snapshot (a legacy one,
+   * presented before snapshots existed) deliberately keeps the live compute — no data-fix for
+   * those, product decision. Drafts/ready declarations always compute live.
+   */
+  @SuppressWarnings("java:S112")
+  protected JSONObject snapshotOrCompute(String orgId, int year, String period) throws Exception {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    // Lookup on the org the declaration is stored with; the compute keeps the effective org.
+    JSONObject snapshot = declHandler().snapshots.findLatestSubmittedSnapshot(clientId, declarationOrgId(),
+        getDeclModel(), year, period);
+    return snapshot != null ? snapshot : computeLivePayload(orgId, year, period);
+  }
+
+  /**
+   * Wires every handler's {@link FiscalDeclCrudHandler} to compute a submission snapshot through
+   * the handler that owns the declaration's model (ETP-5438). Needed because every declaration
+   * PUT — Modelo 303 and Modelo 349 alike — arrives through {@code /fiscal303/declarations}, so
+   * the CRUD handler must be able to reach the OTHER model's compute too. The org is resolved
+   * exactly like the read endpoint resolves it ({@link #resolveEffectiveOrg}), so the snapshot
+   * matches what that read returns.
+   */
+  static void linkSubmittedSnapshotProviders(AbstractFiscalHandler... handlers) {
+    java.util.Map<String, AbstractFiscalHandler> byModel = new HashMap<>();
+    for (AbstractFiscalHandler h : handlers) {
+      byModel.put(h.getDeclModel(), h);
+    }
+    FiscalSubmittedSnapshotSupport.SnapshotProvider provider = (model, year, period) -> {
+      AbstractFiscalHandler owner = byModel.get(model);
+      return owner != null
+          ? owner.computeSubmittedSnapshot(owner.resolveEffectiveOrg(), year, period)
+          : null;
+    };
+    for (AbstractFiscalHandler h : handlers) {
+      h.declHandler().snapshots.setProvider(provider);
     }
   }
 
