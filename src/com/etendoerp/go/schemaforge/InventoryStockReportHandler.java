@@ -124,6 +124,16 @@ public class InventoryStockReportHandler implements NeoHandler {
       // '0' is Etendo's "*" organization — shared master data visible to every org —
       // so both products and warehouses stay visible when they carry it, exactly like
       // the org-tree check everywhere else in this handler.
+      //
+      // ETP-5492 — includeZeroStock must only surface a zero-stock pair that ACTUALLY
+      // had movement history, not every product×warehouse combination the CROSS JOIN
+      // produces. m_storage_detail's own presence isn't a safe "had movement" proxy
+      // (it's a derived/current-state table, not a ledger — see the EXISTS below),
+      // so this checks m_transaction directly, the same table the Product window's
+      // sidebar already reads to decide "Sin movimientos de stock" vs "Disponible 0"
+      // (ProductSidebar.jsx's /transactions call, entity M_Transaction). Scoped here
+      // additionally by warehouse (via m_locator), which that sidebar does not do —
+      // this report is per-warehouse, the sidebar isn't.
       StringBuilder sql = new StringBuilder("SELECT "
           + "wh.name AS warehouse, "
           + "COALESCE(pc.name, '') AS category_name, "
@@ -164,8 +174,22 @@ public class InventoryStockReportHandler implements NeoHandler {
       appendOptionalFilters(sql, productIds, warehouseIds, categoryIds);
 
       sql.append(
-          "GROUP BY wh.name, pc.name, p.value, p.name, uom.name, uomt.name, cost.cost "
-          + "HAVING (:includeZeroStock = true OR COALESCE(SUM(sd.qtyonhand), 0) <> 0) "
+          // ETP-5492: p.m_product_id and wh.m_warehouse_id are added here solely so the
+          // correlated EXISTS below is legal — Postgres only exempts a table's ungrouped
+          // columns from GROUP BY when its DECLARED PRIMARY KEY is itself grouped by, and
+          // p.value/wh.name are business keys, not the PK, so referencing p.m_product_id/
+          // wh.m_warehouse_id inside EXISTS without them here is rejected at query time
+          // ("subquery uses ungrouped column"). Both are 1:1 with p.value/wh.name already,
+          // so this changes nothing about which rows get grouped together.
+          "GROUP BY wh.name, wh.m_warehouse_id, pc.name, p.value, p.name, p.m_product_id, "
+          + "uom.name, uomt.name, cost.cost "
+          + "HAVING (COALESCE(SUM(sd.qtyonhand), 0) <> 0 "
+          + "  OR (:includeZeroStock = true AND EXISTS ( "
+          + "    SELECT 1 FROM m_transaction t "
+          + "    JOIN m_locator tl ON tl.m_locator_id = t.m_locator_id "
+          + "    WHERE t.m_product_id = p.m_product_id "
+          + "      AND tl.m_warehouse_id = wh.m_warehouse_id "
+          + "  ))) "
           + "ORDER BY wh.name, p.value, p.name");
 
       NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
