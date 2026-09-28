@@ -1628,6 +1628,61 @@ Multi-currency needs no parameter: conversion uses the same exchange rate as the
 `candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
 `applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
 
+**Line targeting, partial results and rollback (ETP-5472).** These rules hold for the SPA routes
+and for `neo_action` alike — both enter the same `ReconciliationHandlerSupport` wrappers.
+
+- **A refused write rolls back.** `runPostAction` rolls back whenever the action RETURNS a status
+  `>= 400`, not only when it throws. Before, a returned `NeoResponse.error` was committed by the
+  request filter: `reconcileGroup` with invoices and an unknown operation id answered 400 and kept
+  the invoice payment and its movement. In addition, `reconcileGroup` checks the client-supplied
+  `operationIds` (exists, belongs to the account, not already reconciled —
+  `ReconciliationFlowSupport.validateOperationRefs`) **before** paying any invoice; the sum/sign
+  check still runs after, since it needs the invoice movements. No routed action persists anything
+  on purpose alongside an error: `removeOperation`/`reactivateSelected` report partial failures in
+  a 200 and `applySuggestions` reports rejected groups in `results[]` of a 201. **The rollback only
+  covers what is still pending in the request's session:** work Core commits mid-flow (e.g.
+  `SessionHandler#commitAndStart` inside its removal utilities) is already committed when the
+  refusal is returned and survives it, as before. Likewise, an `applySuggestions` group rejected
+  after its line was healed keeps the heal, since that call answers 201.
+- **Partial result is explicit.** `reconcileGroup`'s 201 (and so `reconcileDifference`'s) carries
+  `partial` (boolean), `pendingAmount` and, when partial, `remainderLineId` — the pending sub-line
+  the split left. The outcome is read from Core's real state after processing, not predicted from
+  the request: `partial` is `true` **only when a pending remainder row actually exists** in the
+  line's match group, and `pendingAmount` is that row's own signed `cramount - dramount`. Otherwise
+  `partial:false`, `pendingAmount: 0` and no `remainderLineId` — including an overpay within the
+  tolerance `validateOperations` accepts, which leaves no remainder. `partial:true` means the line
+  is NOT complete; continue with `remainderLineId`.
+- **Partial-group head → remainder.** `pendingLines` lists a partial group by its head id, whose own
+  row is already matched. `reconcileGroup`, `applySuggestions` and `candidates` redirect a head whose
+  reconciliation is processed to the group's pending remainder (first active, unmatched row sharing
+  `EM_ETGO_Match_Group_ID`). `candidates` then also returns `remainderLineId` in its `data`. With no
+  remainder (fully reconciled) the 409 `Statement line is already reconciled` stays;
+  `reconcileDifference` still requires the remainder itself and names it in its 409.
+- **Stuck lines are healed — only when the movement has no reconciliation at all.** A line linked
+  to a movement with **no** reconciliation is listed as pending by `PENDING_LINES_SQL` but used to
+  be refused by every write. `reconcileGroup` and `applySuggestions` now free it first — the line
+  (and any match-group sibling whose movement has no reconciliation either) is unlinked and its
+  match fields reset, then `normalizeReactivatedMatchGroup` collapses the group — and continue
+  normally in the same transaction. The movement and its payment are **kept** and become ordinary
+  candidates again: a movement left in `RPPC` is put back to "not cleared" by direction
+  (`ReactivationSupport.restoreNotClearedStatus`), since the candidates query excludes `RPPC`.
+  `undoReconciliation` on such a line frees it the same way and answers
+  `{reactivated:true, healed:true}` instead of the old 409. `candidates` is a GET and never heals.
+  Each heal is logged at info level (line id, transaction id).
+- **A draft-held line is refused, never healed.** When the line's movement sits in ANY unprocessed
+  (draft) reconciliation — created by Classic's Match Statement or by Etendo GO, holding only this
+  line or other movements too — `reconcileGroup` and `applySuggestions` answer **409** before any
+  write, with `Reconciliation <documentNo> is an unconfirmed draft that already holds this line.
+  Review it before reconciling the line again.` (`ReconciliationLineTargetSupport.MSG_DRAFT_HOLDS_LINE_PREFIX`
+  / `_SUFFIX`; matched by `matchDraftHoldsLine` in schema_forge `tools/app-shell/src/lib/backendErrors.js`).
+  Same policy as `ReconciliationDraftGuard`: a draft is unconfirmed work and is never emptied,
+  removed or discarded without a human decision. `undoReconciliation` on a draft-held line keeps its
+  existing path.
+- **Duplicate groups in one `applySuggestions` call are rejected.** Two groups can resolve to the
+  same effective line (e.g. a partial head redirected to its remainder plus the remainder itself).
+  The first accepted group keeps it; any later one is reported in `results[]` as a 409
+  `Statement line is already reconciled: <requested id>`, before anything is matched.
+
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
