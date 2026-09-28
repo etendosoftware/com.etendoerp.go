@@ -47,7 +47,7 @@ import org.xml.sax.SAXException;
  * <p><b>The invariant.</b> A plan is UNLIMITED for a resource when it has NO quota row for that
  * resource. The absence of the row IS the "unlimited" answer — that is the load-bearing rule of the
  * whole plan/quota feature, and it is what lets the ETP-5046 grandfathered plan
- * ({@code legacy-productive}, shipped as sourcedata with zero quota children) keep every existing
+ * ({@code legacy-productive}, seeded by a module script with zero quota children) keep every existing
  * productive tenant unrestricted. Therefore nothing may ever pre-fill a quantity into a quota row:
  * a row that exists is a real, deliberate cap.</p>
  *

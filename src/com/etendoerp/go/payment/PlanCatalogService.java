@@ -29,9 +29,10 @@ import com.etendoerp.go.schemaforge.data.Plan;
 public class PlanCatalogService {
 
   /**
-   * Search key of the grandfathered plan that ships as module sourcedata. It carries no provider
-   * price of its own; it is sold only through the legacy price fallback (see
-   * {@link #isLegacyFallbackActive()}).
+   * Search key of the grandfathered plan, created by the module script
+   * {@code EnsureLegacyPlanScript} (which carries a literal copy of this key — keep them equal).
+   * It carries no provider price of its own; it is sold only through the legacy price fallback
+   * (see {@link #isLegacyFallbackActive()}).
    */
   public static final String LEGACY_PLAN_KEY = "legacy-productive";
 

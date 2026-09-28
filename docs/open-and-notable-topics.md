@@ -175,6 +175,32 @@ ETP-5045 into ETP-5046 produced zero conflicts in the test file and then failed 
 ETP-5045's new tests call `recordRequested` with four arguments, ETP-5046 widened it to five, and
 the two edits sat in different regions so git saw no conflict. Always build after propagating.
 
+### 🟠 2.8 `ETGO_PLAN` must never be an AD dataset table — the legacy plan is seeded by a module script
+
+**Ticket:** owner ETP-5046. Related ETP-5053 (retiring the grandfathered plan, §3.2).
+
+`ETGO_PLAN` holds rows the module ships (`legacy-productive`) and rows operators create at runtime
+(the priced plans). DBSM treats a table in the module's `AD` dataset as module-owned **as a whole**,
+whatever the dataset's where clause says. With `ETGO_PLAN` in the dataset:
+
+- plain `update.database` refuses with *"Change detected in table: etgo_plan … Database has local
+  changes"* as soon as one runtime plan exists — and smartbuild then silently skips the DB update;
+- `update.database -Dforce=yes` **deletes every runtime plan**, then fails recreating the foreign
+  keys from `ETGO_SUBSCRIPTION`, `ETGO_CHECKOUT_REQUEST` and `ETGO_PLAN_QUOTA` that pointed at them.
+
+So there is no `AD_DATASET_TABLE` row and no `sourcedata/ETGO_PLAN.xml` for it. The legacy row is
+created by the module script `EnsureLegacyPlanScript` (`src-util/modulescript/`) with one idempotent
+`INSERT … SELECT … WHERE NOT EXISTS` guarded on both the key and the fixed id
+(`219D5C8E15C64E97B2F553B228D30DD0`). It runs on every `update.database`, after DBSM has applied
+the model, and on `install.source` through `import.sample.data`; an existing row — including one an
+operator deactivated or renamed — is never touched. Like `EnsureSystemRoleTemplatesScript`, its
+compiled class is **committed** (`build/classes/com/etendoerp/go/modulescript/`, force-added):
+`update.database` only runs module scripts that are already compiled and a deploy never runs
+`compile.modulescript`, so after any edit recompile and `git add -f` the class, or the old logic
+keeps running. `EnsureLegacyPlanScriptTest` fails the build if `ETGO_PLAN` reappears in
+`AD_DATASET_TABLE.xml` or as sourcedata, or if the compiled class is not committed. The same rule applies to any other
+table that mixes shipped and runtime rows: seed the shipped rows with a module script.
+
 ---
 
 ## 3. Legacy plans and the cutover
@@ -224,6 +250,12 @@ warnings, is out of proportion to that. Half of the class leaves with the fallba
 the single-environment overload of `EtendoGoJwtDalHelper.buildEnvironmentJson`, builds a one-entry
 cache only so it resolves the plan exactly as the list does. Once the fallback is gone it can read
 that one tenant's latest row directly.
+
+**Not Phase F, but the same kind of cleanup:** the `legacy-productive` plan is re-created on every
+`update.database` by `EnsureLegacyPlanScript` (§2.8). Whoever retires the grandfathered plan — once
+ETP-5053 has moved its buyers and no subscription references it — must remove or change that script
+in the same change; a row deleted without it is back after the next deploy. (Deactivating the row
+survives — the script only creates a missing row, it never updates one.)
 
 ---
 

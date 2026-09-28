@@ -122,7 +122,7 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
   /** Prefix on the {@code AD_CLIENT.VALUE} of every synthetic tenant this class creates. */
   private static final String TENANT_MARKER = "ETP5046WHK-";
-  /** The grandfathered plan, shipped as module sourcedata, so it exists in every environment. */
+  /** The grandfathered plan, seeded by EnsureLegacyPlanScript, so it exists in every environment. */
   private static final String LEGACY_PLAN_ID = "219D5C8E15C64E97B2F553B228D30DD0";
   private static final String PAYMENT_FAILED = "invoice.payment_failed";
 
