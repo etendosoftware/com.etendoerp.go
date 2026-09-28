@@ -28,6 +28,7 @@ import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFMyReportAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPortalAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFRefreshToken;
@@ -65,15 +66,24 @@ class NeoPseudoSpecDispatcher {
   private final NeoSimSearchEndpoint simSearchEndpoint;
   private final NeoVectorSearchEndpoint vectorSearchEndpoint;
   private final NeoGoWebhookBridge goWebhookBridge;
+  private final NeoUsageEventEndpoint usageEventEndpoint;
 
   NeoPseudoSpecDispatcher(NeoServlet servlet, BatchService batchService,
       NeoSimSearchEndpoint simSearchEndpoint, NeoVectorSearchEndpoint vectorSearchEndpoint,
       NeoGoWebhookBridge goWebhookBridge) {
+    this(servlet, batchService, simSearchEndpoint, vectorSearchEndpoint, goWebhookBridge,
+        new NeoUsageEventEndpoint());
+  }
+
+  NeoPseudoSpecDispatcher(NeoServlet servlet, BatchService batchService,
+      NeoSimSearchEndpoint simSearchEndpoint, NeoVectorSearchEndpoint vectorSearchEndpoint,
+      NeoGoWebhookBridge goWebhookBridge, NeoUsageEventEndpoint usageEventEndpoint) {
     this.servlet = servlet;
     this.batchService = batchService;
     this.simSearchEndpoint = simSearchEndpoint;
     this.vectorSearchEndpoint = vectorSearchEndpoint;
     this.goWebhookBridge = goWebhookBridge;
+    this.usageEventEndpoint = usageEventEndpoint;
   }
 
   /**
@@ -112,6 +122,13 @@ class NeoPseudoSpecDispatcher {
       case "vectorsearch":
         return dispatchVectorSearch(method, request, response);
 
+      // ETP-5462: usage events from the UI and the AI BFF: POST /sws/neo/usage
+      //   Validates a batch and hands it to UsageEventRecorder, answering 202 without waiting for
+      //   the INSERT. Client/org/user/role come from the token, never the body. See
+      //   NeoUsageEventEndpoint's class javadoc for the drop-don't-fail rules.
+      case "usage":
+        return dispatchUsage(method, request, response);
+
       // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
       // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
       // NeoGoWebhookBridge's class javadoc for the full rationale). A fixed, explicit allow-list,
@@ -121,6 +138,13 @@ class NeoPseudoSpecDispatcher {
         return dispatchGoWebhook("Listmenu", method, request, response, new SFListMenu());
       case "windowaccessmap":
         return dispatchGoWebhook("Windowaccessmap", method, request, response, new SFWindowAccessMap());
+
+      // ETP-5402 QA follow-up: the CURRENT caller's own Informes-subsection report access,
+      // mirroring windowaccessmap's shape but for ReportAccessCatalog's 9 report rows. See
+      // SFMyReportAccess's class javadoc for why it exists (ReportViewerPage.jsx's real gate
+      // never consulted per-report tiers before this).
+      case "myreportaccess":
+        return dispatchGoWebhook("Myreportaccess", method, request, response, new SFMyReportAccess());
       case "rolesoverview":
         return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
 
@@ -239,6 +263,17 @@ class NeoPseudoSpecDispatcher {
       return true;
     }
     servlet.writeResponse(response, vectorSearchEndpoint.handle(request));
+    return true;
+  }
+
+  private boolean dispatchUsage(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"POST".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Usage endpoint only supports POST");
+      return true;
+    }
+    servlet.writeResponse(response, usageEventEndpoint.handle(request));
     return true;
   }
 

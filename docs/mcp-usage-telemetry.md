@@ -115,6 +115,36 @@ It is a property and not an AD Preference on purpose: D28 asks for a *per-instan
 Preference is per client/org/user/role, and a property needs neither an `OBContext` nor a database
 read on the hot path.
 
+## Reading the table from a deployed instance
+
+`schema_forge/scripts/mcp-usage-dump.sh <ssh-alias>` exports the table as JSONL, one object per
+row, from any instance reachable over SSH. The alias is the only connection argument: the script
+reads that host's own `gradle.properties` and runs `psql` there, so no credential travels to the
+operator's machine.
+
+```bash
+scripts/mcp-usage-dump.sh etendo-go-experimental --count
+scripts/mcp-usage-dump.sh etendo-go-experimental --row-type feedback
+scripts/mcp-usage-dump.sh etendo-go-production --mark-reviewed
+make mcp-usage HOST=etendo-go-experimental MARK_REVIEWED=1     # same thing from the Makefile
+```
+
+Dumps land in `schema_forge/mcp-usage/<ssh-alias>-<timestamp>.jsonl`, a folder whose contents are
+gitignored — this is real telemetry and does not belong in a commit. Override with `--out`.
+
+**`isactive = 'N'` means reviewed.** The table has no review column, so `isactive` is repurposed as
+one. This is safe because the writer always inserts `'Y'` (see `INSERT_SQL` in `McpUsageLogger`) and
+nothing in the module ever reads the column back — flipping it is inert for the runtime. It is a
+convention, not a constraint: if the table is ever surfaced as an AD window, the standard grid hides
+`'N'` rows and any user can flip them back.
+
+Exports skip reviewed rows by default, so repeated runs return only what is new; `--include-reviewed`
+brings them all back. `--mark-reviewed` marks exactly the rows it exported, in the same statement
+that reads them (`UPDATE … RETURNING`), so no row can be marked without having been written out.
+
+The `payload` column stays a JSON **string** in the output — it is only populated on `feedback` rows.
+Read those with `jq -r 'select(.row_type=="feedback") | .payload | fromjson'`.
+
 ## Code map
 
 | File | Role |

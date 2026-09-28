@@ -238,6 +238,48 @@ class McpToolRouterRouteTest {
     return result.getJSONArray("content").getJSONObject(0).getString("text");
   }
 
+  /**
+   * Assert the IMP-5 envelope {@link McpRoutingException#entityHasNoTab} builds for an entity that
+   * has neither an AD tab nor a {@code NeoHandler} (ETP-5405, no-handler branch).
+   *
+   * <p>Shared by every call site that exits at {@code McpWriteRequestSupport.getAdTabOrThrow}.
+   * Structured on purpose: the assertions these replaced matched the substring
+   * {@code "No AD_Tab"} of a prose message, which is exactly what let a deliberate reword — and a
+   * status change from 500 to 422 — pass unnoticed until the message disappeared. {@code status}
+   * and {@code error} are the machine-readable contract an agent branches on, so they are asserted
+   * exactly; the {@code detail} check is kept to the one clause that carries the meaning (there is
+   * nothing behind the entity) rather than the whole sentence.</p>
+   *
+   * @param envelope the parsed error content of the tool result
+   */
+  private static void assertNoTabEnvelope(JSONObject envelope) throws Exception {
+    assertEquals(422, envelope.getInt("status"));
+    assertEquals("validation_error", envelope.getString("error"));
+    assertTrue(envelope.getString("detail").contains("no window and no handler"),
+        envelope.toString());
+    assertTrue(envelope.getString("hint").contains("neo_discover"), envelope.toString());
+  }
+
+  /**
+   * Assert the envelope {@link McpRoutingException#entityHasNoTab} builds for a tab-less entity
+   * that IS backed by a {@code NeoHandler} (ETP-5405, handler branch).
+   *
+   * <p>405 rather than 422 is the whole point of the branch: the entity is perfectly readable
+   * through {@code neo_list}/{@code neo_get}, only this tool cannot serve it, so the agent must
+   * not be told the configuration is broken and must not retry with corrected values —
+   * {@code method_not_allowed} is the code that says "the request is fine, this surface is
+   * wrong" (see {@code McpConstants#ERROR_METHOD_NOT_ALLOWED}).</p>
+   *
+   * @param envelope the parsed error content of the tool result
+   */
+  private static void assertHandlerServedEnvelope(JSONObject envelope) throws Exception {
+    assertEquals(405, envelope.getInt("status"));
+    assertEquals("method_not_allowed", envelope.getString("error"));
+    assertTrue(envelope.getString("detail").contains("served by a dedicated handler"),
+        envelope.toString());
+    assertTrue(envelope.getString("hint").contains("neo_list"), envelope.toString());
+  }
+
   private JSONObject buildCrudArgs() throws Exception {
     JSONObject args = new JSONObject();
     args.put("spec", SPEC_NAME);
@@ -811,8 +853,13 @@ class McpToolRouterRouteTest {
      * given a null AD_Tab on purpose so the call then fails in {@code getAdTabOrThrow} — the
      * next step after the gate — instead of reaching {@code DefaultJsonDataService}, whose
      * static initialiser needs a servlet container (see this class's javadoc). What matters is
-     * that the failure is the AD_Tab error and never the method-flag refusal, mirroring
+     * that the failure is the tab-less one and never the method-flag refusal, mirroring
      * {@code WriteTierAuthorizationTests#listAllowedForReadOnlyRole}.
+     *
+     * <p>ETP-5405: that failure used to be a bare {@code IllegalArgumentException} rendered by the
+     * catch-all as {@code 500 server_error "No AD_Tab linked to entity: header"}. It is now
+     * {@link McpRoutingException#entityHasNoTab}'s no-handler branch, so the assertion reads the
+     * envelope rather than matching a prose substring that the reword silently invalidated.</p>
      */
     @Test
     @DisplayName("a writable entity passes the gate")
@@ -824,7 +871,7 @@ class McpToolRouterRouteTest {
       String text = routeAndGetText("neo_create", createArgs());
 
       assertFalse(text.contains("does not enable"), text);
-      assertTrue(text.contains("No AD_Tab linked to entity"), text);
+      assertNoTabEnvelope(new JSONObject(text));
     }
   }
 
@@ -1295,15 +1342,27 @@ class McpToolRouterRouteTest {
       assertEquals("orderHeader", available.getString(0));
     }
 
+    /**
+     * An entity with neither a tab nor a handler is unserviceable, and ETP-5405 made the router
+     * say so as a routing failure instead of a server fault.
+     *
+     * <p>{@code McpWriteRequestSupport.getAdTabOrThrow} used to throw a bare
+     * {@code IllegalArgumentException}, which the catch-all rendered as
+     * {@code 500 server_error "No AD_Tab linked to entity: header"}. The blind-agent run on
+     * ETP-5405 showed the cost: the agent read the 500 and its "re-sending will not help" hint as
+     * proof the capability was broken and abandoned the spec. It is now a 422
+     * {@code validation_error} naming the configuration as the fault, which is the branch this
+     * mock produces — the entity declares no {@code Java_Qualifier}, so
+     * {@code McpHookExecutor.resolveEntityHandler} finds nothing and {@code hasHandler} is
+     * false.</p>
+     */
     @Test
-    @DisplayName("entity without AD_Tab returns error")
+    @DisplayName("entity with neither AD_Tab nor handler returns a 422 routing envelope")
     void entityWithoutTabReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
 
-      // Entity resolves (via the shared guard) but has no linked AD_Tab. The router's own
-      // getAdTabOrThrow (still private in McpToolRouter) raises "No AD_Tab linked to entity".
       supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
           any(SFSpec.class), anyString())).thenReturn(entity);
       when(entity.getADTab()).thenReturn(null);
@@ -1312,8 +1371,9 @@ class McpToolRouterRouteTest {
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = contentText(result);
-      assertTrue(text.contains("No AD_Tab"));
+      JSONObject envelope = new JSONObject(contentText(result));
+      assertNoTabEnvelope(envelope);
+      assertEquals("neo_list", envelope.getString("tool"));
     }
   }
 
@@ -2096,6 +2156,11 @@ class McpToolRouterRouteTest {
    * AD_Tab, so the changed line executes and control exits at {@code getAdTabOrThrow} — before
    * any DefaultJsonDataService/ModelProvider static-init dependency is touched. neo_list and
    * neo_defaults call-sites are already covered by their own tests above.
+   *
+   * <p>ETP-5405: the entity here declares no {@code Java_Qualifier}, so the exit is the
+   * no-handler branch of {@link McpRoutingException#entityHasNoTab} — a 422 routing envelope,
+   * not the {@code 500 server_error "No AD_Tab linked to entity"} this used to match on. The
+   * handler branch and the tab-less read path are covered by {@code TablessEntityTests}.</p>
    */
   @Nested
   @DisplayName("route — entity-CRUD tools resolve via shared guard (ETP-4257)")
@@ -2113,7 +2178,7 @@ class McpToolRouterRouteTest {
 
     private void assertNoTabError(JSONObject result) throws Exception {
       assertTrue(result.getBoolean("isError"));
-      assertTrue(contentText(result).contains("No AD_Tab"));
+      assertNoTabEnvelope(new JSONObject(contentText(result)));
     }
 
     @Test
@@ -2164,6 +2229,222 @@ class McpToolRouterRouteTest {
     @DisplayName("neo_schema resolves entity via the shared guard")
     void schemaResolvesViaGuard() throws Exception {
       assertNoTabError(routeWithNoTabEntity("neo_schema", buildCrudArgs(), READ_SCOPES));
+    }
+  }
+
+  // ── ETP-5405: tab-less entities ──────────────────────────────────────────
+
+  /**
+   * The two halves of ETP-5405, neither of which existed before it.
+   *
+   * <p>Sixteen active, included entities carry {@code ETGO_SF_ENTITY.ad_tab_id IS NULL} because a
+   * handler serves them instead of a window — the dashboard widgets, {@code contacts/bp-stats},
+   * {@code not-posted-documents/header}, the report specs, {@code warehouse/location}. Over REST
+   * they answer fine: {@code NeoCrudHandler} consults the entity's {@code Java_Qualifier} first and
+   * only falls through to the tab-based path when there is none. The MCP router did the opposite —
+   * it demanded the tab up front — so every tool answered {@code 500 server_error} on an entity the
+   * SPA renders. ETP-5405 split that into two answers:</p>
+   *
+   * <ol>
+   *   <li>{@code neo_list} and {@code neo_get} now run the handler's pre-hook before the tab is
+   *       demanded, so those reads simply work ({@code runTablessReadHook});</li>
+   *   <li>every tool that genuinely needs a tab to answer — {@code neo_schema} describes one's
+   *       fields, the write paths fill them — answers 405 naming the tools that do work, instead
+   *       of a 500 that reads as a broken instance.</li>
+   * </ol>
+   *
+   * <p>The third test is the guard on the narrowness of (1): the 171 tab-backed entities must keep
+   * the exact path they had, so the read hook must not fire for them.</p>
+   */
+  @Nested
+  @DisplayName("route — tab-less entities served by a handler (ETP-5405)")
+  class TablessEntityTests {
+
+    /** A tab-less entity resolved by the shared guard, as every tool sees one. */
+    private SFEntity setupTablessEntity() {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenReturn(entity);
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenReturn(entity);
+      when(entity.getADTab()).thenReturn(null);
+      return entity;
+    }
+
+    /**
+     * What a handler's pre-hook hands back once {@code McpHookExecutor} has converted it: the MCP
+     * content wrapper, not a {@code NeoResponse}. Carries a marker the assertions can recognise,
+     * so "the handler answered" is proved by the payload rather than by the absence of an error.
+     */
+    private JSONObject handlerResult() throws Exception {
+      JSONObject payload = new JSONObject();
+      payload.put("servedBy", "handler");
+      JSONObject text = new JSONObject();
+      text.put("type", "text");
+      text.put("text", payload.toString());
+      JSONArray content = new JSONArray();
+      content.put(text);
+      JSONObject result = new JSONObject();
+      result.put("content", content);
+      return result;
+    }
+
+    /**
+     * {@code neo_schema} describes a tab's fields, so a tab-less entity leaves it nothing to
+     * describe. With a handler behind the entity that is not a fault — the record is readable, the
+     * tool is the wrong one — and the 405 says so while pointing at {@code neo_list}/{@code
+     * neo_get}. This is the branch that never had a test: the pre-ETP-5405 code could not
+     * distinguish the two cases at all.
+     */
+    @Test
+    @DisplayName("neo_schema on a tab-less entity WITH a handler answers 405, not 422")
+    void schemaOnTablessHandledEntityIsMethodNotAllowed() throws Exception {
+      SFEntity entity = setupTablessEntity();
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(mock(NeoHandler.class));
+
+        JSONObject result = router.route("neo_schema", buildCrudArgs(), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject envelope = new JSONObject(contentText(result));
+        assertHandlerServedEnvelope(envelope);
+        assertEquals("neo_schema", envelope.getString("tool"));
+      }
+    }
+
+    /**
+     * The same refusal on a write tool. Kept separate from the {@code neo_schema} case because the
+     * two reach {@code getAdTabOrThrow} from different call sites and only a per-site test proves
+     * both were converted; the write path additionally passes the method-flag gate first, so this
+     * also pins the order — the tab-less answer must come from the routing exception, never from a
+     * gate refusal.
+     */
+    @Test
+    @DisplayName("neo_create on a tab-less entity WITH a handler answers 405")
+    void createOnTablessHandledEntityIsMethodNotAllowed() throws Exception {
+      SFEntity entity = setupTablessEntity();
+      JSONObject args = buildCrudArgs();
+      args.put("fields", new JSONObject());
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(mock(NeoHandler.class));
+
+        JSONObject result = router.route("neo_create", args, WRITE_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        assertHandlerServedEnvelope(new JSONObject(contentText(result)));
+      }
+    }
+
+    /**
+     * {@code neo_list} on a tab-less, handled entity must be answered BY the handler — no tab
+     * demanded, no error. Before ETP-5405 this call could only 500.
+     */
+    @Test
+    @DisplayName("neo_list on a tab-less entity is served by the handler pre-hook")
+    void listOnTablessHandledEntityIsServedByHandler() throws Exception {
+      SFEntity entity = setupTablessEntity();
+      NeoHandler handler = mock(NeoHandler.class);
+      JSONObject handled = handlerResult();
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity)).thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
+
+        JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError"), result.toString());
+        assertTrue(contentText(result).contains("\"servedBy\":\"handler\""), contentText(result));
+      }
+    }
+
+    /**
+     * The same for {@code neo_get}, which reaches the hook from its own call site. The record id
+     * is what distinguishes a get from a list for the handler, so it must travel into the hook
+     * context — asserted here rather than left to the list case, which passes {@code null}.
+     */
+    @Test
+    @DisplayName("neo_get on a tab-less entity is served by the handler pre-hook")
+    void getOnTablessHandledEntityIsServedByHandler() throws Exception {
+      SFEntity entity = setupTablessEntity();
+      NeoHandler handler = mock(NeoHandler.class);
+      JSONObject handled = handlerResult();
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity)).thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
+
+        JSONObject result = router.route("neo_get", args, READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError"), result.toString());
+        assertTrue(contentText(result).contains("\"servedBy\":\"handler\""), contentText(result));
+        hookMock.verify(() -> McpHookExecutor.buildReadHookContext(anyString(), anyString(),
+            eq("rec-1"), isNull(), eq(entity), any()));
+      }
+    }
+
+    /**
+     * A tab-less entity with NO handler falls through the read hook and reaches the tab demand, so
+     * {@code neo_list} still refuses — with the 422 that says the entity itself is misconfigured.
+     * This pins the {@code return null} in {@code runTablessReadHook}: were it to swallow the call,
+     * an unserviceable entity would answer an empty success.
+     */
+    @Test
+    @DisplayName("neo_list on a tab-less entity WITHOUT a handler still refuses with 422")
+    void listOnTablessUnhandledEntityStillRefuses() throws Exception {
+      SFEntity entity = setupTablessEntity();
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity)).thenReturn(null);
+
+        JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        assertNoTabEnvelope(new JSONObject(contentText(result)));
+        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()), never());
+      }
+    }
+
+    /**
+     * The narrowness guard. {@code runTablessReadHook} returns immediately when the entity has a
+     * tab, which is what keeps ETP-5405 incapable of changing the shape of any read that already
+     * worked — 171 entities, 80 of them with a handler whose {@code afterHandle} would otherwise
+     * start running on MCP reads for the first time.
+     *
+     * <p>The call is allowed to fail afterwards and its outcome is deliberately not asserted: a
+     * tab-backed {@code neo_list} continues into {@code DefaultJsonDataService}, whose static
+     * initialiser needs a servlet container (see this class's javadoc), and it may surface as an
+     * error result or as an {@code Error} escaping {@code route}'s {@code catch (Exception)}.
+     * What this test pins is only that no hook ran before that point.</p>
+     */
+    @Test
+    @DisplayName("an entity WITH a tab never reaches the read hook")
+    void tabBackedEntityNeverRunsTheReadHook() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, mockTab());
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(mock(NeoHandler.class));
+
+        try {
+          router.route("neo_list", buildCrudArgs(), READ_SCOPES);
+        } catch (Throwable ignored) {
+          // See the javadoc: the generic path's dependencies are out of scope for this class.
+        }
+
+        hookMock.verify(() -> McpHookExecutor.resolveEntityHandler(entity), never());
+        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()), never());
+      }
     }
   }
 }

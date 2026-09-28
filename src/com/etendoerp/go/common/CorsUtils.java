@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
@@ -37,13 +38,24 @@ public final class CorsUtils {
 
   private static final String ALLOWED_ORIGINS_PROPERTY = "etgo.allowed.origins";
   private static final String ALLOWED_ORIGINS_ENV = "ETGO_ALLOWED_ORIGINS";
+  // ETP-4575 — these are the local development origins the session's CSRF/origin
+  // check trusts out of the box. 3000 (CRA) and 5173 (vite's own default) came
+  // from the generic list and never matched this project: the app's dev and
+  // preview servers run on 3100, and the E2E harness starts its preview on 4173.
+  // With those missing, every unsafe request from a local UI failed the origin
+  // check and surfaced as "CSRF validation failed" even though the token was
+  // correct — the integration E2E suite could not pass on a fresh checkout.
+  // Localhost only; any other origin still has to be declared through
+  // etgo.allowed.origins / ETGO_ALLOWED_ORIGINS.
   private static final Set<String> DEFAULT_ALLOWED_ORIGINS = Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(
           "http://localhost:3000",
           "http://localhost:3100",
+          "http://localhost:4173",
           "http://localhost:5173",
           "http://127.0.0.1:3000",
           "http://127.0.0.1:3100",
+          "http://127.0.0.1:4173",
           "http://127.0.0.1:5173")));
 
   private CorsUtils() {
@@ -79,12 +91,20 @@ public final class CorsUtils {
     }
   }
 
-  private static boolean isAllowedOrigin(HttpServletRequest request, String origin) {
+  /**
+   * Whether the given origin is allowlisted for the current request (same-origin, default
+   * allowlist, or configured origins). Exposed for reuse by the session CSRF/origin check.
+   *
+   * @param request current HTTP request
+   * @param origin  the origin to validate (e.g. from the {@code Origin} or {@code Referer} header)
+   * @return {@code true} if the origin is allowed
+   */
+  public static boolean isAllowedOrigin(HttpServletRequest request, String origin) {
     String requestOrigin = buildRequestOrigin(request);
     if (origin.equals(requestOrigin) || DEFAULT_ALLOWED_ORIGINS.contains(origin)) {
       return true;
     }
-    return resolveConfiguredOrigins().contains(origin);
+    return resolveConfiguredOrigins().stream().anyMatch(pattern -> matchesOrigin(pattern, origin));
   }
 
   private static Set<String> resolveConfiguredOrigins() {
@@ -99,6 +119,32 @@ public final class CorsUtils {
         .map(StringUtils::trimToNull)
         .filter(StringUtils::isNotBlank)
         .collect(Collectors.toSet());
+  }
+
+  /**
+   * Matches a configured origin entry against an actual request origin. A configured entry
+   * with no {@code *} must match exactly (pre-existing behavior). A {@code *} stands for
+   * exactly one hostname label (no {@code .} or {@code /}) — e.g. {@code http://*.localhost:3100}
+   * matches {@code http://goclean.localhost:3100} and {@code http://etendo.localhost:3100}, so a
+   * single entry covers every local subdomain instead of listing each one out.
+   *
+   * @param pattern a raw entry from {@code etgo.allowed.origins} / {@code ETGO_ALLOWED_ORIGINS}
+   * @param origin  the actual request origin to test
+   * @return {@code true} if {@code origin} matches {@code pattern}
+   */
+  private static boolean matchesOrigin(String pattern, String origin) {
+    if (!pattern.contains("*")) {
+      return pattern.equals(origin);
+    }
+    String[] parts = pattern.split(Pattern.quote("*"), -1);
+    StringBuilder regex = new StringBuilder();
+    for (int i = 0; i < parts.length; i++) {
+      if (i > 0) {
+        regex.append("[^./]+");
+      }
+      regex.append(Pattern.quote(parts[i]));
+    }
+    return origin.matches(regex.toString());
   }
 
   private static String buildRequestOrigin(HttpServletRequest request) {

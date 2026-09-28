@@ -995,4 +995,39 @@ public class GoodsShipmentHeaderHandlerTest {
       assertEquals("BP Fallback Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
     }
   }
+
+  /**
+   * Case 5 (ETP-5410 follow-up) — no linked order and the Business Partner itself has no
+   * price list ({@code getPriceList()} returns null, tier 2 also misses): falls through to
+   * the tier-3 client-default lookup. {@link MultiDocumentInvoiceSupport#findDefaultPriceList}
+   * is mocked at the class boundary rather than its own Hibernate Criteria chain — that
+   * chain's correctness is {@code MultiDocumentInvoiceSupportTest}'s concern, this test only
+   * verifies the handler wires the tier-3 fallback in.
+   */
+  @Test
+  public void enrichResolvedPriceListFallsBackToClientDefaultWhenBusinessPartnerHasNone()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<MultiDocumentInvoiceSupport> supportMock =
+             Mockito.mockStatic(MultiDocumentInvoiceSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubShipmentWithBusinessPartnerPriceList(dal, "sh-5", null);
+
+      PriceList clientDefault = mock(PriceList.class);
+      when(clientDefault.getId()).thenReturn("PL-CLIENT-DEFAULT");
+      when(clientDefault.getName()).thenReturn("Client Default Price List");
+      supportMock.when(() -> MultiDocumentInvoiceSupport.findDefaultPriceList(true))
+          .thenReturn(clientDefault);
+
+      JSONObject shipmentRec = new JSONObject().put("id", "sh-5")
+          .put("linkedOrders", new JSONArray());
+
+      invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), shipmentRec, "sh-5");
+
+      assertEquals("PL-CLIENT-DEFAULT", shipmentRec.getString("resolvedPriceListId"));
+      assertEquals("Client Default Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
+    }
+  }
 }

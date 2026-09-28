@@ -166,8 +166,11 @@ public final class PriceListVersionResolver {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.warn("Could not resolve the default {} price list version: {}",
-          salesPriceList ? "sales" : "purchase", e.getMessage());
+      // Keep the underlying DAL/criteria failure in the server log. Returning null is part of
+      // this resolver's contract, but callers otherwise cannot distinguish "no configured list"
+      // from a query failure and report a misleading missing-version error.
+      log.warn("Could not resolve the default {} price list version for client {} and org {}",
+          salesPriceList ? "sales" : "purchase", clientId, orgId, e);
     }
     return null;
   }

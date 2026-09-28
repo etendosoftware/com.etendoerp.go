@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
@@ -37,7 +38,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * {@code NeoHandler} for the {@code inventory} entity (Physical Inventory header). Exposes the
  * {@code generateLines} action, which triggers the core Etendo stock process
  * {@code M_Inventory_ListCreate} ("Generar líneas automáticamente", AD_Process 105) to
- * auto-generate {@code M_InventoryLine} rows for the current warehouse.
+ * auto-generate {@code M_InventoryLine} rows for the current warehouse. Also delegates
+ * {@code post}/{@code unpost} actions to {@link DocumentPostingService} (ETP-5360) — without
+ * this, those actions fell through to NEO's generic AD-button-column lookup, which finds no
+ * such button on {@code M_Inventory} and answers "Action not found: post".
  *
  * <p>The classic process relies on the {@code @M_Warehouse_ID@} window token to scope the scan,
  * which NEO does not resolve. This handler reads the inventory header's warehouse explicitly and
@@ -70,8 +74,20 @@ public class InventoryHandler implements NeoHandler {
   private static final String YES = "Y";
   private static final String NO = "N";
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }

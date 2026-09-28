@@ -30,6 +30,7 @@ import javax.servlet.ServletException;
 import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.annotation.WebFilter;
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -38,6 +39,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.session.GoSessionSecurity;
 
 /**
  * Servlet filter that validates OAuth2 Bearer tokens on requests to the MCP endpoints.
@@ -93,6 +95,19 @@ public class OAuth2Filter implements Filter {
     String authHeader = httpReq.getHeader(AUTH_HEADER);
 
     if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
+      if (hasGoSessionCookie(httpReq)) {
+        // Since ETP-4576 the browser SPA authenticates with the `__Host-` cookie session and
+        // sends no Authorization header at all, so rejecting here cut off every in-app
+        // conversation before the servlet could resolve the cookie. This filter validates
+        // OAuth2 tokens and has none to validate, so it defers: the servlet resolves the
+        // session and answers 401/403 itself.
+        //
+        // Gated on the cookie deliberately. A request carrying neither credential still gets
+        // this filter's own 401, byte for byte — including the `error="invalid_request"` field
+        // of `WWW-Authenticate`, which is what an MCP client's OAuth discovery reads.
+        chain.doFilter(request, response);
+        return;
+      }
       sendError(httpReq, httpResp, HttpServletResponse.SC_UNAUTHORIZED,
           "invalid_request", "Missing or malformed Authorization header. Expected: Bearer <token>");
       return;
@@ -139,6 +154,23 @@ public class OAuth2Filter implements Filter {
       sendError(httpReq, httpResp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "server_error", "Internal server error during token validation");
     }
+  }
+
+  /**
+   * Whether the request carries an Etendo Go session cookie, i.e. whether deferring to the
+   * servlet can plausibly resolve a credential this filter cannot see.
+   */
+  private static boolean hasGoSessionCookie(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) {
+      return false;
+    }
+    for (Cookie cookie : cookies) {
+      if (GoSessionSecurity.COOKIE_NAME.equals(cookie.getName())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override

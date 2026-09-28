@@ -49,9 +49,12 @@ import javax.servlet.http.HttpServletResponse;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -1784,6 +1787,311 @@ public class Fiscal303BoxesHandlerTest {
         assertTrue("Message must contain searchKey", e.getMessage().contains("AEAT303_Q_2024"));
       }
     }
+  }
+
+  // ── guardNotAlreadySubmitted (generate only, ETP-5438) ────────────────
+  //
+  // Full-parity follow-up: "en todos los modelos tiene que funcionar de la misma manera" — every
+  // model's generate entity must reject once the latest declaration is already submitted,
+  // exactly like Fiscal349BoxesHandler's own guard (moved to AbstractFiscalHandler and shared,
+  // see its javadoc). The boxes read is intentionally NOT gated (frontend freeze needs it). `submit` (real AEAT telematic filing) is deliberately NOT covered here — it
+  // already has its own narrower `submitted_ack`-only guard in Fiscal303SubmissionSupport.
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedNoDeclarationYetDoesNotThrow() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedReadyDoesNotThrow() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "ready");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
+  public void testGuardNotAlreadySubmittedSubmittedThrows() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
+  public void testGuardNotAlreadySubmittedSubmittedExtThrows() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ext");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
+  public void testGuardNotAlreadySubmittedSubmittedAckThrows() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1");
+    }
+  }
+
+  /**
+   * Same "latest DECL_SEQ wins" rectificativa-safety guarantee as Fiscal349BoxesHandlerTest's
+   * mirror test — a fresh draft for the same period must never be blocked by an older,
+   * already-submitted declaration for that period.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedGatesOnLatestDeclSeqNotFirstInList() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject newerDraft = declWithSeqAndStatus303(1L, "draft");
+      BaseOBObject olderSubmitted = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Arrays.asList(newerDraft, olderSubmitted));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw — latest (seq 1) is draft
+    }
+  }
+
+  // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
+
+  /**
+   * ETP-5438 — {@code boxes} is a pure read and stays available for a submitted declaration. A
+   * legacy submitted declaration (presented before snapshots existed, so no snapshot) keeps the
+   * live compute — no data-fix for those, product decision. Only {@code generate} is blocked.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesComputesLiveWhenSubmittedWithoutSnapshot() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    Map<Integer, BigDecimal> boxes = new HashMap<>();
+    boxes.put(46, new BigDecimal("123.45"));
+    org.mockito.Mockito.doReturn(new ComputeResult(boxes, Collections.emptyList()))
+        .when(h).computeBoxes("org1", 2026, "T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(servlet, never()).sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    verify(h).computeBoxes("org1", 2026, "T1");
+    org.junit.Assert.assertTrue(body.toString().contains("\"result\":\"123.45\""));
+  }
+
+  /**
+   * ETP-5438 — a submitted declaration WITH a snapshot is served from it, byte for byte, and the
+   * live compute is never reached: an invoice added/removed after submission cannot change it.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesServesSnapshotWithoutComputingWhenSubmitted() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    String snapshot = "{\"boxes\":{\"46\":\"99.00\"},\"summary\":{\"result\":\"99.00\"},\"sources\":[]}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h, never()).computeBoxes(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
+  /**
+   * ETP-5438 — a stale snapshot on a declaration that is no longer submitted (latest DECL_SEQ is
+   * a draft) is ignored: drafts always compute live.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesComputesLiveWhenLatestIsDraft() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(new java.io.StringWriter()));
+    org.mockito.Mockito.doReturn(new ComputeResult(new HashMap<>(), Collections.emptyList()))
+        .when(h).computeBoxes("org1", 2026, "T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject newerDraft = declWithSeqAndStatus303(1L, "draft");
+      BaseOBObject olderSubmitted = declWithSeqAndStatus303(0L, "submitted");
+      when(olderSubmitted.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
+          .thenReturn("{\"boxes\":{}}");
+      when(query.list()).thenReturn(Arrays.asList(newerDraft, olderSubmitted));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h).computeBoxes("org1", 2026, "T1");
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateReturns409WhenAlreadySubmitted() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    // The real generator never ran — no file/response body was ever attempted for it.
+    verify(resp, never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * ETP-5438 review W1 — a {@code *} session (org {@code "0"}): {@code dispatch} receives the
+   * EFFECTIVE leaf org for the computation, but the declaration was stored under {@code "0"}.
+   * The snapshot lookup must query the stored org, or the snapshot is never found and the boxes
+   * are recomputed live.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesLooksSnapshotUpWithSessionOrgNotEffectiveOrg() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    String snapshot = "{\"boxes\":{\"46\":\"12.00\"},\"summary\":{},\"sources\":[]}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1", "0");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "leaf-org", 2026, "T1", mock(HttpServletRequest.class), resp);
+
+      verify(query).setNamedParameter("orgId", "0");
+      verify(query, never()).setNamedParameter("orgId", "leaf-org");
+    }
+    verify(h, never()).computeBoxes(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
+  /** ETP-5438 review W1 — same for the generate guard: a {@code *} session is still blocked. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedUsesSessionOrgNotEffectiveOrg() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1", "0");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      try {
+        handler.guardNotAlreadySubmitted("leaf-org", 2026, "T1");
+        org.junit.Assert.fail("expected AlreadySubmittedException");
+      } catch (AbstractFiscalHandler.AlreadySubmittedException expected) {
+        // blocked, as it must be
+      }
+      verify(query).setNamedParameter("orgId", "0");
+    }
+  }
+
+  // ── test helpers (ETP-5438) ───────────────────────────────────────────
+
+  private static void mockClient303(MockedStatic<OBContext> ctxMock, String clientId) {
+    mockClient303(ctxMock, clientId, "org1");
+  }
+
+  /** Same, with an explicit SESSION org (the org declarations are stored under). */
+  private static void mockClient303(MockedStatic<OBContext> ctxMock, String clientId,
+      String sessionOrgId) {
+    OBContext ctx = mock(OBContext.class);
+    ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(ctx.getCurrentClient()).thenReturn(client);
+    org.openbravo.model.common.enterprise.Organization org =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(org.getId()).thenReturn(sessionOrgId);
+    when(ctx.getCurrentOrganization()).thenReturn(org);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static OBQuery<BaseOBObject> mockDeclQuery303(MockedStatic<OBDal> dalMock) {
+    OBDal obDal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(obDal);
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+        .thenReturn(query);
+    return query;
+  }
+
+  private static BaseOBObject declWithSeqAndStatus303(long declSeq, String status) {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(declSeq);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(status);
+    return decl;
   }
 
   private static void assertBd(String expected, BigDecimal actual) {

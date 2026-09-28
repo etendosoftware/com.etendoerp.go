@@ -26,6 +26,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.service.json.JsonConstants;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -100,30 +101,34 @@ final class McpHookExecutor {
    * takes the tab straight off the entity and tolerates {@code null}.</p>
    *
    * <p><b>Query params.</b> A provider reads its inputs from {@code getQueryParams()} — the REST
-   * read fills that from the query string ({@code NeoServlet.extractQueryParams}, which always
-   * returns a map, never {@code null}). MCP has no query string, so the map is built from the
-   * tool's own arguments: {@code parentId}, plus every scalar entry of {@code filters}. Both
-   * halves matter and for different reasons. The map is never {@code null}, because the REST one
-   * never is and a provider written against REST dereferences it without a guard
-   * ({@code ContactsBpStatsHandler:71-72} is exactly that shape) — a null there is an
-   * {@code NPE} presented to the agent as a 500. And the {@code filters} pass-through is what
-   * gives the agent a way to supply a named input at all: {@code bp-stats} needs a
-   * {@code bpartnerId} that no MCP argument otherwise carries, so
-   * {@code neo_list(contacts, bp-stats, filters:{bpartnerId:"…"})} is its call shape.</p>
+   * read fills that from the query string ({@code NeoServlet.extractQueryParams}). MCP has no
+   * query string, so {@link #buildReadProviderParams} builds the map from the tool's own
+   * arguments. The {@code filters} pass-through is what gives the agent a way to supply a named
+   * input at all: {@code bp-stats} needs a {@code businessPartnerId} that no MCP argument
+   * otherwise carries, so
+   * {@code neo_list(contacts, bp-stats, filters:{businessPartnerId:"…"})} is its call shape.</p>
+   *
+   * <p><b>Relation to ETP-5405.</b> That ticket fixed the same 500 with
+   * {@code McpTablessReadDispatcher}, which ran this phase only when {@code getADTab() == null}.
+   * This one runs it always, which is what closes D13: over REST the pre-hook runs on every read,
+   * so restricting it to tab-less entities would have left a customization that serves a read of
+   * a tabbed entity working in the app and silently inert for an agent. ETP-5405's call position
+   * and its parameter builder are kept verbatim; only the gate and the resolver changed — the
+   * latter so an {@code @NeoExtension} class is seen and the dispatch is traced.</p>
    *
    * @param specName   the spec being read
    * @param entityName the entity being read
    * @param recordId   the record for {@code neo_get}, {@code null} for {@code neo_list} — the
    *                   value customizations branch on to tell a single-record read from a list
    * @param sfEntity   the entity configuration, whose {@code Java_Qualifier} is resolved
-   * @param args       the tool arguments, read for {@code parentId} and {@code filters}; may be
+   * @param queryParams the provider's inputs, built by {@link #buildReadProviderParams}; never
    *                   {@code null}
    * @return the MCP result when the customization served the read, or {@code null} to carry on
    *         with the generic path
    * @throws JSONException when the customization's response cannot be converted
    */
   static JSONObject runReadProvider(String specName, String entityName, String recordId,
-      SFEntity sfEntity, JSONObject args) throws JSONException {
+      SFEntity sfEntity, Map<String, String> queryParams) throws JSONException {
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
@@ -133,7 +138,7 @@ final class McpHookExecutor {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
-        .queryParams(buildReadProviderParams(args))
+        .queryParams(queryParams)
         .build();
     NeoExtensionResult result = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
@@ -148,19 +153,35 @@ final class McpHookExecutor {
   }
 
   /**
-   * Build the provider's query-param map from the tool arguments. Never returns {@code null} —
-   * see {@link #runReadProvider}.
+   * Build the provider's query-param map. Never returns {@code null}: the REST read always passes
+   * a map ({@code NeoServlet.extractQueryParams}), so a provider written against REST
+   * dereferences one without a guard — {@code ContactsBpStatsHandler:71-72} is exactly that
+   * shape, and a {@code null} there reaches the agent as a 500.
+   *
+   * <p>Carried over from {@code McpTablessReadDispatcher.buildParams} (ETP-5405) when that class
+   * was folded into this one. Paging and ordering are part of it on purpose: a provider serves the
+   * whole read, so nothing downstream is left to apply {@code startRow}/{@code endRow} for it.</p>
+   *
+   * @param filters  the tool's {@code filters} object, or {@code null}
+   * @param parentId the parent scope, or {@code null}
+   * @param offset   first row, paired with {@code limit}; both {@code null} to omit paging
+   * @param limit    page size, paired with {@code offset}
+   * @param orderBy  sort expression, or {@code null}
+   * @return a mutable map, never {@code null}
    */
-  private static Map<String, String> buildReadProviderParams(JSONObject args) {
+  static Map<String, String> buildReadProviderParams(JSONObject filters, String parentId,
+      Integer offset, Integer limit, String orderBy) {
     Map<String, String> params = new HashMap<>();
-    if (args == null) {
-      return params;
+    if (offset != null && limit != null) {
+      params.put(JsonConstants.STARTROW_PARAMETER, String.valueOf(offset));
+      params.put(JsonConstants.ENDROW_PARAMETER, String.valueOf(offset + limit - 1));
     }
-    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
+    if (StringUtils.isNotBlank(orderBy)) {
+      params.put(JsonConstants.SORTBY_PARAMETER, orderBy);
+    }
     if (StringUtils.isNotBlank(parentId)) {
       params.put(McpConstants.PARAM_PARENT_ID, parentId);
     }
-    JSONObject filters = args.optJSONObject("filters");
     if (filters == null) {
       return params;
     }
@@ -177,6 +198,7 @@ final class McpHookExecutor {
     }
     return params;
   }
+
   /**
    * Run the entity customization's READ post-phase over an MCP read result (ETP-5415, T3).
    *
@@ -272,7 +294,37 @@ final class McpHookExecutor {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
         .endpointType(NeoEndpointType.CRUD)
+        .build();
+  }
+
+  /**
+   * Build the {@link NeoContext} an MCP read passes to its entity hook.
+   *
+   * <p>ETP-5405 — mirrors what the REST dispatcher hands a handler on
+   * {@code GET /sws/neo/{spec}/{entity}}: {@code endpointType=CRUD}, {@code httpMethod=GET}, no
+   * request body, and the query string as a flat map. A read handler reads its input from
+   * {@link NeoContext#getQueryParams()} — {@code NotPostedDocumentsHandler.handleCrud} branches on
+   * {@code _mode} and then passes the whole map to its datasource — so the map must never be
+   * {@code null}, and the MCP arguments are flattened into it under the names the handler already
+   * expects from the SPA.</p>
+   *
+   * @param adTab the entity's AD tab, {@code null} for the tab-less entities this path exists for
+   */
+  static NeoContext buildReadHookContext(String specName, String entityName, String recordId,
+      Tab adTab, SFEntity sfEntity, Map<String, String> queryParams) {
+    return NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .httpMethod("GET")
+        .recordId(recordId)
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(queryParams)
         .build();
   }
 
@@ -291,6 +343,7 @@ final class McpHookExecutor {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
         .endpointType(NeoEndpointType.DEFAULTS)
         .queryParams(queryParams)
         .build();
@@ -374,6 +427,7 @@ final class McpHookExecutor {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .mcpOrigin(true)
         .endpointType(NeoEndpointType.ACTION)
         .fieldName(actionName)
         .build();

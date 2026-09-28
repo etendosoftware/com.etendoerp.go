@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -939,6 +940,245 @@ public class FiscalDeclCrudHandlerTest {
     }
   }
 
+  // ── handleDeclPut (negative box70/78/109/110 rejection, ETP-5438) ───
+  // Casillas 70, 78, 109 and 110 are declared "Num" (numérico sin signo / unsigned) in the
+  // official AEAT Modelo 303 "Diseño de registro" (DR303e26v101 v1.01), exactly like 111 and 77
+  // above — same guard, same set, just widened. See NEGATIVE_NOT_ALLOWED_BOX_KEYS's javadoc.
+
+  /**
+   * A negative box 70 ("a_deducir") in {@code manualData.manualOverrides} must reject the PUT
+   * with 400 — same contract as the box 111/77 tests above.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox70Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"70\":-100}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * A negative box 78 ("cuotas_compensar_aplic") must also reject the PUT with 400.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox78Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"78\":-50.25}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * A negative box 109 ("devoluciones_at") must also reject the PUT with 400.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox109Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"109\":-10}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * A negative box 110 ("cuotas_compensar") must also reject the PUT with 400.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox110Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"110\":-1}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * Zero (the boundary, not a clearly positive value) on all 4 newly-guarded boxes at once must
+   * be accepted — the guard's condition is strictly {@code < 0}, same as the 111/77 boundary test.
+   */
+  @Test
+  public void testHandleDeclPutWithZeroOnAllFourNewBoxesSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":"
+            + "{\"70\":0,\"78\":0,\"109\":0,\"110\":0}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    }
+  }
+
+  // ── handleDeclPut (identification maxLength, ETP-5438) ──────────────
+  // AEAT-spec audit follow-up: the alphanumeric ("An") identification fields have fixed max
+  // lengths. See IDENTIFICATION_MAX_LENGTHS' javadoc for the exact spec citations. (bank_sepa's
+  // 4-value enum guard was reverted from this ticket — handled separately.)
+
+  /**
+   * A {@code bank_iban} longer than its 34-char AEAT slot must reject the PUT with 400 and leave
+   * the record unwritten — mirrors the negative-box tests' "reject the whole PUT" contract.
+   */
+  @Test
+  public void testHandleDeclPutWithOversizedBankIbanReturns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    String oversizedIban = "ES" + "1".repeat(33); // 35 chars, 1 over the 34-char limit
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"identification\":{\"bank_iban\":\""
+            + oversizedIban + "\"}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * A {@code bank_iban} exactly at the 34-char limit must be accepted — the guard's condition is
+   * strictly {@code length > max}.
+   */
+  @Test
+  public void testHandleDeclPutWithBankIbanAtMaxLengthSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    String maxLengthIban = "ES" + "1".repeat(32); // exactly 34 chars
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"identification\":{\"bank_iban\":\""
+            + maxLengthIban + "\"}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    }
+  }
+
+  /**
+   * A {@code nro_justificante} longer than its 13-char AEAT slot must reject the PUT with 400 —
+   * covers a second field on the map, not just bank_iban.
+   */
+  @Test
+  public void testHandleDeclPutWithOversizedNroJustificanteReturns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"identification\":"
+            + "{\"nro_justificante\":\"12345678901234\"}}}"))); // 14 chars, 1 over the limit
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
   // ── handleDeclPut (submissionMethod, ETP-4755) ──────────────────────
   // Mirrors the manualData tests above exactly: submissionMethod follows the same
   // "explicit null means not sent" precedent (see handleDeclPut's javadoc comment), not
@@ -1214,6 +1454,567 @@ public class FiscalDeclCrudHandlerTest {
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
     verify(decl).set(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL, true);
     assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── handleDeclPut (rejectRepresentation — block re-presentation, ETP-5438) ─
+  //
+  // "block re-presentation once already submitted" — this is the backend half of that: a PUT
+  // that re-sends a submitted-family `status` on a declaration that is ALREADY in a
+  // submitted-family status must be rejected, regardless of what the frontend does (it already
+  // hides "Registrar/Presentar" once isSubmitted). Model-agnostic — the same ETGO_Fiscal_Decl
+  // table/PUT path serves both 303 and 349, so these tests exercise the shared handler directly
+  // rather than a model-specific one.
+
+  /**
+   * The base case: current status {@code submitted}, PUT tries to set {@code submitted_ack} (a
+   * different manual path re-presenting the SAME declaration) — rejected with 409, no status
+   * write, no commit.
+   */
+  @Test
+  public void testHandleDeclPutRepresentAlreadySubmittedReturns409AndLeavesRecordUnchanged()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted_ack\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /** Same guard, exercised with the exact same status on both sides (idempotent re-PUT). */
+  @Test
+  public void testHandleDeclPutRepresentSameStatusReturns409() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    }
+  }
+
+  /** {@code submitted_ext} (legacy) counts as "already submitted" too — mixed-status coverage. */
+  @Test
+  public void testHandleDeclPutRepresentFromSubmittedExtReturns409() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted_ext");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    }
+  }
+
+  /**
+   * The normal, FIRST-time presentation (current {@code ready} -> new {@code submitted}) must NOT
+   * be rejected — the guard only fires when BOTH sides are already in the submitted family.
+   */
+  @Test
+  public void testHandleDeclPutFirstPresentationFromReadySucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("ready");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * "Reactivar declaración" (current {@code submitted}, new {@code draft}, non-telematic) must
+   * remain unaffected by this new guard — it only special-cases an INCOMING submitted-family
+   * status, and {@code draft} is not one. {@link #rejectTelematicReactivation} is what already
+   * guards this specific transition on its own, narrower terms.
+   */
+  @Test
+  public void testHandleDeclPutReactivateFromSubmittedStillSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("manual_ack");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── submission snapshot (ETP-5438) ─────────────────────────────────
+
+  private static final String SNAPSHOT_303 =
+      "{\"boxes\":{\"46\":\"123.45\"},\"summary\":{\"result\":\"123.45\"},\"sources\":[]}";
+
+  /** Runs a PUT {@code body} against {@code decl} and returns the response body. */
+  private String putDecl(BaseOBObject decl, String body, OBDal[] obDalOut) throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+      handler.handleDeclarations("PUT", req, resp);
+      if (obDalOut != null) {
+        obDalOut[0] = obDal;
+      }
+    }
+    return sw.toString();
+  }
+
+  private BaseOBObject draftDecl(String model) {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn(model);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    return decl;
+  }
+
+  /**
+   * Manual Registrar/Presentar of a Modelo 303 (draft -> submitted): the snapshot is computed
+   * through the provider for the declaration's own (model, year, period), stored on the record
+   * in the same transaction as the status change, and echoed in the PUT response.
+   */
+  @Test
+  public void testPutFirstPresentation303TakesSnapshotAndEchoesIt() throws Exception {
+    java.util.List<String> calls = new java.util.ArrayList<>();
+    handler.snapshots.setProvider((model, year, period) -> {
+      calls.add(model + "|" + year + "|" + period);
+      return new JSONObject(SNAPSHOT_303);
+    });
+    BaseOBObject decl = draftDecl("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+    OBDal[] obDal = new OBDal[1];
+
+    String body = putDecl(decl, "{\"status\":\"submitted\",\"submissionMethod\":\"manual_no_receipt\"}", obDal);
+
+    assertEquals(java.util.Collections.singletonList("303|2026|T1"), calls);
+    verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+        eq(new JSONObject(SNAPSHOT_303).toString()));
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
+    verify(obDal[0]).commitAndClose();
+    JSONObject out = new JSONObject(body);
+    assertTrue(out.getBoolean("ok"));
+    assertEquals("123.45",
+        out.getJSONObject("submittedSnapshot").getJSONObject("boxes").getString("46"));
+  }
+
+  /** Same for a Modelo 349 manual presentation (draft -> submitted_ack). */
+  @Test
+  public void testPutFirstPresentation349TakesSnapshot() throws Exception {
+    String snapshot349 = "{\"operators\":[],\"summary\":{\"totalE\":\"0.00\"}}";
+    java.util.List<String> models = new java.util.ArrayList<>();
+    handler.snapshots.setProvider((model, year, period) -> {
+      models.add(model);
+      return new JSONObject(snapshot349);
+    });
+    BaseOBObject decl = draftDecl("349");
+
+    putDecl(decl, "{\"status\":\"submitted_ack\",\"submissionMethod\":\"manual_ack\"}", null);
+
+    assertEquals(java.util.Collections.singletonList("349"), models);
+    verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+        eq(new JSONObject(snapshot349).toString()));
+  }
+
+  /**
+   * When the snapshot cannot be computed the presentation is rejected (500) and NOTHING is
+   * written: no status change, no commit — a declaration is never presented without one.
+   */
+  @Test
+  public void testPutFirstPresentationSnapshotFailureRejectsAndWritesNothing() throws Exception {
+    handler.snapshots.setProvider((model, year, period) -> {
+      throw new IllegalStateException("No TaxReport found");
+    });
+    BaseOBObject decl = draftDecl("303");
+    OBDal[] obDal = new OBDal[1];
+
+    putDecl(decl, "{\"status\":\"submitted\"}", obDal);
+
+    verify(servlet).sendError(any(), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        org.mockito.ArgumentMatchers.contains("No TaxReport found"));
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    verify(obDal[0], never()).commitAndClose();
+  }
+
+  /** "Reactivar declaración" (submitted -> draft) clears the snapshot and computes nothing. */
+  @Test
+  public void testPutReactivationClearsSnapshot() throws Exception {
+    int[] calls = { 0 };
+    handler.snapshots.setProvider((model, year, period) -> {
+      calls[0]++;
+      return new JSONObject();
+    });
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted_ack");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("manual_ack");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+
+    String body = putDecl(decl, "{\"status\":\"draft\"}", null);
+
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT, null);
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals(0, calls[0]);
+    assertEquals("{\"ok\":true}", body);
+  }
+
+  /** A PUT that does not change the status (e.g. a manualData save) never touches the snapshot. */
+  @Test
+  public void testPutWithoutStatusChangeLeavesSnapshotAlone() throws Exception {
+    int[] calls = { 0 };
+    handler.snapshots.setProvider((model, year, period) -> {
+      calls[0]++;
+      return new JSONObject();
+    });
+    BaseOBObject decl = draftDecl("303");
+
+    putDecl(decl, "{\"manualData\":{\"identification\":{}}}", null);
+
+    assertEquals(0, calls[0]);
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+  }
+
+  /** A model without snapshot support (provider answers null) presents without one. */
+  @Test
+  public void testPutFirstPresentationUnsupportedModelProceedsWithoutSnapshot() throws Exception {
+    handler.snapshots.setProvider((model, year, period) -> null);
+    BaseOBObject decl = draftDecl("390");
+
+    String body = putDecl(decl, "{\"status\":\"submitted\"}", null);
+
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    assertEquals("{\"ok\":true}", body);
+  }
+
+  // ── handleDeclPost: creating a declaration directly in a submitted status (ETP-5438) ──
+
+  /** Captures what a POST did: the created row, the DAL mock and the response. */
+  private static final class PostOutcome {
+    BaseOBObject decl;
+    OBDal obDal;
+    HttpServletResponse resp;
+    String body;
+  }
+
+  /**
+   * Runs a POST {@code /fiscal303/declarations} with {@code body} against an empty natural key
+   * (no existing declaration for the period, so neither the ETP-5272 draft guard nor the
+   * DECL_SEQ resolution interferes) and returns what happened.
+   */
+  @SuppressWarnings("unchecked")
+  private PostOutcome postDecl(String body) throws Exception {
+    PostOutcome outcome = new PostOutcome();
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    outcome.resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(outcome.resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    outcome.decl = mock(BaseOBObject.class);
+    // Map-backed like a real BaseOBObject: get(property) returns what set(property, v) stored,
+    // so the snapshot provider sees the (model, year, period) the handler put on the new row.
+    java.util.Map<String, Object> props = new java.util.HashMap<>();
+    org.mockito.Mockito.doAnswer(inv -> {
+      props.put(inv.getArgument(0), inv.getArgument(1));
+      return null;
+    }).when(outcome.decl).set(anyString(), any());
+    when(outcome.decl.get(anyString())).thenAnswer(inv -> props.get(inv.<String>getArgument(0)));
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      outcome.obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(outcome.obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(outcome.obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(outcome.decl);
+
+      handler.handleDeclarations("POST", req, outcome.resp);
+    }
+    outcome.body = sw.toString();
+    return outcome;
+  }
+
+  private static String postBody(String status) {
+    return "{\"model\":\"303\",\"year\":2026,\"period\":\"T1\",\"status\":\"" + status + "\"}";
+  }
+
+  /**
+   * Creating a declaration straight into any submitted-family status (e.g. registering a
+   * presentation filed outside Etendo) takes the snapshot exactly once, for the new row's own
+   * (model, year, period), and stores it on the record BEFORE it is saved and committed.
+   */
+  @Test
+  public void testPostInSubmittedStatusTakesSnapshotBeforeSave() throws Exception {
+    for (String status : new String[] { "submitted", "submitted_ext", "submitted_ack" }) {
+      java.util.List<String> calls = new java.util.ArrayList<>();
+      handler.snapshots.setProvider((model, year, period) -> {
+        calls.add(model + "|" + year + "|" + period);
+        return new JSONObject(SNAPSHOT_303);
+      });
+
+      PostOutcome out = postDecl(postBody(status));
+
+      assertEquals(status, java.util.Collections.singletonList("303|2026|T1"), calls);
+      org.mockito.InOrder order = org.mockito.Mockito.inOrder(out.decl, out.obDal);
+      order.verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, status);
+      order.verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
+          new JSONObject(SNAPSHOT_303).toString());
+      order.verify(out.obDal).save(out.decl);
+      order.verify(out.obDal).commitAndClose();
+      verify(out.resp).setStatus(HttpServletResponse.SC_CREATED);
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+      assertTrue(status, out.body.startsWith("{"));
+    }
+  }
+
+  /** Creating a draft or ready declaration never computes a snapshot nor sets the column. */
+  @Test
+  public void testPostInNonSubmittedStatusTakesNoSnapshot() throws Exception {
+    for (String status : new String[] { "draft", "ready" }) {
+      int[] calls = { 0 };
+      handler.snapshots.setProvider((model, year, period) -> {
+        calls[0]++;
+        return new JSONObject(SNAPSHOT_303);
+      });
+
+      PostOutcome out = postDecl(postBody(status));
+
+      assertEquals(status, 0, calls[0]);
+      verify(out.decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+      verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, status);
+      verify(out.obDal).save(out.decl);
+      verify(out.obDal).commitAndClose();
+      verify(out.resp).setStatus(HttpServletResponse.SC_CREATED);
+    }
+  }
+
+  /** A POST without an explicit status defaults to draft and takes no snapshot either. */
+  @Test
+  public void testPostWithoutStatusDefaultsToDraftAndTakesNoSnapshot() throws Exception {
+    int[] calls = { 0 };
+    handler.snapshots.setProvider((model, year, period) -> {
+      calls[0]++;
+      return new JSONObject(SNAPSHOT_303);
+    });
+
+    PostOutcome out = postDecl("{\"model\":\"303\",\"year\":2026,\"period\":\"T1\"}");
+
+    assertEquals(0, calls[0]);
+    verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    verify(out.decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    verify(out.obDal).save(out.decl);
+  }
+
+  /**
+   * When the snapshot cannot be computed, creating a submitted declaration is rejected with the
+   * same 500 as the PUT path, and the new row is never saved nor committed.
+   */
+  @Test
+  public void testPostInSubmittedStatusSnapshotFailureRejectsAndSavesNothing() throws Exception {
+    handler.snapshots.setProvider((model, year, period) -> {
+      throw new IllegalStateException("No TaxReport found");
+    });
+
+    PostOutcome out = postDecl(postBody("submitted"));
+
+    verify(servlet).sendError(eq(out.resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        org.mockito.ArgumentMatchers.contains("No TaxReport found"));
+    verify(out.decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    verify(out.obDal, never()).save(any());
+    verify(out.obDal, never()).commitAndClose();
+    verify(out.resp, never()).setStatus(HttpServletResponse.SC_CREATED);
+    assertEquals("", out.body);
+  }
+
+  /** declToJson exposes a stored snapshot as a parsed nested object. */
+  @Test
+  public void testDeclToJsonExposesSubmittedSnapshot() throws Exception {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn("decl1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+
+    JSONObject json = handler.declToJson(decl);
+
+    assertEquals("123.45",
+        json.getJSONObject("submittedSnapshot").getJSONObject("summary").getString("result"));
+  }
+
+  /**
+   * No snapshot (never submitted, or a legacy declaration presented before the column existed)
+   * and an unparseable one both come back as JSON null — never an empty object, which would
+   * freeze the declaration on no figures at all.
+   */
+  @Test
+  public void testDeclToJsonMissingOrCorruptSnapshotIsNull() throws Exception {
+    BaseOBObject missing = mock(BaseOBObject.class);
+    BaseOBObject corrupt = mock(BaseOBObject.class);
+    when(corrupt.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn("{not json");
+
+    assertTrue(handler.declToJson(missing).isNull("submittedSnapshot"));
+    assertTrue(handler.declToJson(corrupt).isNull("submittedSnapshot"));
+  }
+
+  /** findLatestSubmittedSnapshot only answers for a SUBMITTED latest declaration. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestSubmittedSnapshotRequiresSubmittedLatest() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      BaseOBObject submitted = mock(BaseOBObject.class);
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+
+      when(query.list()).thenReturn(Collections.singletonList(submitted));
+      assertEquals("123.45", handler.snapshots.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1")
+          .optJSONObject("summary").optString("result"));
+
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+      assertNull(handler.snapshots.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
+
+      when(query.list()).thenReturn(Collections.emptyList());
+      assertNull(handler.snapshots.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
+    }
+  }
+
+  // ── findLatestDeclarationStatus (ETP-5438) ───────────────────────────
+
+  /** No declaration exists yet for the natural key -> {@code null} ("not submitted" by default). */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestDeclarationStatusNoneReturnsNull() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      String status = handler.findLatestDeclarationStatus("client1", "org1", "349", 2026L, "T1");
+
+      assertEquals(null, status);
+    }
+  }
+
+  /**
+   * Two declarations for the same natural key (rectificativa flow) — the one with the HIGHER
+   * {@code DECL_SEQ} wins, regardless of list iteration order, matching {@code
+   * resolveNextDeclSeq}'s own "latest wins" ordinal.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestDeclarationStatusReturnsHighestDeclSeqStatus() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      BaseOBObject older = mock(BaseOBObject.class);
+      when(older.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+      when(older.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+      BaseOBObject newer = mock(BaseOBObject.class);
+      when(newer.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(1L);
+      when(newer.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+      // Older-first in the list, on purpose — the result must not depend on iteration order.
+      when(query.list()).thenReturn(Arrays.asList(older, newer));
+
+      String status = handler.findLatestDeclarationStatus("client1", "org1", "349", 2026L, "T1");
+
+      assertEquals("draft", status);
+    }
   }
 
   // ── declToJson (manualData) ────────────────────────────────────────

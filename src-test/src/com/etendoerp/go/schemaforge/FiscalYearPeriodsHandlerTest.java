@@ -79,7 +79,7 @@ public class FiscalYearPeriodsHandlerTest {
   @Test
   public void createPeriodsRejectsInvalidFiscalYearRange() throws Exception {
     NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(
-        new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", "APRIL")));
+        new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", "MARCH")));
 
     assertEquals(400, response.getHttpStatus());
   }
@@ -182,6 +182,190 @@ public class FiscalYearPeriodsHandlerTest {
       verify(adjustmentPeriod).setPeriodType("A");
       verify(adjustmentPeriod).setName("13th Period - 28");
       assertPeriodStartDate(adjustmentPeriod, LocalDate.of(2028, 6, 30));
+    }
+  }
+
+  @Test
+  public void aprilCreatePeriodsCreatesTwelveConsecutiveFiscalPeriods() throws Exception {
+    List<Period> periods = new ArrayList<>();
+    for (int index = 0; index < 12; index++) {
+      periods.add(mock(Period.class));
+    }
+    AtomicInteger nextPeriod = new AtomicInteger();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBProvider provider = mock(OBProvider.class);
+      OBCriteria<Period> criteria = mock(OBCriteria.class);
+      Year year = mock(Year.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(dal.get(eq(Year.class), anyString())).thenReturn(year);
+      when(dal.createCriteria(Period.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+      when(year.getFiscalYear()).thenReturn("2027");
+      when(provider.get(Period.class)).thenAnswer(invocation -> periods.get(nextPeriod.getAndIncrement()));
+
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(
+          new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", "APRIL")));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(provider, times(12)).get(Period.class);
+      verify(dal, times(12)).save(any(Period.class));
+      for (int periodNo = 1; periodNo <= 12; periodNo++) {
+        Period period = periods.get(periodNo - 1);
+        LocalDate start = LocalDate.of(2027, 4, 1).plusMonths(periodNo - 1L);
+        verify(period).setPeriodNo((long) periodNo);
+        verify(period).setPeriodType("S");
+        verify(period).setName(start.format(java.time.format.DateTimeFormatter.ofPattern("MMM-yy",
+            java.util.Locale.ENGLISH)));
+        assertPeriodStartDate(period, start);
+      }
+    }
+  }
+
+  @Test
+  public void aprilCreatePeriodsAddsAdjustmentPeriodWhenRequested() throws Exception {
+    List<Period> periods = new ArrayList<>();
+    for (int index = 0; index < 13; index++) {
+      periods.add(mock(Period.class));
+    }
+    AtomicInteger nextPeriod = new AtomicInteger();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBProvider provider = mock(OBProvider.class);
+      OBCriteria<Period> criteria = mock(OBCriteria.class);
+      Year year = mock(Year.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(dal.get(eq(Year.class), anyString())).thenReturn(year);
+      when(dal.createCriteria(Period.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+      when(year.getFiscalYear()).thenReturn("2027");
+      when(provider.get(Period.class)).thenAnswer(invocation -> periods.get(nextPeriod.getAndIncrement()));
+
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(
+          new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", "APRIL")
+              .put("CREATEADJUSTMENT", "Y")));
+
+      Period adjustmentPeriod = periods.get(12);
+      assertEquals(200, response.getHttpStatus());
+      verify(provider, times(13)).get(Period.class);
+      verify(dal, times(13)).save(any(Period.class));
+      verify(adjustmentPeriod).setPeriodNo(13L);
+      verify(adjustmentPeriod).setPeriodType("A");
+      verify(adjustmentPeriod).setName("13th Period - 28");
+      assertPeriodStartDate(adjustmentPeriod, LocalDate.of(2028, 3, 31));
+    }
+  }
+
+  @Test
+  public void octoberCreatePeriodsCreatesTwelveConsecutiveFiscalPeriods() throws Exception {
+    List<Period> periods = new ArrayList<>();
+    for (int index = 0; index < 12; index++) {
+      periods.add(mock(Period.class));
+    }
+    AtomicInteger nextPeriod = new AtomicInteger();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBProvider provider = mock(OBProvider.class);
+      OBCriteria<Period> criteria = mock(OBCriteria.class);
+      Year year = mock(Year.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(dal.get(eq(Year.class), anyString())).thenReturn(year);
+      when(dal.createCriteria(Period.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+      when(year.getFiscalYear()).thenReturn("2027");
+      when(provider.get(Period.class)).thenAnswer(invocation -> periods.get(nextPeriod.getAndIncrement()));
+
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(
+          new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", "OCTOBER")));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(provider, times(12)).get(Period.class);
+      verify(dal, times(12)).save(any(Period.class));
+      for (int periodNo = 1; periodNo <= 12; periodNo++) {
+        Period period = periods.get(periodNo - 1);
+        LocalDate start = LocalDate.of(2027, 10, 1).plusMonths(periodNo - 1L);
+        verify(period).setPeriodNo((long) periodNo);
+        verify(period).setPeriodType("S");
+        verify(period).setName(start.format(java.time.format.DateTimeFormatter.ofPattern("MMM-yy",
+            java.util.Locale.ENGLISH)));
+        assertPeriodStartDate(period, start);
+      }
+    }
+  }
+
+  @Test
+  public void octoberCreatePeriodsAddsAdjustmentPeriodWhenRequested() throws Exception {
+    List<Period> periods = new ArrayList<>();
+    for (int index = 0; index < 13; index++) {
+      periods.add(mock(Period.class));
+    }
+    AtomicInteger nextPeriod = new AtomicInteger();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBProvider provider = mock(OBProvider.class);
+      OBCriteria<Period> criteria = mock(OBCriteria.class);
+      Year year = mock(Year.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(dal.get(eq(Year.class), anyString())).thenReturn(year);
+      when(dal.createCriteria(Period.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+      when(year.getFiscalYear()).thenReturn("2027");
+      when(provider.get(Period.class)).thenAnswer(invocation -> periods.get(nextPeriod.getAndIncrement()));
+
+      NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(
+          new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", "OCTOBER")
+              .put("CREATEADJUSTMENT", "Y")));
+
+      Period adjustmentPeriod = periods.get(12);
+      assertEquals(200, response.getHttpStatus());
+      verify(provider, times(13)).get(Period.class);
+      verify(dal, times(13)).save(any(Period.class));
+      verify(adjustmentPeriod).setPeriodNo(13L);
+      verify(adjustmentPeriod).setPeriodType("A");
+      verify(adjustmentPeriod).setName("13th Period - 28");
+      assertPeriodStartDate(adjustmentPeriod, LocalDate.of(2028, 9, 30));
+    }
+  }
+
+  @Test
+  public void shiftedRangeCreatePeriodsRejectsFiscalYearsThatAlreadyHavePeriods() throws Exception {
+    for (String range : new String[] { "APRIL", "OCTOBER" }) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        OBCriteria<Period> criteria = mock(OBCriteria.class);
+        Year year = mock(Year.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(eq(Year.class), anyString())).thenReturn(year);
+        when(dal.createCriteria(Period.class)).thenReturn(criteria);
+        when(criteria.add(any())).thenReturn(criteria);
+        when(criteria.setMaxResults(1)).thenReturn(criteria);
+        when(criteria.uniqueResult()).thenReturn(mock(Period.class));
+
+        NeoResponse response = new FiscalYearPeriodsHandler().handle(buildCreatePeriodsContext(
+            new org.codehaus.jettison.json.JSONObject().put("FISCALYEARSTART", range)));
+
+        assertEquals(409, response.getHttpStatus());
+      }
     }
   }
 }

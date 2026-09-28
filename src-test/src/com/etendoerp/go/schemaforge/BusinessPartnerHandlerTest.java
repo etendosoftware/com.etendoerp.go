@@ -360,6 +360,143 @@ class BusinessPartnerHandlerTest {
     }
   }
 
+  // ── handle() — POST: org currency injection over MCP (ETP-5284) ──────────────
+
+  /**
+   * One database column, two spellings, and the reason the tests below exist at all.
+   *
+   * <p>{@code C_BPartner.BP_Currency_ID} reaches this hook as {@code bPCurrencyID} over REST and
+   * as {@code currency} over MCP, because the two paths hand the handler a body in different
+   * field-naming conventions. Neither path reports the other's key: a value written under the
+   * wrong spelling is dropped downstream in silence, the create succeeds, and the Business Partner
+   * is left with no currency — which surfaces much later as a purchase invoice that cannot be
+   * confirmed ({@code ProcessInvoiceUtil} rejects {@code businessPartner.getCurrency() == null}
+   * with no fallback). That is ETP-5284, and it only ever affected the MCP side: the four tests
+   * above build their context without {@code mcpOrigin}, so they covered the REST branch, which
+   * was never broken.
+   *
+   * <p>The same lesson as ETP-5405's tab-less entities: an agent-facing path that silently
+   * discards what it does not recognise produces a confident wrong result rather than a failure,
+   * so the branch has to be pinned by a test rather than inferred from the shared column. The
+   * crossed cases below are the load-bearing ones — collapse {@code currencyKey} back to a single
+   * constant, as the code comment invites once the conventions are reconciled, and they fail.
+   *
+   * @param mcpOrigin whether the call arrived through the MCP tools
+   * @param orgId     the current organization
+   */
+  private void stubCurrencyContext(boolean mcpOrigin, String orgId) {
+    when(ctx.isMcpOrigin()).thenReturn(mcpOrigin);
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getObContext()).thenReturn(obContext);
+  }
+
+  /**
+   * The ETP-5284 defect itself: over MCP the injected currency must land under {@code currency}.
+   *
+   * <p>The second assertion is the half that fixes the bug rather than merely observing it — the
+   * REST spelling must NOT appear, because writing {@code bPCurrencyID} on the MCP path is exactly
+   * what was discarded downstream with no error, leaving the Business Partner currency-less.
+   */
+  @Test
+  void testHandlePostMcpOriginInjectsCurrencyUnderMcpSpelling() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    stubCurrencyContext(true, "ORG1");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("currency"));
+      assertFalse(body.has("bPCurrencyID"), body.toString());
+    }
+  }
+
+  /**
+   * The MCP mirror of {@code testHandlePostKeepsExplicitCurrency}: a caller that already sent
+   * {@code currency} keeps it, and the org-currency resolver is never consulted.
+   */
+  @Test
+  void testHandlePostMcpOriginKeepsExplicitCurrency() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("currency", "EXISTING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.isMcpOrigin()).thenReturn(true);
+
+    try (MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      handler.handle(ctx);
+
+      assertEquals("EXISTING", body.getString("currency"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * The crossed case, and the one that would catch a regression first: an MCP body carrying the
+   * REST spelling.
+   *
+   * <p>{@code bPCurrencyID} on the MCP path is not a currency the caller set — it is a key that
+   * will be thrown away before it reaches the column. So the "caller already supplied one" guard
+   * must not fire on it: the handler still has to inject {@code currency}, or the record is
+   * created with no currency while the body looks as though it had one. A single shared constant
+   * for both conventions makes this test return early and fail.
+   */
+  @Test
+  void testHandlePostMcpOriginInjectsDespiteRestSpellingInBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("bPCurrencyID", "REST_SPELLING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    stubCurrencyContext(true, "ORG1");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("currency"));
+      // The caller's own key is left exactly as it arrived: this hook resolves a missing
+      // currency, it does not rewrite the request into the other convention.
+      assertEquals("REST_SPELLING", body.getString("bPCurrencyID"));
+    }
+  }
+
+  /**
+   * The symmetric crossed case, which pins the branch from the other side: a REST body carrying
+   * the MCP spelling must still get {@code bPCurrencyID}, for the same reason reversed —
+   * {@code currency} is discarded on the REST path, so it is not a value the guard may honour.
+   */
+  @Test
+  void testHandlePostRestOriginInjectsDespiteMcpSpellingInBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("currency", "MCP_SPELLING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    stubCurrencyContext(false, "ORG1");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("bPCurrencyID"));
+      assertEquals("MCP_SPELLING", body.getString("currency"));
+    }
+  }
+
   /**
    * On PATCH, when the persisted name is blank, the handler must derive it by merging
    * persisted parts with the incoming body values.

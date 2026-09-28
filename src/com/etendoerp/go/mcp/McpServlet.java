@@ -41,6 +41,13 @@ import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoNeoAuth;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -65,8 +72,19 @@ public class McpServlet extends HttpServlet {
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
   private static final String PROTOCOL_VERSION = "2024-11-05";
-  private static final String SERVER_NAME = "etendo-neo";
+  private static final String SERVER_NAME = "etendo-mcp";
   private static final String SERVER_VERSION = "1.0.0";
+  /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
+  private static final String SERVER_TITLE = "Etendo MCP";
+  private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
+  /**
+   * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
+   * Same file for every environment, so a fixed production URL is fine. Clients that predate the
+   * field ignore it.
+   */
+  private static final String SERVER_ICON_URL = "https://app.etendo.ai/favicon.png";
+  private static final String SERVER_ICON_MIME_TYPE = "image/png";
+  private static final String SERVER_ICON_SIZES = "513x513";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
@@ -76,11 +94,14 @@ public class McpServlet extends HttpServlet {
   private static final String LEGACY_JWT_FALLBACK_SCOPES =
       "neo:read neo:write neo:process neo:report";
 
+  private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
+      new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
+
   // ── CORS ───────────────────────────────────────────────────────────────
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept, Mcp-Session-Id",
+        "Content-Type, Authorization, Accept, Mcp-Session-Id, X-Go-CSRF",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }
 
@@ -358,9 +379,10 @@ public class McpServlet extends HttpServlet {
     // Inline validation
     String authHeader = request.getHeader("Authorization");
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing Authorization: Bearer <token> header");
-      return null;
+      // Only reached when there is no Bearer credential at all — the case that used to be an
+      // unconditional 401. Every request that already carried a token keeps the exact path
+      // below, so OAuth2 and legacy-JWT clients are untouched by ETP-4576.
+      return cookieSessionIdentity(request, response);
     }
 
     String bearerToken = authHeader.substring(7).trim();
@@ -392,6 +414,71 @@ public class McpServlet extends HttpServlet {
           "Invalid or expired token (OAuth2 and JWT both failed)");
       return null;
     }
+  }
+
+  /**
+   * Resolve the request against the backend-managed cookie session (ETP-4576).
+   *
+   * <p>Reached only when no {@code Authorization: Bearer} header is present, which before this
+   * existed was an unconditional 401. The browser SPA holds no token under the cookie scheme —
+   * {@code authHeaders()} deliberately sends nothing and lets the {@code __Host-} cookie travel
+   * on its own — so that 401 rejected every in-app conversation while reads elsewhere in the app
+   * kept working, which is what made it read like a deployment fault rather than an auth one.
+   *
+   * <p>{@link GoNeoAuth#decide} is the module's single arbiter of this, and the outcomes are kept
+   * distinct because the client reacts to them: a failed CSRF/Origin proof is 403 (the session is
+   * valid; re-authenticating would not help), an expired session is 401, and no session at all
+   * falls back to the unchanged "missing Authorization header" 401 — including its
+   * {@code WWW-Authenticate} discovery hint, so an MCP client's OAuth flow still starts here.
+   */
+  private AuthIdentity cookieSessionIdentity(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    GoSessionAuthResult sessionAuth = SESSION_AUTHENTICATOR.authenticate(request);
+    switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
+      case USE_SESSION:
+        return sessionIdentity(request, response, sessionAuth.getRecord());
+      case CSRF_REJECTED:
+        log.warn("Forbidden MCP request: CSRF validation failed");
+        sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
+            "CSRF validation failed");
+        return null;
+      case SESSION_INVALID:
+        log.warn("Unauthorized MCP request: invalid or expired session");
+        sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+            "Invalid or expired session");
+        return null;
+      default:
+        // NO_CREDENTIALS and USE_LEGACY_BEARER both land here: there is no cookie session AND no
+        // Bearer header, so the answer is the pre-existing one, unchanged.
+        sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+            "Missing Authorization: Bearer <token> header");
+        return null;
+    }
+  }
+
+  /**
+   * Build the request identity from a resolved cookie session.
+   *
+   * <p>The scopes are the same set the validated legacy JWT path grants, and for the same
+   * reason: both are interactive browser sessions, and RBAC still filters the tool catalog
+   * and authorizes every operation by the user's role and window access. Granting less here
+   * would make the same user see a different catalog depending only on which credential
+   * scheme the backend happened to issue.
+   *
+   * <p>A session with no environment selected is rejected rather than defaulted — the tenant
+   * scope is what every downstream query is filtered by, so guessing it is not an option.
+   */
+  private AuthIdentity sessionIdentity(HttpServletRequest request, HttpServletResponse response,
+      GoSessionRecord session) throws IOException {
+    if (StringUtils.isAnyBlank(session.getUserId(), session.getRoleId(), session.getCtxOrgId(),
+        session.getCtxClientId())) {
+      log.warn("Unauthorized MCP request: session has no environment selected");
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Session has no environment selected");
+      return null;
+    }
+    return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
+        session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
   }
 
   // ── JSON-RPC method dispatch ────────────────────────────────────────────
@@ -460,12 +547,31 @@ public class McpServlet extends HttpServlet {
     JSONObject serverInfo = new JSONObject();
     serverInfo.put("name", SERVER_NAME);
     serverInfo.put("version", SERVER_VERSION);
+    serverInfo.put("title", SERVER_TITLE);
+    serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
+    JSONObject icon = new JSONObject();
+    icon.put("src", SERVER_ICON_URL);
+    icon.put("mimeType", SERVER_ICON_MIME_TYPE);
+    icon.put("sizes", new JSONArray().put(SERVER_ICON_SIZES));
+    serverInfo.put("icons", new JSONArray().put(icon));
     result.put("serverInfo", serverInfo);
 
     return result;
   }
 
   // ── Handler: tools/list ─────────────────────────────────────────────────
+
+  /**
+   * Language code of the user the MCP token belongs to, for localized tool titles.
+   *
+   * @return a code such as {@code es_ES}, or {@code null} when the context carries none
+   */
+  private static String currentLanguageCode() {
+    OBContext context = OBContext.getOBContext();
+    return context != null && context.getLanguage() != null
+        ? context.getLanguage().getLanguage()
+        : null;
+  }
 
   private JSONObject handleToolsList(AuthIdentity identity) throws Exception {
     return McpSessionManager.executeInContext(
@@ -477,11 +583,13 @@ public class McpServlet extends HttpServlet {
             Set<String> scopes = parseScopes(identity.scopes);
             List<McpToolDefinition> tools = registry.generateTools(scopes);
 
+            String language = currentLanguageCode();
             JSONObject result = new JSONObject();
             JSONArray toolsArray = new JSONArray();
             for (McpToolDefinition tool : tools) {
               JSONObject toolJson = new JSONObject();
               toolJson.put("name", tool.getName());
+              toolJson.put("title", McpToolTitles.resolve(tool, language));
               toolJson.put("description", tool.getDescription());
               toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
               toolsArray.put(toolJson);

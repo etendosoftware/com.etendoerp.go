@@ -107,6 +107,11 @@ public class InventoryStockReportHandler implements NeoHandler {
 
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      // ETP-5419 — c_uom.name is only the base (English) name; c_uom_trl carries
+      // the session-language translation, same pattern as TaxReportHandler's
+      // c_country_trl join and FinancialAccountTransactionsHandler's
+      // ad_ref_list_trl join.
+      String language = OBContext.getOBContext().getLanguage().getLanguage();
       Set<String> orgTree = OBContext.getOBContext()
           .getOrganizationStructureProvider(clientId)
           .getNaturalTree(orgId);
@@ -124,13 +129,14 @@ public class InventoryStockReportHandler implements NeoHandler {
           + "COALESCE(pc.name, '') AS category_name, "
           + "p.value AS product_search_key, "
           + "p.name AS product_name, "
-          + "COALESCE(uom.name, '') AS uom_name, "
+          + "COALESCE(uomt.name, uom.name, '') AS uom_name, "
           + "COALESCE(SUM(sd.qtyonhand), 0) AS qty_on_hand, "
           + "COALESCE(cost.cost, 0) AS unit_cost, "
           + "COALESCE(SUM(sd.qtyonhand), 0) * COALESCE(cost.cost, 0) AS total_valuation "
           + "FROM m_product p "
           + "CROSS JOIN m_warehouse wh "
           + "LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id "
+          + "LEFT JOIN c_uom_trl uomt ON uomt.c_uom_id = uom.c_uom_id AND uomt.ad_language = :lang "
           + "LEFT JOIN m_product_category pc ON pc.m_product_category_id = p.m_product_category_id "
           + "LEFT JOIN m_locator l ON l.m_warehouse_id = wh.m_warehouse_id "
           + "LEFT JOIN m_storage_detail sd ON sd.m_locator_id = l.m_locator_id "
@@ -158,7 +164,7 @@ public class InventoryStockReportHandler implements NeoHandler {
       appendOptionalFilters(sql, productIds, warehouseIds, categoryIds);
 
       sql.append(
-          "GROUP BY wh.name, pc.name, p.value, p.name, uom.name, cost.cost "
+          "GROUP BY wh.name, pc.name, p.value, p.name, uom.name, uomt.name, cost.cost "
           + "HAVING (:includeZeroStock = true OR COALESCE(SUM(sd.qtyonhand), 0) <> 0) "
           + "ORDER BY wh.name, p.value, p.name");
 
@@ -166,6 +172,7 @@ public class InventoryStockReportHandler implements NeoHandler {
       query.setParameter("clientId", clientId);
       query.setParameterList("orgIds", orgTree);
       query.setParameter("includeZeroStock", includeZeroStock);
+      query.setParameter("lang", language);
       bindOptionalParameters(query, productIds, warehouseIds, categoryIds);
 
       List<Object[]> rows = query.list();

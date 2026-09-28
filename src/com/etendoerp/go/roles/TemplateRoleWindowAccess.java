@@ -395,4 +395,40 @@ public final class TemplateRoleWindowAccess {
     map.put(SystemRoleTemplates.INVENTORY_ROLE_ID, Collections.emptyList());
     return map;
   }
+
+  /**
+   * ETP-5402 — standalone CLASSIC {@code AD_Process_Access} grants (a third, separate mechanism
+   * from both {@link #byRoleId()}'s window matrix and {@link #standaloneProcessGrantsByRoleId()}'s
+   * OBUIAPP one): {@code tax-report} (the Informes-subsection "Tax Report" row, see {@code
+   * ReportAccessCatalog#TAX_REPORT_PROCESS_ID} in {@code schemaforge/util}) gates on a CLASSIC
+   * {@code AD_Process_Access} row ({@code TaxReportHandler#isAccessibleForCurrentRole} →
+   * {@code NeoAccessHelper#hasProcessAccess}), not an OBUIAPP one — confirmed live (2026-09-21,
+   * {@code santo_ETP-5402-analysis-and-plan.md} Part A "Additional finding") that NONE of the 4
+   * system-template roles held this grant: the 114 existing rows on this process id are either
+   * admin/client-admin (redundant — {@code NeoAccessHelper#isAdminOrClientAdmin} bypasses the
+   * check anyway) or 8 legacy F&amp;B-sample-data/test roles pre-dating the template-role model,
+   * never reconciled by this class. Without this grant the new Informes "Tax Report" row would
+   * ship correctly wired end-to-end yet show "none" for every real Finance-templated user — same
+   * class of gap {@link #standaloneProcessGrantsByRoleId()} closed for the aging reports.
+   *
+   * <p>Granted to Finance ONLY — Sales/Purchasing/Inventory get nothing (same product scope as
+   * every other Finance-only Informes row: "Informes financieros", the 6 financial-account report
+   * rows). Reconciled by {@code EnsureSystemRoleTemplatesScript#reconcileStandaloneClassicProcessAccess}
+   * — a mechanism deliberately separate from {@link #standaloneProcessGrantsByRoleId()}'s OBUIAPP
+   * one (different table: {@code ad_process_access}, not {@code obuiapp_process_access}), following
+   * the same "grant the process id directly, independent of any window grant" shape.</p>
+   *
+   * @return a fresh, mutable {@link LinkedHashMap} from template role id to its (immutable) list
+   *     of classic {@code AD_Process_Access} ids — every one of the four template roles is a key,
+   *     even the three with an empty list, mirroring {@link #standaloneProcessGrantsByRoleId()}'s
+   *     own "always all four keys" contract
+   */
+  public static Map<String, List<String>> standaloneClassicProcessGrantsByRoleId() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(SystemRoleTemplates.FINANCE_ROLE_ID, List.of("8C1331B9EC14CED7E040007F010119A0"));
+    map.put(SystemRoleTemplates.SALES_ROLE_ID, Collections.emptyList());
+    map.put(SystemRoleTemplates.PURCHASING_ROLE_ID, Collections.emptyList());
+    map.put(SystemRoleTemplates.INVENTORY_ROLE_ID, Collections.emptyList());
+    return map;
+  }
 }
