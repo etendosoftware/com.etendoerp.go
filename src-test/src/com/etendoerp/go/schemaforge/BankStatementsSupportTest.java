@@ -18,8 +18,12 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -27,11 +31,15 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Date;
 
+import org.junit.After;
 import org.junit.Test;
+import org.mockito.Mockito;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Unit tests for {@link BankStatementsSupport} — the stateless helpers extracted
- * from {@link BankStatementsHandler}. All pure, no mocks required.
+ * from {@link BankStatementsHandler}. All pure; only {@code isBankConnected} needs a
+ * mocked financial account.
  */
 public class BankStatementsSupportTest {
 
@@ -210,5 +218,50 @@ public class BankStatementsSupportTest {
   @Test
   public void truncateCutsLongString() {
     assertEquals("abc", BankStatementsSupport.truncate("abcdef", 3));
+  }
+
+  // ── isBankConnected (ETP-5471) ───────────────────────────────────────────
+
+  /**
+   * PSD2 status meaning "connected". Compared by VALUE rather than importing
+   * {@code BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED}, so a change of the constant
+   * on one side only is caught here.
+   */
+  private static final String PSD2_CONNECTED = "CO";
+
+  /** The column's default status, i.e. an ordinary, not bank-connected account. */
+  private static final String PSD2_DISCONNECTED = "DC";
+
+  /** Releases the inline mocks the isBankConnected tests create (shared test-JVM heap). */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
+  }
+
+  private static FIN_FinancialAccount accountWithConnectionStatus(String status) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(status);
+    return account;
+  }
+
+  @Test
+  public void testIsBankConnectedTrueForConnectedStatus() {
+    assertTrue(BankStatementsSupport.isBankConnected(accountWithConnectionStatus(PSD2_CONNECTED)));
+  }
+
+  /** A disconnected account carries a non-null status too — a null check would get this wrong. */
+  @Test
+  public void testIsBankConnectedFalseForDisconnectedStatus() {
+    assertFalse(BankStatementsSupport.isBankConnected(accountWithConnectionStatus(PSD2_DISCONNECTED)));
+  }
+
+  @Test
+  public void testIsBankConnectedFalseForNullStatus() {
+    assertFalse(BankStatementsSupport.isBankConnected(accountWithConnectionStatus(null)));
+  }
+
+  @Test
+  public void testIsBankConnectedFalseForNullAccount() {
+    assertFalse(BankStatementsSupport.isBankConnected(null));
   }
 }
