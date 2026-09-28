@@ -1704,7 +1704,11 @@ Multi-currency needs no parameter: conversion uses the same exchange rate as the
 `candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
 `applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
 
-##### 4.12.1.2 Bank statement agent actions (ETP-5447)
+The role gate, the SPA-shaped derived context and the flush-to-clean after a successful write
+(ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
+keeps only its contracts and its routing.
+
+##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
 
 The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
 `@Named("bank-statements")`), the report spec (`SPEC_TYPE=R`) behind the SPA's
@@ -1721,55 +1725,97 @@ neo_action {spec:"bank-statements", entity:"bank-statements", id:"<id>", action:
                         lines:[{date:"2026-06-02", description, bpartnerName, in:3500, out:0}]}}
 ```
 
-- **Same engine as the SPA.** Each action becomes the exact request the SPA sends — `POST` with
-  `action=<engine action>` in the query params and the body the engine reads — and re-enters
-  `BankStatementsHandler.handle` unchanged: required header dates, the account's BSF document type,
-  the line amount rules (exactly one of `in`/`out` above zero, never negative), the draft/processed
-  state machine and the PSD2 delete guard are the UI's own. The derived context has no endpoint
-  type, so it cannot loop back into the ACTION branch.
-- **`id` semantics.** Account-level actions take the **financial account** id (written into the
-  body as `FIN_Financial_Account_ID`); statement-level actions take the **bank statement** id
-  (written as `id`). The record `id` always wins: an id-like key in `parameters` is refused by the
-  contract as undeclared. Each contract carries an `idDescription` saying which one it is.
-- **Guards before anything runs.** Contract validation (§4.12.1.1 refusals, 422), blank `id` → 422,
-  then the report-spec role gate — `POST` for writes, `GET` for `previewStatement`, which only
-  reads even though the engine receives it as a POST (it needs the upload body).
-- **Flush while the context is set.** Successful writes are flushed to a clean session inside the
-  dispatcher, for the same reason as the reconciliation dispatcher (the MCP session scope flushes
-  once and restores a null `OBContext`; a leftover dirty session would fail at request end with an
-  HTML 500 after a reported success). A flush failure is rolled back and answered as JSON.
+Before these actions, an agent could only reach statements through the generic
+`financial-account` entities `importedBankStatements` / `bankStatementLines`: a statement written
+there was never processed (its lines never became reconcilable), could not be processed,
+reactivated or imported at all, stamped today on both header dates and skipped every check the UI
+applies to a manual statement.
 
-| Action | Kind | `id` | Parameters (required in **bold**) | Engine route |
+- **Same handler methods as the SPA.** Each action re-enters the SAME package-private method the
+  SPA route uses (`handleList`, `handleGetLines`, `handlePreview`, `handleCreate`, `handleImport`,
+  `handleUpdate`, `handleProcess`, `handleReactivate`, `handleDelete`) with a derived context that
+  has no endpoint type, so it cannot loop back into the ACTION branch. Required header dates, the
+  account's BSF document type, the line amount rules (exactly one of `in`/`out` above zero, never
+  negative), the draft/processed state machine and the PSD2 delete guard are the UI's own.
+- **`id` semantics.** Account-level actions take the **financial account** id (sent as
+  `FIN_Financial_Account_ID`); statement-level actions take the **bank statement** id (sent as
+  `statementId` for `statementLines`, as `id` in the body otherwise). The record `id` always wins:
+  an id-like key in `parameters` is refused by the contract as undeclared. Each contract carries an
+  `idDescription` saying which one it is.
+- **Guards before anything runs.** Contract validation (§4.12.1.1 refusals, 422), blank `id` → 422
+  (`id is required: <idDescription>`), then the report-spec role gate — `POST` for writes, `GET`
+  for the reads, including `previewStatement`, which only reads even though the handler receives it
+  as a POST (it needs the upload body) — then the agent-only input checks below (422).
+- **Flush while the context is set.** Successful writes are flushed to a clean session inside the
+  dispatcher (the MCP session scope flushes once and restores a null `OBContext`; a leftover dirty
+  session would fail at request end with an HTML 500 after a reported success). A flush failure is
+  rolled back and answered as JSON. The reads never flush.
+
+| Action | Kind | `id` | Parameters (required in **bold**) | SPA route reused |
 |---|---|---|---|---|
-| `createStatement` | write | financial account | **`name`**, **`transactionDate`**, **`importDate`** (`yyyy-MM-dd`), **`lines[]`**, `process` (default `true`), `notes`, `fileName` | `POST ?action=create` |
+| `listStatements` | read | financial account | — | `GET ?FIN_Financial_Account_ID=` |
+| `statementLines` | read | bank statement | — | `GET ?action=lines&statementId=` |
 | `previewStatement` | read | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=preview` (never persists) |
+| `createStatement` | write | financial account | **`name`**, **`transactionDate`**, **`importDate`** (`yyyy-MM-dd`), **`lines[]`**, `process` (default `true`), `notes`, `fileName` | `POST ?action=create` |
 | `importStatement` | write | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=import` |
 | `updateStatement` | write | bank statement | **`name`**, **`transactionDate`**, **`importDate`**, `lines[]` (required unless matched lines remain), `process` (default `false`), `notes`, `fileName` (omitted = cleared) | `POST ?action=update` |
 | `processStatement` | write | bank statement | — | `POST ?action=process` |
 | `reactivateStatement` | write | bank statement | — | `POST ?action=reactivate` |
 | `deleteStatement` | write | bank statement | — | `POST ?action=delete` |
 
-Notes: `lines[]` items are `{date, description, bpartnerName, bpartnerId?, glItemId?, reference?,
-in, out}`; a line `date` defaults to the header `transactionDate`, `reference` defaults to `**`.
-`updateStatement` replaces only the unmatched lines and works on drafts only; `reactivateStatement`
-needs a processed, not posted statement and does not reverse reconciliations; `deleteStatement`
-works on drafts only, answers **409** on a PSD2-connected account and **400** while matched lines
-remain. Upload formats are Cuaderno 43 or a generic CSV with header `Transaction Date, Reference
-No., Business Partner Name, Description, Amount OUT, Amount IN` (dates `dd/MM/yyyy`).
+Notes: `lines[]` items are `{date, in, out, description, reference, bpartnerName, bpartnerId,
+glItemId}`; `reference` defaults to `**`. `updateStatement` replaces only the unmatched lines and
+works on drafts only; `reactivateStatement` needs a processed, not posted statement and does not
+reverse reconciliations; `deleteStatement` works on drafts only, answers **409** on a
+PSD2-connected account and **400** while matched lines remain. Upload formats are Cuaderno 43 or a
+generic CSV with header `Transaction Date, Reference No., Business Partner Name, Description,
+Amount OUT, Amount IN` (dates `dd/MM/yyyy`).
 
 **Import date rule.** `importStatement` stores the statement **processed**, with `importdate` = now
 and `statementdate` (`transactionDate`) = the last movement date among the kept lines (today when
 no line has a date) — the same rule as the SPA's CSV import. A file with no valid line answers
 **400** with code `NO_VALID_LINES` and saves nothing.
 
-**Generic writes are refused (405).** On the `financial-account` W spec, `importedBankStatements`
-and `bankStatementLines` carry `Java_Qualifier = bankStatementEntityHandler`
-(`BankStatementEntityHandler`): generic create / update / delete bypass every rule above, so they
-answer 405 and the message names the concrete action and call — create → `createStatement` (or
-`importStatement` from a file) with `id` = the financial account; update → `updateStatement`;
-delete → `deleteStatement`; any line write → `updateStatement` on the line's statement — all via
-`neo_action {spec:"bank-statements", entity:"bank-statements"}`. Reads (`neo_list` / `neo_get`)
-pass through, which is how an agent finds statement ids.
+**Agent-only input checks (`BankStatementAgentValidation`).** The UI never sends a statement that
+fails its own client-side checks, so the handler fills the gaps silently (a missing line date
+becomes the statement date, an unparseable amount becomes 0, an over-long text is truncated, an
+unknown contact / G/L item id is dropped). Tightening the handler would change what the SPA route
+accepts, so the agent path applies the UI's checks to the agent's input instead — on
+`createStatement` and `updateStatement` — answering 422 with `lines[<i>]: <problem>`:
+
+- every line needs `date` (a real `yyyy-MM-dd` date) and an amount on exactly one side — `in` or
+  `out` > 0, the other absent/0, none negative, each a JSON number or a dot-decimal numeric string
+  (same rule as the UI's `isLineComplete` and the handler's `validateLineAmounts`, which still
+  runs);
+- a line accepts only the eight keys above (a typo such as `amount` would otherwise produce a line
+  the handler treats as blank and skips);
+- lengths are refused, not truncated: `name` / `bpartnerName` ≤ 60, `fileName` / `notes` ≤ 255,
+  `reference` ≤ 30, `description` ≤ 2000, measured on the raw value as sent (the handler
+  truncates it untrimmed); a blank `reference` is still stored as `**`;
+- `bpartnerId` / `glItemId` must be a contact / G/L item of the current tenant;
+- header `transactionDate` / `importDate` must be real dates (the contract already requires them
+  and checks their shape);
+- `importStatement` / `previewStatement`: `contentBase64` must be standard base64 (RFC 4648
+  alphabet, no line breaks: the handler decodes it with `Base64.getDecoder()`) and is capped at
+  1 MiB of file content (1,398,104 base64 characters) — refused before decoding. The UI import is
+  not limited.
+
+Business refusals keep the handler's own literals and statuses (e.g. `Only draft (unprocessed)
+statements can be modified`, `The statement is posted and cannot be reactivated`, code
+`NO_VALID_LINES`).
+
+**Generic writes are closed (405).** On the `financial-account` W spec, `importedBankStatements`
+and `bankStatementLines` are `readOnly: true` in `artifacts/financial-account/decisions.json`, so
+`ETGO_SF_ENTITY` grants `GET`/`GETBYID` only and `POST`/`PUT`/`PATCH`/`DELETE` answer 405
+(`<METHOD> not enabled for <entity>`) on REST and MCP alike. Both entities also carry
+`Java_Qualifier = bankStatementEntityHandler` (`BankStatementEntityHandler`), which refuses any
+generic create / update / delete that still reaches it with a 405 naming the concrete action —
+create → `createStatement` (or `importStatement` from a file) with `id` = the financial account;
+update → `updateStatement`; delete → `deleteStatement`; any line write → `updateStatement` on the
+line's statement. The SPA is unaffected: it never wrote through those entities (it uses
+`/sws/neo/bank-statements`). Reads (`neo_list` / `neo_get`) pass through, and the agent guidance
+(`AGENT_PROMPT` of `financial-account`, `bank-statements` and of both entities) sends agents to the
+actions.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 

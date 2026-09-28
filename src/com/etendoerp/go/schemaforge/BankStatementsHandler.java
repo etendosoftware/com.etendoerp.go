@@ -33,6 +33,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateCreateBody;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateHeaderDates;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.wrapInEnvelope;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
@@ -360,9 +361,9 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * The bank-statement actions an agent can run through {@code neo_action} (ETP-5447) — see
-   * {@link BankStatementAgentActions}. Declaring them also makes {@link #servesActions()} true and
-   * lists {@code bank-statements} in the {@code neo_action} / {@code neo_schema} enums.
+   * The bank-statement actions an agent can run through {@code neo_action} (ETP-5447, ETP-5469)
+   * — see {@link BankStatementAgentActions}. Declaring them also makes {@link #servesActions()}
+   * true and lists {@code bank-statements} in the {@code neo_action} / {@code neo_schema} enums.
    *
    * @return the declared actions by name, in presentation order
    */
@@ -373,10 +374,10 @@ public class BankStatementsHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    // ETP-5447: purely additive. Only neo_action produces an ACTION context for this spec; the
-    // SPA's ?action= calls arrive as report-spec requests with no endpoint type and never enter
-    // this branch, so their routing below is untouched. The dispatcher re-enters this method with
-    // a context that carries no endpoint type, so it cannot loop back here.
+    // ETP-5447 / ETP-5469: purely additive. Only neo_action produces an ACTION context for this
+    // spec; the SPA's ?action= calls arrive as report-spec requests with no endpoint type and never
+    // enter this branch, so their routing below is untouched. The dispatcher calls the handle*
+    // methods directly with a derived context that carries no endpoint type, so it cannot loop back.
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return BankStatementAgentActions.dispatch(this, context);
     }
@@ -406,7 +407,7 @@ public class BankStatementsHandler implements NeoHandler {
     return NeoResponse.error(405, "Method not allowed.");
   }
 
-  private NeoResponse handleList(NeoContext context) {
+  NeoResponse handleList(NeoContext context) {
     String accountId = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_ACCOUNT_ID)
         : null;
@@ -427,7 +428,7 @@ public class BankStatementsHandler implements NeoHandler {
     }
   }
 
-  private NeoResponse handleGetLines(NeoContext context) {
+  NeoResponse handleGetLines(NeoContext context) {
     String multi = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_STATEMENT_IDS)
         : null;
@@ -460,21 +461,6 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * Builds the {@code { "response": { "data": { <key>: <payload> } } }} envelope
-   * shared by every successful GET endpoint here. Pulled out so the literal
-   * keys "response" / "data" only appear once (S1192).
-   */
-  private static JSONObject wrapInEnvelope(String key, Object payload) throws Exception {
-    JSONObject data = new JSONObject();
-    data.put(key, payload);
-    JSONObject responseData = new JSONObject();
-    responseData.put(JSON_DATA, data);
-    JSONObject env = new JSONObject();
-    env.put(JSON_RESPONSE, responseData);
-    return env;
-  }
-
-  /**
    * {@code ?action=import} — parses an uploaded Cuaderno 43 or generic CSV file into a new,
    * processed statement. Reached by the MCP {@code importStatement} action and by direct REST
    * callers; the SPA no longer calls it (since ETP-4954 its import parses the file in the browser
@@ -487,7 +473,7 @@ public class BankStatementsHandler implements NeoHandler {
    * the same rule the SPA's CSV import applies ({@code buildStatementCreatePayload}), so a
    * statement lands in the same place of the date-ordered list whichever path imported it.
    */
-  private NeoResponse handleImport(NeoContext context) {
+  NeoResponse handleImport(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) {
       return NeoResponse.error(400, MSG_BODY_REQUIRED);
@@ -571,7 +557,7 @@ public class BankStatementsHandler implements NeoHandler {
    * }
    * </pre>
    */
-  private NeoResponse handleCreate(NeoContext context) {
+  NeoResponse handleCreate(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -631,7 +617,7 @@ public class BankStatementsHandler implements NeoHandler {
    * reconcilable, mirroring "Save and process" on the create flow. Only drafts
    * (unprocessed) can be processed. Body: {@code { "id": "..." }}.
    */
-  private NeoResponse handleProcess(NeoContext context) {
+  NeoResponse handleProcess(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -674,7 +660,7 @@ public class BankStatementsHandler implements NeoHandler {
    * line at all, which Classic never did).
    * Body: {@code { "id": "..." }}.
    */
-  private NeoResponse handleReactivate(NeoContext context) {
+  NeoResponse handleReactivate(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -713,7 +699,7 @@ public class BankStatementsHandler implements NeoHandler {
    * dates are required, exactly as on create
    * (see {@link BankStatementsSupport#validateHeaderDates}).
    */
-  private NeoResponse handleUpdate(NeoContext context) {
+  NeoResponse handleUpdate(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -790,7 +776,7 @@ public class BankStatementsHandler implements NeoHandler {
    * the attempt through and explains the failure (ETP-5111). Note this also covers an old manual
    * statement on an account that has since been connected.
    */
-  private NeoResponse handleDelete(NeoContext context) {
+  NeoResponse handleDelete(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
@@ -1081,7 +1067,7 @@ public class BankStatementsHandler implements NeoHandler {
    * no statement/line rows leak into the DB even if the parser inserts them
    * along the way (Cuaderno43 / OpenCSV both call {@code save()} internally).
    */
-  private NeoResponse handlePreview(NeoContext context) {
+  NeoResponse handlePreview(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
