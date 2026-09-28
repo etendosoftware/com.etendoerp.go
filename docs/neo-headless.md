@@ -4324,6 +4324,27 @@ Ventas only the Receivables schedule; Compras only the Payables one).
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
 fallback).
 
+**Performance (ETP-5503).** Adding a template that overlaps templates the user already has used to
+be the slow save (5–13 s in production for +1 template): the overlap guards cleared each
+conflicting process / OBUIAPP process row on its own, and each one paid a `refresh(role)` that
+cascades into every loaded access collection of the role (~27 statements per row).
+`AbstractAccessOverlapCorruptionGuard#guardNewInheritance` now finds every conflict with one query
+and clears them all with one bulk `DELETE` and one `refresh(role)`. Locally, +Finance onto
+Sales+Purchasing (43 cleared rows) went from ~1500 to ~235 statements, close to the ~220 of a
+non-overlapping add. The resulting access set is unchanged.
+
+Each `reconcileInheritances` call logs one INFO summary line
+(`RoleCompositionMetrics`). The overlap guards themselves log only at DEBUG: the per-row
+`Corrected` / `Widened` / repoint lines and the per-batch `Prevented` line:
+
+```
+Reconciled template inheritances of role <id> (+1 / -0): prevented=43 copied=122 widened=3
+repointed=0 stagesMs={windowPreclear=8, guard=13, save=120, flush=46, reconcile=7} totalMs=183
+```
+
+`guard` is part of `save`, so core's own propagation time is `save − guard`. Use this line, or the
+ALB latency of `/sws/neo/assignuserroles`, to measure a save in production.
+
 ---
 
 ## 8e. Read User Role Assignments (SFUserRoleAssignments Webhook, ETP-4906)

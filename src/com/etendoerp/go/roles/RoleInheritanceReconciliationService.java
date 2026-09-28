@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
@@ -54,6 +56,8 @@ import org.openbravo.model.ad.access.WindowAccess;
  */
 class RoleInheritanceReconciliationService {
 
+  private static final Logger log = LogManager.getLogger(RoleInheritanceReconciliationService.class);
+
   private static final long SEQNO_STEP = 10L;
 
   /**
@@ -76,9 +80,20 @@ class RoleInheritanceReconciliationService {
    * which also always queries fresh rather than trusting {@code role.getADRoleInheritanceList()}.
    * </p>
    *
+   * <p>Logs one INFO summary line per call (ETP-5503) — see {@link RoleCompositionMetrics}.</p>
+   *
    * @return {@code {addedCount, removedCount}}
    */
   int[] reconcileInheritances(Role personalRole, List<Role> templates) {
+    try (RoleCompositionMetrics metrics = RoleCompositionMetrics.start()) {
+      int[] counters = applyInheritanceChanges(personalRole, templates);
+      log.info("Reconciled template inheritances of role {} (+{} / -{}): {}",
+          personalRole.getId(), counters[0], counters[1], metrics.summary());
+      return counters;
+    }
+  }
+
+  private int[] applyInheritanceChanges(Role personalRole, List<Role> templates) {
     Set<String> desiredIds = new LinkedHashSet<>();
     for (Role template : templates) {
       desiredIds.add(template.getId());
@@ -98,6 +113,7 @@ class RoleInheritanceReconciliationService {
     int removed = 0;
     for (RoleInheritance inheritance : existing) {
       if (!desiredIds.contains(inheritance.getInheritFrom().getId())) {
+        long removeStart = System.nanoTime();
         OBDal.getInstance().remove(inheritance);
         // Same core RoleInheritanceEventHandler fan-out as the ADD loop below (see its own
         // comment) — deleting this row triggers RoleInheritanceManager#applyRemoveInheritance,
@@ -112,6 +128,7 @@ class RoleInheritanceReconciliationService {
         } finally {
           OBContext.restorePreviousMode();
         }
+        RoleCompositionMetrics.addStageTime("remove", System.nanoTime() - removeStart);
         removed++;
       }
     }
@@ -121,7 +138,9 @@ class RoleInheritanceReconciliationService {
       if (existingIds.contains(template.getId())) {
         continue;
       }
+      long preclearStart = System.nanoTime();
       preventWindowAccessOverlapCorruption(personalRole, template);
+      RoleCompositionMetrics.addStageTime("windowPreclear", System.nanoTime() - preclearStart);
       maxSeqno += SEQNO_STEP;
       RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
       inheritance.setNewOBObject(true);
@@ -131,7 +150,9 @@ class RoleInheritanceReconciliationService {
       inheritance.setRole(personalRole);
       inheritance.setInheritFrom(template);
       inheritance.setSequenceNumber(maxSeqno);
+      long saveStart = System.nanoTime();
       OBDal.getInstance().save(inheritance);
+      RoleCompositionMetrics.addStageTime("save", System.nanoTime() - saveStart);
       // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
       // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
       // OBUIAPP process, ...) to copy the template's accesses onto personalRole. Each injector's
@@ -145,19 +166,23 @@ class RoleInheritanceReconciliationService {
       // this flush with OBSecurityException as soon as a template actually has any (ETP-4830's
       // own EnsureSystemRoleTemplatesScript#reconcileProcessAccess started seeding those rows).
       // Same bypass RoleInheritanceManager's own internal saves use, scoped to just this flush.
+      long flushStart = System.nanoTime();
       OBContext.setAdminMode(false);
       try {
         OBDal.getInstance().flush();
       } finally {
         OBContext.restorePreviousMode();
       }
+      RoleCompositionMetrics.addStageTime("flush", System.nanoTime() - flushStart);
       added++;
     }
 
+    long reconcileStart = System.nanoTime();
     if (added > 0) {
       reconcileWindowAccessAfterComposition(personalRole, templates);
     }
     syncShowAccountingFieldsFlag(personalRole, templates);
+    RoleCompositionMetrics.addStageTime("reconcile", System.nanoTime() - reconcileStart);
     return new int[] { added, removed };
   }
 
