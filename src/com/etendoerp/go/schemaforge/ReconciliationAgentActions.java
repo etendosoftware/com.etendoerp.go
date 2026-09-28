@@ -78,8 +78,10 @@ final class ReconciliationAgentActions {
   private static final String P_DATE_TO = ReconciliationHandler.PARAM_DATE_TO;
   private static final String S = NeoActionContract.TYPE_STRING;
   private static final String LINE_DESC =
-      "Id of the bank statement line (from pendingLines). For a partially reconciled line use "
-          + "its pending sub-line, not the group head (the refusal names it as remainderLineId).";
+      "Id of the bank statement line (from pendingLines). For a partially reconciled line, "
+          + "candidates, reconcileGroup and applySuggestions accept the group head and act on its "
+          + "pending sub-line (remainderLineId) automatically; reconcileDifference needs the "
+          + "pending sub-line itself and its refusal names it as remainderLineId.";
 
   /** What the {@code neo_action} {@code id} argument identifies for every action here. */
   private static final String ID_DESC =
@@ -288,9 +290,16 @@ final class ReconciliationAgentActions {
                 + "and/or unpaid invoices, which are paid on the fly. Send operationIds, invoices, "
                 + "or both. The selection must add up to the line amount; a gap within the "
                 + "account's tolerance is posted to the difference GL item, a larger shortfall "
-                + "leaves the line partially reconciled (pending remainder). Foreign-currency "
-                + "items are converted with the same exchange rate the UI uses — no extra "
-                + "parameter. Completes and processes the reconciliation, or rolls back.",
+                + "leaves the line partially reconciled (pending remainder). A 201 with "
+                + "partial:true means the line is NOT complete: pendingAmount (signed like the "
+                + "line) is still open — continue with remainderLineId. partial:false means the "
+                + "line is closed. Foreign-currency items are converted with the same exchange "
+                + "rate the UI uses — no extra parameter. A line left linked to a movement "
+                + "that has no reconciliation at all is freed first (the movement is kept). A "
+                + "line whose movement sits in an unconfirmed draft reconciliation is refused "
+                + "(409) until that draft is reviewed. Completes and processes the "
+                + "reconciliation; a refusal rolls back this call's own writes, invoice payments "
+                + "included.",
             required(P_LINE, S, LINE_DESC),
             array("operationIds", S, false, "Ids of existing movements (from candidates, "
                 + "kind=transactions)."),
@@ -315,9 +324,10 @@ final class ReconciliationAgentActions {
         NeoActionContract.write(UNDO_RECONCILIATION,
             "Undoes the reconciliation of a statement line: the line returns to pending, "
                 + "movements and payments that the reconciliation created automatically are "
-                + "removed, pre-existing movements are kept but unreconciled. Refused when the "
-                + "accounting period is closed, or when another draft reconciliation of the "
-                + "account holds unconfirmed matches.",
+                + "removed, pre-existing movements are kept but unreconciled. A line linked to a "
+                + "movement that has no reconciliation is just freed (healed:true; the movement "
+                + "is kept). Refused when the accounting period is closed, or when another draft "
+                + "reconciliation of the account holds unconfirmed matches.",
             required(P_LINE, S, LINE_DESC)),
         NeoActionContract.write(REMOVE_OPERATION,
             "Detaches specific movements from a reconciled line and deletes the ones the "
@@ -335,7 +345,8 @@ final class ReconciliationAgentActions {
             "Confirms automatch groups in one reconciliation. Accept all = send every group "
                 + "autoMatch returned; accept some = send only those; to reject a group simply do "
                 + "not send it (nothing is persisted for it). Invalid groups are reported per "
-                + "group in results[] without blocking the others.",
+                + "group in results[] without blocking the others — including a second group that "
+                + "lands on a line an earlier group of the same call already took.",
             array("groups", NeoActionContract.TYPE_OBJECT, true, "One entry per accepted autoMatch "
                 + "group: {statementLineId: group.statementLine.id, operationIds: ids of the "
                 + "group's operations whose isNew is false, createPayment: group.createPayment "
