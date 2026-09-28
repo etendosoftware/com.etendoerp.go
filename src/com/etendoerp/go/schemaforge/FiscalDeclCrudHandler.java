@@ -106,6 +106,21 @@ class FiscalDeclCrudHandler {
    */
   static final String PROPERTY_SUBMISSION_METHOD = "submissionMethod";
   /**
+   * Java property for the {@code Submitted_Snapshot} TEXT column added to
+   * {@code ETGO_Fiscal_Decl} (ETP-5438) — the FIGURES {@code GET /fiscal303/boxes} (Modelo 303)
+   * or {@code GET /fiscal349/operators} (Modelo 349) returned for the declaration's
+   * {@code (org, year, period)} at the moment it entered {@link #SUBMITTED_STATUSES}, computed
+   * server-side with the same code path in the same request (see {@link FiscalSubmittedSnapshotSupport#takeSubmittedSnapshot}).
+   * Per-invoice arrays are not kept, only their row counts
+   * ({@link AbstractFiscalHandler#computeSubmittedSnapshot}), so its size never grows with the
+   * number of invoices.
+   * Once presented, a declaration is served from this snapshot and never recomputed from the
+   * current invoices; "Reactivar declaración" (back to draft) clears it. {@code null} on every
+   * declaration that was never submitted AND on legacy declarations presented before this column
+   * existed — those deliberately keep the live-compute read path (no data-fix, product decision).
+   */
+  static final String PROPERTY_SUBMITTED_SNAPSHOT = "submittedSnapshot";
+  /**
    * {@code submissionMethod} value set only by {@code Fiscal303SubmissionSupport
    * #persistSuccessfulSubmission} on a real, non-test-mode AEAT telematic success (ETP-4755).
    * Duplicated here (rather than referencing {@code Fiscal303SubmissionSupport}'s private
@@ -125,7 +140,8 @@ class FiscalDeclCrudHandler {
    * "Duplicated, deliberately, in 4 places" for the frontend side of this same tradeoff). Used
    * by {@link #rejectRepresentation} (re-presentation guard, ETP-5438) and by
    * {@link Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to block a raw
-   * compute/generate call against an already-presented declaration.
+   * {@code generate} call against an already-presented declaration (the boxes/operators reads
+   * stay open so the frontend can render a submitted declaration).
    */
   static final java.util.Set<String> SUBMITTED_STATUSES =
       java.util.Set.of("submitted", "submitted_ext", "submitted_ack");
@@ -206,6 +222,7 @@ class FiscalDeclCrudHandler {
   private static final String PARAM_ORG_ID      = "orgId";
   private static final String MANUAL_DATA_KEY   = "manualData";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
+  private static final String SUBMITTED_SNAPSHOT_KEY = "submittedSnapshot";
   private static final String CODE_KEY          = "code";
   private static final String MESSAGE_KEY       = "message";
   private static final String SEVERITY_KEY      = "severity";
@@ -213,9 +230,16 @@ class FiscalDeclCrudHandler {
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
   private final NeoServlet servlet;
+  /**
+   * ETP-5438 submission snapshot handling for this table (transition, lookup, parsing) —
+   * extracted to {@link FiscalSubmittedSnapshotSupport} to keep this class under the SonarQube
+   * {@code java:S1448} method-count threshold.
+   */
+  final FiscalSubmittedSnapshotSupport snapshots;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
+    this.snapshots = new FiscalSubmittedSnapshotSupport(this, servlet);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -299,6 +323,9 @@ class FiscalDeclCrudHandler {
     decl.set(PROPERTY_DECLARATION_TYPE, requestedDeclType);
     decl.set(PROPERTY_DECL_SEQ, declSeq);
     decl.set(PROPERTY_DECLARATION_STATUS, status);
+    if (!snapshots.applyTransition(decl, null, status, "(new)", response)) {
+      return;
+    }
     OBDal.getInstance().save(decl);
     JSONObject created = declToJson(decl);
     OBDal.getInstance().commitAndClose();
@@ -398,20 +425,29 @@ class FiscalDeclCrudHandler {
    * {@link #PROPERTY_DECL_SEQ} — same "latest wins" ordinal {@link #resolveNextDeclSeq} computes
    * off) for the given natural key, or {@code null} when no declaration exists for it yet.
    *
-   * <p>ETP-5438 — {@code /fiscal349/operators}, {@code /fiscal349/generate} and their 303
-   * counterparts take no declaration id, only {@code (org, year, period)}: the natural key can
-   * legitimately have MORE THAN ONE declaration (the rectificativa flow, {@link
-   * #resolveNextDeclSeq}'s own javadoc), so "the declaration this call is about" is inherently
-   * the latest one for that period — an older, already-submitted declaration for the SAME period
-   * must not block a fresh rectificativa draft's own compute/generate. Used by {@link
-   * Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to reject a compute/generate call once
-   * that latest declaration is already in {@link #SUBMITTED_STATUSES} — the same "must not
-   * silently recompute/regenerate an already-presented declaration" guarantee {@link
-   * #rejectRepresentation} enforces for the PUT path, extended to the read/generate endpoints a
-   * direct API call could otherwise reach without ever going through this handler's PUT at all.
+   * <p>ETP-5438 — {@code /fiscal349/generate} and {@code /fiscal303/generate} take no
+   * declaration id, only {@code (org, year, period)}: the natural key can legitimately have MORE
+   * THAN ONE declaration (the rectificativa flow, {@link #resolveNextDeclSeq}'s own javadoc), so
+   * "the declaration this call is about" is inherently the latest one for that period — an
+   * older, already-submitted declaration for the SAME period must not block a fresh
+   * rectificativa draft's own generate. Used by {@link Fiscal349BoxesHandler}/{@code
+   * Fiscal303BoxesHandler} to reject a generate call once that latest declaration is already in
+   * {@link #SUBMITTED_STATUSES} — the same "must not silently regenerate an already-presented
+   * declaration" guarantee {@link #rejectRepresentation} enforces for the PUT path, extended to
+   * the generate endpoints a direct API call could otherwise reach without ever going through
+   * this handler's PUT at all. The boxes/operators reads are intentionally NOT gated: they serve
+   * a submitted declaration from its persisted snapshot ({@link FiscalSubmittedSnapshotSupport#findLatestSubmittedSnapshot}),
+   * or compute it live for a legacy declaration presented before snapshots existed.
    */
   String findLatestDeclarationStatus(String clientId, String orgId, String model, long year,
       String period) {
+    BaseOBObject latest = findLatestDeclaration(clientId, orgId, model, year, period);
+    return latest != null ? asString(latest.get(PROPERTY_DECLARATION_STATUS)) : null;
+  }
+
+  /** Highest-{@code DECL_SEQ} declaration for the natural key, or {@code null} when none. */
+  BaseOBObject findLatestDeclaration(String clientId, String orgId, String model,
+      long year, String period) {
     OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
     long maxSeq = -1L;
     BaseOBObject latest = null;
@@ -423,7 +459,7 @@ class FiscalDeclCrudHandler {
         latest = existing;
       }
     }
-    return latest != null ? asString(latest.get(PROPERTY_DECLARATION_STATUS)) : null;
+    return latest;
   }
 
   private void handleDeclPut(HttpServletRequest request, HttpServletResponse response)
@@ -446,11 +482,21 @@ class FiscalDeclCrudHandler {
     if (rejectOversizedIdentificationFields(body, id, response)) {
       return;
     }
+    String previousStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    String newStatus = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : null;
+    if (newStatus != null
+        && !snapshots.applyTransition(decl, previousStatus, newStatus, id, response)) {
+      return;
+    }
     applyDeclPutScalarFields(decl, body);
     boolean manualDataApplied = applyManualDataIfRequested(decl, body);
     decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+    // Echo only a snapshot taken by THIS request; read before commitAndClose() closes the session.
+    boolean justSubmitted = newStatus != null && SUBMITTED_STATUSES.contains(newStatus)
+        && !SUBMITTED_STATUSES.contains(previousStatus);
+    JSONObject snapshot = justSubmitted ? FiscalSubmittedSnapshotSupport.parseSubmittedSnapshot(decl) : null;
     OBDal.getInstance().commitAndClose();
-    writeDeclPutResponse(response, manualDataApplied);
+    writeDeclPutResponse(response, manualDataApplied, snapshot);
   }
 
   /**
@@ -697,13 +743,17 @@ class FiscalDeclCrudHandler {
     return !hasManualData || setManualDataIfPresent(decl, body);
   }
 
-  private void writeDeclPutResponse(HttpServletResponse response, boolean manualDataApplied)
-      throws IOException {
-    if (manualDataApplied) {
-      response.getWriter().write("{\"ok\":true}");
-    } else {
-      response.getWriter().write("{\"ok\":true,\"manualDataApplied\":false}");
-    }
+  /**
+   * Writes the PUT response. When this request presented the declaration, the snapshot it took is
+   * echoed back as {@code submittedSnapshot} (ETP-5438), so the frontend can freeze the
+   * just-presented declaration on the exact persisted payload without refetching the list.
+   */
+  private void writeDeclPutResponse(HttpServletResponse response, boolean manualDataApplied,
+      JSONObject submittedSnapshot) throws IOException {
+    String head = manualDataApplied ? "{\"ok\":true" : "{\"ok\":true,\"manualDataApplied\":false";
+    String snapshotPart = submittedSnapshot != null
+        ? ",\"" + SUBMITTED_SNAPSHOT_KEY + "\":" + submittedSnapshot.toString() : "";
+    response.getWriter().write(head + snapshotPart + "}");
   }
 
   /**
@@ -967,6 +1017,8 @@ class FiscalDeclCrudHandler {
     String submissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
     o.put(SUBMISSION_METHOD_KEY, StringUtils.isNotBlank(submissionMethod)
         ? submissionMethod : JSONObject.NULL);
+    JSONObject snapshot = FiscalSubmittedSnapshotSupport.parseSubmittedSnapshot(decl);
+    o.put(SUBMITTED_SNAPSHOT_KEY, snapshot != null ? snapshot : JSONObject.NULL);
     return o;
   }
 
@@ -1001,11 +1053,11 @@ class FiscalDeclCrudHandler {
         ? String.valueOf(((BaseOBObject) related).getId()) : "";
   }
 
-  private static String asString(Object value) {
+  static String asString(Object value) {
     return value != null ? String.valueOf(value) : "";
   }
 
-  private static int asInt(Object value) {
+  static int asInt(Object value) {
     if (value instanceof Number) {
       return ((Number) value).intValue();
     }
