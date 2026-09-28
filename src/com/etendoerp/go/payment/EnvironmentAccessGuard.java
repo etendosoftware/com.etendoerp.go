@@ -30,10 +30,27 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * ETP-5047 — the single commercial access check every tenant entry point runs: NEO
- * ({@code NeoAuthenticator}), MCP ({@code McpServlet}), the servlets authenticating through
- * {@code JwtAuthUtils.authenticateOrFail} (favorites, report selectors, survey config, fiscal test
- * mode) and the environment login endpoints of {@code EtendoGoJwtServlet}.
+ * ETP-5047 — the single commercial access check every tenant entry point runs. The complete list
+ * of gated surfaces:
+ *
+ * <ul>
+ *   <li><b>NEO</b> — {@code NeoAuthenticator}, {@code SurfacePolicy.NEO_API}, every credential
+ *       scheme (Bearer JWT, cookie session, OAuth2 token);</li>
+ *   <li><b>{@code SurfacePolicy.NEO_DATA}</b> — the favorites and fiscal test mode servlets
+ *       (through {@code JwtAuthUtils.authenticateOrFail}), the report selectors (through
+ *       {@code NeoServletSupport.authenticate}) and the OAuth2 API-key management endpoints
+ *       (through {@code OAuth2Servlet}, which refuses in its own error envelope);</li>
+ *   <li><b>MCP</b> — {@code McpServlet}, through {@link #checkAsSystem};</li>
+ *   <li><b>{@code /sws/go} tenant-session endpoints</b> — {@code EtendoGoJwtServlet}'s
+ *       {@code resolveTenantSession};</li>
+ *   <li><b>the legacy environment login</b> — {@code GET /sws/go/login?userId=}, refused because
+ *       it hands out a raw Etendo JWT.</li>
+ * </ul>
+ *
+ * <p>{@code POST /sws/go/session/environment} reads {@link #enforcedDecision} to report the
+ * decision but never refuses: the blocked-access screen and the pages that let the customer pay
+ * render inside the entered environment. The survey configuration ({@code NEO_AUXILIARY}) is
+ * deliberately not gated.
  *
  * <p>It decides with {@link TenantEnvironmentLifecycleService#evaluateAccess} and then applies the
  * kill switch ({@link EnvironmentAccessEnforcementFlag}): a denial is returned unless enforcement

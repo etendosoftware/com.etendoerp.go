@@ -143,8 +143,12 @@ public final class GoFeatureFlags {
 
   /**
    * ETP-5047 — the kill switch of commercial environment-access enforcement: the HTTP 402 that
-   * NEO, MCP, the {@code JwtAuthUtils} servlets and the legacy environment login answer once a
-   * demo trial has expired or a subscription's payment grace has elapsed.
+   * NEO (every scheme), the {@code NEO_DATA} surfaces (favorites, fiscal test mode, report
+   * selectors, OAuth2 API keys), MCP, the {@code /sws/go} tenant-session endpoints and the legacy
+   * {@code GET /sws/go/login?userId=} answer once a demo trial has expired or a subscription's
+   * payment grace has elapsed. The survey configuration ({@code NEO_AUXILIARY}) is not gated, and
+   * {@code POST /sws/go/session/environment} reports the decision without refusing; the complete
+   * list lives on {@code EnvironmentAccessGuard}.
    *
    * <p><b>Phrased as an OFF switch on purpose, because every failure of this class resolves to
    * {@code false}.</b> Enforcement is live from deploy and stays live when the flag is not
@@ -153,8 +157,9 @@ public final class GoFeatureFlags {
    * disables the refusal: on ConfigCat the boolean setting served as {@code true}; locally
    * ({@link PropertiesFeatureProvider}) {@code true}, {@code Y}, {@code yes} or {@code 1}, case
    * insensitive and trimmed. {@code false}/{@code N}/{@code no}/{@code 0} keep enforcing, and any
-   * other value is a {@code PARSE_ERROR} that keeps enforcing too. A positively phrased "enforcement enabled" flag would do the opposite — a missing key
-   * would silently open every blocked tenant — so do not "fix" the polarity.
+   * other value is a {@code PARSE_ERROR} that keeps enforcing too. A positively phrased
+   * "enforcement enabled" flag would do the opposite — a missing key would silently open every
+   * blocked tenant — so do not "fix" the polarity.
    *
    * <p><b>What {@code true} does.</b> The access decision is still computed and logged at INFO
    * (entry point, tenant, decision) instead of being refused, so an operator can see who would

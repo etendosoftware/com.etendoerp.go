@@ -369,8 +369,10 @@ A blocked environment's data is fully inaccessible. It is not deleted (TL, 2026-
 - Every `402` above is decided by one class, `EnvironmentAccessGuard` (ETP-5047): the bind step
   runs it for policies that require commercial access and carries its denial as
   `EnvironmentAuthOutcome.getAccessDenial()`, so the kill switch
-  `environment-access-enforcement-off` and the structured body (`error.code` /
-  `error.decision`) are the same on every surface (`open-and-notable-topics.md` §3.8).
+  `environment-access-enforcement-off` is the same on every surface, and so is the structured
+  body (`error.code` / `error.decision`) — with one exception: the OAuth2 API-key endpoints
+  (`NEO_DATA`, through `OAuth2Servlet`) refuse in the OAuth2 servlet's own error envelope, not in
+  the guard's body (`open-and-notable-topics.md` §3.8).
 
 ### Guards — `AuthenticationEntryPointGuardTest`
 

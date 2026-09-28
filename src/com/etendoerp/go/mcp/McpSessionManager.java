@@ -34,7 +34,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * MCP uses long-lived SSE connections where multiple tool calls happen over time.
  * Each tool call MUST have its own OBContext and Hibernate session to prevent
  * cross-contamination between calls. This class wraps tool execution with proper
- * setup/teardown following the same pattern as NeoServlet's authenticateJwt.
+ * setup/teardown, building the context the same way NEO's shared authentication pipeline does
+ * ({@code EnvironmentRequestAuthenticator}'s bind step, through
+ * {@link SecureWebServicesUtils#createContext}).
  */
 public class McpSessionManager {
 
@@ -91,7 +93,7 @@ public class McpSessionManager {
         }
       }
 
-      // Set OBContext using the same method as NeoServlet.authenticateJwt
+      // Set OBContext the way EnvironmentRequestAuthenticator's bind step does for NEO
       OBContext context = SecureWebServicesUtils.createContext(
           userId, roleId, effectiveOrg, warehouseId, effectiveClient);
       OBContext.setOBContext(context);
