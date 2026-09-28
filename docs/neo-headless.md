@@ -261,11 +261,17 @@ the same `ETGO_SF_FIELD` metadata that the REST filter already uses: an included
 writable only when it is in that filter's writable set. Explicit grants for identifiers,
 `active`, and link-to-parent columns therefore keep their existing behavior.
 
-This boundary only judges the original client body. Mandatory defaults, callouts, and
-`NeoHandler` hooks may still add derived read-only values after the check; those are
-server-authored values, not an attempted client write. `client` and `organization` remain a
-separate session-ownership policy: REST strips caller-supplied values and resolves them from
-the authenticated context rather than rejecting the request.
+Edge cases:
+
+- **API-key alias.** The rejected `field` is the key the caller actually sent (e.g.
+  `documentNumber`), not the DAL property it resolves to (`documentNo`), so the error points at
+  something the caller recognizes.
+- **Server-authored values added after the check.** Mandatory defaults, callouts, and
+  `NeoHandler` hooks may still add a derived read-only value once this boundary has passed;
+  that is a server-authored value, not an attempted client write, and is not rejected.
+- **`client` / `organization` are not read-only-field rejections.** They are a separate
+  session-ownership policy: REST strips any caller-supplied value and resolves both from the
+  authenticated context instead of rejecting the request.
 
 **DELETE** -- `DELETE /{specName}/{entityName}/{recordId}`
 

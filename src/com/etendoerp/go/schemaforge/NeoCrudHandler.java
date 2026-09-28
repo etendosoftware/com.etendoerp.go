@@ -110,14 +110,18 @@ class NeoCrudHandler {
    * <p>{@code KEY_ERROR} serves both shapes in use: the nested {@code {"error":{...}}} wrapper of
    * the MISSING_REQUIRED_FIELDS body, and the flat discriminator every later envelope carries.
    * They are the same key name, holding different things.
+   *
+   * <p>Package-private, not {@code private}: {@link NeoReadOnlyFieldResponse} builds the same
+   * envelope shape for a sixth case (IMP-28 clause 2) and reuses these instead of re-spelling
+   * the keys a sixth time.
    */
-  private static final String KEY_STATUS = "status";
-  private static final String KEY_ERROR = "error";
+  static final String KEY_STATUS = "status";
+  static final String KEY_ERROR = "error";
   private static final String KEY_MESSAGE = "message";
-  private static final String KEY_DETAIL = "detail";
-  private static final String KEY_FIELD = "field";
-  private static final String KEY_HINT = "hint";
-  private static final String KEY_SEE_ALSO = "seeAlso";
+  static final String KEY_DETAIL = "detail";
+  static final String KEY_FIELD = "field";
+  static final String KEY_HINT = "hint";
+  static final String KEY_SEE_ALSO = "seeAlso";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
