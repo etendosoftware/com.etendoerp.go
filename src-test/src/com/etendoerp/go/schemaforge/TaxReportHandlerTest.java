@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -51,9 +52,12 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
@@ -1109,12 +1113,14 @@ class TaxReportHandlerTest {
   }
 
   /**
-   * Regression for ETP-4899: with no currency selected the raw columns must be emitted.
-   * C_CURRENCY_CONVERT_RATE returns NULL when the target currency is NULL, so converting
-   * unconditionally would blank out every amount in the report.
+   * Regression for ETP-4899, narrowed by the currency-default fix: raw columns are only
+   * emitted when there is truly no currency to fall back to — i.e. the client itself has none
+   * (only the System client). C_CURRENCY_CONVERT_RATE returns NULL when the target currency
+   * is NULL, so converting unconditionally would blank out every amount in the report.
    */
   @Test
-  void testWithoutCurrencyIdRawAmountColumnsAreUsed() throws Exception {
+  void testWithoutCurrencyIdRawAmountColumnsAreUsedWhenClientHasNoCurrency() throws Exception {
+    when(client.getCurrency()).thenReturn(null);
     mockResultSetRows(0);
     JSONObject body = buildValidBody("P", false, false);
 
@@ -1132,10 +1138,12 @@ class TaxReportHandlerTest {
 
   /**
    * Same guard as above, for an explicitly empty currencyId (what the frontend sends when
-   * the currency filter is cleared).
+   * the currency filter is cleared) — still falls back to the client's currency, and here too
+   * only stays raw because the client itself has none.
    */
   @Test
-  void testEmptyCurrencyIdRawAmountColumnsAreUsed() throws Exception {
+  void testEmptyCurrencyIdRawAmountColumnsAreUsedWhenClientHasNoCurrency() throws Exception {
+    when(client.getCurrency()).thenReturn(null);
     mockResultSetRows(0);
     JSONObject body = buildValidBody("P", false, false);
     body.put("currencyId", "");
@@ -1147,6 +1155,256 @@ class TaxReportHandlerTest {
         "an empty currencyId must behave like no currency at all");
     assertFalse(sql.contains("c_conversion_rate_document"),
         "an empty currencyId must not add the rate join");
+  }
+
+  // ---- Currency default fallback to the client's own currency --------------
+
+  /**
+   * Regression for the currencyId-fallback fix: when the caller omits currencyId entirely
+   * (the MCP case — the SPA always sends one), the report must NOT sum amounts raw across
+   * mismatched document currencies; it must fall back to converting to the client's own
+   * currency ({@code AD_Client.C_Currency_ID}), same as {@link #resolveDefaultCurrencyId}
+   * documents. This exercises that fallback's second step — the org GL/accounting-schema
+   * lookup ({@link #resolveOrgAcctSchemaCurrency}) resolves nothing here (neither
+   * {@code obDal.get(Organization.class, ...)} nor {@code obDal.createQuery(...)} is stubbed, so
+   * both default to {@code null}), so resolution falls through to the client. The org-currency-
+   * wins case is covered separately below.
+   */
+  @Test
+  void testWithoutCurrencyIdFallsBackToClientCurrency() throws Exception {
+    org.openbravo.model.common.currency.Currency clientCurrency =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(clientCurrency.getId()).thenReturn("client-curr");
+    when(client.getCurrency()).thenReturn(clientCurrency);
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    String sql = captureSql();
+    assertEquals(CONVERTED_AMOUNT_COLUMNS, countOccurrences(sql, "C_CURRENCY_CONVERT_RATE("),
+        "amounts must be converted to the client's default currency");
+    assertTrue(sql.contains("LEFT JOIN c_conversion_rate_document crd"),
+        "the invoice-specific rate join must be present");
+
+    List<Object> binds = captureBinds();
+    assertEquals("client-curr", binds.get(0), "target currency bound is the client's own");
+
+    String metaCurrencyId = response.getBody().getJSONObject("response")
+        .getJSONObject("meta").getString("currencyId");
+    assertEquals("client-curr", metaCurrencyId,
+        "meta.currencyId must report the currency actually converted to");
+  }
+
+  /**
+   * Same fallback, for an explicitly empty currencyId (what the frontend sends when the
+   * currency filter is cleared) — must also resolve to the client's currency, not stay raw.
+   */
+  @Test
+  void testEmptyCurrencyIdFallsBackToClientCurrency() throws Exception {
+    org.openbravo.model.common.currency.Currency clientCurrency =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(clientCurrency.getId()).thenReturn("client-curr");
+    when(client.getCurrency()).thenReturn(clientCurrency);
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    String sql = captureSql();
+    assertEquals(CONVERTED_AMOUNT_COLUMNS, countOccurrences(sql, "C_CURRENCY_CONVERT_RATE("),
+        "amounts must be converted to the client's default currency");
+
+    List<Object> binds = captureBinds();
+    assertEquals("client-curr", binds.get(0), "target currency bound is the client's own");
+
+    String metaCurrencyId = response.getBody().getJSONObject("response")
+        .getJSONObject("meta").getString("currencyId");
+    assertEquals("client-curr", metaCurrencyId);
+  }
+
+  /**
+   * An explicit currencyId in the body must win over the client's own currency — the caller's
+   * choice is never silently overridden by the default.
+   */
+  @Test
+  void testExplicitCurrencyIdWinsOverClientCurrency() throws Exception {
+    org.openbravo.model.common.currency.Currency clientCurrency =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(clientCurrency.getId()).thenReturn("client-curr");
+    when(client.getCurrency()).thenReturn(clientCurrency);
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals("curr-001", binds.get(0),
+        "the explicit currencyId must be bound, not the client's own");
+
+    String metaCurrencyId = response.getBody().getJSONObject("response")
+        .getJSONObject("meta").getString("currencyId");
+    assertEquals("curr-001", metaCurrencyId);
+  }
+
+  // ---- Currency default: organization's general-ledger currency (ETP-5483 follow-up) --------
+
+  /**
+   * The report is org-scoped (p.orgId), so the default currency must follow the organization's
+   * own accounting-schema currency (via its general-ledger FK — same precedence as
+   * {@code AgingReportHandler#resolveAcctSchemaForOrg}, ETP-4918), not just the client's base
+   * currency: a multi-org tenant can have an org whose GL is booked in a different currency
+   * than {@code AD_Client.C_Currency_ID}.
+   */
+  @Test
+  void testOrgGeneralLedgerCurrencyWinsOverClientCurrency() throws Exception {
+    Currency clientCurrency = mock(Currency.class);
+    when(clientCurrency.getId()).thenReturn("client-curr");
+    when(client.getCurrency()).thenReturn(clientCurrency);
+
+    Organization targetOrg = mock(Organization.class);
+    when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
+    AcctSchema ledger = mock(AcctSchema.class);
+    Currency orgCurrency = mock(Currency.class);
+    when(orgCurrency.getId()).thenReturn("org-gl-curr");
+    when(ledger.getCurrency()).thenReturn(orgCurrency);
+    when(targetOrg.getGeneralLedger()).thenReturn(ledger);
+
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals("org-gl-curr", binds.get(0),
+        "target currency bound must be the org's general-ledger currency, not the client's");
+
+    String metaCurrencyId = response.getBody().getJSONObject("response")
+        .getJSONObject("meta").getString("currencyId");
+    assertEquals("org-gl-curr", metaCurrencyId);
+  }
+
+  /**
+   * When the org's FK ({@code getGeneralLedger()}) carries no currency, resolution falls back
+   * to the {@code OrganizationAcctSchema} link table — same fallback as
+   * {@code AgingReportHandler#resolveAcctSchemaForOrg} — before ever reaching the client.
+   */
+  @Test
+  void testOrgAcctSchemaLinkTableWinsOverClientCurrencyWhenLedgerFkHasNone() throws Exception {
+    Currency clientCurrency = mock(Currency.class);
+    when(clientCurrency.getId()).thenReturn("client-curr");
+    when(client.getCurrency()).thenReturn(clientCurrency);
+
+    Organization targetOrg = mock(Organization.class);
+    when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
+    when(targetOrg.getGeneralLedger()).thenReturn(null);
+
+    @SuppressWarnings("unchecked")
+    OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+    when(obDal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+    when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+    when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+    AcctSchema linkedSchema = mock(AcctSchema.class);
+    Currency orgCurrency = mock(Currency.class);
+    when(orgCurrency.getId()).thenReturn("org-schema-curr");
+    when(linkedSchema.getCurrency()).thenReturn(orgCurrency);
+    when(schemaQuery.uniqueResult()).thenReturn(linkedSchema);
+
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals("org-schema-curr", binds.get(0),
+        "target currency bound must be the OrganizationAcctSchema-linked currency");
+  }
+
+  /**
+   * When the org has neither a general-ledger FK nor an active {@code OrganizationAcctSchema}
+   * link — the org resolves, but nothing usable comes back — the default must still fall back
+   * to the client's currency rather than raising or leaving amounts unconverted.
+   */
+  @Test
+  void testOrgWithoutGlOrSchemaFallsBackToClientCurrency() throws Exception {
+    Currency clientCurrency = mock(Currency.class);
+    when(clientCurrency.getId()).thenReturn("client-curr");
+    when(client.getCurrency()).thenReturn(clientCurrency);
+
+    Organization targetOrg = mock(Organization.class);
+    when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
+    when(targetOrg.getGeneralLedger()).thenReturn(null);
+
+    @SuppressWarnings("unchecked")
+    OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+    when(obDal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+    when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+    when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+    when(schemaQuery.uniqueResult()).thenReturn(null);
+
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals("client-curr", binds.get(0),
+        "no org GL/schema currency resolved, must fall back to the client's currency");
+  }
+
+  /**
+   * Neither the org nor the client has a currency (only the System client, in practice): the
+   * report must stay raw, exactly like the client-only case already covered by
+   * {@link #testWithoutCurrencyIdRawAmountColumnsAreUsedWhenClientHasNoCurrency}.
+   */
+  @Test
+  void testNeitherOrgNorClientCurrencyLeavesAmountsRaw() throws Exception {
+    when(client.getCurrency()).thenReturn(null);
+    // obDal.get(Organization.class, "test-org-id") is left unstubbed -> null -> org resolution
+    // finds nothing, matching resolveOrgAcctSchemaCurrency's own null-safety.
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    String sql = captureSql();
+    assertFalse(sql.contains("C_CURRENCY_CONVERT_RATE"),
+        "no conversion when neither the org nor the client has a currency");
+  }
+
+  /**
+   * An explicit currencyId in the body must win over BOTH the org's general-ledger currency and
+   * the client's — the caller's choice is never silently overridden by either default.
+   */
+  @Test
+  void testExplicitCurrencyIdWinsOverOrgGeneralLedgerCurrency() throws Exception {
+    Organization targetOrg = mock(Organization.class);
+    when(obDal.get(Organization.class, "test-org-id")).thenReturn(targetOrg);
+    AcctSchema ledger = mock(AcctSchema.class);
+    Currency orgCurrency = mock(Currency.class);
+    when(orgCurrency.getId()).thenReturn("org-gl-curr");
+    when(ledger.getCurrency()).thenReturn(orgCurrency);
+    when(targetOrg.getGeneralLedger()).thenReturn(ledger);
+
+    mockResultSetRows(0);
+    JSONObject body = buildValidBody("P", false, false);
+    body.put("currencyId", "curr-001");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+    assertEquals(200, response.getHttpStatus());
+
+    List<Object> binds = captureBinds();
+    assertEquals("curr-001", binds.get(0),
+        "the explicit currencyId must be bound, not the org's general-ledger currency");
   }
 
   /**
