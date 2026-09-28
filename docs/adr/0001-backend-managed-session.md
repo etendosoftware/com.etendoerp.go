@@ -70,17 +70,20 @@ context-derivation logic that `/sws/neo/*` depends on is unchanged — only its 
 `com.etendoerp.copilot` and accepts only `Authorization: Bearer <SWS JWT>`. Under the cookie scheme
 every SPA call to it (OCR upload, `executeTool`, …) got a 401, and the SPA read that as an expired
 session and logged the user out. `CopilotSessionBridgeFilter` (`@WebFilter("/sws/copilot/*")`)
-resolves the cookie with the same `GoSessionAuthenticator` (CSRF/Origin on unsafe methods
-included). It then rebuilds `OBContext` from the session row, as NEO does, and dispatches to
-Copilot's `RestService`, the same instance `CopilotJwtServlet` routes to.
+authenticates through the shared `EnvironmentRequestAuthenticator` (ETP-5455, policy
+`NEO_DATA`), so the cookie gets the same CSRF/Origin check, role reconciliation (ETP-5395),
+warehouse repair and commercial-access refusal as NEO. With the context the pipeline installs, it
+dispatches to Copilot's `RestService`, the same instance `CopilotJwtServlet` routes to. A refused
+cookie gets the pipeline's status (401, 403 or 402).
 
 The filter does not mint a JWT for the servlet. A first version did, and broke on real tenants.
 `SecureWebServicesUtils.generateToken` dereferences the resolved warehouse unconditionally, and an
 environment whose only warehouse belongs to org `0` (linked via `AD_Org_Warehouse`) resolves none,
 so it threw a NullPointerException. The servlet's JWT also requires a warehouse claim that a
 session does not always carry. Building the context directly keeps D1: one credential, and no
-JWT anywhere on the path. A request that already carries `Authorization` is left to the servlet.
-Without a session cookie the request passes through, so the servlet answers its own 401.
+JWT anywhere on the path. A request without a session cookie (a Bearer caller, or none) passes
+through, so the servlet keeps validating its own JWT and answering its own 401. As everywhere in
+the pipeline, a dead cookie is final: a Bearer sent alongside it is not tried.
 
 ### D2 — Session store: new table `ETGO_GO_SESSION`
 

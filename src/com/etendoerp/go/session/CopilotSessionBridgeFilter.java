@@ -28,15 +28,15 @@ import javax.servlet.annotation.WebFilter;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.copilot.rest.CopilotJwtServlet;
+import com.etendoerp.go.auth.AuthScheme;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.ServletResponseUtils;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Lets the cookie session reach the Copilot endpoints under {@code /sws/copilot/*}.
@@ -46,27 +46,25 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * {@code Authorization: Bearer <SWS JWT>}. Every OCR upload and tool call was therefore answered
  * 401, which the SPA reads as an expired session and turns into a logout.
  *
- * <p>For a resolved session this filter builds {@code OBContext} from the session's environment,
- * exactly like NEO does, and hands the request to Copilot's own {@code RestService}. It does NOT
- * mint a JWT for the servlet: {@code SecureWebServicesUtils.generateToken} dereferences the
- * resolved warehouse unconditionally, so an environment whose only warehouse belongs to org
- * {@code 0} (linked through {@code AD_Org_Warehouse}) made it throw a NullPointerException. The
- * servlet's JWT also demands a warehouse claim, which a session does not always carry.
+ * <p>The request is authenticated by the shared {@link EnvironmentRequestAuthenticator}
+ * (ETP-5455), so the cookie gets the same role reconciliation, warehouse repair and commercial
+ * access check as NEO. For a cookie session the context it installs is used to hand the request
+ * to Copilot's own {@code RestService}. No JWT is minted for the servlet:
+ * {@code SecureWebServicesUtils.generateToken} dereferences the resolved warehouse
+ * unconditionally, so an environment whose only warehouse belongs to org {@code 0} (linked
+ * through {@code AD_Org_Warehouse}) made it throw a NullPointerException.
  *
- * <p>It decides like {@link com.etendoerp.go.common.JwtAuthUtils#authenticateOrFail}:
+ * <p>How each outcome is answered:
  * <ul>
- *   <li>a request that already carries {@code Authorization} is left to the servlet;</li>
- *   <li>no session cookie: pass through, so the servlet answers its own 401;</li>
- *   <li>invalid or expired session, or no environment selected: 401;</li>
- *   <li>unsafe method failing CSRF/Origin: 403 (the authenticator enforces it).</li>
+ *   <li>cookie session authenticated: served by Copilot with the session's context;</li>
+ *   <li>cookie session refused (expired, CSRF, no environment, blocked): the pipeline's status;</li>
+ *   <li>no cookie: left to the servlet, which keeps validating its own Bearer JWT.</li>
  * </ul>
  */
 @WebFilter(urlPatterns = { "/sws/copilot/*" })
 public class CopilotSessionBridgeFilter implements Filter {
 
   private static final Logger log = LogManager.getLogger(CopilotSessionBridgeFilter.class);
-
-  static final String AUTH_HEADER = "Authorization";
 
   /** Hands an authenticated request to Copilot. A seam so tests need no Copilot service. */
   @FunctionalInterface
@@ -81,16 +79,16 @@ public class CopilotSessionBridgeFilter implements Filter {
     void dispatch(HttpServletRequest request, HttpServletResponse response) throws IOException;
   }
 
-  private final GoSessionAuthenticator authenticator;
+  private final EnvironmentRequestAuthenticator authenticator;
   private final CopilotDispatcher dispatcher;
 
   /** Container constructor. */
   public CopilotSessionBridgeFilter() {
-    this(new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore())),
-        CopilotSessionBridgeFilter::dispatchToRestService);
+    this(new EnvironmentRequestAuthenticator(), CopilotSessionBridgeFilter::dispatchToRestService);
   }
 
-  CopilotSessionBridgeFilter(GoSessionAuthenticator authenticator, CopilotDispatcher dispatcher) {
+  CopilotSessionBridgeFilter(EnvironmentRequestAuthenticator authenticator,
+      CopilotDispatcher dispatcher) {
     this.authenticator = authenticator;
     this.dispatcher = dispatcher;
   }
@@ -106,57 +104,23 @@ public class CopilotSessionBridgeFilter implements Filter {
     HttpServletRequest httpReq = (HttpServletRequest) request;
     HttpServletResponse httpResp = (HttpServletResponse) response;
 
-    if ("OPTIONS".equalsIgnoreCase(httpReq.getMethod())
-        || StringUtils.isNotBlank(httpReq.getHeader(AUTH_HEADER))) {
+    if ("OPTIONS".equalsIgnoreCase(httpReq.getMethod())) {
       chain.doFilter(request, response);
       return;
     }
 
-    GoSessionAuthResult result = authenticator.authenticate(httpReq);
-    switch (result.getStatus()) {
-      case AUTHENTICATED:
-        serveWithSession(result.getRecord(), httpReq, httpResp);
-        return;
-      case CSRF_FAILED:
-        log.warn("Forbidden copilot request: CSRF validation failed");
-        ServletResponseUtils.sendError(httpResp, HttpServletResponse.SC_FORBIDDEN,
-            "CSRF validation failed");
-        return;
-      case UNAUTHENTICATED:
-        ServletResponseUtils.sendError(httpResp, HttpServletResponse.SC_UNAUTHORIZED,
-            "Invalid or expired session");
-        return;
-      case NO_SESSION:
-      default:
-        chain.doFilter(request, response);
-    }
-  }
-
-  private void serveWithSession(GoSessionRecord session, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    try {
-      applySessionContext(request, session);
-    } catch (OBException e) {
-      log.warn("Unauthorized copilot request: {}", e.getMessage());
-      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(httpReq, SurfacePolicy.NEO_DATA);
+    if (outcome.getScheme() != AuthScheme.COOKIE) {
+      // No cookie: a Bearer caller, or nobody. The servlet keeps answering those itself.
+      chain.doFilter(request, response);
       return;
     }
-    dispatcher.dispatch(request, response);
-  }
-
-  /**
-   * Rebuild {@code OBContext} from the session record, the same shape as NEO's and
-   * {@code JwtAuthUtils}' session path. A null warehouse is valid here.
-   */
-  static void applySessionContext(HttpServletRequest request, GoSessionRecord session) {
-    if (StringUtils.isAnyBlank(session.getUserId(), session.getRoleId(), session.getCtxOrgId(),
-        session.getCtxClientId())) {
-      throw new OBException("Session has no environment selected");
+    if (!outcome.isAuthenticated()) {
+      log.warn("Refused copilot request ({}): {}", outcome.getHttpStatus(), outcome.getMessage());
+      ServletResponseUtils.sendError(httpResp, outcome.getHttpStatus(), outcome.getMessage());
+      return;
     }
-    OBContext ctx = SecureWebServicesUtils.createContext(session.getUserId(), session.getRoleId(),
-        session.getCtxOrgId(), session.getWarehouseId(), session.getCtxClientId());
-    OBContext.setOBContext(ctx);
-    OBContext.setOBContextInSession(request, ctx);
+    dispatcher.dispatch(httpReq, httpResp);
   }
 
   /**
