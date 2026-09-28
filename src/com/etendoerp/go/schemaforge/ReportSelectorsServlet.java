@@ -268,7 +268,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       case "accounting":
       case "acctschema": return buildAcctschemaQuery();
       case "year":       return buildYearQuery(req);
-      case "currency":   return buildCurrencyQuery();
+      case "currency":   return buildCurrencyQuery(req);
       case "tax":        return buildTaxQuery();
       default: throw new IllegalArgumentException("Unknown selector type: " + type);
     }
@@ -412,18 +412,31 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         fromWhere, "ORDER BY y.year DESC", true);
   }
 
-  private SelectorQuery buildCurrencyQuery() {
-    // Currency is a global (cross-client) table; no ad_client_id filter in fromWhere.
-    // :clientId is used only in the ORDER BY subquery to sort the client's default currency first.
-    // executeSelector binds :clientId on the data query only (count has no ORDER BY).
+  private SelectorQuery buildCurrencyQuery(SelectorRequest req) {
+    // ETP-5420 — c_currency is a global table holding the full ISO catalog (~160 rows), so it
+    // must be scoped to the currencies the tenant actually uses: the client's base currency, the
+    // selected organization's own currency, and anything with an active C_Conversion_Rate row
+    // for this client (either direction). Same rule as report-api.js's dev-plugin selector and
+    // /sales-order's CurrencyRatePicker. :clientId and :selectedOrgId both live in fromWhere,
+    // so executeSelector binds them on the count query as well as on the data query.
+    StringBuilder fromWhere = new StringBuilder("FROM c_currency WHERE isactive='Y'"
+        + " AND (iso_code ILIKE :search OR description ILIKE :search)"
+        + " AND (c_currency_id = (SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)");
+    String firstChoice = "(SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)";
+    if (req.selectedOrgId != null) {
+      fromWhere.append(
+          " OR c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)");
+      firstChoice = "(SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)";
+    }
+    fromWhere.append(" OR EXISTS (SELECT 1 FROM c_conversion_rate cr"
+        + " WHERE cr.isactive = 'Y' AND cr.ad_client_id IN (:clientId, '0')"
+        + " AND (cr.c_currency_id = c_currency.c_currency_id"
+        + " OR cr.c_currency_id_to = c_currency.c_currency_id)))");
     return new SelectorQuery(
         "SELECT c_currency_id AS id, iso_code AS name,"
         + " iso_code || ' - ' || description AS label",
-        new StringBuilder("FROM c_currency WHERE isactive='Y'"
-            + " AND (iso_code ILIKE :search OR description ILIKE :search)"),
-        "ORDER BY (CASE WHEN c_currency_id ="
-        + " (SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)"
-        + " THEN 0 ELSE 1 END), iso_code",
+        fromWhere,
+        "ORDER BY (CASE WHEN c_currency_id = " + firstChoice + " THEN 0 ELSE 1 END), iso_code",
         true);
   }
 
