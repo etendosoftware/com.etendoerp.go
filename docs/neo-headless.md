@@ -669,6 +669,49 @@ paths — so nothing here affects editing an existing user.
   `IDENTITY_KEYS` to include `"P|"`-prefixed keys, or route this fallback through a live
   `AD_Preference` query instead of the session snapshot.
 
+#### 4.3.5 A GET's `_extraProperties` companion key was silently stripped by `NeoFieldFilter` (ETP-5432)
+
+**`_extraProperties`/`additionalProperties` is the classic Openbravo datasource query parameter** a
+GET/list request uses to ask `DefaultJsonDataService` for a related property beyond the entity's own
+curated fields — e.g. `_extraProperties=invoice.salesTransaction` on a request against a
+`TBAI_SyncInvoice`-backed entity, to also get the linked invoice's `IsSOTrx` flag. `NeoCrudHandler`
+forwards the whole incoming query-param map to `DefaultJsonDataService.fetch()` verbatim, so the
+requested property resolves and `DataToJsonConverter` joins it into the response under a flat,
+`$`-joined key (`invoice$salesTransaction` for the dotted request-side path
+`invoice.salesTransaction` — see `DataToJsonConverter#replaceDots` /
+`DalUtil.FIELDSEPARATOR`/`DalUtil.DOT`).
+
+**The bug:** `NeoFieldFilter#filterGetResponse` strips any response key that isn't already known to
+the entity's `ETGO_SF_FIELD` config, UNLESS `isMetadataKey` recognizes it — and `isMetadataKey` only
+recognizes a key starting with `_` or `$`. A joined companion key like `invoice$salesTransaction`
+starts with the FK **property name** instead, so it fell straight through both checks and was
+deleted before ever reaching the client — indistinguishable from a client typo (no error; the value
+was just always absent). This is a **general bug affecting any window** that requests a
+non-curated field via `_extraProperties` on a filtered entity, not specific to any one spec — it
+surfaced via TBAI's fiscal-monitor `isSalesRow(row)` check (`tools/app-shell/src/windows/custom/
+fiscal-monitor/TbaiMonitorSection.jsx` in the functional repo), which read the never-populated
+`invoice$issotrx`/`issotrx` (the DAL property name for `IsSOTrx` is actually `salesTransaction`, not
+the generic `IsXxx`→`xxx` pattern) and defaulted every row to "not sales" as a result — see that
+repo's `docs/generated-custom-windows/fiscal-monitor.md` for the frontend-side fix and symptom.
+
+**Fix — `NeoFieldFilter.forEntity` gained a 3-arg overload,** `forEntity(sfEntity, dalEntityName,
+queryParams)`, that additionally allowlists whatever the caller explicitly requested via
+`_extraProperties` before `filterGetResponse` runs. A new private `includeRequestedExtraProperties`
+parses the query param's comma-separated dotted paths and adds each one to the `included` set,
+converted to the same flat `$`-joined shape the response actually carries
+(`invoice.salesTransaction` → `invoice$salesTransaction`). A caller naming a property this way has
+already opted into seeing it — the same reasoning `includeFkIdentifierVariant` already applies to
+the `$_identifier` variant NEO always adds for a resolved FK.
+
+**Scoped to GET only, deliberately.** `NeoCrudHandler.handleWindowEntityCrud` picks the overload
+based on `context.getHttpMethod()`: `"GET".equals(...)` uses the 3-arg overload (with
+`context.getQueryParams()`), every other verb keeps calling the 2-arg overload unchanged. Only a
+GET/list request can carry a client-requested `_extraProperties` key, and `included` also gates
+`filterCreateRequest`/`filterWriteRequest` on the write paths — allowlisting a write-side field this
+way would be a write permission grant, not a response projection, so the two are kept strictly
+separate. `queryParams` is `null` for every existing 2-arg call site (write paths, tests), which is
+a no-op for `includeRequestedExtraProperties`.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -1069,7 +1112,27 @@ DELETE /sws/neo/attachments/file/{attachmentId}
 Authorization: Bearer {token}
 ```
 
-Returns `204` on success, `404` if the attachment does not exist.
+Returns `204` on success, `404` if the attachment does not exist, `409` if it belongs to a
+non-draft fiscal declaration (see below).
+
+**Fiscal-declaration guard (ETP-5432).** Before this change, `NeoAttachmentsHelper#handleDelete`
+had **no ownership/status check of any kind** — any attachment could be deleted regardless of the
+state of the record it belonged to. A frontend-only guard already hid the delete action for a
+non-draft fiscal declaration's justificante (`AttachmentsTab.jsx`'s `readOnly` prop, functional
+repo — see `docs/generated-custom-windows/fiscal-models.md`, "Justificante delete blocked outside
+draft status"), but that hid a UI control, not the endpoint: a direct `DELETE` call still succeeded
+unconditionally.
+
+`handleDelete` now calls a new private `rejectDeleteOfNonDraftFiscalDeclAttachment(attachment)`
+right after resolving the attachment and before invoking `AttachImplementationManager#delete`.
+It is **deliberately narrow** — it inspects the attachment's own `AD_Table`/`AD_Record_ID` and
+short-circuits (returns `null`, delete proceeds) on the very first check for any table other than
+`ETGO_Fiscal_Decl`, so every other table's attachments (goods-receipt, invoice, …) are completely
+unaffected. For an `ETGO_Fiscal_Decl` attachment, it resolves the owning declaration via `OBDal`
+and rejects with `409` (`"Cannot delete an attachment of a fiscal declaration that is not in
+draft status: <declId>"`) when `DeclarationStatus` is set and is not the draft default — mirroring
+the same 409 shape `FiscalDeclCrudHandler#handleDeclDelete` already uses for deleting the
+declaration record itself.
 
 #### PATCH — Update description
 
