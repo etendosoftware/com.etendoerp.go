@@ -71,12 +71,16 @@ context-derivation logic that `/sws/neo/*` depends on is unchanged — only its 
 every SPA call to it (OCR upload, `executeTool`, …) got a 401, and the SPA read that as an expired
 session and logged the user out. `CopilotSessionBridgeFilter` (`@WebFilter("/sws/copilot/*")`)
 resolves the cookie with the same `GoSessionAuthenticator` (CSRF/Origin on unsafe methods
-included). It then mints a short-lived SWS JWT for the session's environment and injects it as the
-`Authorization` header, so the Copilot servlet keeps validating and routing unchanged. This is the
-one place the JWT survives, and only as a server-side credential translator for a module that
-cannot read the cookie. It never reaches the browser. A request that already carries
-`Authorization` is untouched. Without a session cookie the request passes through, so the servlet
-answers its own 401.
+included). It then rebuilds `OBContext` from the session row, as NEO does, and dispatches to
+Copilot's `RestService`, the same instance `CopilotJwtServlet` routes to.
+
+The filter does not mint a JWT for the servlet. A first version did, and broke on real tenants.
+`SecureWebServicesUtils.generateToken` dereferences the resolved warehouse unconditionally, and an
+environment whose only warehouse belongs to org `0` (linked via `AD_Org_Warehouse`) resolves none,
+so it threw a NullPointerException. The servlet's JWT also requires a warehouse claim that a
+session does not always carry. Building the context directly keeps D1: one credential, and no
+JWT anywhere on the path. A request that already carries `Authorization` is left to the servlet.
+Without a session cookie the request passes through, so the servlet answers its own 401.
 
 ### D2 — Session store: new table `ETGO_GO_SESSION`
 

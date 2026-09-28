@@ -17,10 +17,6 @@
 package com.etendoerp.go.session;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.List;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -30,7 +26,6 @@ import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.annotation.WebFilter;
 import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -38,12 +33,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.access.Role;
-import org.openbravo.model.ad.access.User;
-import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.enterprise.Warehouse;
 
+import com.etendoerp.copilot.rest.CopilotJwtServlet;
 import com.etendoerp.go.common.ServletResponseUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -55,14 +46,18 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * {@code Authorization: Bearer <SWS JWT>}. Every OCR upload and tool call was therefore answered
  * 401, which the SPA reads as an expired session and turns into a logout.
  *
- * <p>This filter only translates the credential. A resolved session gets a short-lived SWS JWT
- * for the same user, role, organization and warehouse, injected as the {@code Authorization}
- * header. The Copilot servlet stays the authority that validates the token and routes the
- * request. It decides like {@link com.etendoerp.go.common.JwtAuthUtils#authenticateOrFail}:
+ * <p>For a resolved session this filter builds {@code OBContext} from the session's environment,
+ * exactly like NEO does, and hands the request to Copilot's own {@code RestService}. It does NOT
+ * mint a JWT for the servlet: {@code SecureWebServicesUtils.generateToken} dereferences the
+ * resolved warehouse unconditionally, so an environment whose only warehouse belongs to org
+ * {@code 0} (linked through {@code AD_Org_Warehouse}) made it throw a NullPointerException. The
+ * servlet's JWT also demands a warehouse claim, which a session does not always carry.
+ *
+ * <p>It decides like {@link com.etendoerp.go.common.JwtAuthUtils#authenticateOrFail}:
  * <ul>
- *   <li>a request that already carries {@code Authorization} is left untouched;</li>
+ *   <li>a request that already carries {@code Authorization} is left to the servlet;</li>
  *   <li>no session cookie: pass through, so the servlet answers its own 401;</li>
- *   <li>invalid or expired session: 401;</li>
+ *   <li>invalid or expired session, or no environment selected: 401;</li>
  *   <li>unsafe method failing CSRF/Origin: 403 (the authenticator enforces it).</li>
  * </ul>
  */
@@ -72,26 +67,32 @@ public class CopilotSessionBridgeFilter implements Filter {
   private static final Logger log = LogManager.getLogger(CopilotSessionBridgeFilter.class);
 
   static final String AUTH_HEADER = "Authorization";
-  private static final String BEARER_PREFIX = "Bearer ";
 
-  /** Mints the SWS JWT for a resolved session. A seam so tests need no key material. */
+  /** Hands an authenticated request to Copilot. A seam so tests need no Copilot service. */
   @FunctionalInterface
-  interface SessionTokenMinter {
-    String mint(GoSessionRecord session) throws Exception;
+  interface CopilotDispatcher {
+    /**
+     * Serve the request with {@code OBContext} already set for the session.
+     *
+     * @param request  the incoming request
+     * @param response the response to write
+     * @throws IOException if writing the response fails
+     */
+    void dispatch(HttpServletRequest request, HttpServletResponse response) throws IOException;
   }
 
   private final GoSessionAuthenticator authenticator;
-  private final SessionTokenMinter minter;
+  private final CopilotDispatcher dispatcher;
 
   /** Container constructor. */
   public CopilotSessionBridgeFilter() {
     this(new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore())),
-        CopilotSessionBridgeFilter::mintSwsToken);
+        CopilotSessionBridgeFilter::dispatchToRestService);
   }
 
-  CopilotSessionBridgeFilter(GoSessionAuthenticator authenticator, SessionTokenMinter minter) {
+  CopilotSessionBridgeFilter(GoSessionAuthenticator authenticator, CopilotDispatcher dispatcher) {
     this.authenticator = authenticator;
-    this.minter = minter;
+    this.dispatcher = dispatcher;
   }
 
   @Override
@@ -114,7 +115,7 @@ public class CopilotSessionBridgeFilter implements Filter {
     GoSessionAuthResult result = authenticator.authenticate(httpReq);
     switch (result.getStatus()) {
       case AUTHENTICATED:
-        forwardWithToken(result.getRecord(), httpReq, httpResp, chain);
+        serveWithSession(result.getRecord(), httpReq, httpResp);
         return;
       case CSRF_FAILED:
         log.warn("Forbidden copilot request: CSRF validation failed");
@@ -131,95 +132,50 @@ public class CopilotSessionBridgeFilter implements Filter {
     }
   }
 
-  private void forwardWithToken(GoSessionRecord session, HttpServletRequest request,
-      HttpServletResponse response, FilterChain chain) throws IOException, ServletException {
-    String token = mintOrFail(session, response);
-    if (token != null) {
-      chain.doFilter(new BearerRequest(request, token), response);
-    }
-  }
-
-  private String mintOrFail(GoSessionRecord session, HttpServletResponse response)
-      throws IOException {
+  private void serveWithSession(GoSessionRecord session, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
     try {
-      return minter.mint(session);
+      applySessionContext(request, session);
     } catch (OBException e) {
       log.warn("Unauthorized copilot request: {}", e.getMessage());
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-    } catch (Exception e) {
-      log.error("Could not mint a copilot token for the session", e);
-      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Could not authenticate the session");
+      return;
     }
-    return null;
+    dispatcher.dispatch(request, response);
   }
 
   /**
-   * Mint an SWS JWT carrying the session's environment. {@code OBContext} is set first because
-   * {@code generateToken} reads the signing-algorithm preference through it.
+   * Rebuild {@code OBContext} from the session record, the same shape as NEO's and
+   * {@code JwtAuthUtils}' session path. A null warehouse is valid here.
    */
-  static String mintSwsToken(GoSessionRecord session) throws Exception {
+  static void applySessionContext(HttpServletRequest request, GoSessionRecord session) {
     if (StringUtils.isAnyBlank(session.getUserId(), session.getRoleId(), session.getCtxOrgId(),
         session.getCtxClientId())) {
       throw new OBException("Session has no environment selected");
     }
-    OBContext.setOBContext(SecureWebServicesUtils.createContext(session.getUserId(),
-        session.getRoleId(), session.getCtxOrgId(), session.getWarehouseId(),
-        session.getCtxClientId()));
-    OBContext.setAdminMode(true);
-    try {
-      OBDal dal = OBDal.getInstance();
-      User user = dal.get(User.class, session.getUserId());
-      if (user == null) {
-        throw new OBException("Session user not found");
-      }
-      Warehouse warehouse = StringUtils.isBlank(session.getWarehouseId()) ? null
-          : dal.get(Warehouse.class, session.getWarehouseId());
-      return SecureWebServicesUtils.generateToken(user, dal.get(Role.class, session.getRoleId()),
-          dal.get(Organization.class, session.getCtxOrgId()), warehouse);
-    } finally {
-      OBContext.restorePreviousMode();
+    OBContext ctx = SecureWebServicesUtils.createContext(session.getUserId(), session.getRoleId(),
+        session.getCtxOrgId(), session.getWarehouseId(), session.getCtxClientId());
+    OBContext.setOBContext(ctx);
+    OBContext.setOBContextInSession(request, ctx);
+  }
+
+  /**
+   * Route to Copilot's {@code RestService}, as {@code CopilotJwtServlet} does once its JWT check
+   * passes. The servlet serves only GET and POST.
+   */
+  static void dispatchToRestService(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    if ("GET".equalsIgnoreCase(request.getMethod())) {
+      CopilotJwtServlet.getInstance().doGet(request, response);
+    } else if ("POST".equalsIgnoreCase(request.getMethod())) {
+      CopilotJwtServlet.getInstance().doPost(request, response);
+    } else {
+      response.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
     }
   }
 
   @Override
   public void destroy() {
     // Nothing to release.
-  }
-
-  /** Exposes a minted token as the request's {@code Authorization} header. */
-  static final class BearerRequest extends HttpServletRequestWrapper {
-    private final String authorization;
-
-    BearerRequest(HttpServletRequest request, String token) {
-      super(request);
-      this.authorization = BEARER_PREFIX + token;
-    }
-
-    @Override
-    public String getHeader(String name) {
-      return AUTH_HEADER.equalsIgnoreCase(name) ? authorization : super.getHeader(name);
-    }
-
-    @Override
-    public Enumeration<String> getHeaders(String name) {
-      return AUTH_HEADER.equalsIgnoreCase(name)
-          ? Collections.enumeration(Collections.singletonList(authorization))
-          : super.getHeaders(name);
-    }
-
-    @Override
-    public Enumeration<String> getHeaderNames() {
-      List<String> names = new ArrayList<>();
-      Enumeration<String> original = super.getHeaderNames();
-      while (original != null && original.hasMoreElements()) {
-        String name = original.nextElement();
-        if (!AUTH_HEADER.equalsIgnoreCase(name)) {
-          names.add(name);
-        }
-      }
-      names.add(AUTH_HEADER);
-      return Collections.enumeration(names);
-    }
   }
 }

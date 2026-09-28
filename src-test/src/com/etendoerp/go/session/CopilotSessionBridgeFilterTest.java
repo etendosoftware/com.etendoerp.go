@@ -16,11 +16,12 @@
  */
 package com.etendoerp.go.session;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -28,28 +29,30 @@ import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.Collections;
 
 import javax.servlet.FilterChain;
-import javax.servlet.ServletRequest;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
+
+import com.etendoerp.copilot.rest.CopilotJwtServlet;
+import com.etendoerp.copilot.rest.RestService;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for {@link CopilotSessionBridgeFilter}: the cookie session must reach
- * {@code /sws/copilot/*} as a Bearer token, and every non-authenticated outcome must keep the
- * behaviour the Copilot servlet had before.
+ * {@code /sws/copilot/*} with {@code OBContext} built from the session, and every
+ * non-authenticated outcome must keep the behaviour the Copilot servlet had before.
  */
 class CopilotSessionBridgeFilterTest {
 
-  private static final String MINTED = "minted.jwt";
-
   private GoSessionAuthenticator authenticator;
+  private CopilotSessionBridgeFilter.CopilotDispatcher dispatcher;
   private HttpServletRequest request;
   private HttpServletResponse response;
   private FilterChain chain;
@@ -58,6 +61,7 @@ class CopilotSessionBridgeFilterTest {
   @BeforeEach
   void setUp() throws Exception {
     authenticator = mock(GoSessionAuthenticator.class);
+    dispatcher = mock(CopilotSessionBridgeFilter.CopilotDispatcher.class);
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
     chain = mock(FilterChain.class);
@@ -66,15 +70,35 @@ class CopilotSessionBridgeFilterTest {
     when(response.getWriter()).thenReturn(new PrintWriter(body));
   }
 
-  private CopilotSessionBridgeFilter filterMinting(String token) {
-    return new CopilotSessionBridgeFilter(authenticator, session -> token);
+  private CopilotSessionBridgeFilter filter() {
+    return new CopilotSessionBridgeFilter(authenticator, dispatcher);
+  }
+
+  private static GoSessionRecord sessionWithEnvironment(String warehouseId) {
+    GoSessionRecord session = new GoSessionRecord();
+    session.setUserId("U1");
+    session.setRoleId("R1");
+    session.setCtxOrgId("O1");
+    session.setCtxClientId("C1");
+    session.setWarehouseId(warehouseId);
+    return session;
   }
 
   @Test
-  void requestWithAuthorizationHeaderIsLeftUntouched() throws Exception {
+  void requestWithAuthorizationHeaderIsLeftToTheServlet() throws Exception {
     when(request.getHeader(CopilotSessionBridgeFilter.AUTH_HEADER)).thenReturn("Bearer legacy");
 
-    filterMinting(MINTED).doFilter(request, response, chain);
+    filter().doFilter(request, response, chain);
+
+    verify(chain).doFilter(request, response);
+    verifyNoInteractions(authenticator, dispatcher);
+  }
+
+  @Test
+  void preflightPassesThrough() throws Exception {
+    when(request.getMethod()).thenReturn("OPTIONS");
+
+    filter().doFilter(request, response, chain);
 
     verify(chain).doFilter(request, response);
     verifyNoInteractions(authenticator);
@@ -84,96 +108,111 @@ class CopilotSessionBridgeFilterTest {
   void noSessionPassesThroughSoTheServletAnswersItsOwn401() throws Exception {
     when(authenticator.authenticate(request)).thenReturn(GoSessionAuthResult.noSession());
 
-    filterMinting(MINTED).doFilter(request, response, chain);
+    filter().doFilter(request, response, chain);
 
     verify(chain).doFilter(request, response);
+    verifyNoInteractions(dispatcher);
   }
 
   @Test
   void invalidSessionIsRejectedWith401() throws Exception {
     when(authenticator.authenticate(request)).thenReturn(GoSessionAuthResult.unauthenticated());
 
-    filterMinting(MINTED).doFilter(request, response, chain);
+    filter().doFilter(request, response, chain);
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
     verify(chain, never()).doFilter(any(), any());
+    verifyNoInteractions(dispatcher);
   }
 
   @Test
   void csrfFailureIsRejectedWith403() throws Exception {
     when(authenticator.authenticate(request)).thenReturn(GoSessionAuthResult.csrfFailed());
 
-    filterMinting(MINTED).doFilter(request, response, chain);
+    filter().doFilter(request, response, chain);
 
     verify(response).setStatus(HttpServletResponse.SC_FORBIDDEN);
-    verify(chain, never()).doFilter(any(), any());
-  }
-
-  @Test
-  void authenticatedSessionIsForwardedWithAMintedBearer() throws Exception {
-    when(authenticator.authenticate(request))
-        .thenReturn(GoSessionAuthResult.authenticated(new GoSessionRecord()));
-    when(request.getHeaderNames()).thenReturn(Collections.enumeration(
-        Collections.singletonList("Cookie")));
-
-    filterMinting(MINTED).doFilter(request, response, chain);
-
-    ArgumentCaptor<ServletRequest> forwarded = ArgumentCaptor.forClass(ServletRequest.class);
-    verify(chain).doFilter(forwarded.capture(), any());
-    HttpServletRequest wrapped = (HttpServletRequest) forwarded.getValue();
-    assertEquals("Bearer " + MINTED, wrapped.getHeader("authorization"));
-    assertEquals("Bearer " + MINTED, wrapped.getHeaders("Authorization").nextElement());
-    assertTrue(Collections.list(wrapped.getHeaderNames()).contains("Authorization"));
+    verifyNoInteractions(dispatcher);
   }
 
   @Test
   void sessionWithoutEnvironmentIsRejectedWith401() throws Exception {
     when(authenticator.authenticate(request))
         .thenReturn(GoSessionAuthResult.authenticated(new GoSessionRecord()));
-    CopilotSessionBridgeFilter filter = new CopilotSessionBridgeFilter(authenticator,
-        CopilotSessionBridgeFilter::mintSwsToken);
 
-    filter.doFilter(request, response, chain);
+    filter().doFilter(request, response, chain);
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
     assertTrue(body.toString().contains("Session has no environment selected"));
+    verifyNoInteractions(dispatcher);
+  }
+
+  // ETP-5289 — an environment whose only warehouse belongs to org 0 yields a session with no
+  // warehouse. Minting an SWS JWT for it threw a NullPointerException inside generateToken;
+  // the context must be built with a null warehouse instead, as NEO does.
+  @Test
+  void sessionWithoutWarehouseIsServedWithItsContext() throws Exception {
+    when(authenticator.authenticate(request))
+        .thenReturn(GoSessionAuthResult.authenticated(sessionWithEnvironment(null)));
+    OBContext ctx = mock(OBContext.class);
+    try (MockedStatic<SecureWebServicesUtils> sws = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<OBContext> obc = mockStatic(OBContext.class)) {
+      sws.when(() -> SecureWebServicesUtils.createContext("U1", "R1", "O1", null, "C1"))
+          .thenReturn(ctx);
+
+      filter().doFilter(request, response, chain);
+
+      sws.verify(() -> SecureWebServicesUtils.createContext(any(), any(), any(), isNull(), any()));
+      obc.verify(() -> OBContext.setOBContext(ctx));
+      obc.verify(() -> OBContext.setOBContextInSession(request, ctx));
+    }
+    verify(dispatcher).dispatch(request, response);
     verify(chain, never()).doFilter(any(), any());
   }
 
   @Test
-  void unexpectedMintFailureIsRejectedWith401() throws Exception {
+  void contextFailureIsRejectedWith401() throws Exception {
     when(authenticator.authenticate(request))
-        .thenReturn(GoSessionAuthResult.authenticated(new GoSessionRecord()));
-    CopilotSessionBridgeFilter filter = new CopilotSessionBridgeFilter(authenticator, session -> {
-      throw new IllegalStateException("no key");
-    });
+        .thenReturn(GoSessionAuthResult.authenticated(sessionWithEnvironment("W1")));
+    try (MockedStatic<SecureWebServicesUtils> sws = mockStatic(SecureWebServicesUtils.class)) {
+      sws.when(() -> SecureWebServicesUtils.createContext(any(), any(), any(), any(), any()))
+          .thenThrow(new OBException("Role not accessible"));
 
-    filter.doFilter(request, response, chain);
-
+      filter().doFilter(request, response, chain);
+    }
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-    verify(chain, never()).doFilter(any(), any());
+    assertTrue(body.toString().contains("Role not accessible"));
+    verifyNoInteractions(dispatcher);
   }
 
   @Test
-  void otherHeadersStillComeFromTheOriginalRequest() {
-    when(request.getHeader("Origin")).thenReturn("http://localhost:3100");
-
-    HttpServletRequest wrapped = new CopilotSessionBridgeFilter.BearerRequest(request, MINTED);
-
-    assertEquals("http://localhost:3100", wrapped.getHeader("Origin"));
-    assertSame(request, ((javax.servlet.ServletRequestWrapper) wrapped).getRequest());
+  void blankEnvironmentThrowsBeforeTouchingTheContext() {
+    GoSessionRecord session = new GoSessionRecord();
+    assertThrows(OBException.class,
+        () -> CopilotSessionBridgeFilter.applySessionContext(request, session));
   }
 
   @Test
-  void obExceptionMessageReachesTheClient() throws Exception {
-    when(authenticator.authenticate(request))
-        .thenReturn(GoSessionAuthResult.authenticated(new GoSessionRecord()));
-    CopilotSessionBridgeFilter filter = new CopilotSessionBridgeFilter(authenticator, session -> {
-      throw new OBException("Session user not found");
-    });
+  void getAndPostAreRoutedToTheCopilotRestService() throws Exception {
+    RestService rest = mock(RestService.class);
+    try (MockedStatic<CopilotJwtServlet> servlet = mockStatic(CopilotJwtServlet.class)) {
+      servlet.when(CopilotJwtServlet::getInstance).thenReturn(rest);
 
-    filter.doFilter(request, response, chain);
+      when(request.getMethod()).thenReturn("GET");
+      CopilotSessionBridgeFilter.dispatchToRestService(request, response);
+      when(request.getMethod()).thenReturn("POST");
+      CopilotSessionBridgeFilter.dispatchToRestService(request, response);
+    }
+    verify(rest).doGet(request, response);
+    verify(rest).doPost(request, response);
+  }
 
-    assertTrue(body.toString().contains("Session user not found"));
+  @Test
+  void otherMethodsAreRejectedWith405() throws Exception {
+    when(request.getMethod()).thenReturn("DELETE");
+
+    CopilotSessionBridgeFilter.dispatchToRestService(request, response);
+
+    verify(response).sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
   }
 }
