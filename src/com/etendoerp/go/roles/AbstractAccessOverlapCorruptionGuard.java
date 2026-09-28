@@ -523,25 +523,13 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
     if (templateGrants.isEmpty()) {
       return;
     }
-    Map<String, A> dependentAccessByItemId = new LinkedHashMap<>();
-    for (A access : findActiveAccessList(dependent)) {
-      G item = getGrantedItem(access);
-      if (item != null) {
-        dependentAccessByItemId.putIfAbsent((String) item.getId(), access);
-      }
-    }
+    Map<String, A> dependentAccessByItemId = activeAccessByItemId(dependent);
     // Built on the first overlapping row only: its lookup is pointless when nothing overlaps.
     HigherPrecedenceSkip skip = null;
     List<A> conflicting = new ArrayList<>();
     int kept = 0;
     for (A templateGrant : templateGrants) {
-      G item = getGrantedItem(templateGrant);
-      if (item == null) {
-        continue;
-      }
-      // remove(), not get(): a template never grants the same item twice (unique key), but taking
-      // the row out of the map also guarantees it is never queued for deletion twice.
-      A existing = dependentAccessByItemId.remove((String) item.getId());
+      A existing = takeOverlappingRow(dependentAccessByItemId, templateGrant);
       if (existing == null) {
         continue;
       }
@@ -562,6 +550,28 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
           dependent.getId(), template.getId());
     }
     deleteForcingCreatePath(conflicting, dependent, template);
+  }
+
+  /** {@code role}'s active rows of this guard's type, keyed by granted item id (first row wins). */
+  private Map<String, A> activeAccessByItemId(Role role) {
+    Map<String, A> accessByItemId = new LinkedHashMap<>();
+    for (A access : findActiveAccessList(role)) {
+      G item = getGrantedItem(access);
+      if (item != null) {
+        accessByItemId.putIfAbsent((String) item.getId(), access);
+      }
+    }
+    return accessByItemId;
+  }
+
+  /**
+   * The dependent's row for the item {@code templateGrant} grants, or {@code null} if it has none.
+   * Uses {@code remove()}, not {@code get()}: a template never grants the same item twice (unique
+   * key), but taking the row out of the map also guarantees it is never queued for deletion twice.
+   */
+  private A takeOverlappingRow(Map<String, A> dependentAccessByItemId, A templateGrant) {
+    G item = getGrantedItem(templateGrant);
+    return item == null ? null : dependentAccessByItemId.remove((String) item.getId());
   }
 
   /**
