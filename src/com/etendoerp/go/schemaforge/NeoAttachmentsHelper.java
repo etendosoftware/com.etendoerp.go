@@ -52,6 +52,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.core.OBContext;
@@ -101,6 +102,8 @@ public final class NeoAttachmentsHelper {
   private static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
   private static final String CONTENT_DISPOSITION = "Content-Disposition";
   private static final String MAIN_FLAG_COLUMN = "EM_ETGO_ISPREVIEWMAIN";
+  private static final String ERR_FISCAL_DECL_NOT_DRAFT_PREFIX =
+      "Cannot delete an attachment of a fiscal declaration that is not in draft status: ";
 
   private NeoAttachmentsHelper() {
   }
@@ -499,8 +502,16 @@ public final class NeoAttachmentsHelper {
   /**
    * Deletes a single attachment (DB record + file on disk).
    *
+   * <p>ETP-5432: rejects the delete when the attachment belongs to a fiscal declaration
+   * ({@code ETGO_Fiscal_Decl}) that is not in draft status — see
+   * {@link #rejectDeleteOfNonDraftFiscalDeclAttachment}. A frontend-only guard already hides the
+   * delete action for a non-draft declaration's justificante ({@code FmListPage.jsx}), but this
+   * is what actually stops a direct {@code DELETE /sws/neo/attachments/:id} call regardless of
+   * what the client sends. Attachments of every other table are unaffected.</p>
+   *
    * @param attachmentId the C_File_ID
-   * @return 204 No Content on success, 404 if the attachment does not exist
+   * @return 204 No Content on success, 404 if the attachment does not exist, 409 if it belongs
+   *         to a non-draft fiscal declaration
    */
   public static NeoResponse handleDelete(String attachmentId) {
     if (StringUtils.isBlank(attachmentId)) {
@@ -510,6 +521,10 @@ public final class NeoAttachmentsHelper {
       Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
       if (attachment == null) {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
+      }
+      NeoResponse guard = rejectDeleteOfNonDraftFiscalDeclAttachment(attachment);
+      if (guard != null) {
+        return guard;
       }
       AttachImplementationManager aim = getAttachManager();
       aim.delete(attachment);
@@ -523,6 +538,43 @@ public final class NeoAttachmentsHelper {
       log.error("Attachment delete failed for id {}", attachmentId, e);
       return NeoResponse.error(500, "Internal error deleting attachment");
     }
+  }
+
+  /**
+   * Guards {@link #handleDelete} against removing a justificante/attachment of a fiscal
+   * declaration ({@code ETGO_Fiscal_Decl}) that is no longer a draft — ETP-5432. Deliberately
+   * narrow: it only inspects the attachment's OWN {@code AD_Table}/{@code AD_Record_ID}, so an
+   * attachment of any other table (goods-receipt, invoice, …) short-circuits on the very first
+   * check and never reaches the DAL lookup that follows. Mirrors the 409 shape already used by
+   * {@link FiscalDeclCrudHandler#handleDeclDelete} for the equivalent declaration-delete guard.
+   *
+   * @param attachment the attachment about to be deleted (never {@code null})
+   * @return a 409 {@link NeoResponse} when the attachment belongs to a non-draft fiscal
+   *         declaration; {@code null} when the delete may proceed (wrong table, unresolvable
+   *         owning record, or the declaration is genuinely a draft)
+   */
+  private static NeoResponse rejectDeleteOfNonDraftFiscalDeclAttachment(Attachment attachment) {
+    Table table = attachment.getTable();
+    if (table == null
+        || !FiscalDeclCrudHandler.ENTITY_FISCAL_DECL.equals(table.getDBTableName())) {
+      return null;
+    }
+    String declId = attachment.getRecord();
+    if (StringUtils.isBlank(declId)) {
+      return null;
+    }
+    BaseOBObject decl = OBDal.getInstance().get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, declId);
+    if (decl == null) {
+      // Owning declaration already gone (or never existed) — nothing left to guard.
+      return null;
+    }
+    Object status = decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS);
+    String statusStr = status != null ? String.valueOf(status) : "";
+    if (StringUtils.isNotBlank(statusStr)
+        && !FiscalDeclCrudHandler.DEFAULT_STATUS.equals(statusStr)) {
+      return NeoResponse.error(409, ERR_FISCAL_DECL_NOT_DRAFT_PREFIX + declId);
+    }
+    return null;
   }
 
   // ── Update description ──────────────────────────────────────────────────────

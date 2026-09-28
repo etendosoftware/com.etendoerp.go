@@ -35,6 +35,10 @@ import org.openbravo.model.ad.access.Role;
  * The limit matches the five rows rendered by {@code RecentSalesList} to avoid fetching
  * unnecessary records. When no range is supplied it falls back to the last 30 days anchored
  * to the most recent invoice date so demo/test databases with stale data still return results.
+ * Results are ordered by {@code dateinvoiced DESC}, then by {@code created DESC} and
+ * {@code c_invoice_id DESC} as deterministic tie-breakers (ETP-5367) — {@code dateinvoiced}
+ * is a DATE column, so multiple invoices issued on the same day would otherwise tie and
+ * Postgres would return them in arbitrary join-plan order instead of true creation order.
  */
 @Named("widgetRecentInvoicesHandler")
 public class WidgetRecentInvoicesHandler implements NeoHandler {
