@@ -97,6 +97,8 @@ import com.etendoerp.go.session.JdbcGoSessionStore;
 public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
+  /** The label of the API-key endpoints in the commercial-access guard's log line (ETP-5047). */
+  private static final String API_KEYS_ENTRY_POINT = "oauth2-api-keys";
   private final GoSessionService goSessionService;
   private final EnvironmentRequestAuthenticator environmentAuthenticator;
   // Package-visible so tests can swap the database-backed role lookups for a fake. Only the
@@ -952,8 +954,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
     // the Authorization header only, so the SPA's cookie session got 401 here (and the frontend
     // logs out on a 401), the legacy kill switch did not apply, and a commercially blocked
     // tenant's keys stayed manageable. The pipeline installs the request's OBContext itself.
-    EnvironmentAuthOutcome outcome =
-        environmentAuthenticator.authenticate(request, SurfacePolicy.NEO_DATA);
+    EnvironmentAuthOutcome outcome = environmentAuthenticator.authenticate(request,
+        SurfacePolicy.NEO_DATA, API_KEYS_ENTRY_POINT);
     if (!outcome.isAuthenticated()) {
       throw new AuthException(outcome.getHttpStatus(), outcome.getMessage());
     }

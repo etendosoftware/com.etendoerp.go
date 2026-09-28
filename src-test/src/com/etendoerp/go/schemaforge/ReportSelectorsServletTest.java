@@ -161,7 +161,7 @@ class ReportSelectorsServletTest {
   // ---------------------------------------------------------------------------
 
   private void configureAuthenticatedGet(String type) throws Exception {
-    neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
+    neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any())).thenReturn(authenticatedOutcome(obContext));
     when(request.getPathInfo()).thenReturn("/" + type);
     when(request.getParameter("q")).thenReturn("");
     when(request.getParameter("limit")).thenReturn("20");
@@ -204,7 +204,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 401 when JWT authentication throws OBException")
     void authFailureOBException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any()))
           .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "bad token"));
 
       servlet.doGet(request, response);
@@ -216,7 +216,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 401 when JWT authentication throws generic Exception")
     void authFailureGenericException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any()))
           .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED,
               "Invalid or expired token"));
 
@@ -229,18 +229,19 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("ETP-5455: authenticates through the shared pipeline under NEO_DATA")
     void asksForTheNeoDataPolicy() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any()))
           .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "refused"));
 
       servlet.doGet(request, response);
 
-      neoSupportMock.verify(() -> NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA));
+      neoSupportMock.verify(() -> NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA,
+          ReportSelectorsServlet.ENTRY_POINT));
     }
 
     @Test
     @DisplayName("ETP-5455: a commercially blocked environment answers 402, not the selector")
     void blockedEnvironmentAnswers402() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any()))
           .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.PAYMENT_REQUIRED,
               "Environment access is not available: SUBSCRIPTION_REQUIRED"));
       when(request.getPathInfo()).thenReturn("/bpartner");
@@ -263,7 +264,7 @@ class ReportSelectorsServletTest {
             org.mockito.ArgumentMatchers.eq(true), any())).thenReturn(Decision.DEMO_TRIAL_EXPIRED);
         denial = new EnvironmentAccessGuard(lifecycle).check("client-1", "test");
       }
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any()))
           .thenReturn(EnvironmentAuthOutcome.accessDenied(denial, AuthScheme.COOKIE));
 
       servlet.doGet(request, response);
@@ -279,7 +280,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 400 when pathInfo is null")
     void missingPathInfo() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn(null);
 
       servlet.doGet(request, response);
@@ -291,7 +292,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 400 when pathInfo is just /")
     void rootPathInfo() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn("/");
 
       servlet.doGet(request, response);
@@ -460,7 +461,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 500 when executeSelector throws unexpected exception")
     void internalError() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn("/bpartner");
       when(request.getParameter("q")).thenReturn("");
       when(request.getParameter("limit")).thenReturn("20");

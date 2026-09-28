@@ -67,6 +67,8 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(ReportSelectorsServlet.class);
 
+  /** The label of this surface in the commercial-access guard's log line (ETP-5047). */
+  static final String ENTRY_POINT = "report-selectors";
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
   private static final String ORDER_BY_NAME = "ORDER BY name";
@@ -163,14 +165,15 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     // they get NEO's commercial-access check; and the shared pipeline accepts the cookie session
     // the SPA sends, which the old bearer-only decode answered with 401 (logging the user out).
     EnvironmentAuthOutcome outcome =
-        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA);
+        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA, ENTRY_POINT);
     if (!outcome.isAuthenticated()) {
-      log.warn("Refused ReportSelectors request ({}): {}", outcome.getHttpStatus(),
-          outcome.getMessage());
       if (outcome.getAccessDenial() != null) {
-        // ETP-5047 — the commercial refusal answers with the shared guard body, as NEO does.
+        // ETP-5047 — the commercial refusal answers with the shared guard body, as NEO does. The
+        // guard already logged it, so no WARN here: that line is for refusals it did not decide.
         outcome.getAccessDenial().writeTo(response);
       } else {
+        log.warn("Refused ReportSelectors request ({}): {}", outcome.getHttpStatus(),
+            outcome.getMessage());
         sendError(response, outcome.getHttpStatus(), outcome.getMessage());
       }
       return;

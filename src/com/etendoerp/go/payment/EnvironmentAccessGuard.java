@@ -38,13 +38,15 @@ import org.codehaus.jettison.json.JSONObject;
  * <p>It decides with {@link TenantEnvironmentLifecycleService#evaluateAccess} and then applies the
  * kill switch ({@link EnvironmentAccessEnforcementFlag}): a denial is returned unless enforcement
  * was switched off (the flag resolves to {@code true}), in which case it is logged at INFO and
- * access is allowed. The flag
- * is consulted only for a denial, so an allowed request — the normal case, on every NEO call —
- * costs no flag evaluation.
+ * access is allowed. The flag is consulted only for a denial, so an allowed request — the normal
+ * case, on every NEO call — costs no flag evaluation.
+ *
+ * <p><b>One log line per refusal.</b> {@link #check} logs every denial it returns at INFO —
+ * {@code Commercial access denied at <entryPoint> for tenant <clientId>: <decision>} — so support
+ * sees the same line whichever surface refused; the callers do not log the refusal again.
  *
  * <p><b>The denial wire format is shared.</b> {@link Denial#errorBody(int)} is the one JSON shape
- * all four entry points (NEO, MCP, the {@code JwtAuthUtils} servlets and {@code GET /login})
- * answer with, HTTP 402:
+ * every refusing entry point except the OAuth2 API-key endpoints answers with, HTTP 402:
  *
  * <pre>
  * { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
@@ -121,6 +123,9 @@ public class EnvironmentAccessGuard {
    * that very tenant (its session, JWT or OAuth2 token names the tenant's own user), so the
    * policy's membership rule has nothing left to decide here.
    *
+   * <p>A denial is logged here, at INFO, naming the entry point, the tenant and the decision:
+   * the caller refuses the request and must not log the refusal a second time.
+   *
    * @param clientId the tenant being entered
    * @param entryPoint a short label for the log line ({@code "neo"}, {@code "mcp"}, ...)
    * @return the denial to answer with, or null when access is allowed — including a tenant that
@@ -128,45 +133,51 @@ public class EnvironmentAccessGuard {
    *     switch turned off
    */
   public Denial check(String clientId, String entryPoint) {
-    EnvironmentAccessPolicy.Decision refusal = refusalOf(clientId);
-    if (refusal == null) {
+    EnvironmentAccessPolicy.Decision decision = enforce(clientId, entryPoint);
+    if (!isRefusal(decision)) {
       return null;
     }
-    if (enforcementSwitchedOff.test(clientId)) {
-      log.info("Environment access enforcement is switched off: {} would have refused tenant {}"
-          + " ({}) and allowed it", entryPoint, clientId, refusal.name());
-      return null;
-    }
-    return new Denial(refusal);
+    log.info("Commercial access denied at {} for tenant {}: {}", entryPoint, clientId,
+        decision.name());
+    return new Denial(decision);
   }
 
   /**
    * ETP-5047 — the decision this guard actually enforces, for a caller that reports it rather
-   * than acting on it (the environment list's {@code accessState}). The policy decision, except
-   * that a refusal the kill switch turned off reads as {@code ALLOWED}: reporting "suspended" for
-   * a tenant whose requests all go through would contradict the product. Same cost profile as
-   * {@link #check}: the flag is read only for a refusal. Logs nothing — it decides no request.
+   * than acting on it (the environment list's {@code accessState}, the environment switch's
+   * {@code accessDecision}). The policy decision, except that a refusal the kill switch turned
+   * off reads as {@code ALLOWED}: reporting "suspended" for a tenant whose requests all go through
+   * would contradict the product. Same cost profile as {@link #check}: the flag is read only for a
+   * refusal. Logs nothing — it decides no request.
    *
    * @param clientId the tenant
    * @return the enforced decision, or null for a tenant that predates lifecycle metadata (the
    *     policy's own "no decision", which every entry point allows)
    */
   public EnvironmentAccessPolicy.Decision enforcedDecision(String clientId) {
-    EnvironmentAccessPolicy.Decision decision = lifecycleService.get().evaluateAccess(clientId,
-        true, Instant.now());
-    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
-      return decision;
-    }
-    return enforcementSwitchedOff.test(clientId) ? EnvironmentAccessPolicy.Decision.ALLOWED
-        : decision;
+    return enforce(clientId, null);
   }
 
-  /** The policy decision when it is a refusal; null when it allows or has no answer. */
-  private EnvironmentAccessPolicy.Decision refusalOf(String clientId) {
+  /**
+   * The policy decision with the kill switch applied: a refusal the switch turned off reads as
+   * {@code ALLOWED}. The kill-switch INFO line is written only for a request that is being decided
+   * ({@code entryPoint} not null), never for a caller that merely reports the decision.
+   */
+  private EnvironmentAccessPolicy.Decision enforce(String clientId, String entryPoint) {
     EnvironmentAccessPolicy.Decision decision = lifecycleService.get().evaluateAccess(clientId,
         true, Instant.now());
-    return decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED ? null
-        : decision;
+    if (!isRefusal(decision) || !enforcementSwitchedOff.test(clientId)) {
+      return decision;
+    }
+    if (entryPoint != null) {
+      log.info("Environment access enforcement is switched off: {} would have refused tenant {}"
+          + " ({}) and allowed it", entryPoint, clientId, decision.name());
+    }
+    return EnvironmentAccessPolicy.Decision.ALLOWED;
+  }
+
+  private static boolean isRefusal(EnvironmentAccessPolicy.Decision decision) {
+    return decision != null && decision != EnvironmentAccessPolicy.Decision.ALLOWED;
   }
 
   /**

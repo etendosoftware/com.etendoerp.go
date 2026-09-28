@@ -261,7 +261,7 @@ never evaluates it. Locally: `etendo.go.flags.environment-access-enforcement-off
 
 | Flag | A tenant whose decision is `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` |
 |---|---|
-| unset / `false` / unreadable | 402 on NEO, the `NEO_DATA` servlets, the `/sws/go` tenant-session endpoints, MCP and `GET /sws/go/login` |
+| unset / `false` / unreadable | 402 on NEO, the `NEO_DATA` servlets, the `/sws/go` tenant-session endpoints, MCP and `GET /sws/go/login`; INFO log `Commercial access denied at <entry point> for tenant <id>: <DECISION>` |
 | `true` (for that `clientId`, or globally) | allowed; INFO log `Environment access enforcement is switched off: <entry point> would have refused tenant <id> (<DECISION>)` |
 
 It is an incident switch (a wrong status after a provider outage, a bad deploy), not a way to give a
@@ -317,10 +317,13 @@ rule/property (or setting `false`). Anything that is not a clean `true` keeps en
   `GET /sws/go/login`. (The OAuth2 API-key endpoints refuse through the same guard, in the OAuth2
   servlet's own error envelope.) One gap: an Etendo JWT minted **before** the block keeps working on Copilot
   until it expires (`open-and-notable-topics.md` §3.10).
-- **The log** has an INFO line per refused request — `Commercial access denied for NEO request:
-  Environment access is not available: <DECISION>`, `... for MCP request: ...`, or `... for
-  <endpoint>: ...` from the `JwtAuthUtils` servlets. `GET /sws/go/login`, report selectors and the
-  `/sws/go` tenant-session endpoints refuse without a line of their own.
+- **The log** has exactly one INFO line per refused request, written by `EnvironmentAccessGuard`
+  whichever surface refused: `Commercial access denied at <entry point> for tenant <AD_Client_ID>:
+  <DECISION>`. Entry points: `neo`, `mcp`, `report-selectors`, `oauth2-api-keys`,
+  `tenant-session` (the `/sws/go` tenant-session endpoints), `environment-login`
+  (`GET /sws/go/login`), and the `JwtAuthUtils` servlets' own labels (`favorites GET`,
+  `fiscal-test-mode GET`, ...). Grep for `Commercial access denied` and the tenant id. Entering the
+  environment (`POST /sws/go/session/environment`) writes no such line: it refuses nothing.
 - **Why it is blocked**: `GET /sws/go/environments` (`accessState`, `subscriptionStatus`, trial
   fields) and the tenant's subscription rows —
 

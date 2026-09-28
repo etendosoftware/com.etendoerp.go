@@ -46,6 +46,20 @@ class NeoServletSupport {
   }
 
   /**
+   * {@link #authenticate(HttpServletRequest, SurfacePolicy)} naming the entry point for the
+   * commercial-access guard's log line (ETP-5047), so support can tell the surfaces apart.
+   *
+   * @param request    the incoming request
+   * @param policy     what the calling surface requires beyond a valid credential
+   * @param entryPoint a short label for the guard's log line ({@code "report-selectors"}, ...)
+   * @return the outcome; on refusal it carries the status and message to answer with
+   */
+  static EnvironmentAuthOutcome authenticate(HttpServletRequest request, SurfacePolicy policy,
+      String entryPoint) {
+    return AUTHENTICATOR.authenticate(request, policy, entryPoint);
+  }
+
+  /**
    * Dispatch to a CDI-discovered {@link NeoHandler} by {@code Java_Qualifier}, running the
    * default CRUD service as either the sole result (no handler / handler declines via a
    * {@code null} pre-hook) or as the wrapped "default service" step between the handler's

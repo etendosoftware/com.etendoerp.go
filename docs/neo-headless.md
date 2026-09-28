@@ -169,8 +169,12 @@ A missing or invalid token returns `401 Unauthorized`.
 **Commercial access — `402 Payment Required` (ETP-5443, body since ETP-5047).** Once the caller is
 authenticated, every NEO request (bearer, cookie session or OAuth2 alike) is refused when the
 tenant's commercial access is cut off — a demo past its trial, or a subscription canceled or past
-due beyond its payment grace. The check is `EnvironmentAccessGuard`, shared with MCP (§4.12), the
-`JwtAuthUtils` servlets and `GET /sws/go/login`, so all of them answer the same body:
+due beyond its payment grace. The check is `EnvironmentAccessGuard`, shared with the
+`NEO_DATA` surfaces (favorites, fiscal test mode, report selectors), MCP (§4.12), the `/sws/go`
+tenant-session endpoints and `GET /sws/go/login`, so all of them answer the same body (the OAuth2
+API-key endpoints excepted: they refuse in the OAuth2 servlet's own error envelope). The guard logs
+each refusal once at INFO — `Commercial access denied at <entryPoint> for tenant <clientId>:
+<DECISION>`:
 
 ```json
 { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",

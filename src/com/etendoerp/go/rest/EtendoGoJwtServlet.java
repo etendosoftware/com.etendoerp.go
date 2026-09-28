@@ -3691,11 +3691,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return the denial, or null when access is allowed or the user no longer exists
    */
   private EnvironmentAccessGuard.Denial environmentAccessDenial(String userId, String entryPoint) {
+    String clientId = clientIdOfUser(userId);
+    return clientId == null ? null : environmentAccessGuard.check(clientId, entryPoint);
+  }
+
+  /**
+   * ETP-5047 — the commercial access decision the guard enforces for the tenant an environment
+   * user belongs to, for a caller that reports it without refusing ({@code POST
+   * /session/environment}). Unlike {@link #environmentAccessDenial} it logs nothing: no request is
+   * refused, so the guard's "Commercial access denied" line would be false.
+   *
+   * @param userId the {@code AD_User} being entered, already verified to belong to the account
+   * @return the enforced decision; null when the tenant predates lifecycle metadata or the user no
+   *     longer exists
+   */
+  private EnvironmentAccessPolicy.Decision enforcedAccessDecision(String userId) {
+    String clientId = clientIdOfUser(userId);
+    return clientId == null ? null : environmentAccessGuard.enforcedDecision(clientId);
+  }
+
+  private static String clientIdOfUser(String userId) {
     User user = OBDal.getInstance().get(User.class, userId);
-    if (user == null || user.getClient() == null) {
-      return null;
-    }
-    return environmentAccessGuard.check(user.getClient().getId(), entryPoint);
+    return user == null || user.getClient() == null ? null : user.getClient().getId();
   }
 
   /**
@@ -5221,12 +5238,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // ETP-5047 — entering a blocked tenant is NOT refused here, deliberately. The blocked-access
       // screen and the pages it sends the customer to (/account, /upgrade) render inside the
       // entered environment, so refusing entry would lock a blocked customer out of the one place
-      // that lets them pay. The tenant's data paths refuse on their own instead — NEO, MCP and the
-      // JwtAuthUtils servlets answer 402 on every request. accessDecision is informational and
+      // that lets them pay. The tenant's data paths refuse on their own instead — NEO, the NEO_DATA
+      // surfaces and MCP answer 402 on every request. accessDecision is informational and
       // backend-only: nothing in the SPA reads it; its blocked screen is driven by the NEO 402.
-      EnvironmentAccessGuard.Denial denial = environmentAccessDenial(userId, "session-environment");
-      if (denial != null) {
-        result.put(FIELD_ACCESS_DECISION, denial.decision().name());
+      // It reads the enforced decision instead of asking the guard to check: nothing is refused
+      // here, so the guard's refusal log line must not be written for this call.
+      EnvironmentAccessPolicy.Decision accessDecision = enforcedAccessDecision(userId);
+      if (accessDecision != null && accessDecision != EnvironmentAccessPolicy.Decision.ALLOWED) {
+        result.put(FIELD_ACCESS_DECISION, accessDecision.name());
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
       recordCookieEnvironmentLogin(rotated.getRecord(), startNanos);

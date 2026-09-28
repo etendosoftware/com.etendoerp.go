@@ -78,7 +78,7 @@ class NeoAuthenticator {
     }
     EnvironmentAccessGuard.Denial denial = outcome.getAccessDenial();
     if (denial != null) {
-      log.info("Commercial access denied for NEO request: {}", outcome.getMessage());
+      // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
       servlet.writeResponse(response, NeoResponse.error(EnvironmentAccessGuard.Denial.STATUS,
           denial.errorBody(EnvironmentAccessGuard.Denial.STATUS)));
       return false;

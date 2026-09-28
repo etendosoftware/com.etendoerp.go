@@ -510,7 +510,7 @@ public class McpServlet extends HttpServlet {
     if (denial == null) {
       return true;
     }
-    log.info("Commercial access denied for MCP request: {}", denial.message());
+    // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
     denial.writeTo(response);
     return false;
   }

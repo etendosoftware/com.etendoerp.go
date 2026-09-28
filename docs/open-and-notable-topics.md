@@ -463,6 +463,13 @@ release** — an SPA older than the backend still parses it.
   The platform-account endpoints (`runWithPlatformAccount`: billing, portal, purchases, plans)
   never call the guard, and none of them authenticates through `JwtAuthUtils` (checked in ETP-5047:
   `EtendoGoJwtServlet` only reads `JwtAuthUtils`' claim-name constants).
+- **One log line per refusal.** The guard itself logs every denial it returns, at INFO:
+  `Commercial access denied at <entryPoint> for tenant <clientId>: <DECISION>`. The callers do not
+  log it again (NEO, `JwtAuthUtils` and MCP used to log their own line without the tenant;
+  `ReportSelectorsServlet` keeps its WARN only for refusals the guard did not decide). Entry-point
+  labels: `neo`, the `JwtAuthUtils` context (`favorites GET`, ...), `report-selectors`,
+  `oauth2-api-keys`, `mcp`, `tenant-session`, `environment-login`. `POST /session/environment`
+  reads `enforcedDecision` instead of `check`, so it writes no refusal line — it refuses nothing.
 - **Kill switch** `environment-access-enforcement-off` (backend-only, per `clientId` via ConfigCat):
   enforcing unless the flag resolves to `true` (locally `true`/`Y`/`yes`/`1`, case-insensitive;
   anything else, unset or unreadable keeps enforcing); when on, the would-be denial is logged at

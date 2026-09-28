@@ -97,7 +97,7 @@ public class JwtAuthUtils {
     }
     EnvironmentAccessGuard.Denial denial = outcome.getAccessDenial();
     if (denial != null) {
-      log.info("Commercial access denied for {}: {}", context, denial.message());
+      // The guard already logged the refusal (ETP-5047: one line, whichever surface refused).
       denial.writeTo(response);
       return false;
     }

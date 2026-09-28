@@ -154,11 +154,27 @@ class EnvironmentAccessGuardTest {
   }
 
   @Test
-  void anEnforcedDenialLogsNothingAtInfo() {
+  void anEnforcedDenialLogsOneInfoLineNamingEntryPointTenantAndDecision() {
     decide(Decision.DEMO_TRIAL_EXPIRED);
     TestLogCapture info = TestLogCapture.attachTo(EnvironmentAccessGuard.class, Level.INFO);
     try {
-      assertNotNull(guard(false).check(CLIENT_ID, "neo"));
+      assertNotNull(guard(false).check(CLIENT_ID, "report-selectors"));
+    } finally {
+      info.detach();
+    }
+
+    // The single refusal line support greps for, whichever surface refused (ETP-5047).
+    assertEquals(List.of("Commercial access denied at report-selectors for tenant " + CLIENT_ID
+        + ": DEMO_TRIAL_EXPIRED"), info.messagesAt(Level.INFO));
+    assertTrue(info.messagesAt(Level.WARN).isEmpty());
+  }
+
+  @Test
+  void anAllowedTenantLogsNothing() {
+    decide(Decision.ALLOWED);
+    TestLogCapture info = TestLogCapture.attachTo(EnvironmentAccessGuard.class, Level.INFO);
+    try {
+      assertNull(guard(false).check(CLIENT_ID, "neo"));
     } finally {
       info.detach();
     }

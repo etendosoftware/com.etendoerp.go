@@ -137,8 +137,8 @@ class JwtAuthUtilsEnvironmentAccessTest {
     assertSharedBody("SUBSCRIPTION_REQUIRED");
     // The tenant is the session's environment.
     verify(lifecycle).evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class));
-    verify(log).info("Commercial access denied for {}: {}", "favorites GET",
-        "Environment access is not available: SUBSCRIPTION_REQUIRED");
+    // ETP-5047 — the guard writes the one refusal line; the caller's logger stays silent.
+    verifyNoInteractions(log);
   }
 
   @Test
