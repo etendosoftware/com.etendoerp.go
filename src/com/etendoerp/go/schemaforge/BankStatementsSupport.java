@@ -531,7 +531,39 @@ public final class BankStatementsSupport {
     // per-item un-reconcile ("desvincular") uses it to decide whether removing it also reverses a
     // payment and restores the invoice to unpaid. See ETP-4502 iteration 5.
     t.put("autoCreated", "Y".equalsIgnoreCase(StringUtils.trimToEmpty(rs.getString("txn_auto_created"))));
+    appendTxnForeignOriginal(t, rs);
     txns.put(t);
     return txns;
+  }
+
+  /**
+   * Adds the original document currency of a linked transaction when it differs from the account
+   * currency (ETP-5450): {@code foreignAmount} (the stored, unsigned {@code foreign_amount} with the
+   * sign of {@code txn_amount}), {@code foreignCurrency} (ISO) and {@code foreignRate} (the final
+   * {@code foreign_convert_rate}). {@code amount} deliberately stays in the account currency —
+   * callers sum it against the statement line (e.g. the reconciled-transactions modal balance
+   * check). Same-currency transactions are left untouched.
+   *
+   * @param t  the txn JSON being built
+   * @param rs the lines result set positioned on the current row
+   * @throws Exception if reading the result set or writing the JSON fails
+   */
+  static void appendTxnForeignOriginal(JSONObject t, ResultSet rs) throws Exception {
+    String foreignIso = StringUtils.trimToEmpty(rs.getString("txn_foreign_currency"));
+    String accountIso = StringUtils.trimToEmpty(rs.getString("txn_currency"));
+    BigDecimal foreignAmount = rs.getBigDecimal("txn_foreign_amount");
+    // Not a foreign pair (or no stored original amount): keep the txn as is.
+    if (foreignIso.isEmpty() || accountIso.isEmpty() || foreignIso.equals(accountIso)
+        || foreignAmount == null) {
+      return;
+    }
+    BigDecimal base = nullSafeBigDecimal(rs.getBigDecimal("txn_amount"));
+    t.put("foreignAmount", base.signum() < 0 ? foreignAmount.abs().negate() : foreignAmount.abs());
+    t.put("foreignCurrency", foreignIso);
+    t.put("currency", accountIso);
+    BigDecimal rate = rs.getBigDecimal("txn_foreign_rate");
+    if (rate != null) {
+      t.put("foreignRate", rate);
+    }
   }
 }
