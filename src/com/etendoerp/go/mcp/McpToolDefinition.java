@@ -33,6 +33,7 @@ public class McpToolDefinition {
   private final String name;
   private final String description;
   private final Map<String, Object> inputSchema;
+  private final String title;
 
   /**
    * Create a new tool definition.
@@ -42,9 +43,23 @@ public class McpToolDefinition {
    * @param inputSchema JSON Schema for the tool's input parameters, represented as a Map
    */
   public McpToolDefinition(String name, String description, Map<String, Object> inputSchema) {
+    this(name, description, inputSchema, null);
+  }
+
+  /**
+   * Create a new tool definition with an explicit display title.
+   *
+   * @param name        unique tool name (snake_case)
+   * @param description human-readable description of what the tool does
+   * @param inputSchema JSON Schema for the tool's input parameters, represented as a Map
+   * @param title       display title in the caller's language, or {@code null} to derive it
+   */
+  public McpToolDefinition(String name, String description, Map<String, Object> inputSchema,
+      String title) {
     this.name = name;
     this.description = description;
     this.inputSchema = inputSchema != null ? inputSchema : Collections.emptyMap();
+    this.title = title;
   }
 
   public String getName() {
@@ -57,6 +72,17 @@ public class McpToolDefinition {
 
   public Map<String, Object> getInputSchema() {
     return inputSchema;
+  }
+
+  /**
+   * Display title already resolved by the caller (a per-spec tool's translated AD name), or
+   * {@code null} to let {@link McpToolTitles} derive it from the catalog; see
+   * {@link McpToolTitles#resolve}.
+   *
+   * @return the explicit title, or {@code null}
+   */
+  public String getTitle() {
+    return title;
   }
 
   @Override

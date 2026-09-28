@@ -72,8 +72,19 @@ public class McpServlet extends HttpServlet {
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
   private static final String PROTOCOL_VERSION = "2024-11-05";
-  private static final String SERVER_NAME = "etendo-neo";
+  private static final String SERVER_NAME = "etendo-mcp";
   private static final String SERVER_VERSION = "1.0.0";
+  /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
+  private static final String SERVER_TITLE = "Etendo MCP";
+  private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
+  /**
+   * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
+   * Same file for every environment, so a fixed production URL is fine. Clients that predate the
+   * field ignore it.
+   */
+  private static final String SERVER_ICON_URL = "https://app.etendo.ai/favicon.png";
+  private static final String SERVER_ICON_MIME_TYPE = "image/png";
+  private static final String SERVER_ICON_SIZES = "513x513";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
@@ -536,12 +547,31 @@ public class McpServlet extends HttpServlet {
     JSONObject serverInfo = new JSONObject();
     serverInfo.put("name", SERVER_NAME);
     serverInfo.put("version", SERVER_VERSION);
+    serverInfo.put("title", SERVER_TITLE);
+    serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
+    JSONObject icon = new JSONObject();
+    icon.put("src", SERVER_ICON_URL);
+    icon.put("mimeType", SERVER_ICON_MIME_TYPE);
+    icon.put("sizes", new JSONArray().put(SERVER_ICON_SIZES));
+    serverInfo.put("icons", new JSONArray().put(icon));
     result.put("serverInfo", serverInfo);
 
     return result;
   }
 
   // ── Handler: tools/list ─────────────────────────────────────────────────
+
+  /**
+   * Language code of the user the MCP token belongs to, for localized tool titles.
+   *
+   * @return a code such as {@code es_ES}, or {@code null} when the context carries none
+   */
+  private static String currentLanguageCode() {
+    OBContext context = OBContext.getOBContext();
+    return context != null && context.getLanguage() != null
+        ? context.getLanguage().getLanguage()
+        : null;
+  }
 
   private JSONObject handleToolsList(AuthIdentity identity) throws Exception {
     return McpSessionManager.executeInContext(
@@ -553,11 +583,13 @@ public class McpServlet extends HttpServlet {
             Set<String> scopes = parseScopes(identity.scopes);
             List<McpToolDefinition> tools = registry.generateTools(scopes);
 
+            String language = currentLanguageCode();
             JSONObject result = new JSONObject();
             JSONArray toolsArray = new JSONArray();
             for (McpToolDefinition tool : tools) {
               JSONObject toolJson = new JSONObject();
               toolJson.put("name", tool.getName());
+              toolJson.put("title", McpToolTitles.resolve(tool, language));
               toolJson.put("description", tool.getDescription());
               toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
               toolsArray.put(toolJson);
