@@ -923,13 +923,15 @@ public class BankStatementsHandlerTest {
         .contains(BankStatementsHandler.FIELD_TRANSACTION_DATE));
   }
 
-  // ── ETP-5447: neo_action surface ───────────────────────────────────────
+  // ── ETP-5447 / ETP-5469: neo_action surface ────────────────────────────
 
   @Test
-  public void testActionContractsReturnsTheSevenAgentActions() {
+  public void testActionContractsReturnsTheNineAgentActions() {
+    // The handler publishes the dispatcher's own declaration (not a copy), reads first.
     assertSame(BankStatementAgentActions.CONTRACTS, handler.actionContracts());
-    assertEquals(Arrays.asList("createStatement", "previewStatement", "importStatement",
-        "updateStatement", "processStatement", "reactivateStatement", "deleteStatement"),
+    assertEquals(Arrays.asList("listStatements", "statementLines", "previewStatement",
+        "createStatement", "importStatement", "updateStatement", "processStatement",
+        "reactivateStatement", "deleteStatement"),
         new ArrayList<>(handler.actionContracts().keySet()));
     assertTrue(handler.servesActions());
   }
@@ -972,12 +974,18 @@ public class BankStatementsHandlerTest {
     verify(handler, never()).newManualBankStatement(any(), any());
   }
 
+  /**
+   * ETP-5469 design: the dispatcher calls the SPA handler method on the SAME instance directly,
+   * with a derived SPA-shaped context — it never re-enters {@code handle()}, so an ACTION context
+   * cannot loop back into the dispatcher. The per-action routing matrix lives in
+   * {@code BankStatementAgentActionsTest}; this pins the single-entry guarantee on the engine.
+   */
   @Test
-  public void testActionContextReentersTheSameHandlerWithTheEngineRequest() throws Exception {
+  public void testActionContextCallsTheHandlerMethodDirectlyWithoutReenteringHandle()
+      throws Exception {
     when(agentSfEntity.getETGOSFSpec()).thenReturn(agentSpec);
     NeoResponse engineAnswer = NeoResponse.error(409, "connected to the bank");
-    doReturn(engineAnswer).when(handler)
-        .handle(Mockito.argThat(c -> c != null && c.getEndpointType() == null));
+    doReturn(engineAnswer).when(handler).handleDelete(any());
     NeoContext ctx = NeoContext.builder()
         .specName(BANK_STATEMENTS_SPEC)
         .entityName(BANK_STATEMENTS_SPEC)
@@ -994,13 +1002,19 @@ public class BankStatementsHandlerTest {
       r = handler.handle(ctx);
     }
 
+    // The SPA method's own answer, untouched (an error response is never flushed).
     assertSame(engineAnswer, r);
+    // Only the outer call: no re-entry into handle().
+    verify(handler, times(1)).handle(any());
     ArgumentCaptor<NeoContext> captor = ArgumentCaptor.forClass(NeoContext.class);
-    verify(handler, times(2)).handle(captor.capture());
-    NeoContext derived = captor.getAllValues().get(1);
+    verify(handler, times(1)).handleDelete(captor.capture());
+    verify(handler, never()).handleProcess(any());
+    verify(handler, never()).handleReactivate(any());
+    NeoContext derived = captor.getValue();
     assertNull(derived.getEndpointType());
     assertEquals("POST", derived.getHttpMethod());
-    assertEquals("delete", derived.getQueryParams().get("action"));
+    assertNull("no ?action= is forged", derived.getQueryParams().get("action"));
+    assertSame(agentSfEntity, derived.getSfEntity());
     assertEquals("stmt-1", derived.getRequestBody().getString("id"));
     assertEquals(1, derived.getRequestBody().length());
   }
