@@ -364,8 +364,8 @@ A blocked environment's data is fully inaccessible. It is not deleted (TL, 2026-
 - Entering a blocked environment through the cookie session (`POST /session/environment`) is not
   refused: the blocked screen and the pay path render inside it. The first environment request
   answers `402`, identically for every scheme. The legacy `GET /login?userId=` IS refused with
-  `402` (ETP-5047): it mints a raw Etendo JWT that reaches every secure web service of the
-  tenant, not only the surfaces above.
+  `402` (ETP-5047; confirmed, Martin, 2026-09-28): it mints a raw Etendo JWT that reaches every
+  secure web service of the tenant, not only the surfaces above.
 - Every `402` above is decided by one class, `EnvironmentAccessGuard` (ETP-5047): the bind step
   runs it for policies that require commercial access and carries its denial as
   `EnvironmentAuthOutcome.getAccessDenial()`, so the kill switch

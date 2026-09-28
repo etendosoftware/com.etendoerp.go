@@ -210,7 +210,10 @@ row`) no longer appears in the logs.
   `EtendoGoJwtServlet` / `EtendoGoJwtDalHelper`;
 - the `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preference reads in
   `TenantEnvironmentLifecycleService` for a tenant with no row, and with them the write-path
-  asymmetry of §3.5.
+  asymmetry of §3.5;
+- the `ETGO_EnvironmentType` read in `TenantEnvironmentLifecycleService.resolve`, which since
+  ETP-5047 happens only for a tenant with no row — its last reader, so the marker itself retires
+  with it.
 
 **In the same cleanup, fold `EnvironmentPlanCache` into the environment list (ETP-5047).** Replace
 it with a local `Map<String, PlanView>` built in `EtendoGoJwtServlet.handleEnvironments` from
@@ -268,8 +271,8 @@ together or they drift apart in silence.
 - `ENVIRONMENT_TYPE` stays a preference. It records DEMO versus PRODUCTIVE, which the subscription
   table does not carry, so `applyPaidUpgradeSideEffects` still marks the lifecycle projection
   whichever way the payment itself was recorded. **Since ETP-5047 it no longer decides for a tenant
-  with a row:** any subscription row makes the tenant productive (§3.7), and a row without the
-  marker only logs a WARN (§3.9).
+  with a row:** any subscription row makes the tenant productive (§3.7), and the marker is read
+  only for a tenant with no row at all — retired in Phase F (§3.2).
 - The `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences are still read **when the
   tenant has no subscription row at all** (`ETP-5046-TRANSITIONAL-FALLBACK`). The order matters:
   consulting them first would let the access policy and the Subscription Plan Catalog disagree about the same
@@ -371,9 +374,10 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   makes the plan `free`, and a tenant without the marker — every tenant provisioned before the
   marker existed (6 of 6 productive tenants on the development database) — fell into the demo path,
   got a legacy-transition start or no snapshot, and was **allowed**. A tenant with a row now never
-  reaches the demo path, so no demo or legacy-transition preference is ever written for it. A row
-  without the `PRODUCTIVE` marker logs one WARN per tenant and JVM. The marker and `resolvePlan`
-  still decide for a tenant with no row at all (the preference fallback).
+  reaches the demo path, so no demo or legacy-transition preference is ever written for it. On the
+  row path the marker is not even read, and a missing one is not reported (it is the normal state
+  of a pre-marker tenant). The marker and `resolvePlan` still decide for a tenant with no row at
+  all (the preference fallback).
 - **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
   `openSubscription` inserts one. If the open row is `canceled` but was never closed — its delete
   event was lost, or R37 backfilled it (R37 leaves canceled rows open on purpose: its idempotency
@@ -437,9 +441,9 @@ hands its denial to the consumer as `EnvironmentAuthOutcome.getAccessDenial()`. 
 pipeline it runs in MCP (`McpServlet.doPost`, every credential scheme, run as system because MCP
 has no context yet), in `EtendoGoJwtServlet.resolveTenantSession` (the `/sws/go` endpoints that act
 on the session's tenant) and in the legacy `GET /sws/go/login` (it hands out a raw Etendo JWT, valid
-on every secure web service of the tenant). They all answer **HTTP 402** with the body below — the
-OAuth2 API-key endpoints excepted, which refuse through the same guard in the OAuth2 servlet's own
-error envelope:
+on every secure web service of the tenant; refusing it there is confirmed (Martin, 2026-09-28)).
+They all answer **HTTP 402** with the body below — the OAuth2 API-key endpoints excepted, which
+refuse through the same guard in the OAuth2 servlet's own error envelope:
 
 ```json
 { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
@@ -474,38 +478,14 @@ release** — an SPA older than the backend still parses it.
   `JwtAuthUtils` servlets; ETP-5455 moved it to `NEO_AUXILIARY` (ADR-0001, "Commercially blocked
   environment": support and surveys stay reachable — a survey is global configuration and feedback,
   not tenant ERP data, and a blocked customer's feedback is the one that matters). The merge keeps
-  ETP-5455's decision.
+  ETP-5455's decision — confirmed (Martin, 2026-09-28).
 - **`charge.dispute.created`** is alert-only: recorded `APPLIED` in `ETGO_BILLING_EVENT`, a WARN
   with the dispute, charge and payment-intent ids, amount and reason — never a status change. A lost
   dispute reaches the subscription through the ordinary lifecycle events.
 
-### 🔴 3.9 The `ETGO_EnvironmentType` marker is missing on tenants with a subscription row — data-fix proposed
+### 🟡 3.10 A JWT minted before the block keeps working on Copilot until it expires
 
-**Ticket:** no ticket — found in ETP-5047; the data-fix needs an owner (Remedy / a follow-up of ETP-5047).
-
-Since ETP-5047 a subscription row, not the marker, makes a tenant productive (§3.7), and a row
-without `ETGO_EnvironmentType = PRODUCTIVE` logs one WARN per tenant and JVM
-(`TenantEnvironmentLifecycleService.warnOnceWhenMarkerIsMissing`). Every tenant provisioned before
-the marker existed has a row but no marker — 6 of 6 productive tenants on the development
-database — so the WARN fires on every node after every restart and never converges on its own.
-Nothing depends on the marker for access or display any more (the environment list's type,
-access state and trial fields all come from `resolve`), so this is noise, not a fault; but a WARN
-that can never reach zero trains everyone to ignore it.
-
-**Proposal — to decide, not scheduled:** a follow-up data-fix (`cli/src/data-fixes/sql/`, the next
-free R-number, dated after every fix merged at that point — §3.6) that, per tenant, writes
-`ETGO_EnvironmentType = PRODUCTIVE` when the tenant has any `ETGO_SUBSCRIPTION` row
-(`environment_client_id = :client_id`) and no such preference. Scoping: the marker is written by
-`TenantEnvironmentLifecycleService#setPreferenceValue` with `setClient(tenant)`, so it is keyed by
-`AD_CLIENT_ID`, like the lifecycle preferences in R37 statement 2 — not by `VISIBLEAT_CLIENT_ID`.
-Its `@check` is naturally idempotent (row exists AND no marker). **R37 is deliberately not
-changed for this** (reviewed and declined in ETP-5047): it is already written, and adding a write
-to it would widen a fix whose scope is the subscription backfill. Converges the WARN count to zero;
-the per-tenant WARN is the operator-visible worklist until then.
-
-### 🔴 3.10 A JWT minted before the block keeps working on Copilot until it expires
-
-**Ticket:** no ticket — found in ETP-5047 QA; the fix lives in `com.etendoerp.copilot` or in the secure-web-services token lifetime.
+**Ticket:** accepted as a known risk (Martin, 2026-09-28); no ticket — found in ETP-5047 QA (BUG-1); a fix would live in `com.etendoerp.copilot` or in the secure-web-services token lifetime.
 
 The environment-access check (§3.8) runs where a request enters a tenant through this module: NEO,
 the `NEO_DATA` servlets, MCP, and `GET /sws/go/login`, which refuses to mint a new token for a
@@ -516,17 +496,16 @@ services and never asks the guard. It keeps working until it expires —
 `SMFSWS_CONFIG.EXPIRATIONTIME`, 1440 minutes (24 h) on the development database. Found in ETP-5047
 QA (BUG-1).
 
-**Proposal — to decide, not scheduled; Copilot is another module, so no code here:** either
-(a) Copilot's request authentication calls `EnvironmentAccessGuard.check` (or an equivalent hook
-this module exposes) with the token's client, answering the same 402 body — the durable fix, and
-the same rule §3.8 states for any new tenant servlet; or (b) shorten the secure-web-services token
-lifetime so the window closes sooner — cheaper, but it bounds the leak rather than closing it and
-affects every client of those tokens. Until then a blocked tenant can keep using Copilot for at
-most one token lifetime after the block.
+**Accepted:** a blocked tenant can keep using Copilot for at most one token lifetime after the
+block. If it is ever closed (Copilot is another module, so no code here): either (a) Copilot's
+request authentication calls `EnvironmentAccessGuard.check` (or an equivalent hook this module
+exposes) with the token's client, answering the same 402 body — the durable fix, and the same rule
+§3.8 states for any new tenant servlet; or (b) shorten the secure-web-services token lifetime —
+cheaper, but it bounds the leak rather than closing it and affects every client of those tokens.
 
-### 🔴 3.11 Two R37 edge cases found in ETP-5047 QA
+### 🟡 3.11 Two R37 edge cases found in ETP-5047 QA
 
-**Ticket:** owner ETP-5046 (R37 deployment); found in ETP-5047 QA.
+**Ticket:** accepted as a known risk (Martin, 2026-09-28); no ticket — found in ETP-5047 QA; related ETP-5046 (R37 deployment).
 
 - **`past_due` with no grace anchor means zero grace — blocked at once.** The access policy grants
   grace only from a non-null anchor (`EnvironmentAccessPolicy.evaluate`), and
@@ -536,18 +515,17 @@ most one token lifetime after the block.
   `ETGO_SubscriptionStatus` preference is `PAST_DUE` while `ETGO_SubscriptionDueAt` is missing or
   not ISO-shaped is backfilled as `past_due` with no anchor. That preserves its access rather
   than changing it — the preference route already read the same pair as "past due, no due date",
-  i.e. blocked — but it is a lockout nobody chose. Worth a report query before running R37 on an
-  environment: tenants with `ETGO_SubscriptionStatus = PAST_DUE` and no valid
-  `ETGO_SubscriptionDueAt`.
+  i.e. blocked — accepted as is. Before running R37 on an environment, run a report query for
+  tenants with `ETGO_SubscriptionStatus = PAST_DUE` and no valid `ETGO_SubscriptionDueAt`.
 - **R37's `@check` keys on "no OPEN row", so it can re-subscribe a canceled tenant.** A tenant
   that still carries the `ETGO_TenantPlan = productive` preference and whose only rows are closed
   — a subscription canceled since ETP-5047 closes its row, and a failed
   `retireProductivePreference` leaves the preference behind — matches `@check`, and R37 inserts a
-  fresh **active** row: a canceled tenant reads as paying again. **Proposal:** key R37's
-  `@check` and its statement-2 guard on "no row at all" (`NOT EXISTS` any `ETGO_SUBSCRIPTION` row
-  for the tenant) instead of "no open row". That also keeps it idempotent (§3.7's reason for
-  leaving backfilled canceled rows open). Not changed in ETP-5047 by decision; decide before R37
-  runs on an environment where subscriptions have already been canceled live.
+  fresh **active** row: a canceled tenant reads as paying again. Accepted as is; if R37 is ever
+  run on an environment where subscriptions were canceled live, revisit the check first — keying
+  `@check` and the statement-2 guard on "no row at all" (`NOT EXISTS` any `ETGO_SUBSCRIPTION` row
+  for the tenant) closes it and stays idempotent (§3.7's reason for leaving backfilled canceled
+  rows open).
 
 ## 4. Known issues
 

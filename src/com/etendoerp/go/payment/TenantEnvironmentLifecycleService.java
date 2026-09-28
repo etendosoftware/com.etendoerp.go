@@ -15,8 +15,6 @@ package com.etendoerp.go.payment;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -65,12 +63,6 @@ public class TenantEnvironmentLifecycleService {
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
-
-  /**
-   * Tenants already reported for holding a subscription row without the productive marker, so the
-   * WARN is written once per tenant and JVM rather than on every NEO request.
-   */
-  private static final Set<String> MISSING_MARKER_REPORTED = ConcurrentHashMap.newKeySet();
 
   private final TenantPlanService tenantPlanService;
   private final SubscriptionService subscriptionService;
@@ -151,7 +143,9 @@ public class TenantEnvironmentLifecycleService {
    * canceled row makes the plan {@code free}, and a tenant without the marker (every tenant
    * provisioned before it existed) then fell into the demo path, got a legacy-transition start or
    * no snapshot at all, and was allowed in. A tenant with a row therefore never reaches the demo
-   * path and never gets a demo or legacy-transition preference written.
+   * path and never gets a demo or legacy-transition preference written. The marker is therefore
+   * read only on the no-row fallback, and its absence on a tenant with a row is not reported: it
+   * is the normal state of a tenant provisioned before the marker existed.
    *
    * @param clientId environment client id
    * @return lifecycle snapshot, or null when metadata is unavailable
@@ -161,14 +155,14 @@ public class TenantEnvironmentLifecycleService {
       return null;
     }
     try {
-      String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
       Optional<Subscription> subscription = subscriptionService.findLatest(clientId);
       if (subscription.isPresent()) {
-        warnOnceWhenMarkerIsMissing(clientId, type);
         return rowSnapshot(subscription.get());
       }
       // No row at all: the plan can only come from the transitional preference fallback, so ask
       // that directly instead of resolvePlan, which would repeat the row lookup (ETP-5047).
+      // ETP-5046-TRANSITIONAL-FALLBACK — the ETGO_EnvironmentType marker retires in Phase F.
+      String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
       if (TYPE_PRODUCTIVE.equalsIgnoreCase(type) || TenantPlanService.PLAN_PRODUCTIVE.equals(
           tenantPlanService.resolvePlanWithoutSubscription(clientId))) {
         return preferenceSnapshot(clientId);
@@ -226,14 +220,6 @@ public class TenantEnvironmentLifecycleService {
     return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
         subscriptionStatusOf(SubscriptionService.effectiveStatusOf(subscription)), renewalDueAt,
         false);
-  }
-
-  private static void warnOnceWhenMarkerIsMissing(String clientId, String type) {
-    if (!TYPE_PRODUCTIVE.equalsIgnoreCase(type) && MISSING_MARKER_REPORTED.add(clientId)) {
-      log.warn("Tenant {} has an ETGO_SUBSCRIPTION row but its {} marker is '{}', not {}; it is"
-          + " treated as productive because the row decides", clientId,
-          ENVIRONMENT_TYPE_ATTRIBUTE, StringUtils.defaultString(type), TYPE_PRODUCTIVE);
-    }
   }
 
   /**

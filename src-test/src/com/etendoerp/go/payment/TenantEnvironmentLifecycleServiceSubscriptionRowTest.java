@@ -692,44 +692,21 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   }
 
   @Test
-  public void aMissingMarkerIsReportedOnceATenantAcrossResolves() {
+  public void aTenantWithARowNeverReadsTheMarkerNorIsReportedForMissingIt() {
+    // ETP-5047 — the row decides, so the ETGO_EnvironmentType marker is read only on the no-row
+    // fallback; a tenant with a row but no marker is the normal pre-marker state, not a warning.
     String clientId = freshClientId();
     Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT);
     TestLogCapture warnings =
         TestLogCapture.attachTo(TenantEnvironmentLifecycleService.class, Level.WARN);
     try {
       fixture.run(() -> service.resolve(clientId));
-      fixture.run(() -> service.resolve(clientId));
     } finally {
       warnings.detach();
     }
 
-    List<String> lines = new ArrayList<>();
-    for (String line : warnings.messagesAt(Level.WARN)) {
-      if (line.contains(clientId)) {
-        lines.add(line);
-      }
-    }
-    assertEquals(lines.toString(), 1, lines.size());
-    assertTrue(lines.get(0), lines.get(0).contains(
+    assertFalse(fixture.queriedPreferenceAttributes.contains(
         TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE));
-  }
-
-  @Test
-  public void aTenantWithTheProductiveMarkerIsNeverReported() {
-    String clientId = freshClientId();
-    Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT)
-        .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
-            TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE);
-    TestLogCapture warnings =
-        TestLogCapture.attachTo(TenantEnvironmentLifecycleService.class, Level.WARN);
-    try {
-      fixture.run(() -> service.resolve(clientId));
-      fixture.run(() -> service.resolve(clientId));
-    } finally {
-      warnings.detach();
-    }
-
     for (String line : warnings.messagesAt(Level.WARN)) {
       assertFalse(line, line.contains(clientId));
     }
