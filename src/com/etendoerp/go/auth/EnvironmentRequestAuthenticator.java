@@ -93,8 +93,6 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
-  /** The guard's message prefix; ETP-5047 made {@link EnvironmentAccessGuard} its only owner. */
-  static final String MSG_ACCESS_PREFIX = EnvironmentAccessGuard.MESSAGE_PREFIX;
 
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";

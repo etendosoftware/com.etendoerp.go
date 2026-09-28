@@ -57,6 +57,7 @@ import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
@@ -168,8 +169,7 @@ class EnvironmentRequestAuthenticatorTest {
     } else if (policy.isCommercialAccessRequired() && blocked) {
       assertEquals(Status.PAYMENT_REQUIRED, outcome.getStatus());
       assertEquals(402, outcome.getHttpStatus());
-      assertEquals("Environment access is not available: " + decision.name(),
-          outcome.getMessage());
+      assertEquals(EnvironmentAccessGuard.MESSAGE_PREFIX + decision.name(), outcome.getMessage());
       assertEquals(scheme, outcome.getScheme());
       // ETP-5047 — the refusal carries the shared guard's denial for the structured 402 body.
       assertEquals(decision, outcome.getAccessDenial().decision());
