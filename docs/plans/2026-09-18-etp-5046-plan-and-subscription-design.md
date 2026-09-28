@@ -258,8 +258,8 @@ catalog and falls back to the offer only while that lookup is in flight or has f
 
 The order below is the whole procedure; nothing else has to be redeployed.
 
-1. **Deploy the module** (`update.database`). It ships the `legacy-productive` row as sourcedata;
-   no plan carries a price yet.
+1. **Deploy the module** (`update.database`). Its module script `EnsureLegacyPlanScript` creates
+   the `legacy-productive` row if it is missing (§7); no plan carries a price yet.
 2. **Keep selling as before.** With `etendo.go.checkout.secret.key`,
    `etendo.go.checkout.webhook.secret` and `etendo.go.checkout.price.id` set, and no priced plan,
    the legacy price fallback (§6.1) is active: `GET /sws/go/plans` lists `legacy-productive` at the
@@ -294,9 +294,14 @@ merge, see §7.3. Re-running creates zero rows and retires nothing;
 `@check` converges to 0 for two independent reasons afterwards, since it requires both a
 productive preference (gone) and no open subscription (present).
 
-The `legacy-productive` plan itself ships as **module sourcedata**
-(`src-db/database/sourcedata/ETGO_PLAN.xml` + an `AD_DATASET_TABLE` row), not as a companion
-data-fix. A `--client 0` companion fix was rejected: if an operator forgot to run it first, the
+The `legacy-productive` plan itself is created by the **module script**
+`EnsureLegacyPlanScript` (`src-util/modulescript/`) on every `update.database` — an idempotent
+insert of the fixed id `219D5C8E15C64E97B2F553B228D30DD0` that runs only when no row carries that
+key or id — not by a companion data-fix. It first shipped as module sourcedata
+(`sourcedata/ETGO_PLAN.xml` + an `AD_DATASET_TABLE` row); that was withdrawn because a dataset
+table is module-owned as a whole: runtime plans made plain `update.database` refuse with "local
+changes", and `-Dforce` deleted them (`open-and-notable-topics.md` §2.8). `ETGO_PLAN` must never
+be an AD dataset table again. A `--client 0` companion fix was rejected: if an operator forgot to run it first, the
 per-tenant `@check` would return 0 rows, the runner would record `SKIPPED_NOT_NEEDED` — a status
 that **advances the watermark** — and every paying tenant would be silently and permanently
 reclassified as free.

@@ -342,6 +342,12 @@ are required.
 
 ## 7. Sourcedata — the grandfathered plan
 
+> **Superseded (2026-09-28).** The dataset row and `sourcedata/ETGO_PLAN.xml` described below were
+> removed: a dataset table is module-owned as a whole, so runtime plans blocked `update.database`
+> and `-Dforce` deleted them. The row is now created by the module script `EnsureLegacyPlanScript`
+> with the same values (`open-and-notable-topics.md` §2.8). Kept as the record of what was handed
+> off; do not recreate the dataset row.
+
 One `AD_DATASET_TABLE` row so the legacy plan ships as module sourcedata:
 
 | Field | Value |
@@ -393,7 +399,7 @@ The comparable commits in this module (`36be4eb3` for `ETGO_DATA_FIX_HISTORY`, `
 - [ ] `AD_WINDOW.xml` — "Plans", "Subscriptions"
 - [ ] `AD_TAB.xml` — Plan (`TABLEVEL=0`, `SEQNO=10`), Quotas (`TABLEVEL=1`, `SEQNO=20`), Subscription (`TABLEVEL=0`, `SEQNO=10`)
 - [ ] `AD_FIELD.xml` — including `ISDISPLAYED='N'` for `Pending_Plan_ID` and `Pending_Effective_Date`
-- [ ] `AD_DATASET_TABLE.xml` — the `legacy-productive` export
+- [ ] `AD_DATASET_TABLE.xml` — the `legacy-productive` export *(superseded — see §7)*
 - [ ] `AD_MENU.xml`
 - [ ] `AD_TREENODE.xml` — **easy to forget; this is what actually places the menu entry**
       (`AD_TREE_ID=10`, `PARENT_ID=0`, `SEQNO=999`)

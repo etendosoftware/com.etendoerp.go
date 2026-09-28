@@ -97,7 +97,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   private static final String SQL_RELATIVE_PATH = "schema_forge/cli/src/data-fixes/sql/"
       + "20260924T150000Z__R37-tenant-subscription-backfill.sql";
 
-  /** The grandfathered plan the fix insists on, shipped as sourcedata with this exact id. */
+  /** The grandfathered plan the fix insists on, seeded by EnsureLegacyPlanScript with this id. */
   private static final String LEGACY_PLAN_VALUE = "legacy-productive";
   private static final String LEGACY_PLAN_ID = "219D5C8E15C64E97B2F553B228D30DD0";
   private static final String LEGACY_PLAN_NAME = "Legacy Productive (grandfathered)";
@@ -108,8 +108,9 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
 
   /**
    * True when this run created the {@code legacy-productive} plan row itself, which decides
-   * whether cleanup may delete it. The row ships as sourcedata but is only present once
-   * {@code update.database} has loaded it, so both cases are real.
+   * whether cleanup may delete it. The row is seeded by the module script
+   * {@code EnsureLegacyPlanScript} but is only present once {@code update.database} has run it, so
+   * both cases are real.
    */
   private boolean createdLegacyPlan;
 
@@ -875,10 +876,10 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   /**
    * Makes sure the fix's precondition holds, and remembers whether it had to.
    *
-   * <p>The {@code legacy-productive} row ships in
-   * {@code src-db/database/sourcedata/ETGO_PLAN.xml} but only reaches a given database once
-   * {@code update.database} has loaded it, so both "already there" and "not yet" are ordinary
-   * states. When this class creates it, it creates it with the sourcedata's own id, value and
+   * <p>The {@code legacy-productive} row is seeded by the module script
+   * {@code EnsureLegacyPlanScript} but only reaches a given database once {@code update.database}
+   * has run it, so both "already there" and "not yet" are ordinary
+   * states. When this class creates it, it creates it with the script's own id, value and
    * name, so a row left behind by a crashed run is indistinguishable from the real one — and
    * deletes it again in cleanup. When the row is already there it is left strictly alone.
    */
