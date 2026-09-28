@@ -4338,12 +4338,43 @@ Each `reconcileInheritances` call logs one INFO summary line
 `Corrected` / `Widened` / repoint lines and the per-batch `Prevented` line:
 
 ```
-Reconciled template inheritances of role <id> (+1 / -0): prevented=43 copied=122 widened=3
-repointed=0 stagesMs={windowPreclear=8, guard=13, save=120, flush=46, reconcile=7} totalMs=183
+Reconciled template inheritances of role <id> (+1 / -0): prevented=43 skipped=0 copied=122
+widened=3 repointed=0 stagesMs={windowPreclear=8, guard=13, save=120, flush=46, reconcile=7}
+totalMs=183
 ```
 
 `guard` is part of `save`, so core's own propagation time is `save − guard`. Use this line, or the
 ALB latency of `/sws/neo/assignuserroles`, to measure a save in production.
+
+**Several templates in one save (ETP-5507).** Templates were added in request order, and the
+add-path clear deleted every row the new template also granted, even a row created a moment earlier
+in the same save by another new template. So an item 3 of the new templates share was copied 3
+times and deleted twice. For 0→4 locally, that is 304 rows created for 161 distinct items.
+
+Now the new templates keep their `SeqNo` in request order (same precedence as before), but are
+saved from the highest `SeqNo` down. When a lower template reaches an item a higher one already
+created, `HigherPrecedenceSkip` leaves that row in place, and core resolves the item to
+`ACCESS_NOT_CHANGED` (its `isPrecedent` check sees the current source has the higher `SeqNo`). A row
+is kept only when all of these hold:
+
+1. it is sourced from an active template inheritance of the role;
+2. that inheritance has a higher `SeqNo` than the new one;
+3. it is at least as permissive as the incoming grant (a read-only row facing a full grant is still
+   deleted and recreated at full level);
+4. core can see it: the row's and that inheritance's client and organization are readable by the
+   caller. When core is blind it would INSERT a duplicate (the ETP-4906 "seventh trigger").
+
+The skip applies to the guards' `guardNewInheritance` (window, process, OBUIAPP process) and to the
+service's window pre-clear. It never applies to a template gaining a single grant
+(`guardDependentsOf`). When the caller cannot see the personal role at all (for example a System
+Administrator context), nothing could be kept, so the templates are saved in request order exactly
+as before: saving them in descending order with nothing kept would leave each shared item sourced
+from the lowest template.
+
+Result locally, 0→4: 132/96/76 → 67/52/46 OBUIAPP process / process / window rows created, which is
+the distinct items plus 4 window rows where a lower template grants full access over a read-only
+higher one. The access set is identical to assigning the templates one per call, `InheritedFrom`
+included. The summary line counts the kept rows as `skipped`.
 
 ---
 

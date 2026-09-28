@@ -32,6 +32,7 @@ class RoleCompositionMetricsTest {
     try (RoleCompositionMetrics metrics = RoleCompositionMetrics.start()) {
       RoleCompositionMetrics.addPrevented(3);
       RoleCompositionMetrics.addPrevented(2);
+      RoleCompositionMetrics.addSkipped(4);
       RoleCompositionMetrics.addCopied();
       RoleCompositionMetrics.addCopied();
       RoleCompositionMetrics.addWidened();
@@ -41,10 +42,12 @@ class RoleCompositionMetricsTest {
       RoleCompositionMetrics.addStageTime("flush", 1_000_000L);
 
       assertEquals(5, metrics.getPrevented());
+      assertEquals(4, metrics.getSkipped());
       assertEquals(2, metrics.getCopied());
       String summary = metrics.summary();
       assertTrue(summary.startsWith(
-          "prevented=5 copied=2 widened=1 repointed=1 stagesMs={save=5, flush=1} totalMs="),
+          "prevented=5 skipped=4 copied=2 widened=1 repointed=1 stagesMs={save=5, flush=1} "
+              + "totalMs="),
           summary);
     }
   }
@@ -52,11 +55,13 @@ class RoleCompositionMetricsTest {
   @Test
   void callsWithNoBoundInstanceAreIgnored() {
     RoleCompositionMetrics.addPrevented(7);
+    RoleCompositionMetrics.addSkipped(7);
     RoleCompositionMetrics.addCopied();
     RoleCompositionMetrics.addStageTime("save", 1_000_000L);
 
     try (RoleCompositionMetrics metrics = RoleCompositionMetrics.start()) {
       assertEquals(0, metrics.getPrevented());
+      assertEquals(0, metrics.getSkipped());
       assertEquals(0, metrics.getCopied());
       assertTrue(metrics.summary().contains("stagesMs={}"), metrics.summary());
     }

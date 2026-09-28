@@ -47,6 +47,7 @@ import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.roles.overlap.ActiveTemplateInheritance;
 import com.etendoerp.go.roles.overlap.GrantCandidate;
+import com.etendoerp.go.roles.overlap.HigherPrecedenceSkip;
 import com.etendoerp.go.roles.overlap.OverlapReconciliationCore;
 import com.etendoerp.go.roles.overlap.OverlapWinner;
 import com.etendoerp.go.roles.overlap.PropagationTrigger;
@@ -91,9 +92,12 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  *   #guardDependentsOf(BaseOBObject, PropagationTrigger)}/{@link
  *   #guardNewInheritance(RoleInheritance)} with {@link PropagationTrigger#NEW_GRANT} — safe to
  *   delete a dependent's conflicting row unconditionally, because core's {@code
- *   propagateNewAccess} always falls back to a CREATE. For a freshly-created inherited row on a
- *   non-template role, {@link #correctInheritedOwnership(EntityNewEvent, BaseOBObject)} pins
- *   {@code client}/{@code organization} back to the owning role's own, and {@link
+ *   propagateNewAccess} always falls back to a CREATE. One exception (ETP-5507, {@code
+ *   guardNewInheritance} only): a row core will leave unchanged because a higher-precedence
+ *   template of the same call already sources it is kept, see {@link HigherPrecedenceSkip}. For
+ *   a freshly-created inherited row on a non-template role, {@link
+ *   #correctInheritedOwnership(EntityNewEvent, BaseOBObject)} pins {@code client}/{@code
+ *   organization} back to the owning role's own, and {@link
  *   #widenInheritedAccessLevelIfNeeded(EntityNewEvent, BaseOBObject)} applies most-permissive-wins
  *   across every OTHER actively-inherited template.</li>
  *   <li>{@link #onUpdate(EntityUpdateEvent)} — a template's OWN existing grant changing level is
@@ -498,9 +502,16 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    * active rows, the conflicts are matched in memory, and ONE {@link #deleteForcingCreatePath}
    * call clears them all. Clearing them one by one cost a lookup plus a {@code refresh(dependent)}
    * per row, and that refresh cascades into every loaded access collection of the role — about
-   * 27 statements per row, the bulk of a slow {@code SFAssignUserRoles} save. Keep this the only
-   * place the add-path clears a role's rows for a new inheritance: the multi-template follow-up
-   * (ETP-5507) builds its skip here.
+   * 27 statements per row, the bulk of a slow {@code SFAssignUserRoles} save.
+   *
+   * <p><b>Precedence skip (ETP-5507), this path only.</b> A row is left in place when {@link
+   * HigherPrecedenceSkip} says core will resolve it to {@code ACCESS_NOT_CHANGED}: it is sourced
+   * from an active template that precedes the new one, it is at least as permissive as the
+   * incoming grant, and core can see it (see that class for the rules and why they close the
+   * seventh-trigger case). That happens when several templates are added in one call, in
+   * descending precedence ({@code RoleInheritanceReconciliationService}): without it, every item
+   * 2+ of them share was copied, deleted and copied again. {@link #guardDependentsOf} (a template
+   * gaining one grant) keeps the unconditional {@link #clearConflictingAccessUnconditionally}.
    */
   private void guardNewInheritance(RoleInheritance inheritance) {
     Role dependent = inheritance.getRole();
@@ -519,7 +530,10 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
         dependentAccessByItemId.putIfAbsent((String) item.getId(), access);
       }
     }
+    // Built on the first overlapping row only: its lookup is pointless when nothing overlaps.
+    HigherPrecedenceSkip skip = null;
     List<A> conflicting = new ArrayList<>();
+    int kept = 0;
     for (A templateGrant : templateGrants) {
       G item = getGrantedItem(templateGrant);
       if (item == null) {
@@ -528,9 +542,24 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
       // remove(), not get(): a template never grants the same item twice (unique key), but taking
       // the row out of the map also guarantees it is never queued for deletion twice.
       A existing = dependentAccessByItemId.remove((String) item.getId());
-      if (existing != null) {
+      if (existing == null) {
+        continue;
+      }
+      if (skip == null) {
+        skip = HigherPrecedenceSkip.forNewInheritance(dependent, inheritance.getSequenceNumber());
+      }
+      if (skip.keepsExisting(existing, getInheritedFrom(existing), getEditableField(existing),
+          getEditableField(templateGrant))) {
+        kept++;
+      } else {
         conflicting.add(existing);
       }
+    }
+    RoleCompositionMetrics.addSkipped(kept);
+    if (kept > 0) {
+      log().debug("Kept {} {} row(s) on role {} for template {}: already sourced from a "
+          + "higher-precedence template, core leaves them unchanged", kept, entityLogLabel(),
+          dependent.getId(), template.getId());
     }
     deleteForcingCreatePath(conflicting, dependent, template);
   }
@@ -692,6 +721,12 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    * recreated row is corrected right back to the exact same values by {@link
    * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded}, which already run on
    * EVERY freshly-created inherited row regardless of how it was triggered.
+   *
+   * <p><b>The one exception (ETP-5507), on {@link #guardNewInheritance} only.</b> "Already
+   * correct" is still no reason to skip here, but "already sourced from a template that precedes
+   * the new one, at least as permissive, and visible to core" is: the visibility check is exactly
+   * the condition this rule exists for, and with it core's {@code isPrecedent} resolves to {@code
+   * ACCESS_NOT_CHANGED}. See {@link HigherPrecedenceSkip}. This method never applies it.
    */
   private void clearConflictingAccessUnconditionally(Role dependent, G item, Role grantingTemplate) {
     A existing = findActiveAccess(dependent, item);
