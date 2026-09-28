@@ -169,6 +169,33 @@ public class McpToolRouterTest {
     assertEquals(jsonError, content.getJSONObject(0).getString("text"));
   }
 
+  // ── deleteConfirmation (ETP-5474) ──────────────────────────────────────
+
+  /**
+   * Pins the single {@code neo_delete} success shape shared by the generic removal path and the
+   * delete pre-hook: one text content item whose JSON is exactly
+   * {@code {"deleted": true, "id": <recordId>}}, and no {@code isError} flag.
+   */
+  @Test
+  public void testDeleteConfirmationReturnsDeletedTrueAndIdAsTextContent() throws Exception {
+    String recordId = "FA-CONFIRM-1";
+
+    JSONObject result = McpToolRouter.deleteConfirmation(recordId);
+
+    assertNotNull(result);
+    assertFalse("a delete confirmation must not be flagged as an error",
+        result.has(FIELD_IS_ERROR));
+    JSONArray content = result.getJSONArray(FIELD_CONTENT);
+    assertEquals(1, content.length());
+    JSONObject block = content.getJSONObject(0);
+    assertEquals("text", block.getString("type"));
+
+    JSONObject payload = new JSONObject(block.getString("text"));
+    assertEquals("the confirmation carries exactly deleted + id", 2, payload.length());
+    assertTrue(payload.getBoolean("deleted"));
+    assertEquals(recordId, payload.getString("id"));
+  }
+
   // ── mapColumnTypeStatic ───────────────────────────────────────────────
 
   /** Tests that mapColumnTypeStatic maps string reference IDs correctly. */
