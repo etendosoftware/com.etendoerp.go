@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -203,5 +204,203 @@ public class InternalConsumptionLineHandlerTest {
 
       assertNull(HANDLER.handle(ctx));
     }
+  }
+
+  // ── afterCallout() — strip stock-derived movementQuantity (ETP-5445) ────────
+  //
+  // The strip is gated on the callout trigger: only a product selection
+  // (SL_Internal_Consumption_Product) echoes the on-hand stock into movementQuantity. Any other
+  // trigger (e.g. SL_Internal_Consumption_Conversion on orderUOM / quantityOrder) computes a
+  // legitimate movementQuantity that must reach the client untouched.
+
+  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
+  private static final String FIELD_UPDATES = "updates";
+  private static final String FIELD_OTHER = "otherField";
+  private static final String FIELD_TRIGGER = "field";
+  private static final String TRIGGER_PRODUCT = "product";
+  private static final String HTTP_POST = "POST";
+
+  /** Request body whose {@code field} names the given trigger ({@code null} omits the key). */
+  private static JSONObject triggerBody(String trigger) throws Exception {
+    JSONObject body = new JSONObject();
+    if (trigger != null) {
+      body.put(FIELD_TRIGGER, trigger);
+    }
+    return body;
+  }
+
+  /** Callout updates carrying a stock-derived movementQuantity plus an unrelated key. */
+  private static JSONObject calloutUpdates() throws Exception {
+    return new JSONObject().put(FIELD_MOVEMENT_QUANTITY, 250.0).put(FIELD_OTHER, "x");
+  }
+
+  /** CALLOUT context with the given request body and a previous result wrapping {@code updates}. */
+  private static NeoContext calloutContext(JSONObject requestBody, JSONObject updates)
+      throws Exception {
+    return NeoContext.builder()
+        .httpMethod(HTTP_POST).endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(requestBody)
+        .previousResult(NeoResponse.ok(new JSONObject().put(FIELD_UPDATES, updates)))
+        .build();
+  }
+
+  /** Runs afterCallout for the given request body and asserts movementQuantity was stripped. */
+  private static void assertStripsMovementQuantity(JSONObject requestBody) throws Exception {
+    JSONObject updates = calloutUpdates();
+    assertNull(HANDLER.afterCallout(calloutContext(requestBody, updates)));
+    assertFalse("movementQuantity must be stripped for a product trigger",
+        updates.has(FIELD_MOVEMENT_QUANTITY));
+    assertEquals("other updates keys must be left untouched", "x", updates.getString(FIELD_OTHER));
+  }
+
+  /** Runs afterCallout for the given request body and asserts movementQuantity was kept. */
+  private static void assertKeepsMovementQuantity(JSONObject requestBody) throws Exception {
+    JSONObject updates = calloutUpdates();
+    assertNull(HANDLER.afterCallout(calloutContext(requestBody, updates)));
+    assertTrue("movementQuantity must be kept for a non-product trigger",
+        updates.has(FIELD_MOVEMENT_QUANTITY));
+    assertEquals(250.0, updates.getDouble(FIELD_MOVEMENT_QUANTITY), 0.0);
+  }
+
+  // afterCallout — product triggers strip movementQuantity
+
+  @Test
+  public void testAfterCalloutStripsMovementQuantityForProductTrigger() throws Exception {
+    assertStripsMovementQuantity(triggerBody(TRIGGER_PRODUCT));
+  }
+
+  @Test
+  public void testAfterCalloutStripsMovementQuantityForUppercaseProductTrigger() throws Exception {
+    assertStripsMovementQuantity(triggerBody("PRODUCT"));
+  }
+
+  @Test
+  public void testAfterCalloutStripsMovementQuantityForColumnNameTrigger() throws Exception {
+    assertStripsMovementQuantity(triggerBody("M_Product_ID"));
+  }
+
+  @Test
+  public void testAfterCalloutStripsMovementQuantityForInpNameTrigger() throws Exception {
+    assertStripsMovementQuantity(triggerBody("inpmProductId"));
+  }
+
+  @Test
+  public void testAfterCalloutStripsMovementQuantityForPaddedProductTrigger() throws Exception {
+    assertStripsMovementQuantity(triggerBody(" product "));
+  }
+
+  // afterCallout — any other trigger keeps movementQuantity
+
+  @Test
+  public void testAfterCalloutKeepsMovementQuantityForOrderUomTrigger() throws Exception {
+    assertKeepsMovementQuantity(triggerBody("orderUOM"));
+  }
+
+  @Test
+  public void testAfterCalloutKeepsMovementQuantityForProductUomColumnTrigger() throws Exception {
+    assertKeepsMovementQuantity(triggerBody("M_Product_Uom_Id"));
+  }
+
+  @Test
+  public void testAfterCalloutKeepsMovementQuantityForQuantityOrderTrigger() throws Exception {
+    assertKeepsMovementQuantity(triggerBody("quantityOrder"));
+  }
+
+  @Test
+  public void testAfterCalloutKeepsMovementQuantityWhenTriggerFieldIsMissing() throws Exception {
+    assertKeepsMovementQuantity(triggerBody(null));
+  }
+
+  @Test
+  public void testAfterCalloutKeepsMovementQuantityWhenTriggerFieldIsBlank() throws Exception {
+    assertKeepsMovementQuantity(triggerBody("   "));
+  }
+
+  @Test
+  public void testAfterCalloutKeepsMovementQuantityWhenRequestBodyIsNull() throws Exception {
+    assertKeepsMovementQuantity(null);
+  }
+
+  // afterCallout — scope and defensive no-ops
+
+  /**
+   * A non-CALLOUT endpoint (e.g. the CRUD write itself) must leave an "updates"-shaped body
+   * untouched even when the request body names the product.
+   */
+  @Test
+  public void testAfterCalloutNoOpWhenEndpointIsNotCallout() throws Exception {
+    JSONObject updates = calloutUpdates();
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod(HTTP_POST).endpointType(NeoEndpointType.CRUD)
+        .requestBody(triggerBody(TRIGGER_PRODUCT))
+        .previousResult(NeoResponse.ok(new JSONObject().put(FIELD_UPDATES, updates)))
+        .build();
+
+    assertNull(HANDLER.afterCallout(ctx));
+
+    assertTrue("a non-CALLOUT endpoint must leave the updates object untouched",
+        updates.has(FIELD_MOVEMENT_QUANTITY));
+  }
+
+  /** A product-triggered callout response without an "updates" object is a silent no-op. */
+  @Test
+  public void testAfterCalloutNoOpWhenUpdatesIsMissing() throws Exception {
+    JSONObject body = new JSONObject().put("someOtherKey", "x");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod(HTTP_POST).endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(triggerBody(TRIGGER_PRODUCT))
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(HANDLER.afterCallout(ctx));
+    assertEquals("x", body.getString("someOtherKey"));
+  }
+
+  /** A product-triggered callout with no previous result at all is also a silent no-op. */
+  @Test
+  public void testAfterCalloutNoOpWhenNoPreviousResult() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod(HTTP_POST).endpointType(NeoEndpointType.CALLOUT)
+        .requestBody(triggerBody(TRIGGER_PRODUCT))
+        .build();
+
+    assertNull(HANDLER.afterCallout(ctx));
+  }
+
+  @Test
+  public void testAfterCalloutReturnsNullForNullContext() {
+    assertNull(HANDLER.afterCallout(null));
+  }
+
+  // isProductTrigger — direct unit tests
+
+  @Test
+  public void testIsProductTriggerAcceptsEveryProductSpelling() throws Exception {
+    String[] productTriggers = {TRIGGER_PRODUCT, "PRODUCT", "M_Product_ID", "m_product_id",
+        "inpmProductId", "INPMPRODUCTID", " product ", "\tM_Product_ID\n"};
+    for (String trigger : productTriggers) {
+      assertTrue("expected a product trigger: [" + trigger + "]",
+          InternalConsumptionLineHandler.isProductTrigger(triggerBody(trigger)));
+    }
+  }
+
+  @Test
+  public void testIsProductTriggerRejectsNonProductFields() throws Exception {
+    String[] otherTriggers = {"orderUOM", "M_Product_Uom_Id", "quantityOrder", "movementQuantity",
+        "productCode", "inpmProductUomId", "", "   "};
+    for (String trigger : otherTriggers) {
+      assertFalse("expected NOT a product trigger: [" + trigger + "]",
+          InternalConsumptionLineHandler.isProductTrigger(triggerBody(trigger)));
+    }
+  }
+
+  @Test
+  public void testIsProductTriggerRejectsMissingField() throws Exception {
+    assertFalse(InternalConsumptionLineHandler.isProductTrigger(triggerBody(null)));
+  }
+
+  @Test
+  public void testIsProductTriggerRejectsNullRequestBody() {
+    assertFalse(InternalConsumptionLineHandler.isProductTrigger(null));
   }
 }
