@@ -38,27 +38,39 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.MockedConstruction;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
+import com.auth0.jwt.interfaces.Claim;
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionSecurity;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for {@link McpServlet} covering CORS, authentication, JSON-RPC
@@ -73,6 +85,9 @@ public class McpServletTest {
   private PrintWriter writer;
   private EnvironmentAccessGuard environmentAccessGuard;
 
+  private static final String KILL_SWITCH_PROPERTY =
+      "etendo.go.flags.environment-access-enforcement-off";
+
   @Before
   public void setUp() throws Exception {
     servlet = new McpServlet();
@@ -83,6 +98,13 @@ public class McpServletTest {
     Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
     guardField.setAccessible(true);
     guardField.set(servlet, environmentAccessGuard);
+    newExchange();
+
+    System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
+  }
+
+  /** A fresh request/response pair, so one test can send several requests. */
+  private void newExchange() throws Exception {
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
     responseBody = new StringWriter();
@@ -94,14 +116,13 @@ public class McpServletTest {
     when(request.getServerName()).thenReturn("localhost");
     when(request.getServerPort()).thenReturn(8080);
     when(request.getContextPath()).thenReturn("/etendo");
-
-    System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
   }
 
   @After
   public void tearDown() {
     System.clearProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY);
     System.clearProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY);
+    System.clearProperty(KILL_SWITCH_PROPERTY);
   }
 
   private void setRequestBody(String body) throws Exception {
@@ -449,6 +470,210 @@ public class McpServletTest {
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
     verifyNoInteractions(environmentAccessGuard);
+  }
+
+  // ── doPost: the 402 under every credential scheme (ETP-5047) ────────────
+
+  /**
+   * Every way {@link McpServlet#doPost} accepts a caller. The guard is asked with the tenant the
+   * credential names, so each scheme carries its own tenant id: a scheme whose tenant never reached
+   * the guard would be decided for the wrong tenant (or for none) and slip through.
+   */
+  private enum CredentialScheme {
+    /** Attributes the OAuth2 filter already set on the request. */
+    OAUTH2_FILTER("filter-tenant"),
+    /** An opaque OAuth2 access token in {@code Authorization: Bearer}. */
+    OAUTH2_TOKEN("oauth2-tenant"),
+    /** A legacy Etendo JWT in {@code Authorization: Bearer}. */
+    LEGACY_JWT("jwt-tenant"),
+    /** The SPA's {@code __Host-go_session} cookie, with its Origin and CSRF proof. */
+    COOKIE_SESSION("cookie-tenant");
+
+    final String clientId;
+
+    CredentialScheme(String clientId) {
+      this.clientId = clientId;
+    }
+  }
+
+  private static final String SAME_ORIGIN = "http://localhost:8080";
+  private static final String SESSION_CSRF = "csrf-token-value-123456";
+
+  /**
+   * Makes the current request carry {@code scheme}'s credential, naming its tenant.
+   *
+   * @return the static mocks the scheme needs, to be closed by the caller
+   */
+  private List<MockedStatic<?>> presentCredential(CredentialScheme scheme) throws Exception {
+    List<MockedStatic<?>> statics = new ArrayList<>();
+    switch (scheme) {
+      case OAUTH2_FILTER:
+        setOAuth2FilterAttributes("user1", "role1", scheme.clientId, "org1", "neo:read");
+        break;
+      case OAUTH2_TOKEN: {
+        when(request.getHeader("Authorization")).thenReturn("Bearer opaque-token");
+        Map<String, String> tokenIdentity = new HashMap<>();
+        tokenIdentity.put(OAuth2Filter.ATTR_USER_ID, "user1");
+        tokenIdentity.put(OAuth2Filter.ATTR_ROLE_ID, "role1");
+        tokenIdentity.put(OAuth2Filter.ATTR_CLIENT_ID, scheme.clientId);
+        tokenIdentity.put(OAuth2Filter.ATTR_ORG_ID, "org1");
+        tokenIdentity.put(OAuth2Filter.ATTR_SCOPES, "neo:read");
+        MockedStatic<OAuth2Filter> oauth2 = mockStatic(OAuth2Filter.class);
+        statics.add(oauth2);
+        oauth2.when(() -> OAuth2Filter.validateToken("opaque-token")).thenReturn(tokenIdentity);
+        break;
+      }
+      case LEGACY_JWT: {
+        when(request.getHeader("Authorization")).thenReturn("Bearer legacy.jwt.token");
+        MockedStatic<OAuth2Filter> oauth2 = mockStatic(OAuth2Filter.class);
+        statics.add(oauth2);
+        oauth2.when(() -> OAuth2Filter.validateToken("legacy.jwt.token")).thenReturn(null);
+        MockedStatic<SecureWebServicesUtils> jwt = mockStatic(SecureWebServicesUtils.class);
+        statics.add(jwt);
+        DecodedJWT decoded = mock(DecodedJWT.class);
+        Claim user = claim("user1");
+        Claim role = claim("role1");
+        Claim client = claim(scheme.clientId);
+        Claim org = claim("org1");
+        when(decoded.getClaim("user")).thenReturn(user);
+        when(decoded.getClaim("role")).thenReturn(role);
+        when(decoded.getClaim("client")).thenReturn(client);
+        when(decoded.getClaim("organization")).thenReturn(org);
+        jwt.when(() -> SecureWebServicesUtils.decodeToken("legacy.jwt.token")).thenReturn(decoded);
+        break;
+      }
+      case COOKIE_SESSION: {
+        when(request.getMethod()).thenReturn("POST");
+        when(request.getCookies()).thenReturn(
+            new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, "session-token") });
+        when(request.getHeader("Origin")).thenReturn(SAME_ORIGIN);
+        when(request.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn(SESSION_CSRF);
+        GoSessionRecord session = sessionRecord("user1", "role1", scheme.clientId, "org1");
+        session.setCsrfToken(SESSION_CSRF);
+        // Far from both expiries, so resolving it writes nothing back.
+        session.setExpiresAt(Instant.now().plus(365, ChronoUnit.DAYS));
+        session.setAbsoluteExpiresAt(Instant.now().plus(365, ChronoUnit.DAYS));
+        // The servlet's session store reads through the DAL session's JDBC work.
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        statics.add(obDal);
+        OBDal dal = mock(OBDal.class);
+        Session hibernateSession = mock(Session.class);
+        when(dal.getSession()).thenReturn(hibernateSession);
+        when(hibernateSession.doReturningWork(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(session);
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        break;
+      }
+      default:
+        throw new IllegalArgumentException(scheme.name());
+    }
+    return statics;
+  }
+
+  private static Claim claim(String value) {
+    Claim claim = mock(Claim.class);
+    when(claim.asString()).thenReturn(value);
+    return claim;
+  }
+
+  /**
+   * Replaces the mock guard with the real one over a lifecycle service that answers
+   * {@code decision} for every tenant, so the refusal, its body and the kill switch are the
+   * production code's, not a stub's.
+   */
+  private TenantEnvironmentLifecycleService useTheRealGuardDeciding(
+      EnvironmentAccessPolicy.Decision decision) throws Exception {
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    when(lifecycle.evaluateAccess(anyString(), eq(true),
+        org.mockito.ArgumentMatchers.any(Instant.class))).thenReturn(decision);
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, new EnvironmentAccessGuard(lifecycle));
+    return lifecycle;
+  }
+
+  /**
+   * Sends a {@code ping} under {@code scheme} into a tenant the lifecycle service refuses. The
+   * guard runs as system; {@link OBContext} is static-mocked so that switch touches no database.
+   */
+  private TenantEnvironmentLifecycleService pingABlockedTenantUnder(CredentialScheme scheme)
+      throws Exception {
+    newExchange();
+    TenantEnvironmentLifecycleService lifecycle =
+        useTheRealGuardDeciding(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 5).put("method", "ping")
+        .toString());
+    List<MockedStatic<?>> statics = presentCredential(scheme);
+    try (MockedStatic<OBContext> context = mockStatic(OBContext.class)) {
+      servlet.doPost(request, response);
+    } finally {
+      for (MockedStatic<?> mocked : statics) {
+        mocked.close();
+      }
+    }
+    return lifecycle;
+  }
+
+  private void assertRefusedWith402AndNothingDispatched(CredentialScheme scheme,
+      TenantEnvironmentLifecycleService lifecycle) throws Exception {
+    String body = getResponseBody();
+    verify(lifecycle).evaluateAccess(eq(scheme.clientId), eq(true),
+        org.mockito.ArgumentMatchers.any(Instant.class));
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    verify(response).setContentType("application/json");
+    verify(response).setCharacterEncoding("UTF-8");
+    verify(request, never()).getReader();
+    JSONObject json = new JSONObject(body);
+    assertFalse(scheme + ": a refusal is not a JSON-RPC response", json.has("jsonrpc"));
+    JSONObject error = json.getJSONObject("error");
+    assertEquals(scheme + ": " + body,
+        "Environment access is not available: SUBSCRIPTION_REQUIRED", error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals("SUBSCRIPTION_REQUIRED", error.getString("decision"));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderTheOAuth2FilterAttributes() throws Exception {
+    CredentialScheme scheme = CredentialScheme.OAUTH2_FILTER;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderAnOAuth2AccessToken() throws Exception {
+    CredentialScheme scheme = CredentialScheme.OAUTH2_TOKEN;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderALegacyJwt() throws Exception {
+    CredentialScheme scheme = CredentialScheme.LEGACY_JWT;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  @Test
+  public void aBlockedTenantIsRefusedWith402UnderTheCookieSession() throws Exception {
+    CredentialScheme scheme = CredentialScheme.COOKIE_SESSION;
+    assertRefusedWith402AndNothingDispatched(scheme, pingABlockedTenantUnder(scheme));
+  }
+
+  /** The kill switch reopens MCP for a blocked tenant whichever credential the caller holds. */
+  @Test
+  public void aBlockedTenantIsDispatchedUnderEverySchemeWhileEnforcementIsSwitchedOff()
+      throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+    for (CredentialScheme scheme : CredentialScheme.values()) {
+      TenantEnvironmentLifecycleService lifecycle = pingABlockedTenantUnder(scheme);
+
+      verify(lifecycle).evaluateAccess(eq(scheme.clientId), eq(true),
+          org.mockito.ArgumentMatchers.any(Instant.class));
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+      JSONObject rpcResponse = new JSONObject(getResponseBody());
+      assertEquals(scheme + ": the ping is answered", 5, rpcResponse.getInt("id"));
+      assertTrue(scheme.name(), rpcResponse.has("result"));
+    }
   }
 
   // ── doPost: JSON-RPC dispatch ───────────────────────────────────────────
