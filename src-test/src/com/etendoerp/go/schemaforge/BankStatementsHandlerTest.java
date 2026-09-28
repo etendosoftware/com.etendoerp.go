@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -44,8 +45,13 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -55,6 +61,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -64,11 +71,16 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link BankStatementsHandler}.
@@ -97,6 +109,9 @@ public class BankStatementsHandlerTest {
   /** The model's default connection status for a financial account, i.e. not bank-connected. */
   private static final String PSD2_DISCONNECTED = "DC";
 
+  /** The report spec (and its one entity) the ETP-5447 agent actions are served on. */
+  private static final String BANK_STATEMENTS_SPEC = "bank-statements";
+
   /**
    * The bank-connected delete rejection (ETP-5111), byte-for-byte in sync with the handler's own
    * constant and with the frontend's {@code backendError.statementBankConnectedNotDeletable}
@@ -106,6 +121,15 @@ public class BankStatementsHandlerTest {
       "Statements from a bank-connected account cannot be deleted.";
 
   private BankStatementsHandler handler;
+
+  /** ETP-5447: the spec / entity an agent ACTION context carries. */
+  @Mock
+  private SFSpec agentSpec;
+  @Mock
+  private SFEntity agentSfEntity;
+  /** ETP-5447: a SPA-shaped ?action=create context (no ACTION endpoint type). */
+  @Mock
+  private NeoContext spaCreateCtx;
   private MockedStatic<BankStatementAggregates> aggMock;
   private MockedStatic<BankStatementLinePruner> prunerMock;
 
@@ -133,6 +157,7 @@ public class BankStatementsHandlerTest {
     if (aggMock != null) {
       aggMock.close();
     }
+    // Null when a test released it early to run the real pruner (see runImport).
     if (prunerMock != null) {
       prunerMock.close();
     }
@@ -815,19 +840,6 @@ public class BankStatementsHandlerTest {
 
   // ── ?action=create (manual statement) ──────────────────────────────────
 
-  /**
-   * Invokes the private static {@code validateCreateBody} via reflection — it
-   * only reads the JSON body, so this covers every 400 branch without the
-   * {@code mockStatic(OBContext)} that going through {@code handle()} would
-   * otherwise force just to get past admin mode.
-   */
-  private static NeoResponse invokeValidateCreate(JSONObject body) throws Exception {
-    java.lang.reflect.Method m =
-        BankStatementsHandler.class.getDeclaredMethod("validateCreateBody", JSONObject.class);
-    m.setAccessible(true);
-    return (NeoResponse) m.invoke(null, body);
-  }
-
   private static JSONObject createLine(String date, String desc, String cp, Object in, Object out)
       throws Exception {
     JSONObject l = new JSONObject();
@@ -848,42 +860,171 @@ public class BankStatementsHandlerTest {
   }
 
   @Test
-  public void validateCreateBodyRejectsMissingAccount() throws Exception {
-    NeoResponse r = invokeValidateCreate(new JSONObject());
+  public void testValidateCreateBodyRejectsMissingAccount() throws Exception {
+    NeoResponse r = BankStatementsSupport.validateCreateBody(new JSONObject());
     assertEquals(400, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message")
         .contains("FIN_Financial_Account_ID"));
   }
 
   @Test
-  public void validateCreateBodyRejectsMissingName() throws Exception {
-    JSONObject body = new JSONObject();
+  public void testValidateCreateBodyRejectsMissingName() throws Exception {
+    JSONObject body = withStatementDates(new JSONObject());
     body.put("FIN_Financial_Account_ID", "acc-1");
-    NeoResponse r = invokeValidateCreate(body);
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
     assertEquals(400, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message").contains("name"));
   }
 
   @Test
-  public void validateCreateBodyRejectsEmptyLines() throws Exception {
+  public void testValidateCreateBodyRejectsEmptyLines() throws Exception {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     body.put("lines", new JSONArray());
-    NeoResponse r = invokeValidateCreate(body);
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
     assertEquals(400, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message").contains("line"));
   }
 
   @Test
-  public void validateCreateBodyAcceptsValidBody() throws Exception {
+  public void testValidateCreateBodyAcceptsValidBody() throws Exception {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     lines.put(createLine("2026-06-02T00:00:00Z", "Transferencia", "Acme", 3500.0, 0));
     body.put("lines", lines);
-    assertNull(invokeValidateCreate(body));
+    assertNull(BankStatementsSupport.validateCreateBody(body));
+  }
+
+  @Test
+  public void testValidateCreateBodyRejectsAbsentLines() throws Exception {
+    JSONObject body = withStatementDates(new JSONObject());
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(BankStatementsHandler.MSG_LINE_REQUIRED,
+        r.getBody().getJSONObject("error").getString("message"));
+  }
+
+  @Test
+  public void testValidateCreateBodyRejectsMissingTransactionDate() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    body.put("importDate", "2026-06-02");
+    NeoResponse r = BankStatementsSupport.validateCreateBody(body);
+    assertEquals(400, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").getString("message")
+        .contains(BankStatementsHandler.FIELD_TRANSACTION_DATE));
+  }
+
+  // ── ETP-5447: neo_action surface ───────────────────────────────────────
+
+  @Test
+  public void testActionContractsReturnsTheSevenAgentActions() {
+    assertSame(BankStatementAgentActions.CONTRACTS, handler.actionContracts());
+    assertEquals(Arrays.asList("createStatement", "previewStatement", "importStatement",
+        "updateStatement", "processStatement", "reactivateStatement", "deleteStatement"),
+        new ArrayList<>(handler.actionContracts().keySet()));
+    assertTrue(handler.servesActions());
+  }
+
+  /** An ACTION context as neo_action builds it for the bank-statements spec. */
+  private static NeoContext agentActionCtx(String action, String recordId, JSONObject params,
+      Map<String, String> queryParams) {
+    return NeoContext.builder()
+        .specName(BANK_STATEMENTS_SPEC)
+        .entityName(BANK_STATEMENTS_SPEC)
+        .httpMethod("POST")
+        .recordId(recordId)
+        .requestBody(params)
+        .queryParams(queryParams)
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(action)
+        .build();
+  }
+
+  @Test
+  public void testActionContextWithUnknownActionIsRefusedByTheDispatcher() throws Exception {
+    NeoResponse r = handler.handle(agentActionCtx("matchStatement", "acc-1", null, null));
+
+    assertEquals(422, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").has("availableActions"));
+    // Only the outer call: the dispatcher refused before re-entering the engine.
+    verify(handler, times(1)).handle(any());
+  }
+
+  @Test
+  public void testActionContextIgnoresTheSpaActionQueryParam() throws Exception {
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "create");
+    // "create" is the SPA's engine action, not an agent action: the ACTION branch judges the
+    // fieldName against the contract and never falls through to ?action= routing.
+    NeoResponse r = handler.handle(agentActionCtx("create", "acc-1", new JSONObject(), qp));
+
+    assertEquals(422, r.getHttpStatus());
+    verify(handler, times(1)).handle(any());
+    verify(handler, never()).newManualBankStatement(any(), any());
+  }
+
+  @Test
+  public void testActionContextReentersTheSameHandlerWithTheEngineRequest() throws Exception {
+    when(agentSfEntity.getETGOSFSpec()).thenReturn(agentSpec);
+    NeoResponse engineAnswer = NeoResponse.error(409, "connected to the bank");
+    doReturn(engineAnswer).when(handler)
+        .handle(Mockito.argThat(c -> c != null && c.getEndpointType() == null));
+    NeoContext ctx = NeoContext.builder()
+        .specName(BANK_STATEMENTS_SPEC)
+        .entityName(BANK_STATEMENTS_SPEC)
+        .httpMethod("POST")
+        .recordId("stmt-1")
+        .sfEntity(agentSfEntity)
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("deleteStatement")
+        .build();
+
+    NeoResponse r;
+    try (MockedStatic<NeoAccessHelper> access = mockStatic(NeoAccessHelper.class)) {
+      access.when(() -> NeoAccessHelper.hasReportSpecAccess(agentSpec, "POST")).thenReturn(true);
+      r = handler.handle(ctx);
+    }
+
+    assertSame(engineAnswer, r);
+    ArgumentCaptor<NeoContext> captor = ArgumentCaptor.forClass(NeoContext.class);
+    verify(handler, times(2)).handle(captor.capture());
+    NeoContext derived = captor.getAllValues().get(1);
+    assertNull(derived.getEndpointType());
+    assertEquals("POST", derived.getHttpMethod());
+    assertEquals("delete", derived.getQueryParams().get("action"));
+    assertEquals("stmt-1", derived.getRequestBody().getString("id"));
+    assertEquals(1, derived.getRequestBody().length());
+  }
+
+  @Test
+  public void testNonActionCreateStillRoutesToTheEngine() {
+    when(spaCreateCtx.getEndpointType()).thenReturn(null);
+    when(spaCreateCtx.getRequestBody()).thenReturn(null);
+
+    NeoResponse r = handler.handle(postCtx(spaCreateCtx, "create"));
+
+    // The engine's own create refusal (400 body required), not the agent contract's 422.
+    assertEquals(400, r.getHttpStatus());
+    verify(handler, times(1)).handle(any());
+  }
+
+  @Test
+  public void testCrudTypedContextIsNotDivertedToTheDispatcher() {
+    when(spaCreateCtx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(spaCreateCtx.getRequestBody()).thenReturn(null);
+
+    NeoResponse r = handler.handle(postCtx(spaCreateCtx, "create"));
+
+    assertEquals(400, r.getHttpStatus());
   }
 
   @Test
@@ -961,6 +1102,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     JSONObject noRef = new JSONObject();
     noRef.put("date", "2026-06-02T00:00:00Z");
@@ -1004,6 +1146,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     JSONObject amountLess = new JSONObject();
     amountLess.put("date", "2026-06-02T00:00:00Z");
@@ -1051,6 +1194,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     JSONObject negative = new JSONObject();
     negative.put("date", "2026-06-02T00:00:00Z");
@@ -1099,6 +1243,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     JSONObject negative = new JSONObject();
     negative.put("date", "2026-06-02T00:00:00Z");
@@ -1157,6 +1302,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     JSONObject bothSides = new JSONObject();
     bothSides.put("date", "2026-06-02T00:00:00Z");
@@ -1213,6 +1359,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     JSONObject equalSides = new JSONObject();
     equalSides.put("date", "2026-06-02T00:00:00Z");
@@ -1262,6 +1409,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     // Both keys present on both lines, with an EXPLICIT 0 on the unused side — the exact shape
     // ManualStatementModal and the import wizard always post.
@@ -1308,6 +1456,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "acc-1");
     body.put("name", "Borrador");
+    withStatementDates(body);
     body.put("process", false); // "save as draft"
     JSONArray lines = new JSONArray();
     lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
@@ -1346,6 +1495,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = new JSONObject();
     body.put("FIN_Financial_Account_ID", "ghost");
     body.put("name", "Extracto manual");
+    withStatementDates(body);
     JSONArray lines = new JSONArray();
     lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
     body.put("lines", lines);
@@ -1592,7 +1742,7 @@ public class BankStatementsHandlerTest {
   @Test
   public void handleUpdateRejectsBlankName() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
-    JSONObject body = idBody("st-1");
+    JSONObject body = withStatementDates(idBody("st-1"));
     body.put("lines", new JSONArray());
     when(ctx.getRequestBody()).thenReturn(body);
     FIN_BankStatement draft = draftStatement("st-1");
@@ -1613,6 +1763,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = idBody("st-1");
     body.put("name", "Editado");
     body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("importDate", "2026-06-04T00:00:00Z");
     body.put("process", true);
     JSONArray lines = new JSONArray();
     lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
@@ -1807,6 +1958,7 @@ public class BankStatementsHandlerTest {
     JSONObject body = idBody("st-1");
     body.put("name", "Editado");
     body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("importDate", "2026-06-04T00:00:00Z");
     JSONArray lines = new JSONArray();
     lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
     body.put("lines", lines);
@@ -1857,6 +2009,7 @@ public class BankStatementsHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     JSONObject body = idBody("st-1");
     body.put("name", "Solo cabecera");
+    withStatementDates(body);
     body.put("lines", new JSONArray());
     when(ctx.getRequestBody()).thenReturn(body);
 
@@ -1889,6 +2042,7 @@ public class BankStatementsHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     JSONObject body = idBody("st-1");
     body.put("name", "Vacio");
+    withStatementDates(body);
     body.put("lines", new JSONArray());
     when(ctx.getRequestBody()).thenReturn(body);
 
@@ -1991,5 +2145,492 @@ public class BankStatementsHandlerTest {
     // And it never touches the line at all, so APRM_FIN_BNKSTM_LINE_CHECK_TRG has nothing to
     // reject (the ETP-4921 finding this builds on).
     verify(reconciledLine, never()).setBankStatement(any());
+  }
+
+  // ── ETP-5447: the statement header dates are mandatory ──────────────────
+  //
+  // applyEditableHeader used to fall back to `new Date()` for a missing or unparseable
+  // transactionDate / importDate, so a statement saved with a cleared date silently landed on
+  // TODAY and nothing told the caller. Both ?action=create and ?action=update now reject such a
+  // body with a 400 before anything is built or mutated, and a valid date is stored as the calendar
+  // day that was sent — never replaced by the fallback.
+
+  private static final String FIELD_TRANSACTION_DATE = "transactionDate";
+  private static final String FIELD_IMPORT_DATE = "importDate";
+  private static final String ACTION_CREATE = "create";
+  private static final String ACTION_UPDATE = "update";
+  private static final String ACCOUNT_ID = "acc-1";
+  private static final String DRAFT_ID = "st-1";
+  private static final String STATEMENT_NAME = "Extracto manual";
+  private static final String DEFAULT_STATEMENT_DAY = "2026-06-04T00:00:00Z";
+  private static final String UNPARSEABLE_DATE = "not-a-date";
+  private static final String BLANK_DATE = "   ";
+  private static final String MSG_MISSING_TRANSACTION_DATE =
+      "Missing required field: " + FIELD_TRANSACTION_DATE;
+  private static final String MSG_MISSING_IMPORT_DATE =
+      "Missing required field: " + FIELD_IMPORT_DATE;
+  /** A transaction day and an import day that differ from each other and from any plausible "today". */
+  private static final String CHOSEN_TRANSACTION_DAY = "2025-03-15T00:00:00Z";
+  private static final String CHOSEN_IMPORT_DAY = "2025-03-20T00:00:00Z";
+
+  @Mock private NeoContext dateContext;
+  @Mock private OBDal dateDal;
+  @Mock private OBProvider dateProvider;
+  @Mock private FIN_FinancialAccount dateAccount;
+  @Mock private FIN_BankStatement dateStatement;
+  @Mock private FIN_BankStatementLine dateLine;
+  @Mock private DocumentType bsfDocType;
+  @Mock private OBCriteria<DocumentType> docTypeCriteria;
+  @Mock private OBCriteria<FIN_BankStatementLine> dateLineCriteria;
+  @Mock private Connection statementsConnection;
+  @Mock private PreparedStatement statementsQuery;
+  @Mock private ResultSet statementsRows;
+
+  /** Puts a valid transactionDate and importDate on {@code body}; returns it for chaining. */
+  private static JSONObject withStatementDates(JSONObject body) throws Exception {
+    body.put(FIELD_TRANSACTION_DATE, DEFAULT_STATEMENT_DAY);
+    body.put(FIELD_IMPORT_DATE, DEFAULT_STATEMENT_DAY);
+    return body;
+  }
+
+  /** Midnight, in the server zone, of the calendar day an ISO instant names — parseIsoDate's output. */
+  private static Date serverMidnightOf(String isoInstant) {
+    return Date.from(LocalDate.parse(isoInstant.substring(0, 10))
+        .atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** A valid ?action=create body whose dates are overridden by the caller (null = key absent). */
+  private static JSONObject createBody(String transactionDate, String importDate) throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", ACCOUNT_ID);
+    body.put("name", STATEMENT_NAME);
+    body.put("process", false);
+    if (transactionDate != null) body.put(FIELD_TRANSACTION_DATE, transactionDate);
+    if (importDate != null) body.put(FIELD_IMPORT_DATE, importDate);
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2025-03-14T00:00:00Z", "Transferencia", "Acme", 100, 0));
+    body.put("lines", lines);
+    return body;
+  }
+
+  /** A valid ?action=update body whose dates are overridden by the caller (null = key absent). */
+  private static JSONObject updateBody(String transactionDate, String importDate) throws Exception {
+    JSONObject body = createBody(transactionDate, importDate);
+    body.remove("FIN_Financial_Account_ID");
+    body.put("id", DRAFT_ID);
+    return body;
+  }
+
+  private static String errorMessage(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  /**
+   * Runs ?action=create with {@code body} against a fully wired offline DAL: the account exists,
+   * the BSF document type resolves and every OBProvider lookup hands back a mock — so the ONLY
+   * thing that can turn the request into a 400 is the body itself.
+   */
+  private NeoResponse runCreate(JSONObject body) {
+    when(dateContext.getRequestBody()).thenReturn(body);
+    when(dateStatement.getId()).thenReturn("stmt-new");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dateDal);
+      when(dateDal.get(eq(FIN_FinancialAccount.class), eq(ACCOUNT_ID))).thenReturn(dateAccount);
+      when(dateDal.createCriteria(DocumentType.class)).thenReturn(docTypeCriteria);
+      when(docTypeCriteria.add(any())).thenReturn(docTypeCriteria);
+      when(docTypeCriteria.list()).thenReturn(Collections.singletonList(bsfDocType));
+      providerMock.when(OBProvider::getInstance).thenReturn(dateProvider);
+      when(dateProvider.get(FIN_BankStatement.class)).thenReturn(dateStatement);
+      when(dateProvider.get(FIN_BankStatementLine.class)).thenReturn(dateLine);
+      return handler.handle(postCtx(dateContext, ACTION_CREATE));
+    }
+  }
+
+  /** Runs ?action=update with {@code body} against a draft {@link #DRAFT_ID} with no matched lines. */
+  private NeoResponse runUpdate(JSONObject body, FIN_BankStatement draft) {
+    when(dateContext.getRequestBody()).thenReturn(body);
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dateDal);
+      when(dateDal.get(eq(FIN_BankStatement.class), eq(DRAFT_ID))).thenReturn(draft);
+      when(dateDal.createCriteria(FIN_BankStatementLine.class)).thenReturn(dateLineCriteria);
+      when(dateLineCriteria.add(any())).thenReturn(dateLineCriteria);
+      when(dateLineCriteria.list()).thenReturn(Collections.emptyList());
+      providerMock.when(OBProvider::getInstance).thenReturn(dateProvider);
+      when(dateProvider.get(FIN_BankStatementLine.class)).thenReturn(dateLine);
+      return handler.handle(postCtx(dateContext, ACTION_UPDATE));
+    }
+  }
+
+  /** A rejected create must not have built, saved or processed anything. */
+  private void assertCreateBuiltNothing() throws Exception {
+    verify(handler, never()).newManualBankStatement(any(), any());
+    verify(handler, never()).processStatement(any());
+    verify(dateDal, never()).save(any());
+    verify(dateStatement, never()).setTransactionDate(any());
+    verify(dateStatement, never()).setImportdate(any());
+  }
+
+  /** A rejected update must not have touched the draft's header or lines. */
+  private void assertUpdateTouchedNothing(FIN_BankStatement draft) throws Exception {
+    verify(draft, never()).setName(any());
+    verify(draft, never()).setTransactionDate(any());
+    verify(draft, never()).setImportdate(any());
+    verify(dateDal, never()).save(any());
+    verify(handler, never()).processStatement(any());
+  }
+
+  @Test
+  public void testCreateRejectsAMissingTransactionDate() throws Exception {
+    NeoResponse r = runCreate(createBody(null, DEFAULT_STATEMENT_DAY));
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_TRANSACTION_DATE, errorMessage(r));
+    assertCreateBuiltNothing();
+  }
+
+  @Test
+  public void testCreateRejectsABlankTransactionDate() throws Exception {
+    NeoResponse r = runCreate(createBody(BLANK_DATE, DEFAULT_STATEMENT_DAY));
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_TRANSACTION_DATE, errorMessage(r));
+    assertCreateBuiltNothing();
+  }
+
+  @Test
+  public void testCreateRejectsAMissingImportDate() throws Exception {
+    NeoResponse r = runCreate(createBody(DEFAULT_STATEMENT_DAY, null));
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_IMPORT_DATE, errorMessage(r));
+    assertCreateBuiltNothing();
+  }
+
+  @Test
+  public void testCreateRejectsABlankImportDate() throws Exception {
+    NeoResponse r = runCreate(createBody(DEFAULT_STATEMENT_DAY, ""));
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_IMPORT_DATE, errorMessage(r));
+    assertCreateBuiltNothing();
+  }
+
+  /** An unparseable value used to collapse onto today exactly like a missing one. */
+  @Test
+  public void testCreateRejectsAnUnparseableTransactionDate() throws Exception {
+    NeoResponse r = runCreate(createBody(UNPARSEABLE_DATE, DEFAULT_STATEMENT_DAY));
+    assertEquals(400, r.getHttpStatus());
+    String message = errorMessage(r);
+    assertTrue(message, message.contains(FIELD_TRANSACTION_DATE));
+    assertCreateBuiltNothing();
+  }
+
+  @Test
+  public void testCreateRejectsAnUnparseableImportDate() throws Exception {
+    NeoResponse r = runCreate(createBody(DEFAULT_STATEMENT_DAY, UNPARSEABLE_DATE));
+    assertEquals(400, r.getHttpStatus());
+    String message = errorMessage(r);
+    assertTrue(message, message.contains(FIELD_IMPORT_DATE));
+    assertCreateBuiltNothing();
+  }
+
+  /**
+   * The happy path runs the REAL newManualBankStatement → applyEditableHeader, so the setters see
+   * exactly what the request carried: each date is set once, to the calendar day that was sent.
+   */
+  @Test
+  public void testCreatePersistsTheChosenCalendarDays() throws Exception {
+    NeoResponse r = runCreate(createBody(CHOSEN_TRANSACTION_DAY, CHOSEN_IMPORT_DAY));
+    assertEquals(201, r.getHttpStatus());
+    verify(dateStatement, times(1)).setTransactionDate(any());
+    verify(dateStatement).setTransactionDate(serverMidnightOf(CHOSEN_TRANSACTION_DAY));
+    verify(dateStatement, times(1)).setImportdate(any());
+    verify(dateStatement).setImportdate(serverMidnightOf(CHOSEN_IMPORT_DAY));
+    verify(dateDal).save(dateStatement);
+  }
+
+  @Test
+  public void testUpdateRejectsAMissingTransactionDate() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    NeoResponse r = runUpdate(updateBody(null, DEFAULT_STATEMENT_DAY), draft);
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_TRANSACTION_DATE, errorMessage(r));
+    assertUpdateTouchedNothing(draft);
+  }
+
+  @Test
+  public void testUpdateRejectsABlankTransactionDate() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    NeoResponse r = runUpdate(updateBody(BLANK_DATE, DEFAULT_STATEMENT_DAY), draft);
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_TRANSACTION_DATE, errorMessage(r));
+    assertUpdateTouchedNothing(draft);
+  }
+
+  @Test
+  public void testUpdateRejectsAMissingImportDate() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    NeoResponse r = runUpdate(updateBody(DEFAULT_STATEMENT_DAY, null), draft);
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_IMPORT_DATE, errorMessage(r));
+    assertUpdateTouchedNothing(draft);
+  }
+
+  @Test
+  public void testUpdateRejectsABlankImportDate() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    NeoResponse r = runUpdate(updateBody(DEFAULT_STATEMENT_DAY, ""), draft);
+    assertEquals(400, r.getHttpStatus());
+    assertEquals(MSG_MISSING_IMPORT_DATE, errorMessage(r));
+    assertUpdateTouchedNothing(draft);
+  }
+
+  @Test
+  public void testUpdateRejectsAnUnparseableTransactionDate() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    NeoResponse r = runUpdate(updateBody(UNPARSEABLE_DATE, DEFAULT_STATEMENT_DAY), draft);
+    assertEquals(400, r.getHttpStatus());
+    String message = errorMessage(r);
+    assertTrue(message, message.contains(FIELD_TRANSACTION_DATE));
+    assertUpdateTouchedNothing(draft);
+  }
+
+  @Test
+  public void testUpdateRejectsAnUnparseableImportDate() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    NeoResponse r = runUpdate(updateBody(DEFAULT_STATEMENT_DAY, UNPARSEABLE_DATE), draft);
+    assertEquals(400, r.getHttpStatus());
+    String message = errorMessage(r);
+    assertTrue(message, message.contains(FIELD_IMPORT_DATE));
+    assertUpdateTouchedNothing(draft);
+  }
+
+  @Test
+  public void testUpdatePersistsTheChosenCalendarDays() throws Exception {
+    FIN_BankStatement draft = draftStatement(DRAFT_ID);
+    when(draft.getName()).thenReturn(STATEMENT_NAME);
+    NeoResponse r = runUpdate(updateBody(CHOSEN_TRANSACTION_DAY, CHOSEN_IMPORT_DAY), draft);
+    assertEquals(200, r.getHttpStatus());
+    verify(draft, times(1)).setTransactionDate(any());
+    verify(draft).setTransactionDate(serverMidnightOf(CHOSEN_TRANSACTION_DAY));
+    verify(draft, times(1)).setImportdate(any());
+    verify(draft).setImportdate(serverMidnightOf(CHOSEN_IMPORT_DAY));
+    verify(dateDal).save(draft);
+  }
+
+  /**
+   * The list's server-side order is transaction date, newest first, with the creation instant as
+   * the tiebreak and the id as a last, total resort — the same order the tab applies client-side —
+   * and every row carries the `created` instant the tab tiebreaks on.
+   */
+  @Test
+  public void testLoadStatementsOrdersByTransactionDateThenCreatedAndExposesCreated()
+      throws Exception {
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    when(statementsConnection.prepareStatement(sql.capture())).thenReturn(statementsQuery);
+    when(statementsQuery.executeQuery()).thenReturn(statementsRows);
+    when(statementsRows.next()).thenReturn(true, false);
+    when(statementsRows.getString("fin_bankstatement_id")).thenReturn("stmt-1");
+    when(statementsRows.getTimestamp(anyString())).thenReturn(new Timestamp(0));
+    when(statementsRows.getString("processed")).thenReturn("N");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dateDal);
+      when(dateDal.getConnection()).thenReturn(statementsConnection);
+
+      JSONArray rows = handler.loadStatements(ACCOUNT_ID);
+
+      String normalized = sql.getValue().replaceAll("\\s+", " ");
+      assertTrue(normalized, normalized.matches(
+          "(?is).*ORDER BY\\s+(bs\\.)?statementdate\\s+DESC\\s*,\\s*(bs\\.)?created\\s+DESC\\s*,"
+              + "\\s*(bs\\.)?fin_bankstatement_id\\s+DESC\\s*$"));
+      JSONObject row = rows.getJSONObject(0);
+      assertTrue("each statement row must expose its creation instant", row.has("created"));
+      assertTrue(row.getString("created"), !row.getString("created").trim().isEmpty());
+    }
+  }
+
+  // ── ETP-5447: a file import dates the statement by its last movement ────
+  //
+  // The import action used to leave the statement date at the current instant stamped when the
+  // statement is created, so a file imported today with August movements sorted as a statement
+  // of today. After the lines are parsed and pruned, the transaction date of the statement is the
+  // calendar day of the latest KEPT line date. The import date stays at the current instant, and
+  // with no dated line the transaction date stays today. The date is set before the statement is
+  // processed, and the first save and flush of that processing persists it.
+  //
+  // These tests run the REAL statement creation and the REAL line pruner. Only the parser, the
+  // processing step and the aggregates are stubbed, so they pin the whole wiring, not a stub.
+
+  private static final String IMPORT_FILE_NAME = "extracto-agosto.c43";
+  private static final String ACTION_IMPORT = "import";
+  private static final LocalDate EARLIER_LINE_DAY = LocalDate.of(2026, 8, 28);
+  private static final LocalDate LATEST_LINE_DAY = LocalDate.of(2026, 8, 29);
+
+  @Mock private FIN_BankStatementLine earlierImportedLine;
+  @Mock private FIN_BankStatementLine latestImportedLine;
+
+  /** Stateful fields of {@link #dateStatement}, so a getter returns what the code last set. */
+  private Date statementTransactionDate;
+  private Date statementImportDate;
+  /** The statement's transactionDate observed at the moment processStatement ran. */
+  private Date transactionDateSeenByProcess;
+  private boolean processStatementCalled;
+  /** False when a test programs the prune result itself through {@link #stubPrune}. */
+  private boolean useRealPrune = true;
+
+  /** A local-time instant on {@code day} — a parsed line date carries a time of day. */
+  private static Date atLocalTime(LocalDate day, int hour, int minute) {
+    return Date.from(day.atTime(hour, minute).atZone(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** Midnight, in the server zone, of {@code day}. */
+  private static Date serverMidnightOf(LocalDate day) {
+    return Date.from(day.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** A kept (credit-only) imported line dated {@code date} ({@code null} = undated). */
+  private static void stubImportedLine(FIN_BankStatementLine line, long lineNo, Date date) {
+    when(line.getLineNo()).thenReturn(lineNo);
+    when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
+    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getTransactionDate()).thenReturn(date);
+  }
+
+  /**
+   * Runs ?action=import for a C43 file whose parsed lines, as the pruner reads them back from the
+   * DB, are {@code parsedLines}. {@link #dateStatement} keeps its transaction / import dates as real
+   * state, and processStatement records the transactionDate it sees.
+   */
+  private NeoResponse runImport(FIN_BankStatementLine... parsedLines) throws Exception {
+    when(dateContext.getRequestBody())
+        .thenReturn(body(ACCOUNT_ID, IMPORT_FILE_NAME, encode(c43LineEighty())));
+    when(dateStatement.getId()).thenReturn("stmt-new");
+    doAnswer(inv -> {
+      statementTransactionDate = inv.getArgument(0);
+      return null;
+    }).when(dateStatement).setTransactionDate(any());
+    when(dateStatement.getTransactionDate()).thenAnswer(inv -> statementTransactionDate);
+    doAnswer(inv -> {
+      statementImportDate = inv.getArgument(0);
+      return null;
+    }).when(dateStatement).setImportdate(any());
+    when(dateStatement.getImportdate()).thenAnswer(inv -> statementImportDate);
+
+    doReturn(parsedLines.length).when(handler).parseC43(any(ByteArrayInputStream.class), eq(dateStatement));
+    doAnswer(inv -> {
+      processStatementCalled = true;
+      transactionDateSeenByProcess = ((FIN_BankStatement) inv.getArgument(0)).getTransactionDate();
+      return null;
+    }).when(handler).processStatement(any());
+    if (useRealPrune) {
+      // Let the real prune run, because it is where the latest kept-line date is collected. A
+      // static mock intercepts EVERY static method of the class, so calling the real entry point
+      // would still route its private helpers to the mock defaults and the line reader would
+      // return an empty list. Release the class-level static mock instead, so the pruner runs
+      // entirely un-mocked. The shared mock cleanup skips it once it is released.
+      prunerMock.close();
+      prunerMock = null;
+    }
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dateDal);
+      when(dateDal.get(eq(FIN_FinancialAccount.class), eq(ACCOUNT_ID))).thenReturn(dateAccount);
+      when(dateDal.createCriteria(DocumentType.class)).thenReturn(docTypeCriteria);
+      when(docTypeCriteria.add(any())).thenReturn(docTypeCriteria);
+      when(docTypeCriteria.list()).thenReturn(Collections.singletonList(bsfDocType));
+      when(dateDal.createCriteria(FIN_BankStatementLine.class)).thenReturn(dateLineCriteria);
+      when(dateLineCriteria.add(any())).thenReturn(dateLineCriteria);
+      when(dateLineCriteria.list()).thenReturn(new ArrayList<>(Arrays.asList(parsedLines)));
+      providerMock.when(OBProvider::getInstance).thenReturn(dateProvider);
+      when(dateProvider.get(FIN_BankStatement.class)).thenReturn(dateStatement);
+      return handler.handle(postCtx(dateContext, ACTION_IMPORT));
+    }
+  }
+
+  private static void assertWithin(String what, Date value, Date from, Date to) {
+    assertNotNull(what + " must be set", value);
+    assertTrue(what + " " + value + " must be within [" + from + ", " + to + "]",
+        !value.before(from) && !value.after(to));
+  }
+
+  /**
+   * The ticket's scenario: lines dated the 28th and the 29th (the later one listed FIRST, so the
+   * result cannot come from "the last line of the file") → the statement is dated the 29th, as the
+   * calendar day at server midnight; the import date is still the moment of the import.
+   */
+  @Test
+  public void testImportDatesTheStatementByItsLatestLine() throws Exception {
+    stubImportedLine(latestImportedLine, 10L, atLocalTime(LATEST_LINE_DAY, 18, 45));
+    stubImportedLine(earlierImportedLine, 20L, atLocalTime(EARLIER_LINE_DAY, 9, 0));
+    Date before = new Date();
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+    Date after = new Date();
+
+    assertEquals(201, r.getHttpStatus());
+    assertEquals(serverMidnightOf(LATEST_LINE_DAY), statementTransactionDate);
+    assertEquals(LATEST_LINE_DAY,
+        statementTransactionDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate());
+    // importdate is the import instant, set once, and never moved to a line date.
+    assertWithin("importdate", statementImportDate, before, after);
+    verify(dateStatement, times(1)).setImportdate(any());
+  }
+
+  /** No parsed line carries a date → the statement keeps today (newBankStatement's stamp). */
+  @Test
+  public void testImportKeepsTodayWhenNoLineHasADate() throws Exception {
+    stubImportedLine(latestImportedLine, 10L, null);
+    stubImportedLine(earlierImportedLine, 20L, null);
+    Date before = new Date();
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+    Date after = new Date();
+
+    assertEquals(201, r.getHttpStatus());
+    assertWithin("transactionDate", statementTransactionDate, before, after);
+    assertEquals(LocalDate.now(),
+        statementTransactionDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate());
+    assertWithin("importdate", statementImportDate, before, after);
+  }
+
+  /**
+   * The line date must already be on the statement when processStatement runs — its first
+   * save + flush is what persists the header, so setting it afterwards would store today.
+   */
+  @Test
+  public void testImportSetsTheLineDateBeforeProcessingTheStatement() throws Exception {
+    stubImportedLine(latestImportedLine, 10L, atLocalTime(LATEST_LINE_DAY, 12, 0));
+    stubImportedLine(earlierImportedLine, 20L, atLocalTime(EARLIER_LINE_DAY, 12, 0));
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+
+    assertEquals(201, r.getHttpStatus());
+    assertTrue("processStatement must run on a successful import", processStatementCalled);
+    assertEquals(serverMidnightOf(LATEST_LINE_DAY), transactionDateSeenByProcess);
+    InOrder order = inOrder(dateStatement, handler);
+    order.verify(dateStatement).setTransactionDate(serverMidnightOf(LATEST_LINE_DAY));
+    order.verify(handler).processStatement(dateStatement);
+  }
+
+  /**
+   * A prune result without a latest date (the legacy two-argument {@code PruneResult}, e.g. every
+   * kept line undated) must not clear or move the date: the statement keeps newBankStatement's today.
+   */
+  @Test
+  public void testImportKeepsTodayWhenThePruneReportsNoLatestDate() throws Exception {
+    useRealPrune = false;
+    stubPrune(dateStatement, 2, 0);
+    Date before = new Date();
+
+    NeoResponse r = runImport(latestImportedLine, earlierImportedLine);
+    Date after = new Date();
+
+    assertEquals(201, r.getHttpStatus());
+    assertWithin("transactionDate", statementTransactionDate, before, after);
+    assertWithin("transactionDate seen by processStatement", transactionDateSeenByProcess,
+        before, after);
   }
 }

@@ -1548,7 +1548,9 @@
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <JAVA_QUALIFIER><![CDATA[bankStatementEntityHandler]]></JAVA_QUALIFIER>
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <SEQNO><![CDATA[70]]></SEQNO>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <AGENT_PROMPT><![CDATA[The `importedBankStatements` entity is a bank statement (FIN_BankStatement) of a financial account; `bankStatementLines` are its lines. Read both with neo_list/neo_get. Generic create/update/delete on both entities is refused with 405: change a statement with the `bank-statements` spec actions — `neo_action {spec:"bank-statements", entity:"bank-statements", id:<statement id>, action:"updateStatement"|"processStatement"|"reactivateStatement"|"deleteStatement"}` — and create one with `createStatement`/`importStatement` (id = the financial account). Catalogue: `neo_schema({spec:"bank-statements", view:"actions"})`.]]></AGENT_PROMPT>
 <!--495659D935FB48EAA6E796F9ED42CAE7--></ETGO_SF_ENTITY>
 
 <!--496A6E939C5B432D9BBB1CD1B583F2FD--><ETGO_SF_ENTITY>
@@ -2573,6 +2575,7 @@
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <JAVA_QUALIFIER><![CDATA[bankStatementEntityHandler]]></JAVA_QUALIFIER>
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <SEQNO><![CDATA[80]]></SEQNO>
 <!--6EFF323FE464437FBE29EADAC6FFAE39--></ETGO_SF_ENTITY>
 
@@ -3970,7 +3973,9 @@
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <JAVA_QUALIFIER><![CDATA[financialAccountHeaderHandler]]></JAVA_QUALIFIER>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <AGENT_PROMPT><![CDATA[The `account` entity represents the company's OWN financial accounts (Etendo table FIN_Financial_Account): its bank, cash and card accounts (required fields: name, currency, type), including their IBAN, SWIFT/BIC and account number. These are NOT a contact's bank details — for a contact's (business partner / BP) bank account (C_BP_BankAccount) use the `contacts` spec (`bankAccount` entity) instead.]]></AGENT_PROMPT>
+<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <AGENT_PROMPT><![CDATA[The `account` entity represents the company's OWN financial accounts (Etendo table FIN_Financial_Account): its bank, cash and card accounts (required fields: name, currency, type), including their IBAN, SWIFT/BIC and account number. These are NOT a contact's bank details — for a contact's (business partner / BP) bank account (C_BP_BankAccount) use the `contacts` spec (`bankAccount` entity) instead.
+
+Bank statements: create, preview or import them with the `bank-statements` spec actions — `neo_action {spec:"bank-statements", entity:"bank-statements", id:<this financial account id>, action:"createStatement"|"previewStatement"|"importStatement"}`; the catalogue is `neo_schema({spec:"bank-statements", view:"actions"})`. Read statements with neo_list/neo_get on `importedBankStatements` / `bankStatementLines`; generic writes on those entities are refused with 405.]]></AGENT_PROMPT>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1--></ETGO_SF_ENTITY>
 
 <!--BE79CE1718074339AE35BE6DDD829308--><ETGO_SF_ENTITY>
