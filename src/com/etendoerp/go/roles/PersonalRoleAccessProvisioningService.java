@@ -20,6 +20,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
@@ -142,6 +143,31 @@ class PersonalRoleAccessProvisioningService {
     }
     int n = Integer.parseInt(digits);
     return n >= 2 && roleName.equals(personalRoleName(base, n));
+  }
+
+  /**
+   * ETP-5502 — active, non-template, non-client-admin roles of {@code user}'s client, earliest
+   * first: the candidates demote may restore. Callers add the owner/name restriction.
+   */
+  static OBCriteria<Role> personalRoleCandidateCriteria(User user) {
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(Role.PROPERTY_TEMPLATE, false));
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENTADMIN, false));
+    criteria.addOrder(Order.asc(Role.PROPERTY_CREATIONDATE));
+    return criteria;
+  }
+
+  /**
+   * ETP-5502 — a personal role is always created after its user, so one older than {@code user}
+   * belonged to someone else (typically a deleted namesake).
+   */
+  static boolean isOlderThan(Role role, User user) {
+    return role.getCreationDate() != null && user.getCreationDate() != null
+        && role.getCreationDate().before(user.getCreationDate());
   }
 
   private boolean roleNameExists(User user, String name) {

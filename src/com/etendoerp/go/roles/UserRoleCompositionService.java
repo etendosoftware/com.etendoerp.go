@@ -28,7 +28,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.Session;
-import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
@@ -1179,7 +1178,8 @@ public class UserRoleCompositionService {
 
   @SuppressWarnings("unchecked")
   private Role findOwnedPersonalRole(User user) {
-    OBCriteria<Role> criteria = dormantPersonalRoleCriteria(user);
+    OBCriteria<Role> criteria =
+        PersonalRoleAccessProvisioningService.personalRoleCandidateCriteria(user);
     criteria.add(Restrictions.eq(Role.PROPERTY_ETGOPERSONALOWNER, user.getId()));
     List<Role> roles = criteria.list();
     if (roles.size() > 1) {
@@ -1197,36 +1197,19 @@ public class UserRoleCompositionService {
   @SuppressWarnings("unchecked")
   private Role findLegacyPersonalRoleByName(User user) {
     String nameSource = personalRoleAccessProvisioningService.personalRoleNameSource(user);
-    OBCriteria<Role> criteria = dormantPersonalRoleCriteria(user);
+    OBCriteria<Role> criteria =
+        PersonalRoleAccessProvisioningService.personalRoleCandidateCriteria(user);
     criteria.add(Restrictions.isNull(Role.PROPERTY_ETGOPERSONALOWNER));
     criteria.add(Restrictions.like(Role.PROPERTY_NAME,
         PersonalRoleAccessProvisioningService.personalRoleName("", 1) + "%"));
     for (Role role : (List<Role>) criteria.list()) {
       if (PersonalRoleAccessProvisioningService.isPersonalRoleNameFor(nameSource, role.getName())
-          && !isOlderThan(role, user) && isReusablePersonalRole(user, role)) {
+          && !PersonalRoleAccessProvisioningService.isOlderThan(role, user)
+          && isReusablePersonalRole(user, role)) {
         return role;
       }
     }
     return null;
-  }
-
-  /** Active, non-template, non-client-admin roles of {@code user}'s client, earliest first. */
-  private OBCriteria<Role> dormantPersonalRoleCriteria(User user) {
-    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
-    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
-    criteria.add(Restrictions.eq(Role.PROPERTY_TEMPLATE, false));
-    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENTADMIN, false));
-    criteria.addOrder(Order.asc(Role.PROPERTY_CREATIONDATE));
-    return criteria;
-  }
-
-  /** A personal role is always created after its user; an older one belonged to someone else. */
-  private static boolean isOlderThan(Role role, User user) {
-    return role.getCreationDate() != null && user.getCreationDate() != null
-        && role.getCreationDate().before(user.getCreationDate());
   }
 
   /**
