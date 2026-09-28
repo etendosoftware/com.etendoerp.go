@@ -217,7 +217,7 @@ final class McpHookExecutor {
     JSONObject body = pre.getBody();
     if (status >= 200 && status < 300 && status != HTTP_ACCEPTED
         && (body == null || body.length() == 0)) {
-      return McpToolRouter.deleteConfirmation(recordId);
+      return McpToolResponses.deleteConfirmation(recordId);
     }
     return neoResponseToMcpResult(pre);
   }

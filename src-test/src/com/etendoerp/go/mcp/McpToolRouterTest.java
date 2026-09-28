@@ -169,7 +169,7 @@ public class McpToolRouterTest {
     assertEquals(jsonError, content.getJSONObject(0).getString("text"));
   }
 
-  // ── deleteConfirmation (ETP-5474) ──────────────────────────────────────
+  // ── McpToolResponses.deleteConfirmation (ETP-5474) ─────────────────────
 
   /**
    * Pins the single {@code neo_delete} success shape shared by the generic removal path and the
@@ -180,7 +180,7 @@ public class McpToolRouterTest {
   public void testDeleteConfirmationReturnsDeletedTrueAndIdAsTextContent() throws Exception {
     String recordId = "FA-CONFIRM-1";
 
-    JSONObject result = McpToolRouter.deleteConfirmation(recordId);
+    JSONObject result = McpToolResponses.deleteConfirmation(recordId);
 
     assertNotNull(result);
     assertFalse("a delete confirmation must not be flagged as an error",

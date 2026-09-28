@@ -2569,7 +2569,7 @@ null body and was rendered as `{}`, which an agent read as a failed delete altho
 |---|---|
 | `null` | generic removal, then the confirmation |
 | status &ge; 400 | the normalized error, unchanged (`neoResponseToMcpResult`) |
-| 2xx other than 202, with a null or empty body | the confirmation (`McpToolRouter.deleteConfirmation`) |
+| 2xx other than 202, with a null or empty body | the confirmation (`McpToolResponses.deleteConfirmation`) |
 | 2xx with a non-empty body | that body, unchanged (e.g. a future handler that answers with its own payload) |
 | `202 Accepted`, or any other non-error code (1xx, 3xx) | passed through unchanged (`neoResponseToMcpResult`) |
 
@@ -2577,7 +2577,7 @@ Only a completed-success 2xx with no body counts as a confirmation. A `202 Accep
 delete was queued and has not happened yet, so an asynchronous handler is never reported to the
 agent as a completed delete.
 
-Both confirmation sites build it through `McpToolRouter.deleteConfirmation`, so they cannot drift.
+Both confirmation sites build it through `McpToolResponses.deleteConfirmation`, so they cannot drift.
 The rule lives in the router, not in each handler: any future handler that resolves DELETE with 204
 is covered. `runPreHook` itself is untouched — on the process, report and widget paths a 204 does
 not mean "deleted".

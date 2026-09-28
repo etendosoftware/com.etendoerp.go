@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import static com.etendoerp.go.mcp.McpToolResponses.buildRoutingErrorBody;
 import static com.etendoerp.go.mcp.McpToolResponses.buildUnexpectedErrorBody;
+import static com.etendoerp.go.mcp.McpToolResponses.deleteConfirmation;
 import static com.etendoerp.go.mcp.McpToolResponses.imageToolResult;
 
 import java.util.Collections;
@@ -1021,21 +1022,6 @@ public class McpToolRouter {
     }
 
     return deleteConfirmation(recordId);
-  }
-
-  /**
-   * The single {@code neo_delete} success answer, {@code {"deleted": true, "id": recordId}}.
-   * Shared by the generic removal path and {@link McpHookExecutor#runDeletePreHook} (a handler
-   * resolving the DELETE with 204 No Content) so the two cannot diverge (ETP-5474).
-   *
-   * @param recordId the id of the deleted record
-   * @return the MCP text-content result carrying the confirmation
-   */
-  static JSONObject deleteConfirmation(String recordId) throws JSONException {
-    JSONObject deleteResult = new JSONObject();
-    deleteResult.put("deleted", true);
-    deleteResult.put("id", recordId);
-    return wrapAsTextContent(deleteResult);
   }
 
   // ── neo_selectors ─────────────────────────────────────────────────────
