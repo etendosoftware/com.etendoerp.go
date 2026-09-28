@@ -102,11 +102,17 @@ class NeoExtensionSurfaceCoverageTest {
   void restRoutesThroughTheDispatcher() {
     for (String source : List.of(REST_SUB_ENDPOINTS, REST_CRUD, REST_BATCH)) {
       String body = McpSourceScanner.read(source);
-      assertTrue(body.contains("NeoExtensionDispatcher"),
-          () -> source + " dispatches a hook without going through NeoExtensionDispatcher. "
-              + "A second path means a second resolution order and no trace — which is how "
-              + "'the customization declined' and 'nothing was resolved' became the same "
-              + "observation (ETP-5415, §6.0.7).");
+      // Either dispatching directly, or delegating to the one method that does.
+      // BatchService takes the second route on purpose: NeoServletSupport.handleWithHooks is the
+      // shared runner for every REST write, and routing batch through it is what keeps batch and
+      // the direct HTTP write on one path after they had already silently diverged once
+      // (ETP-4254). Demanding a literal NeoExtensionDispatcher here would be demanding that batch
+      // hand-roll its own dispatch — the exact shape this assertion exists to prevent.
+      assertTrue(body.contains("NeoExtensionDispatcher") || body.contains("handleWithHooks"),
+          () -> source + " dispatches a hook without going through NeoExtensionDispatcher, "
+              + "directly or via NeoServletSupport.handleWithHooks. A third path means a third "
+              + "resolution order and no trace — which is how 'the customization declined' and "
+              + "'nothing was resolved' became the same observation (ETP-5415, §6.0.7).");
     }
   }
 
@@ -122,7 +128,7 @@ class NeoExtensionSurfaceCoverageTest {
         "REST CRUD must dispatch on REST_SINGLE");
     assertTrue(McpSourceScanner.read(REST_BATCH).contains("REST_BATCH"),
         "the batch service must dispatch on REST_BATCH — the channel whose divergence from "
-            + "neo_create is why BATCH_TOOL_ENABLED is false");
+            + "neo_create had BATCH_TOOL_ENABLED off until ETP-5415 converged them");
   }
 
   private static Set<String> surfaceLiterals(String source) {

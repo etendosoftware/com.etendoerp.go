@@ -175,7 +175,7 @@ public class McpToolRouter {
             // Withdrawing it from tools/list is not enough: an agent that learned the name
             // elsewhere would still reach the handler, and a silent success on a path we chose
             // not to maintain is worse than the refusal.
-            if (!McpConstants.BATCH_TOOL_ENABLED) {
+            if (!McpConstants.batchToolEnabled()) {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
@@ -1516,9 +1516,10 @@ public class McpToolRouter {
 
   /**
    * Execute a transactional batch of create operations across specs.
-   * Delegates to {@link BatchService#executeBatch(JSONArray)} which owns the
-   * OBDal transaction lifecycle and returns a JSONObject describing success
-   * (committed) or failure (rolled back).
+   * Delegates to {@link BatchService#executeBatch(JSONArray,
+   * BatchService.OperationPreprocessor)} which owns the OBDal transaction lifecycle and returns a
+   * JSONObject describing success (committed) or failure (rolled back), calling back into
+   * {@link #preprocessBatchOperation} for each operation's MCP body transforms.
    *
    * <p>Package-private to keep the unit test free of reflection.</p>
    *
@@ -1556,18 +1557,14 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
-      // IMP-15: resolve FK-by-name / legacy-numeric-id values in every op body before the
-      // transaction opens, so neo_batch accepts exactly the formats neo_create does. Without this
-      // the batch path handed the raw value to the DAL, which failed with an import-set error
-      // naming the value it could not resolve — a different contract for the same field.
-      JSONObject fkError = resolveBatchFkNames(operations);
-      if (fkError != null) {
-        // IMP-5 clause (i): reported through the same outcome envelope as a failure inside
-        // executeBatch, and as text rather than error content for the same reason — one condition
-        // must not have two shapes depending on which funnel caught it.
-        return wrapAsTextContent(fkError);
-      }
-      JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
+      // IMP-15 / ETP-5415: the body transforms that make neo_batch accept exactly what neo_create
+      // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
+      // line-price injections. They run per operation, from inside the batch loop, because that is
+      // the first point where a $ref is resolved and a parentRef's parent exists; running them
+      // over the whole array beforehand made every parent-dependent injection abstain in silence.
+      // See BatchService#executeBatch(JSONArray, OperationPreprocessor).
+      JSONObject result = BatchService.forBatchOnly()
+          .executeBatch(operations, this::preprocessBatchOperation);
       if (!result.optBoolean("committed", false)) {
         // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
@@ -1616,75 +1613,62 @@ public class McpToolRouter {
   }
 
   /**
-   * Run the shared FK resolver — and the shared line-policy injection — over every operation body of
-   * a batch (IMP-15).
-   * <p>
-   * Mirrors what {@code handleCreate} does for a single record, with two batch-specific rules:
-   * <ul>
-   *   <li>{@code "$ref:<opId>"} placeholders are skipped — the op they point at has not run yet, so
-   *       the value is resolvable as neither an id nor a name (see {@code BatchService#REF_PREFIX}).</li>
-   *   <li>An op whose spec/entity cannot be resolved is left untouched instead of erroring here, so
-   *       {@code BatchService} still reports it with its own {@code failedAt} pointer rather than
-   *       this pass changing the error shape for malformed input.</li>
-   * </ul>
-   * Bodies are mutated in place, so the resolved ids are what {@code executeBatch} persists.
+   * The MCP write-path transforms, applied to one batch operation immediately before it is written
+   * (IMP-15, moved per-operation by ETP-5415).
    *
-   * @param operations the {@code operations} array from the tool call
-   * @return {@code null} when every body resolved, or — for the first op that failed — the full batch
-   *         outcome envelope built by
-   *         {@link McpToolRouterSupport#toMcpBatchPreflightFailure(JSONObject, int, String)}, which
-   *         carries {@code committed:false} and the {@code failedAt} pointer so the agent reads this
-   *         rejection exactly as it reads a failure from inside the batch (IMP-5 clause (i))
-   */
-  private JSONObject resolveBatchFkNames(JSONArray operations) throws JSONException {
-    for (int i = 0; i < operations.length(); i++) {
-      JSONObject fkError = resolveBatchOpFkNames(operations, i);
-      if (fkError != null) {
-        return fkError;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Run the FK pre-pass for a single batch operation (extracted from {@link #resolveBatchFkNames}
-   * so the loop there carries a single exit point, not one {@code continue} per skip reason).
+   * <p>Mirrors what {@code handleCreate} does for a single record, and now from the same starting
+   * state: {@code BatchService} calls this once every {@code $ref} in the body is resolved and the
+   * op's parent — created by an earlier operation — actually exists. It used to run over the whole
+   * operations array before the batch opened its transaction, which meant a {@code $ref} was still
+   * a placeholder and a {@code parentRef} pointed at nothing, so every parent-dependent injection
+   * below abstained without saying so. The visible symptom was a batched order line persisted at
+   * price 0 while the identical line created with a literal parent id priced correctly.
    *
-   * @return the batch outcome envelope when this op's FK resolution failed, or {@code null} when
-   *         the op was skipped (malformed, unresolved spec/entity) or resolved cleanly
+   * <p>An op whose spec/entity cannot be resolved is left untouched rather than rejected here, so
+   * {@code BatchService} still reports it with its own {@code failedAt} pointer instead of this
+   * method changing the error shape for malformed input.
+   *
+   * <p>The body is mutated in place, so what this leaves behind is what gets persisted.
+   *
+   * @param op the operation about to be written
+   * @return {@code null} when the body is ready to write, or the full batch outcome envelope built
+   *         by {@link McpToolRouterSupport#toMcpBatchPreflightFailure(JSONObject, int, String)},
+   *         which carries {@code committed:false} and the {@code failedAt} pointer so the agent
+   *         reads this rejection exactly as it reads a failure from inside the batch (IMP-5
+   *         clause (i))
    */
-  private JSONObject resolveBatchOpFkNames(JSONArray operations, int i) throws JSONException {
-    JSONObject op = operations.optJSONObject(i);
-    if (op == null) {
+  private JSONObject preprocessBatchOperation(BatchService.OperationContext op)
+      throws JSONException {
+    JSONObject body = op.body();
+    if (body == null || StringUtils.isBlank(op.specName())
+        || StringUtils.isBlank(op.entityName())) {
       return null;
     }
-    JSONObject body = op.optJSONObject("body");
-    String specName = op.optString("spec", null);
-    String entityName = op.optString(McpConstants.PARAM_ENTITY, null);
-    if (body == null || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
-      return null;
-    }
+    // Snapshotted BEFORE any injection below, because McpLinePriceInjector asks whether the AGENT
+    // supplied a price — after an injection the body can no longer answer that. Safe to take here
+    // even though ref substitution already ran: that replaces values, it never adds a field.
+    Set<String> agentProvided = NeoCrudHelper.snapshotBodyFields(body);
     Tab adTab;
     Entity dalEntity;
+    SFEntity sfEntity;
     try {
-      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-      SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
-      adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(op.specName());
+      sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), op.entityName());
+      adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, op.entityName());
       dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
     } catch (Exception e) {
-      log.debug("neo_batch FK pre-pass skipped op {} ({}/{}): {}", i, specName, entityName,
-          e.getMessage());
+      log.debug("neo_batch transforms skipped op {} ({}/{}): {}", op.index(), op.specName(),
+          op.entityName(), e.getMessage());
       return null;
     }
-    // This pre-pass runs on the raw operation body, before any defaults pass has touched it, so
-    // here a present uOM really is the caller's own.
+    // This runs before any defaults pass has touched the body, so here a present uOM really is
+    // the caller's own.
     injectLineUomIfApplicable(body, dalEntity, body.has(FIELD_UOM));
     JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
         value -> value.startsWith(BatchService.REF_PREFIX));
     if (fkError != null) {
-      return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, i,
-          op.optString("id", null));
+      return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, op.index(), op.opId());
     }
     // ETP-5335: same derivation neo_create runs, and it must run here too — neo_batch never
     // reaches handleCreate, so without this a batched document is persisted with a null bill-to
@@ -1692,6 +1676,30 @@ public class McpToolRouter {
     // that null into C_Invoice.C_BPartner_Location_ID (NOT NULL). Placed after the FK pre-pass so
     // a business partner given by name is already an id. See McpBillToInjector.
     McpBillToInjector.injectIfMissing(body, adTab, dalEntity, log);
+
+    // ETP-5415 (T6a): without it a batched commercial line is persisted at price 0 — the shared
+    // create path derives a line's price from the product selector's aux values, which carry no
+    // price-list context, so nothing downstream fills it and nothing complains. That silent-zero
+    // shape is the divergence class that had neo_batch switched off (ETP-5335); leaving it while
+    // re-enabling the tool would have shipped the same defect back. Placed last, matching
+    // handleCreate's order. See McpLinePriceInjector.
+    McpLinePriceInjector.injectIfMissing(body, dalEntity, sfEntity, op.parentId(), agentProvided,
+        log);
+
+    // ETP-5415 (T6a): the remaining two steps neo_create ran and neo_batch did not, both named in
+    // McpConstants#batchToolEnabled() as reasons the tool was switched off.
+    //
+    // FK sentinels first: "0" is a UI-level "not yet set" that the DAL cannot take as a reference,
+    // so it must be resolved or dropped before the write, exactly as neo_create does.
+    McpWriteRequestSupport.resolveFkSentinels(body, dalEntity, log);
+
+    // Then image fields. This one REFUSES rather than repairs, so it runs last among the body
+    // transforms and reports through the same envelope as the FK failure above — one condition
+    // must not have two shapes depending on which funnel caught it (IMP-5).
+    JSONObject imageError = McpImageFieldSupport.validateImageFields(body, adTab, dalEntity);
+    if (imageError != null) {
+      return McpToolRouterSupport.toMcpBatchPreflightFailure(imageError, op.index(), op.opId());
+    }
     return null;
   }
 

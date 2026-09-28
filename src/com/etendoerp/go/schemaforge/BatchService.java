@@ -293,6 +293,41 @@ public class BatchService {
    * @throws JSONException only on truly unexpected JSON serialization failures
    */
   public JSONObject executeBatch(JSONArray operations) throws JSONException {
+    return executeBatch(operations, null);
+  }
+
+  /**
+   * Overload taking a per-operation preprocessor, run for each op once its forward references are
+   * resolved and immediately before the record is created.
+   *
+   * <p><b>Why a per-op hook and not a pass over the whole array (ETP-5415).</b> The MCP layer used
+   * to run its body transforms — FK-by-name resolution, the UoM derivation, the bill-to and the
+   * line-price injections — over every op <i>before</i> {@code executeBatch} was called. At that
+   * point no op has run, so {@code $ref:<opId>} placeholders are unresolved and {@code parentRef}
+   * points at a record that does not exist yet. Any injection that needs the parent therefore
+   * abstained, silently: a batched order line was persisted at price 0 while the very same line
+   * created with a literal parent id got its price. That is the divergence class this ticket
+   * exists to remove — correct on one path, quietly wrong on the other — and it was already the
+   * reason {@code neo_batch} had been switched off (ETP-5335).
+   *
+   * <p>Running the transforms here instead gives them the same starting state
+   * {@code neo_create} has: every reference resolved, the parent persisted and addressable. The
+   * shared code holds no knowledge of what the preprocessor does or who supplies it — REST's
+   * {@code /sws/neo/batch} passes none and is unchanged.
+   *
+   * <p>One behavioural consequence, deliberate: a body the preprocessor rejects is now reported
+   * after the earlier operations have executed rather than before. Nothing is left behind — the
+   * rejection rolls the batch back like any other failure, and {@code persisted} stays empty
+   * except in the process-commit case the tracker already reports.
+   *
+   * @param operations   the ordered list of operation objects (must be non-null)
+   * @param preprocessor invoked per operation; returns {@code null} to proceed, or a batch failure
+   *                     envelope to reject the operation. {@code null} disables the hook.
+   * @return a JSONObject in one of the two shapes documented on {@link #executeBatch(JSONArray)}
+   * @throws JSONException only on truly unexpected JSON serialization failures
+   */
+  public JSONObject executeBatch(JSONArray operations, OperationPreprocessor preprocessor)
+      throws JSONException {
     if (operations == null) {
       return failureBody(-1, null, HttpServletResponse.SC_BAD_REQUEST,
           "Missing 'operations' array", null, null);
@@ -311,7 +346,7 @@ public class BatchService {
     try {
       for (int i = 0; i < operations.length(); i++) {
         JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults,
-            tracker);
+            tracker, preprocessor);
         if (failure != null) {
           rollbackQuietly();
           return failure;
@@ -344,7 +379,8 @@ public class BatchService {
    * or a failure body that the caller should return after rolling back.
    */
   private JSONObject processOperation(int i, JSONObject op, Map<String, String> resolvedIds,
-      JSONArray opResults, TransactionTracker tracker) throws JSONException {
+      JSONArray opResults, TransactionTracker tracker, OperationPreprocessor preprocessor)
+      throws JSONException {
     if (op == null) {
       return failureBody(i, null, HttpServletResponse.SC_BAD_REQUEST,
           OPS_PREFIX + i + "] must be an object", null, tracker.durable());
@@ -383,6 +419,15 @@ public class BatchService {
     }
     String parentId = resolveParentId(op, resolvedIds, opBody);
 
+    // ETP-5415: the caller's own body transforms, run here rather than over the whole array up
+    // front — this is the first point where $ref placeholders are resolved and the parent exists.
+    // See executeBatch(JSONArray, OperationPreprocessor).
+    JSONObject preprocessFailure = runPreprocessor(preprocessor, i, opId, specName, entityName,
+        opBody, parentId, tracker);
+    if (preprocessFailure != null) {
+      return preprocessFailure;
+    }
+
     NeoResponse rowResp = createRecord(spec, entityName, opBody, parentId);
     String recordId = isSuccess(rowResp) ? extractRecordId(rowResp.getBody()) : null;
     if (StringUtils.isNotBlank(recordId)) {
@@ -408,6 +453,67 @@ public class BatchService {
           "Operation '" + opId + "' created but id missing in response", null, tracker.durable());
     }
     return null;
+  }
+
+  /**
+   * Invoke the caller's preprocessor, converting an unexpected failure into a batch failure body
+   * so one bad transform cannot take the whole servlet down with a raw exception.
+   *
+   * <p>A {@code null} preprocessor is the REST case and means "no transforms" — not an error.
+   */
+  private JSONObject runPreprocessor(OperationPreprocessor preprocessor, int i, String opId,
+      String specName, String entityName, JSONObject opBody, String parentId,
+      TransactionTracker tracker) throws JSONException {
+    if (preprocessor == null) {
+      return null;
+    }
+    try {
+      return preprocessor.preprocess(
+          new OperationContext(i, opId, specName, entityName, opBody, parentId));
+    } catch (Exception e) {
+      log.error("[BATCH] preprocessor failed on op '{}' (index {})", opId, i, e);
+      return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to preprocess operation '" + opId + "': " + e.getMessage(), null,
+          tracker.durable());
+    }
+  }
+
+  /**
+   * One batch operation, as handed to an {@link OperationPreprocessor}.
+   *
+   * @param index      position of the operation in the batch, for the {@code failedAt} pointer
+   * @param opId       the operation's own id within the batch
+   * @param specName   the spec the operation targets
+   * @param entityName the entity within that spec
+   * @param body       the operation body, with every {@code $ref} already resolved. Mutated in
+   *                   place by the preprocessor — what it leaves here is what gets persisted.
+   * @param parentId   the resolved parent record id, or {@code null} for a top-level entity. Not
+   *                   necessarily present in {@code body}: on a {@code parentRef} op it is
+   *                   resolved from the earlier operation's result and injected only later, so a
+   *                   preprocessor that needs the parent must read it from here.
+   */
+  public record OperationContext(int index, String opId, String specName, String entityName,
+      JSONObject body, String parentId) {
+  }
+
+  /**
+   * A caller-supplied transform applied to each operation just before it is written.
+   *
+   * <p>Exists so a caller can bring its own write-path compensations to the batch without the
+   * shared batch code having to know what they are — {@code McpToolRouter} supplies the MCP ones,
+   * REST's {@code /sws/neo/batch} supplies none. See
+   * {@link #executeBatch(JSONArray, OperationPreprocessor)} for why the hook is per-operation.
+   */
+  @FunctionalInterface
+  public interface OperationPreprocessor {
+    /**
+     * @param op the operation about to be written; mutate {@code op.body()} in place
+     * @return {@code null} to proceed with the write, or a batch failure envelope (as built by the
+     *         caller, carrying {@code committed:false} and a {@code failedAt} pointer) to reject
+     *         this operation and roll the batch back
+     * @throws JSONException when the transform cannot read or write the body
+     */
+    JSONObject preprocess(OperationContext op) throws JSONException;
   }
 
   /**
@@ -655,7 +761,14 @@ public class BatchService {
         : Collections.emptyMap();
 
     NeoContext ctx = NeoContext.builder()
-        .specName(spec.getId())
+        // ETP-5415 (D10): the NAME, not the id. Every other dispatch path passes the name
+        // (NeoHookDispatcher:98, McpToolRouter, NeoServletSupport), and this one passed the UUID —
+        // so a customization branching on getSpecName() saw a different value depending on which
+        // caller reached it, and @NeoExtension(spec = "sales-order") could never match here at all,
+        // because NeoExtensionIndex resolves on the name. The failure shape is the one this ticket
+        // exists to remove: correct everywhere, silently inert in batch. findEntity above still
+        // uses spec.getId(), which is the id's actual job.
+        .specName(spec.getName())
         .entityName(entityName)
         .httpMethod("POST")
         .requestBody(body)
@@ -674,15 +787,18 @@ public class BatchService {
     // Confirmed via a real import run: a location op created a bare C_BPartner_Location
     // row with none of its required fields populated, hitting a raw Postgres NOT NULL
     // violation instead of ever running ContactsLocationAddressHandler.
-    String javaQualifier = sfEntity.getJavaQualifier();
-    if (StringUtils.isNotBlank(javaQualifier)) {
-      // REST_BATCH, not REST_SINGLE: the resolver is the same, but the trace has to say which
-      // caller this dispatch came from — this path and the direct HTTP write reach the same
-      // dispatch through different code and have silently diverged once already.
-      return NeoServletSupport.handleWithHooks(javaQualifier, ctx, crudHandler,
-          NeoExtensionChannel.REST_BATCH);
-    }
-    return crudHandler.handleDefault(ctx);
+    // REST_BATCH, not REST_SINGLE: the resolver is the same, but the trace has to say which
+    // caller this dispatch came from — this path and the direct HTTP write reach the same
+    // dispatch through different code and have silently diverged once already.
+    //
+    // ETP-5415: dispatched unconditionally. The blank-qualifier early return that used to guard
+    // this call was the last copy of the one already removed from NeoHookDispatcher and the MCP
+    // sites: with @NeoExtension an entity that has no Java_Qualifier can still carry a
+    // customization, and returning to handleDefault here would have made the annotation work on
+    // every path except batch. handleWithHooks falls back to handleDefault itself when nothing
+    // resolves, so the generic behaviour for a genuinely uncustomised entity is unchanged.
+    return NeoServletSupport.handleWithHooks(sfEntity.getJavaQualifier(), ctx, crudHandler,
+        NeoExtensionChannel.REST_BATCH);
   }
 
   /**

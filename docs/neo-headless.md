@@ -1670,8 +1670,8 @@ write body pass a **human search string** for an FK field; the router resolves i
 id server-side before persisting, via the same selector path `neo_selectors` uses
 (`NeoSelectorService.querySelectorByColumn`, limit 10). This runs for both `neo_create` and
 `neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`) and,
-since IMP-15, on every `neo_batch` operation body (`McpToolRouter.resolveBatchFkNames`, run before
-the batch transaction opens).
+since IMP-15, on every `neo_batch` operation body (`McpToolRouter.preprocessBatchOperation`, run
+per operation from inside the batch loop — see §4.12.9).
 
 **Request** — `businessPartner` given by name instead of id:
 
@@ -1765,9 +1765,9 @@ reference.
 
 #### 4.12.4 `neo_batch` failure envelope (IMP-15)
 
-> **`neo_batch` is switched off** since ETP-5335 (§4.12.9). This section describes the contract the
-> tool had, and the one it resumes if the flag is flipped back; the REST `/batch` endpoint it shares
-> `BatchService` with is unaffected and this envelope still applies there.
+> **`neo_batch` is live again** since ETP-5415, after being switched off by ETP-5335 — see §4.12.9
+> for what converged and what is still deliberately unequal. This envelope applies to it and to the
+> REST `/batch` endpoint it shares `BatchService` with.
 
 `BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
 the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
@@ -2123,75 +2123,83 @@ already carries a value, the business partner is unknown or still a `$ref:` plac
 partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
 so a location the role cannot read never becomes the invoicing address of a document it writes.
 
-**Where it runs.** `neo_create` runs it in `handleCreate`, before the mandatory check — this is the
-live call site. A second call site exists in the per-operation pre-pass `resolveBatchOpFkNames`,
-after the FK resolution so a partner given by name is already an id, but it is **dormant**:
-`neo_batch` is switched off (`McpConstants.BATCH_TOOL_ENABLED = false`, §4.12.9) and is neither
-published nor routable. It is kept wired so that flipping the flag back cannot silently reintroduce
-null bill-tos — on that path the missing value was never a 422 at all, because the shared
-`NeoCrudHandler` validator only checks submitted keys, so the document was simply persisted without
-one.
+**Where it runs.** Both MCP write verbs, and both live since ETP-5415: `neo_create` in
+`handleCreate` before the mandatory check, and each `neo_batch` operation in
+`preprocessBatchOperation`, after the FK resolution so a partner given by name is already an id.
+Without it the missing value was never a 422 at all, because the shared `NeoCrudHandler` validator
+only checks submitted keys — the document was simply persisted without a bill-to.
 
 **The REST `/sws/neo/batch` endpoint keeps the existing behaviour.** It shares `BatchService` but
-not the MCP pre-pass, and changing what the React frontend persists is out of scope for this fix.
+passes no preprocessor (§4.12.9), and changing what the React frontend persists is out of scope for
+this fix.
 
 ---
 
-#### 4.12.9 `neo_batch` is switched off (ETP-5335)
+#### 4.12.9 `neo_batch` is on again, and what still differs (ETP-5335 → ETP-5415)
 
-`McpConstants.BATCH_TOOL_ENABLED` is `false`. The tool is not published in `tools/list`
-(`ToolRegistry`) **and** is refused if called by name (`McpToolRouter.route`) — withdrawing it from
-the listing alone would leave an agent that learned the name elsewhere reaching a code path we chose
-not to maintain, and a silent success there is worse than a refusal.
+`McpConstants.batchToolEnabled()` returns `true`. The tool is published in `tools/list`
+(`ToolRegistry`) and routable by name (`McpToolRouter.route`).
 
-**Why.** `neo_batch` and `neo_create` are two different implementations of "create".
+> **It is a method, not a constant, deliberately.** A `static final boolean` initialised to a
+> literal is inlined by javac into every use site, so recompiling `McpConstants` alone changed
+> nothing: the tool stayed unpublished with the flag reading `true` in the source. The worse shape
+> is the asymmetric one — a partial rebuild leaving `ToolRegistry` publishing a tool
+> `McpToolRouter` still refuses. Read the flag through the accessor; never reintroduce the constant.
+
+**The background.** `neo_batch` and `neo_create` are two implementations of "create".
 `neo_create` runs the MCP write pipeline in `handleCreate`; `neo_batch` delegates each operation to
-the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). They had drifted apart in
-**both** directions:
+the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). ETP-5335 switched the tool
+off because they had drifted apart in both directions and keeping one write path correct is cheaper
+than keeping two in step. ETP-5415 closed enough of that gap to turn it back on — **not all of it**.
 
-| | in `neo_create`, not in `neo_batch` |
+##### Closed (ETP-5415)
+
+| step | how |
 |---|---|
-| `validateMandatoryFields` | the full sweep of mandatory AD columns (the shared validator only checks keys the caller submitted) |
-| `coerceFieldTypes` + `buildInvalidDatesError` | the 422 for unreadable/ambiguous dates (ETP-4793 / IMP-24) |
-| `McpImageFieldSupport.validateImageFields` | which tool produces a valid image id (ETP-5184) |
-| `McpLinePriceInjector` | the unit price derived from the parent's price list |
-| `resolveFkSentinels` | the `"0"` sentinel cleanup |
-| entity pre-hook | `handleDefault` never goes through `handleWithHooks`, so `NeoHandler.handle()` does not run |
+| `McpImageFieldSupport.validateImageFields` | runs per operation in `preprocessBatchOperation` |
+| `McpLinePriceInjector` | idem — the unit price derived from the parent's price list |
+| `McpBillToInjector` | idem — added by ETP-5335 while the tool was off, live since |
+| `resolveFkSentinels` | idem — the `"0"` sentinel cleanup |
+| the spec **name** in `NeoContext` | `BatchService.createRecord` passed the spec's UUID where every other path passes its name, so a customization branching on `getSpecName()` saw a different value here (D10) |
+| the entity pre-hook | already true before ETP-5415, and the previous version of this section was wrong to list it as missing: `BatchService` does call `handleWithHooks` when a qualifier exists |
 
-| | in `neo_batch`, not in `neo_create` |
-|---|---|
-| `NeoCommercialLinePolicy.injectCommercialAmounts` | ETP-4855's net-before-gross ordering, reached only via `executePostCreate` |
-| `stripContactsPreCreateBillingDefaults` | — |
-| `handler.protectedCreateCalloutFields` | the fields each handler shields from the cascade |
+**These transforms run per operation, from inside the batch loop** — `BatchService` calls back into
+`McpToolRouter.preprocessBatchOperation` through the `OperationPreprocessor` hook, after
+`substituteRefs` and `resolveParentId` and before the record is written. They used to run as a pass
+over the whole operations array *before* the transaction opened, which is not the same thing: at
+that point no operation has run, so a `$ref:<opId>` is still a placeholder and a `parentRef` names a
+record that does not exist. Every parent-dependent injection therefore abstained in silence — a
+batched order line persisted at price 0 while the identical single create priced correctly. **Do not
+move these back to an up-front pass.**
 
-Keeping one write path correct is cheaper than keeping two in step, so the second is off until they
-converge.
+##### Still divergent
 
-**What is given up.** Not the ability to create several records — an agent calls `neo_create` once
-per record — but **atomicity**. A batch was applied as a unit (IMP-23) and let a later operation
-reference an earlier one's id through `$ref:`. Without it, a run that fails halfway leaves the
-records already created in place, and the agent carries the parent id forward itself. The refusal
-says so, so an agent does not assume the two are equivalent:
+| step | in `neo_create` | in `neo_batch` | consequence |
+|---|---|---|---|
+| `validateMandatoryFields` | yes | **no** | a batch can persist a document missing a mandatory AD column the agent never mentioned — the shared `NeoMandatoryFieldValidator` only checks keys the caller submitted. Same shape as the bill-to defect ETP-5335 fixed |
+| `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`, §3.x) |
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** | no | neither path runs it, so `grossUnitPrice` and `lineGrossAmount` persist as 0 on both. Reached only via `executePostCreate` |
+| `stripContactsPreCreateBillingDefaults` | no | yes | |
+| `handler.protectedCreateCalloutFields` | no | yes | the fields each handler shields from the callout cascade |
 
-```json
-{
-  "status": 405,
-  "error": "tool_disabled",
-  "detail": "neo_batch is disabled on this server. Create the records one at a time with neo_create instead: create the parent first, then pass its returned id as parentId on each child create.",
-  "hint": "These are not equivalent in one respect: a batch was applied as a unit, so a failure undid the whole set. Separate creates are not undone — if one fails, the records already created stay. Check what exists before retrying.",
-  "seeAlso": "docs(topic:\"creating records\")"
-}
-```
+These are **declared** divergences, not unknown ones: the point of listing them is that the next
+person to touch either path can see what is deliberately unequal. Closing a row means adding the
+step to `preprocessBatchOperation` (for the first two) and updating this table in the same change.
 
-`tool_disabled` rather than `not_found` on purpose: the agent misspelled nothing and will not find a
-working variant by retrying.
+##### REST `/sws/neo/batch` is unaffected
 
-**Scope.** The flag governs the MCP tool only. The REST `/sws/neo/batch` endpoint is untouched and
-keeps serving its callers (the OCR purchase-invoice ingest), so `BatchService` stays live.
-`handleBatch` and the MCP-side pre-pass are kept as they are — flipping the flag to `true` restores
-the tool with nothing else to change.
+It shares `BatchService` and passes **no** preprocessor, so none of the MCP compensations above
+apply to it. That is by decision — the underlying defects live in the shared selector-aux path the
+React frontend also uses, and changing what the frontend persists is out of scope. `BatchService`
+itself holds no knowledge of who supplies a preprocessor or what it does.
 
----
+##### Atomicity
+
+Unchanged, and it is what `neo_batch` exists for: a batch is applied as a unit (IMP-23), a failure
+rolls the whole set back, and a later operation can reference an earlier one's id through `$ref:`.
+An operation rejected by the preprocessor is reported after the earlier operations have executed
+rather than before the transaction opens; nothing is left behind, and the envelope is the same
+`committed:false` + `failedAt` shape documented in §4.12.4.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 

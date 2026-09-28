@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.weld.WeldUtils;
@@ -100,7 +101,14 @@ class NeoServletSupport {
       NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(request);
       NeoHandler handler = preDispatch.customization();
       if (handler == null) {
-        log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
+        // ETP-5415: a blank qualifier is not an anomaly — it is the normal state of an entity that
+        // has no customization, and callers no longer filter those out before dispatching (the
+        // blank-qualifier early returns were removed so @NeoExtension is reachable everywhere).
+        // Warning on it would fire once per batch operation for ordinary entities and drown the
+        // case the warning exists for: a qualifier that IS configured and resolves to nothing.
+        if (StringUtils.isNotBlank(javaQualifier)) {
+          log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
+        }
         return crudHandler.handleDefault(context);
       }
 

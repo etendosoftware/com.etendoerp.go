@@ -53,7 +53,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * all — the generic path simply produced the same answer for that row. The defect only becomes
  * visible on the row where the customization would have changed something, which is exactly the row
  * nobody puts in a fixture. {@code neo_batch} was switched off
- * ({@code McpConstants.BATCH_TOOL_ENABLED = false}) because of a divergence of this shape.</p>
+ * because of a divergence of this shape, and was re-enabled once it was closed.</p>
  *
  * <p>So the assertion is on {@code (spec, entity, surface, customization, method, outcome)} as
  * recorded by {@link NeoExtensionTraceRecorder}: every channel must resolve the same customization
