@@ -39,8 +39,9 @@ import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.CorsUtils;
-import com.etendoerp.go.common.JwtAuthUtils;
 
 /**
  * Report Selectors Servlet.
@@ -157,7 +158,18 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
-    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "report-selectors GET")) return;
+
+    // ETP-5455 — report selectors list environment data (partners, products, accounts...), so
+    // they get NEO's commercial-access check; and the shared pipeline accepts the cookie session
+    // the SPA sends, which the old bearer-only decode answered with 401 (logging the user out).
+    EnvironmentAuthOutcome outcome =
+        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA);
+    if (!outcome.isAuthenticated()) {
+      log.warn("Refused ReportSelectors request ({}): {}", outcome.getHttpStatus(),
+          outcome.getMessage());
+      sendError(response, outcome.getHttpStatus(), outcome.getMessage());
+      return;
+    }
 
     String pathInfo = request.getPathInfo();
     if (pathInfo == null || pathInfo.equals("/")) {

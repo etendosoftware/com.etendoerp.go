@@ -40,8 +40,9 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.CorsUtils;
-import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
 
 /**
@@ -138,7 +139,10 @@ public class SurveyConfigServlet extends HttpBaseServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
-    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "survey-config GET")) return;
+
+    if (!authenticate(request, response, "request").isAuthenticated()) {
+      return;
+    }
 
     try {
       OBContext.setAdminMode();
@@ -166,10 +170,33 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       return;
     }
 
-    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "survey-config POST")) return;
-    OBContext ctx = OBContext.getOBContext();
+    EnvironmentAuthOutcome outcome = authenticate(request, response, "response submission");
+    if (!outcome.isAuthenticated()) {
+      return;
+    }
 
-    handleSubmitResponse(request, response, ctx);
+    handleSubmitResponse(request, response, outcome.getContext());
+  }
+
+  /**
+   * ETP-5455 — the shared pipeline under {@link SurfacePolicy#NEO_AUXILIARY}: a survey is not ERP
+   * data, and a commercially blocked customer is exactly one whose feedback matters, so it stays
+   * reachable. It used to be a bearer-only JWT decode, which answered 401 to the cookie session
+   * the SPA sends — every survey load and every submitted response (the ETP-4352 GDPR
+   * persistence) failed silently — and ignored the legacy kill switch.
+   *
+   * @return the outcome; when refused, the error has already been written
+   */
+  private EnvironmentAuthOutcome authenticate(HttpServletRequest request,
+      HttpServletResponse response, String what) throws IOException {
+    EnvironmentAuthOutcome outcome =
+        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_AUXILIARY);
+    if (!outcome.isAuthenticated()) {
+      log.warn("Refused SurveyConfig {} ({}): {}", what, outcome.getHttpStatus(),
+          outcome.getMessage());
+      sendError(response, outcome.getHttpStatus(), outcome.getMessage());
+    }
+    return outcome;
   }
 
   @Override

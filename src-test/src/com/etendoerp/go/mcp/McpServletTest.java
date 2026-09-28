@@ -41,6 +41,7 @@ import java.util.concurrent.Callable;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -213,7 +214,7 @@ public class McpServletTest {
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
     JSONObject info = new JSONObject(getResponseBody());
-    assertEquals("etendo-neo", info.getString("name"));
+    assertEquals("etendo-mcp", info.getString("name"));
     assertEquals("1.0.0", info.getString("version"));
     assertEquals("2024-11-05", info.getString("protocolVersion"));
     assertEquals("streamable-http", info.getString("transport"));
@@ -227,7 +228,7 @@ public class McpServletTest {
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
     JSONObject info = new JSONObject(getResponseBody());
-    assertEquals("etendo-neo", info.getString("name"));
+    assertEquals("etendo-mcp", info.getString("name"));
   }
 
   @Test
@@ -370,8 +371,17 @@ public class McpServletTest {
     assertTrue(result.has("serverInfo"));
 
     JSONObject serverInfo = result.getJSONObject("serverInfo");
-    assertEquals("etendo-neo", serverInfo.getString("name"));
+    assertEquals("etendo-mcp", serverInfo.getString("name"));
     assertEquals("1.0.0", serverInfo.getString("version"));
+    assertEquals("Etendo MCP", serverInfo.getString("title"));
+    assertEquals("https://app.etendo.ai", serverInfo.getString("websiteUrl"));
+
+    JSONArray icons = serverInfo.getJSONArray("icons");
+    assertEquals(1, icons.length());
+    JSONObject icon = icons.getJSONObject(0);
+    assertEquals("https://app.etendo.ai/favicon.png", icon.getString("src"));
+    assertEquals("image/png", icon.getString("mimeType"));
+    assertEquals("513x513", icon.getJSONArray("sizes").getString(0));
 
     JSONObject capabilities = result.getJSONObject("capabilities");
     assertTrue(capabilities.has("tools"));

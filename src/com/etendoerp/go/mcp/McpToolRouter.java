@@ -56,6 +56,7 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
@@ -1187,12 +1188,31 @@ public class McpToolRouter {
    * so the agent sees exactly the same fields the UI would show.
    */
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
+    // ETP-5468: a report spec whose handler declares named actions (bank-reconciliation) is
+    // answered with its action catalog BEFORE the generic path, which rejects every SPEC_TYPE=R
+    // spec as not CRUD-capable (resolveIncludedEntityOrExplain). Null for every other spec, which
+    // then takes the unchanged path below.
+    JSONObject declaredActionsSchema =
+        McpReportActionsSchema.reportSpecActionsSchema(specName, args);
+    if (declaredActionsSchema != null) {
+      return declaredActionsSchema;
+    }
     McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+    // ETP-5468: an entity whose handler declares named actions (bank-reconciliation) has no
+    // field payload of its own — its AD tab is only there for role gating, and dumping that tab's
+    // columns and buttons would advertise actions this entity does not serve. Its schema IS the
+    // action catalog, whatever view was asked for.
+    Map<String, NeoActionContract> declaredActions =
+        McpReportActionsSchema.declaredActionsOf(sfEntity);
+    if (!declaredActions.isEmpty()) {
+      return wrapAsTextContent(
+          McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions));
+    }
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     Entity dalEntity = ModelProvider.getInstance()
