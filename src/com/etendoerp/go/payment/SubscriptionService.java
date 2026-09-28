@@ -639,6 +639,10 @@ public class SubscriptionService {
    * a later flush has nothing of it left to write. The {@code END_DATE IS NULL} guard makes the
    * statement a no-op for a row something else closed in the meantime.
    *
+   * <p>Being an HQL bulk update, the statement bypasses {@code OBInterceptor} and the DAL entity
+   * events: nothing observes {@code Subscription} events today, but a future listener would not
+   * fire on this close.
+   *
    * @param subscription the open row to close
    */
   private static void closeInDatabase(Subscription subscription) {

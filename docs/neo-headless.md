@@ -172,9 +172,8 @@ tenant's commercial access is cut off — a demo past its trial, or a subscripti
 due beyond its payment grace. The check is `EnvironmentAccessGuard`, shared with the
 `NEO_DATA` surfaces (favorites, fiscal test mode, report selectors), MCP (§4.12), the `/sws/go`
 tenant-session endpoints and `GET /sws/go/login`, so all of them answer the same body (the OAuth2
-API-key endpoints excepted: they refuse in the OAuth2 servlet's own error envelope). The guard logs
-each refusal once at INFO — `Commercial access denied at <entryPoint> for tenant <clientId>:
-<DECISION>`:
+API-key endpoints excepted: they refuse in the OAuth2 servlet's own error envelope). The response
+body is:
 
 ```json
 { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",
@@ -182,6 +181,9 @@ each refusal once at INFO — `Commercial access denied at <entryPoint> for tena
              "code": "ENVIRONMENT_ACCESS_DENIED",
              "decision": "SUBSCRIPTION_REQUIRED" } }
 ```
+
+The guard also logs each refusal once at INFO, as a server-side line separate from the body —
+`Commercial access denied at <entryPoint> for tenant <clientId>: <DECISION>`.
 
 `decision` is `DEMO_TRIAL_EXPIRED` or `SUBSCRIPTION_REQUIRED`. Read `error.code` / `error.decision`;
 `message` keeps its pre-ETP-5047 text only so older clients that parse the prefix keep working. The

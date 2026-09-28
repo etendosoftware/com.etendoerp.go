@@ -432,7 +432,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             "2020-01-01T00:00:00Z");
 
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> storedStateOfTenant());
+        fixture.run(this::storedStateOfTenant);
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
     assertEquals(ANCHOR, state.dueAt());
@@ -450,7 +450,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             EVENT_AT.toString());
 
     assertEquals(EVENT_AT,
-        fixture.run(() -> storedStateOfTenant()).lastEventAt());
+        fixture.run(this::storedStateOfTenant).lastEventAt());
   }
 
   @Test
@@ -479,7 +479,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             "2020-01-01T00:00:00Z");
 
     assertEquals(EVENT_AT,
-        fixture.run(() -> storedStateOfTenant()).lastEventAt());
+        fixture.run(this::storedStateOfTenant).lastEventAt());
     assertFalse(fixture.queriedPreferenceAttributes.contains(
         TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
   }
@@ -508,7 +508,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // pre-ETP-5047 R37 left. Without the fallback it would read as zero grace — blocked on deploy.
     Fixture fixture = new Fixture().withLegacyOpenRow("past_due", ANCHOR);
 
-    assertEquals(ANCHOR, fixture.run(() -> storedStateOfTenant()).dueAt());
+    assertEquals(ANCHOR, fixture.run(this::storedStateOfTenant).dueAt());
   }
 
   @Test
@@ -516,7 +516,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // The billing period is not a grace anchor: only past_due falls back to it.
     Fixture fixture = new Fixture().withLegacyOpenRow("active", PERIOD_END);
 
-    assertNull(fixture.run(() -> storedStateOfTenant()).dueAt());
+    assertNull(fixture.run(this::storedStateOfTenant).dueAt());
   }
 
   @Test
@@ -524,7 +524,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     Fixture fixture = new Fixture().withOpenRow("canceled", null);
 
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> storedStateOfTenant());
+        fixture.run(this::storedStateOfTenant);
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, state.status());
     assertNull(state.dueAt());
@@ -540,7 +540,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             EVENT_AT.toString());
 
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> storedStateOfTenant());
+        fixture.run(this::storedStateOfTenant);
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
     assertEquals(ANCHOR, state.dueAt());
@@ -868,7 +868,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void anOlderEventIsStillRejectedAsStaleOnceTheTenantHasARow() throws Exception {
     Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT);
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> storedStateOfTenant());
+        fixture.run(this::storedStateOfTenant);
 
     // A late payment_failed created before the invoice.paid already applied.
     SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
@@ -888,7 +888,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
             EVENT_AT.toString());
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> storedStateOfTenant());
+        fixture.run(this::storedStateOfTenant);
 
     SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
         SubscriptionLifecycleApplier.INVOICE_PAYMENT_FAILED,
@@ -901,7 +901,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void aNewerEventIsAppliedOnTheRowRoute() throws Exception {
     Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT);
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> storedStateOfTenant());
+        fixture.run(this::storedStateOfTenant);
 
     SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
         SubscriptionLifecycleApplier.INVOICE_PAYMENT_FAILED,
@@ -933,12 +933,12 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // of these reads leaking out of admin mode would come back empty (or throw) here.
     Fixture withRow = new Fixture().withOpenRow("past_due", ANCHOR);
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
-        withRow.run(() -> storedStateOfTenant()).status());
+        withRow.run(this::storedStateOfTenant).status());
 
     Fixture withoutRow = new Fixture()
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "EXPIRED");
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
-        withoutRow.run(() -> storedStateOfTenant()).status());
+        withoutRow.run(this::storedStateOfTenant).status());
   }
 
   @Test
