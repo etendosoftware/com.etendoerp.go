@@ -779,7 +779,7 @@ public class UserRoleCompositionService {
     if (role.getETGOPersonalOwner() != null) {
       return;
     }
-    role.setETGOPersonalOwner(user.getId());
+    role.setETGOPersonalOwner(user);
     OBDal.getInstance().save(role);
     OBDal.getInstance().flush();
     log.info("Recorded user {} as owner of legacy personal role {}", user.getId(), role.getId());
@@ -854,8 +854,8 @@ public class UserRoleCompositionService {
     }
     // ETP-5502 — a role that names an owner is only ever that owner's. Without this, a role with
     // zero AD_User_Roles rows (a deleted or promoted user's dormant role) passed as anyone's.
-    String owner = candidate.getETGOPersonalOwner();
-    if (owner != null && !owner.equals(user.getId())) {
+    User owner = candidate.getETGOPersonalOwner();
+    if (owner != null && !owner.getId().equals(user.getId())) {
       return false;
     }
     if (isInheritFromTargetOfAnyInheritance(candidate)) {
@@ -913,8 +913,8 @@ public class UserRoleCompositionService {
     role.setManual(true);
     role.setTemplate(false);
     role.setClientAdmin(false);
-    // ETP-5502 — the permanent link demote restores by; set once, never changed.
-    role.setETGOPersonalOwner(user.getId());
+    // ETP-5502 — the link demote restores by; set once, never changed.
+    role.setETGOPersonalOwner(user);
     OBDal.getInstance().save(role);
     OBDal.getInstance().flush();
     personalRoleAccessProvisioningService.createOrgAccess(role, user, starOrg);
@@ -1180,7 +1180,7 @@ public class UserRoleCompositionService {
   private Role findOwnedPersonalRole(User user) {
     OBCriteria<Role> criteria =
         PersonalRoleAccessProvisioningService.personalRoleCandidateCriteria(user);
-    criteria.add(Restrictions.eq(Role.PROPERTY_ETGOPERSONALOWNER, user.getId()));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ETGOPERSONALOWNER + ".id", user.getId()));
     List<Role> roles = criteria.list();
     if (roles.size() > 1) {
       log.warn("User {} owns {} active personal roles; restoring the earliest created", user.getId(),

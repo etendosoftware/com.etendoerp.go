@@ -607,7 +607,7 @@ class UserRoleCompositionServiceTest {
     when(existingPersonalRole.isTemplate()).thenReturn(false);
     when(existingPersonalRole.isClientAdmin()).thenReturn(false);
     when(existingPersonalRole.getClient()).thenReturn(userClient);
-    when(existingPersonalRole.getETGOPersonalOwner()).thenReturn("user-1");
+    when(existingPersonalRole.getETGOPersonalOwner()).thenReturn(user);
     when(user.getDefaultRole()).thenReturn(existingPersonalRole);
 
     // Not an AD_Role_Inheritance InheritFrom target of anything else.
@@ -664,7 +664,7 @@ class UserRoleCompositionServiceTest {
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       assertSame(legacyRole, service.ensurePersonalRole(user));
-      verify(legacyRole).setETGOPersonalOwner("user-1");
+      verify(legacyRole).setETGOPersonalOwner(user);
       verify(mockDal).save(legacyRole);
     }
   }
@@ -687,7 +687,9 @@ class UserRoleCompositionServiceTest {
     when(foreignRole.isTemplate()).thenReturn(false);
     when(foreignRole.isClientAdmin()).thenReturn(false);
     when(foreignRole.getClient()).thenReturn(userClient);
-    when(foreignRole.getETGOPersonalOwner()).thenReturn("someone-else");
+    User someoneElse = mock(User.class);
+    when(someoneElse.getId()).thenReturn("someone-else");
+    when(foreignRole.getETGOPersonalOwner()).thenReturn(someoneElse);
     when(user.getDefaultRole()).thenReturn(foreignRole);
 
     OBCriteria<RoleInheritance> roleInheritanceCriteria = mock(OBCriteria.class);
@@ -942,7 +944,7 @@ class UserRoleCompositionServiceTest {
       verify(newRole).setTemplate(false);
       verify(newRole).setClientAdmin(false);
       // ETP-5502 — the owner link demote restores by.
-      verify(newRole).setETGOPersonalOwner("user-1");
+      verify(newRole).setETGOPersonalOwner(user);
       verify(mockDal).save(newRole);
     }
   }
@@ -1336,7 +1338,7 @@ class UserRoleCompositionServiceTest {
     when(priorPersonalRole.isClientAdmin()).thenReturn(false);
     when(priorPersonalRole.getClient()).thenReturn(client);
     when(priorPersonalRole.getId()).thenReturn("role-prior-b");
-    when(priorPersonalRole.getETGOPersonalOwner()).thenReturn("admin-b-1");
+    when(priorPersonalRole.getETGOPersonalOwner()).thenReturn(target);
 
     OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
     when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
@@ -1402,7 +1404,7 @@ class UserRoleCompositionServiceTest {
     when(priorPersonalRole.isClientAdmin()).thenReturn(false);
     when(priorPersonalRole.getClient()).thenReturn(client);
     when(priorPersonalRole.getId()).thenReturn("role-prior");
-    when(priorPersonalRole.getETGOPersonalOwner()).thenReturn("target-1");
+    when(priorPersonalRole.getETGOPersonalOwner()).thenReturn(target);
 
     when(mockDal.get(User.class, "target-1")).thenReturn(target);
 
@@ -1442,7 +1444,7 @@ class UserRoleCompositionServiceTest {
       ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
       verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
       assertTrue(criterionCaptor.getAllValues().stream().anyMatch(c -> c.toString()
-          .equals(Role.PROPERTY_ETGOPERSONALOWNER + "=target-1")), criterionCaptor.getAllValues()
+          .equals(Role.PROPERTY_ETGOPERSONALOWNER + ".id=target-1")), criterionCaptor.getAllValues()
           .toString());
       assertFalse(criterionCaptor.getAllValues().stream().anyMatch(c -> c.toString()
           .startsWith(Role.PROPERTY_NAME + "=")), "demote must not look the role up by exact name");

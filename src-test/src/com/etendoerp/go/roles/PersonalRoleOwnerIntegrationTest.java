@@ -85,7 +85,7 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
   public void newPersonalRoleIsOwnedByItsUser() {
     User user = createUser(sameName);
     Role role = composePersonalRole(user);
-    assertEquals(user.getId(), role.getETGOPersonalOwner());
+    assertEquals(user.getId(), ownerId(role));
   }
 
   // ── Demote restores the owned role ──
@@ -96,6 +96,8 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
     User deleted = createUser(sameName);
     Role orphan = composePersonalRole(deleted);
     deleteUser(deleted);
+    assertNull("ON DELETE SET NULL: a deleted user's role loses its owner",
+        ownerId(OBDal.getInstance().get(Role.class, orphan.getId())));
 
     User juan = createUser(sameName);
     Role own = composePersonalRole(juan);
@@ -139,7 +141,7 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
     String restoredId = service.demoteFromAdmin(caller.getId(), adminRole, juan.getId())
         .personalRoleId;
     Role restored = OBDal.getInstance().get(Role.class, restoredId);
-    assertEquals(juan.getId(), restored.getETGOPersonalOwner());
+    assertEquals(juan.getId(), ownerId(restored));
     assertEquals(personalName(sameName, 1), restored.getName());
   }
 
@@ -159,9 +161,9 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
 
     assertEquals(own.getId(), promoteThenDemote(juan));
     assertEquals("the fallback must record the owner it found", juan.getId(),
-        OBDal.getInstance().get(Role.class, own.getId()).getETGOPersonalOwner());
+        ownerId(OBDal.getInstance().get(Role.class, own.getId())));
     assertNull("the orphan must stay unattributed",
-        OBDal.getInstance().get(Role.class, orphan.getId()).getETGOPersonalOwner());
+        ownerId(OBDal.getInstance().get(Role.class, orphan.getId())));
   }
 
   @Test
@@ -195,7 +197,7 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
     String roleId = service.assignTemplateRoles(juan.getId(), Collections.emptyList())
         .personalRoleId;
     assertNotEquals(foreign.getId(), roleId);
-    assertEquals(juan.getId(), OBDal.getInstance().get(Role.class, roleId).getETGOPersonalOwner());
+    assertEquals(juan.getId(), ownerId(OBDal.getInstance().get(Role.class, roleId)));
   }
 
   @Test
@@ -207,7 +209,7 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
     String roleId = service.assignTemplateRoles(juan.getId(), Collections.emptyList())
         .personalRoleId;
     assertEquals(own.getId(), roleId);
-    assertEquals(juan.getId(), OBDal.getInstance().get(Role.class, roleId).getETGOPersonalOwner());
+    assertEquals(juan.getId(), ownerId(OBDal.getInstance().get(Role.class, roleId)));
   }
 
   // ── helpers ──
@@ -301,6 +303,11 @@ public class PersonalRoleOwnerIntegrationTest extends WeldBaseTest {
       }
     }
     throw new IllegalStateException("The test client has no active client-admin role");
+  }
+
+  private static String ownerId(Role role) {
+    User owner = role.getETGOPersonalOwner();
+    return owner == null ? null : owner.getId();
   }
 
   private static String personalName(String base, int n) {

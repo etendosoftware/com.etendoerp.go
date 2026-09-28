@@ -4629,8 +4629,9 @@ creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersona
 
 **Demote restores the role the user owns (ETP-5502).** Every personal role records its owner in
 `AD_Role.EM_ETGO_Personal_Owner_ID` (DAL `Role#getETGOPersonalOwner()`), set once by
-`createPersonalRole`. It is a plain `AD_User_ID`, deliberately **without** a foreign key: a deleted
-user's role keeps its dead owner's id, so it can never be mistaken for anyone else's. Demote
+`createPersonalRole`. It is a foreign key to `AD_User` with `ON DELETE SET NULL`
+(`EM_ETGO_ROLE_PERSOWNER_FK`): deleting a user leaves their role behind with no owner, and the
+fallback below rejects it for any namesake created later because it is older than them. Demote
 (`findDormantPersonalRole`, scoped to the user's client) looks for:
 
 1. **The role owned by the user** — active, not a template, not client-admin, passing

@@ -9,6 +9,9 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <foreign-key foreignTable="AD_USER" name="EM_ETGO_ROLE_PERSOWNER_FK" onDelete="setnull">
+        <reference local="EM_ETGO_PERSONAL_OWNER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
       <check name="EM_ETGO_SHOW_ACCT_FIELDS_CHK"><![CDATA[EM_ETGO_SHOW_ACCT_FIELDS IN ('Y', 'N')]]></check>
     </table>
   </database>

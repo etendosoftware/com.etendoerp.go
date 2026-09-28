@@ -7252,10 +7252,11 @@ END]]></SQLLOGIC>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <NAME><![CDATA[EM_ETGO_Personal_Owner_ID]]></NAME>
-<!--56DB925F1F5B497CBC7950B6126049EC-->  <HELP><![CDATA[Etendo GO internal marker: the AD_User_ID this personal composition role was created for. Set once on creation, never changed; deliberately not a foreign key so a deleted user's role keeps its dead owner id (ETP-5502).]]></HELP>
+<!--56DB925F1F5B497CBC7950B6126049EC-->  <HELP><![CDATA[Etendo GO internal marker: the user this personal composition role was created for. Set once on creation, never changed; demote restores the role by it. Foreign key with on delete set null: a deleted user's role loses its owner (ETP-5502).]]></HELP>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <COLUMNNAME><![CDATA[EM_ETGO_Personal_Owner_ID]]></COLUMNNAME>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_TABLE_ID><![CDATA[156]]></AD_TABLE_ID>
-<!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_REFERENCE_ID><![CDATA[10]]></AD_REFERENCE_ID>
+<!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_REFERENCE_ID><![CDATA[18]]></AD_REFERENCE_ID>
+<!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_REFERENCE_VALUE_ID><![CDATA[110]]></AD_REFERENCE_VALUE_ID>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <FIELDLENGTH><![CDATA[32]]></FIELDLENGTH>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <ISKEY><![CDATA[N]]></ISKEY>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <ISPARENT><![CDATA[N]]></ISPARENT>
