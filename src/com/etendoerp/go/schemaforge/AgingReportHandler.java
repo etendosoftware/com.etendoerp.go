@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -74,9 +75,9 @@ public class AgingReportHandler implements NeoHandler {
   private static final String DEFAULT_COL4       = "120";
   private static final String BUCKET_SENTINEL    = "99999";
   private static final String DATE_FORMAT        = "yyyy-MM-dd";
-  private static final String REC_OR_PAY_RECEIVABLES = "RECEIVABLES";
-  private static final String REC_OR_PAY_PAYABLES     = "PAYABLES";
-  private static final String PARAM_REC_OR_PAY   = "recOrPay";
+  protected static final String REC_OR_PAY_RECEIVABLES = "RECEIVABLES";
+  protected static final String REC_OR_PAY_PAYABLES     = "PAYABLES";
+  protected static final String PARAM_REC_OR_PAY   = "recOrPay";
   private static final String PARAM_CURRENT_DATE = "currentDate";
   private static final String PARAM_COLUMN1      = "column1";
   private static final String PARAM_COLUMN2      = "column2";
@@ -88,6 +89,16 @@ public class AgingReportHandler implements NeoHandler {
   private static final String PARAM_GL_ID        = "glId";
 
   /**
+   * Fallback monetary precision (decimal places) used only when the resolved accounting-schema
+   * currency carries no {@code standardPrecision} at all — should not happen for a real,
+   * currency-bearing schema (see {@link #resolveAcctSchema}), but every currency world-wide uses
+   * either 0 or 2 decimals, so 2 is the same conservative default the rest of this codebase's
+   * currency-formatting utilities fall back to (see CLAUDE.md's Currency & Amount Formatting
+   * section).
+   */
+  private static final int DEFAULT_CURRENCY_PRECISION = 2;
+
+  /**
    * OBUIAPP process id for the classic "Aging Balance Process Definition for Receivables"
    * process. This is the process this spec must gate access on — confirmed via the real
    * {@code AD_Menu.em_obuiapp_process_id} foreign key on {@code AD_Menu} row
@@ -95,7 +106,7 @@ public class AgingReportHandler implements NeoHandler {
    * Receivables"), not by name-matching. Do not repoint this constant at a different-looking
    * process without re-confirming that same FK chain (ETP-4510, follow-up to BUG-3).
    */
-  private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
+  protected static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
 
   /**
    * OBUIAPP process id for the classic "Aging Balance Process Definition for Payables" process —
@@ -108,7 +119,7 @@ public class AgingReportHandler implements NeoHandler {
    * javadoc — "Informe Antigüedad de Cobros"/"Informe Antigüedad de Pagos" are both listed among
    * the windowless rows, same category as "Documentos no contabilizados").
    */
-  private static final String AGING_PAYABLE_PROCESS_ID = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
+  protected static final String AGING_PAYABLE_PROCESS_ID = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
 
   /**
    * Whether the role may use the aging report at all, for either side.
@@ -243,15 +254,15 @@ public class AgingReportHandler implements NeoHandler {
     // was correctly taken into account.
     String gatedProcessId;
     if ("POST".equals(method)) {
-      gatedProcessId = resolveGatedProcessId(context.getRequestBody());
+      JSONObject body = context.getRequestBody();
+      String requested = body == null ? null : body.optString(PARAM_REC_OR_PAY, null);
+      gatedProcessId = resolveGatedProcessId(resolveRecOrPay(requested));
     } else if ("GET".equals(method)) {
       Map<String, String> queryParams = context.getQueryParams();
-      String recOrPay = queryParams == null
-          ? REC_OR_PAY_RECEIVABLES
-          : queryParams.getOrDefault(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
-      gatedProcessId = resolveGatedProcessId(recOrPay);
+      String requested = queryParams == null ? null : queryParams.get(PARAM_REC_OR_PAY);
+      gatedProcessId = resolveGatedProcessId(resolveRecOrPay(requested));
     } else {
-      gatedProcessId = AGING_RECEIVABLE_PROCESS_ID;
+      gatedProcessId = resolveGatedProcessId(resolveRecOrPay(null));
     }
     if (!NeoAccessHelper.hasObuiappProcessAccess(gatedProcessId)) {
       return NeoResponse.error(403, "Access denied");
@@ -266,20 +277,38 @@ public class AgingReportHandler implements NeoHandler {
   }
 
   /**
-   * Resolves which OBUIAPP process a POST request's {@code recOrPay} body param must be gated
-   * on. Mirrors {@link #executeReport}'s own {@code recOrPay} default (RECEIVABLES) so the gate
-   * and the actual query always agree on which side is being served.
+   * Hook for a sibling handler that always serves one fixed side of this report, regardless of
+   * what the request asked for (ETP-5483: {@code AgingPayableReportHandler}, which keeps
+   * {@code recOrPay} out of its own contract entirely and must never fall through to the
+   * receivables default).
    *
-   * @param body the POST request body, or {@code null} (the 400 for a missing body is raised
-   *     later in {@link #executeReport}, after the gate — a missing body still defaults to
-   *     RECEIVABLES for gating purposes)
-   * @return the receivables or payables OBUIAPP process id, matching {@code recOrPay}
+   * <p>{@code null} (the default here) means "read {@code recOrPay} from the request as before" —
+   * {@link #resolveRecOrPay} then applies this handler's own RECEIVABLES default.
+   *
+   * @return {@code REC_OR_PAY_RECEIVABLES}/{@code REC_OR_PAY_PAYABLES} to force that side, or
+   *     {@code null} to honor whatever the request asked for
    */
-  private static String resolveGatedProcessId(JSONObject body) {
-    String recOrPay = body == null
+  protected String forcedRecOrPay() {
+    return null;
+  }
+
+  /**
+   * Resolves the effective {@code recOrPay} for this request: {@link #forcedRecOrPay()} when a
+   * subclass fixes one side, otherwise the requested value, defaulting to RECEIVABLES when absent
+   * or blank — the same default this handler has always applied.
+   *
+   * @param requestedRecOrPay the raw {@code recOrPay} from the POST body or GET query param, or
+   *     {@code null} when absent
+   * @return the effective {@code RECEIVABLES}/{@code PAYABLES} value to serve and gate on
+   */
+  protected String resolveRecOrPay(String requestedRecOrPay) {
+    String forced = forcedRecOrPay();
+    if (forced != null) {
+      return forced;
+    }
+    return (requestedRecOrPay == null || requestedRecOrPay.isEmpty())
         ? REC_OR_PAY_RECEIVABLES
-        : body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
-    return resolveGatedProcessId(recOrPay);
+        : requestedRecOrPay;
   }
 
   /**
@@ -301,11 +330,30 @@ public class AgingReportHandler implements NeoHandler {
   // GET — describe parameters
   // -------------------------------------------------------------------------
 
+  /**
+   * The MCP tool's display name. Overridden by {@code AgingPayableReportHandler} (ETP-5483) so
+   * the two sibling report tools do not both describe themselves as the generic "Aging Report".
+   *
+   * @return the report's display name
+   */
+  protected String reportName() {
+    return "Aging Report";
+  }
+
+  /**
+   * The MCP tool's description. Overridden by {@code AgingPayableReportHandler} (ETP-5483).
+   *
+   * @return the report's description
+   */
+  protected String reportDescription() {
+    return "Aging schedule for receivables or payables, grouped by business partner";
+  }
+
   private NeoResponse describeReport() {
     try {
       JSONObject desc = new JSONObject();
-      desc.put("name", "Aging Report");
-      desc.put("description", "Aging schedule for receivables or payables, grouped by business partner");
+      desc.put("name", reportName());
+      desc.put("description", reportDescription());
 
       // Rendered from reportParameters(), the single declaration of this report's contract.
       // Hand-maintaining a second copy here is what let glId and showDetails go undocumented.
@@ -333,7 +381,7 @@ public class AgingReportHandler implements NeoHandler {
         return NeoResponse.error(400, "Request body is required");
       }
 
-      String recOrPay    = body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
+      String recOrPay    = resolveRecOrPay(body.optString(PARAM_REC_OR_PAY, null));
       String dateStr     = body.optString(PARAM_CURRENT_DATE, "");
       boolean showDetails = body.optBoolean(PARAM_SHOW_DETAILS, false);
 
@@ -376,10 +424,11 @@ public class AgingReportHandler implements NeoHandler {
           orgId, orgs, recOrPay, false, true
       );
 
-      JSONArray rows = buildSummaryRows(data, buckets.activeBuckets);
+      int precision = resolvePrecision(acct.currency);
+      JSONArray rows = buildSummaryRows(data, buckets.activeBuckets, precision);
 
       if (showDetails && acct.currency != null) {
-        attachDetails(ctx, buckets, bPartnerId, orgs, recOrPay, acct.currency, rows);
+        attachDetails(ctx, buckets, bPartnerId, orgs, recOrPay, acct.currency, rows, precision);
       }
 
       JSONObject responseData = new JSONObject();
@@ -498,7 +547,9 @@ public class AgingReportHandler implements NeoHandler {
         .createQuery(AcctSchema.class,
             "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
                 + " and oas.organization.id=:" + PARAM_ORG_ID + " and oas.active=true)"
-                + " and active=true")
+                // Deterministic pick when an org is linked to several schemas; same order
+                // as TaxReportHandler and ReportSelectorsServlet so all three agree.
+                + " and active=true order by id")
         .setNamedParameter(PARAM_ORG_ID, orgId)
         .setMaxResult(1)
         .uniqueResult();
@@ -561,7 +612,24 @@ public class AgingReportHandler implements NeoHandler {
   // Row builders
   // -------------------------------------------------------------------------
 
-  private static JSONArray buildSummaryRows(FieldProvider[] data, int activeBuckets) throws Exception {
+  /**
+   * Builds the per-partner summary rows, rounding every monetary field to {@code precision}
+   * decimals with {@link RoundingMode#HALF_UP} before it is put into the response JSON (ETP-5483
+   * follow-up). {@code current}/{@code days30}/{@code days60}/{@code days90}/{@code days120}/
+   * {@code days150plus}/{@code total}/{@code credits}/{@code net} are each rounded
+   * <b>independently</b> — the same field-by-field rounding the SPA's own template already shows
+   * (e.g. {@code 107.06442176871364} displayed as {@code 107.06}). This means {@code total} is not
+   * guaranteed to equal the sum of the rounded buckets to the last cent after rounding (nor is
+   * {@code net} guaranteed to equal {@code total - credits}): each amount comes from its own
+   * {@code AgingDao} column, and rounding each one on its own can differ from rounding their sum
+   * by at most one cent per bucket. Recomputing {@code total}/{@code net} from the rounded buckets
+   * instead would fix that arithmetic identity but would silently disagree with what
+   * {@code AgingDao} itself computed as the true total — not a trade worth making for a cent-level
+   * cosmetic gain. The DAO call and the bucket/aging computations themselves are unchanged; only
+   * the values written into the JSON are rounded.
+   */
+  private static JSONArray buildSummaryRows(FieldProvider[] data, int activeBuckets, int precision)
+      throws Exception {
     JSONArray rows = new JSONArray();
     if (data == null) {
       return rows;
@@ -576,21 +644,28 @@ public class AgingReportHandler implements NeoHandler {
       if (activeBuckets < 3) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount3")));
       if (activeBuckets < 2) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount2")));
 
-      row.put("current",     toBigDecimal(fp.getField("amount0")));
-      row.put("days30",      toBigDecimal(fp.getField("amount1")));
-      row.put("days60",      activeBuckets >= 2 ? toBigDecimal(fp.getField("amount2")) : BigDecimal.ZERO);
-      row.put("days90",      activeBuckets >= 3 ? toBigDecimal(fp.getField("amount3")) : BigDecimal.ZERO);
-      row.put("days120",     activeBuckets >= 4 ? toBigDecimal(fp.getField("amount4")) : BigDecimal.ZERO);
-      row.put("days150plus", daysPlus);
-      row.put("total",       toBigDecimal(fp.getField("Total")));
-      row.put("credits",     toBigDecimal(fp.getField("credit")));
-      row.put("net",         toBigDecimal(fp.getField("net")));
+      row.put("current",     round(toBigDecimal(fp.getField("amount0")), precision));
+      row.put("days30",      round(toBigDecimal(fp.getField("amount1")), precision));
+      row.put("days60",      round(activeBuckets >= 2 ? toBigDecimal(fp.getField("amount2")) : BigDecimal.ZERO, precision));
+      row.put("days90",      round(activeBuckets >= 3 ? toBigDecimal(fp.getField("amount3")) : BigDecimal.ZERO, precision));
+      row.put("days120",     round(activeBuckets >= 4 ? toBigDecimal(fp.getField("amount4")) : BigDecimal.ZERO, precision));
+      row.put("days150plus", round(daysPlus, precision));
+      row.put("total",       round(toBigDecimal(fp.getField("Total")), precision));
+      row.put("credits",     round(toBigDecimal(fp.getField("credit")), precision));
+      row.put("net",         round(toBigDecimal(fp.getField("net")), precision));
       rows.put(row);
     }
     return rows;
   }
 
-  private static JSONObject buildDocRow(FieldProvider fp, int activeBuckets) throws Exception {
+  /**
+   * Builds one per-document detail row, rounding its bucket amounts to {@code precision} decimals
+   * with {@link RoundingMode#HALF_UP} — same independent-per-field rounding as
+   * {@link #buildSummaryRows}, and the same caveat about the bucket sum not being guaranteed to
+   * equal a separately-rounded total.
+   */
+  private static JSONObject buildDocRow(FieldProvider fp, int activeBuckets, int precision)
+      throws Exception {
     JSONObject doc = new JSONObject();
     doc.put("invoiceId",    fp.getField("INVOICE_ID"));
     doc.put("docNo",        fp.getField("INVOICE_NUMBER"));
@@ -608,18 +683,18 @@ public class AgingReportHandler implements NeoHandler {
     if (activeBuckets < 3) daysPlus = daysPlus.add(a3);
     if (activeBuckets < 2) daysPlus = daysPlus.add(a2);
 
-    doc.put("current",     a0);
-    doc.put("days30",      a1);
-    doc.put("days60",      activeBuckets >= 2 ? a2 : BigDecimal.ZERO);
-    doc.put("days90",      activeBuckets >= 3 ? a3 : BigDecimal.ZERO);
-    doc.put("days120",     activeBuckets >= 4 ? a4 : BigDecimal.ZERO);
-    doc.put("days150plus", daysPlus);
+    doc.put("current",     round(a0, precision));
+    doc.put("days30",      round(a1, precision));
+    doc.put("days60",      round(activeBuckets >= 2 ? a2 : BigDecimal.ZERO, precision));
+    doc.put("days90",      round(activeBuckets >= 3 ? a3 : BigDecimal.ZERO, precision));
+    doc.put("days120",     round(activeBuckets >= 4 ? a4 : BigDecimal.ZERO, precision));
+    doc.put("days150plus", round(daysPlus, precision));
     return doc;
   }
 
   private static void attachDetails(QueryContext ctx, BucketConfig buckets,
-      String bPartnerId, Set<String> orgs, String recOrPay, Currency currency, JSONArray rows)
-      throws Exception {
+      String bPartnerId, Set<String> orgs, String recOrPay, Currency currency, JSONArray rows,
+      int precision) throws Exception {
 
     FieldProvider[] detailData = ctx.dao.getOpenReceivablesAgingScheduleDetails(
         ctx.conn, ctx.currentDate, new SimpleDateFormat(DATE_FORMAT), currency,
@@ -627,7 +702,7 @@ public class AgingReportHandler implements NeoHandler {
         bPartnerId, false, true
     );
 
-    Map<String, JSONArray> docsByBp = groupDetailByBp(detailData, buckets.activeBuckets);
+    Map<String, JSONArray> docsByBp = groupDetailByBp(detailData, buckets.activeBuckets, precision);
 
     for (int i = 0; i < rows.length(); i++) {
       JSONObject row = rows.getJSONObject(i);
@@ -636,8 +711,8 @@ public class AgingReportHandler implements NeoHandler {
     }
   }
 
-  private static Map<String, JSONArray> groupDetailByBp(FieldProvider[] detailData, int activeBuckets)
-      throws Exception {
+  private static Map<String, JSONArray> groupDetailByBp(FieldProvider[] detailData, int activeBuckets,
+      int precision) throws Exception {
     Map<String, JSONArray> docsByBp = new LinkedHashMap<>();
     if (detailData == null) {
       return docsByBp;
@@ -656,7 +731,8 @@ public class AgingReportHandler implements NeoHandler {
       }
       String bpId = fp.getField("BPARTNER");
       if (bpId == null) bpId = "";
-      docsByBpUnsorted.computeIfAbsent(bpId, k -> new ArrayList<>()).add(buildDocRow(fp, activeBuckets));
+      docsByBpUnsorted.computeIfAbsent(bpId, k -> new ArrayList<>())
+          .add(buildDocRow(fp, activeBuckets, precision));
     }
     for (Map.Entry<String, List<JSONObject>> entry : docsByBpUnsorted.entrySet()) {
       List<JSONObject> docs = entry.getValue();
@@ -726,6 +802,40 @@ public class AgingReportHandler implements NeoHandler {
     } catch (NumberFormatException e) {
       return BigDecimal.ZERO;
     }
+  }
+
+  /**
+   * Resolves the number of decimal places every monetary field in the response must be rounded
+   * to, from the report currency's own {@code standardPrecision} — never a hardcoded scale, since
+   * a 0-decimal currency (e.g. JPY-style) must not gain phantom cents. Falls back to
+   * {@link #DEFAULT_CURRENCY_PRECISION} only when {@code currency} itself, or its precision, is
+   * {@code null} — which {@link #resolveAcctSchema} already guards against for the normal path
+   * ({@link #executeReport} returns a 422 before reaching this method when no currency-bearing
+   * schema was resolved at all).
+   *
+   * @param currency the resolved accounting-schema currency, or {@code null}
+   * @return the decimal scale to round every amount field to
+   */
+  private static int resolvePrecision(Currency currency) {
+    if (currency == null || currency.getStandardPrecision() == null) {
+      return DEFAULT_CURRENCY_PRECISION;
+    }
+    return currency.getStandardPrecision().intValue();
+  }
+
+  /**
+   * Rounds one monetary output value to {@code precision} decimals with
+   * {@link RoundingMode#HALF_UP} — via {@link BigDecimal#setScale}, never {@code double}
+   * arithmetic, so the exact decimal value {@code AgingDao} computed is preserved until the last
+   * step.
+   *
+   * @param value     the unrounded amount (never {@code null} — every caller passes a
+   *                  {@link #toBigDecimal}-normalized value or {@link BigDecimal#ZERO})
+   * @param precision the number of decimal places to round to
+   * @return the rounded value, ready to be put into the response JSON
+   */
+  private static BigDecimal round(BigDecimal value, int precision) {
+    return value.setScale(precision, RoundingMode.HALF_UP);
   }
 
   /**
