@@ -743,6 +743,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     OBContext caller = OBContext.getOBContext();
     assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
 
+    // No plan: this fixture exercises context restoration, which does not read one.
     store.recordRequested(requestId, accountId, email, ENVIRONMENT,
         new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     assertSame("recordRequested must give the caller's context back", caller,
@@ -842,6 +843,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
     RuntimeException failure = null;
     try {
+      // No plan: the call is expected to fail on the unknown account before reaching it.
       store.recordRequested(newRequestId(), UNKNOWN_ACCOUNT_ID, newEmail("ctx-throwing"),
           ENVIRONMENT, new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     } catch (RuntimeException e) {
@@ -919,6 +921,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    */
   private String createRequest(String accountId, String email) {
     String requestId = newRequestId();
+    // No plan: these specs exercise the lifecycle transitions, which do not read one.
     store.recordRequested(requestId, accountId, email, ENVIRONMENT,
         new CheckoutRequestStore.RequestOptions(null, false, false, false, null));
     return requestId;

@@ -438,6 +438,13 @@ payment Stripe's webhook confirmed:
 | Any other value, including one merely *shaped* like the retired mock token | `PAYMENT_DECLINED` |
 | absent / blank | `PAYMENT_REQUIRED` |
 
+**What is sold comes from the Subscription Plan Catalog (ETP-5046).** The browser names a plan by
+`planKey` (listed by `GET /sws/go/plans`), never a price; the server resolves the plan's Stripe
+price. While no plan carries a provider price, the **legacy price fallback** keeps selling the
+grandfathered `legacy-productive` plan at `etendo.go.checkout.price.id`, and the first priced plan
+retires it with no redeploy. Rules: `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`
+§6–§6.1; operator go-live procedure: §6.2.
+
 The token is server-generated and correlated server-side, so a browser cannot turn a successful
 return URL into authorization. `CheckoutRequestStore.isPaidFor` matches on the request id **plus**
 the account email **plus** the environment name (the paywall always passes one; the status endpoint
@@ -517,6 +524,12 @@ hypothetical preconditions for a future gateway:
 
 ## 3. The plan marker
 
+> **Since ETP-5046 the marker is no longer the source of truth.** A tenant is productive when it has
+> an open `ETGO_SUBSCRIPTION` row in status `active` or `past_due`; the `ETGO_TenantPlan`
+> preference described below is written only when that subscription write fails, is retired per
+> tenant, and is read only as a transitional fallback — see "Transitional read fallback" at the end
+> of this section.
+
 A tenant created through the paid flow is marked **productive**; every other tenant is **free**.
 
 Storage is an `AD_Preference` row with attribute **`ETGO_TenantPlan`**, made visible at the tenant's
@@ -550,6 +563,85 @@ for that reason.
 
 A `paymentToken` the webhook confirmed is what makes an environment productive — including for an
 account's first environment, and including when converting an environment that already exists.
+
+### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
+
+Since ETP-5046 the source of truth for "is this tenant paying" is the tenant's **open
+`ETGO_SUBSCRIPTION` row**, not the preference. Between deploying that change and running the **R37
+backfill** data-fix, every tenant provisioned before the deploy has a preference and no subscription
+row, and would therefore resolve to `free` — paid features off, wrong environment ordering, and,
+once ETP-5047's enforcement lands, denied login. The backfill is deliberately gated on a human
+re-verifying that production Stripe checkout has not gone live (if it has, a real paying cohort
+exists that the backfill would orphan), so it cannot simply be made automatic.
+
+**The preference is the safety net, not a parallel truth — and it is retired per tenant.**
+`applyPaidUpgradeSideEffects` writes the subscription row and then:
+
+- **success** → it does *not* call `markProductive`; it calls
+  `TenantPlanService.retireProductivePreference(clientId)` instead, removing any stale
+  `ETGO_TenantPlan` row this tenant still carries, so a newly paid tenant lands directly in the
+  post-cutover state;
+- **failure** → it calls `markProductive`, because the preference is then the only record that the
+  tenant paid, and the fallback below is the only thing that will read it back.
+
+Both writes are **System-owned rows (client `0`) written from the new tenant's context**, so both
+run through `payment/SystemContext` (the subscription insert in `SubscriptionService.openSubscription`,
+the marker delete in `TenantPlanService.retireProductivePreference`). Admin mode alone is not
+enough: `setAdminMode(true)` keeps the DAL check that a row's client equals the *current* client,
+and a refusal from that check also marks the whole request for rollback, which no best-effort
+`catch` can undo. A refused subscription save is additionally evicted from the session, so it
+cannot resurface as a `StaleStateException` in the onboarding's next flush. Both are pinned from a
+real tenant context by `TenantContextSubscriptionWriteIntegrationTest`.
+
+R37 does the same thing for tenants that predate the subscription model (statement 3 of its
+`@apply`, in the same transaction as the backfilled row), so the fleet converges from both ends onto
+one **observable end condition**: `select count(*) from ad_preference where
+attribute = 'ETGO_TenantPlan'` reaching 0, with the WARN line below silent. Both retirement paths
+remove *every* `ETGO_TenantPlan` row visible at the tenant, whatever its value or `isactive` flag —
+a leftover would keep that count above zero forever and block Phase F. Neither retirement may fail
+an upgrade that has already been paid for: a failed one is logged and ignored, since the fallback
+simply keeps answering until R37 retires the row.
+
+**Any future data-fix must key on `etgo_subscription`, not on `ETGO_TenantPlan`** — after R37 the
+preference is present only for tenants the backfill has not reached, so "no productive preference"
+increasingly means "already migrated paying tenant", not "free tenant". `R31`/`R32` are safe only
+because the runner's filename-ordered, watermark-gated execution guarantees they can never run for a
+tenant after R37 has; see §8.2 of
+`plans/2026-09-18-etp-5046-plan-and-subscription-design.md`.
+
+The read side therefore tolerates the gap. `com.etendoerp.go.payment.TenantPlanPreferenceFallback`
+answers for a tenant **only when it has no open subscription at all**:
+
+| Path | Where | Cost |
+|---|---|---|
+| Single tenant | `TenantPlanService.resolvePlan` | one extra query, and only when there is no open subscription |
+| Bulk (`GET /environments`) | `EnvironmentPlanCache.of(allClientIds, openSubscriptions)` | **one** extra query for all the missing ids at once; none when every tenant has a row |
+
+Both paths must fall back or neither: if only one did, the environment list and `resolvePlan` would
+disagree about the same tenant, which is worse than the bug being worked around.
+
+**The preference is not scoped by `AD_CLIENT_ID`.** `Preferences.setPreferenceValue` stores the row
+at `AD_CLIENT_ID = '0'` and encodes the tenant it is about in **`VISIBLEAT_CLIENT_ID`** only, so a
+lookup filtered on `AD_CLIENT_ID` matches **zero** rows for every tenant — silently. That exact
+mistake nearly shipped in the R37 backfill SQL, and two specs
+(`TenantPlanServiceTest.PreferenceFallback#scopesTheLookupByVisibleAtClientAndNeverByAdClient` for
+the read, `TenantPlanServiceTest.RetireProductivePreference#scopesTheLookupByVisibleAtClientAndNeverByAdClient`
+for the retirement) pin the column so it cannot recur. It is worse on the retirement side: a removal
+filtered on `AD_CLIENT_ID` is a silent no-op, so the end-condition count would never reach 0 and
+Phase F would be blocked forever with nothing reporting why.
+
+A tenant answered by the fallback reports `plan: "productive"` with **`planKey` and
+`subscriptionStatus` both JSON null**. There is genuinely no Subscription Plan Catalog row and no subscription behind
+it; inventing a key such as `"legacy-productive"` would claim a row that does not exist and would
+hide the gap from anyone reading the payload.
+
+Every resolution served by the fallback logs at **WARN**, naming the tenant and pointing at the
+backfill — one line per resolution, never per comparison. That log is the deletion signal: **when it
+stops appearing, every tenant has a subscription row** and the fallback is safe to remove. Read it
+together with the preference count above: the count says no tenant still *has* a marker, the silence
+says no tenant still *needs* one. Phase F deletes `TenantPlanPreferenceFallback`, `markProductive`,
+`retireProductivePreference`, `PREFERENCE_ATTRIBUTE` and every call site — one
+`grep -r ETP-5046-TRANSITIONAL-FALLBACK` finds all of it.
 
 ### Exposure in `/environments`
 

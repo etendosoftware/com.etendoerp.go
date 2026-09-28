@@ -312,11 +312,11 @@ class TransactionalAuthEmailSender {
   /**
    * Notifies that a way of signing in was removed from an account.
    *
-   * <p>ETP-5115. Deliberately does not name which one. The copy is one catalog entry and naming the
-   * method would mean interpolating it, which this contract shape does not carry — and the value of
-   * the notice does not depend on it: what the owner needs to know is that the ways into their
-   * account changed without them, and the remedy is the same either way. Naming it would be an
-   * improvement, not a prerequisite.
+   * <p>ETP-5115. Deliberately does not name which one. The copy is one message catalog entry and
+   * naming the method would mean interpolating it, which this contract shape does not carry — and
+   * the value of the notice does not depend on it: what the owner needs to know is that the ways
+   * into their account changed without them, and the remedy is the same either way. Naming it
+   * would be an improvement, not a prerequisite.
    *
    * @param account the account a method was removed from
    * @return whether the email was accepted for delivery

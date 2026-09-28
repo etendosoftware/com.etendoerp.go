@@ -19,6 +19,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
  * Durable persistence for hosted-checkout requests. Together with {@link BillingEventStore}
@@ -233,9 +234,7 @@ abstract class CheckoutRequestStoreQuerySupport {
   }
 
   private CheckoutRequest findByProviderField(String field, String value) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(value)) return null;
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr." + field + " = :providerValue and cr.createdClient is not null"
@@ -245,9 +244,7 @@ abstract class CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   protected abstract CheckoutRequest find(String requestId, String accountId, String accountEmail);
@@ -304,7 +301,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName) {
     recordRequested(requestId, accountId, accountEmail, clientName,
-        new RequestOptions(null, false, false, false, null));
+        new RequestOptions(null, false, false, false, null), null);
   }
 
   /**
@@ -319,11 +316,13 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, String demoClientId) {
     recordRequested(requestId, accountId, accountEmail, clientName,
-        new RequestOptions(demoClientId, true, false, false, null));
+        new RequestOptions(demoClientId, true, false, false, null), null);
   }
 
   /**
-   * Records the immutable source, transfer choices, and price for a new purchase.
+   * Records the immutable source, transfer choices, and price for a new purchase that names no
+   * plan. Production checkouts always name one; see
+   * {@link #recordRequested(String, String, String, String, RequestOptions, Plan)}.
    *
    * @param requestId server-generated checkout correlation id
    * @param accountId authenticated platform account id
@@ -333,6 +332,23 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, RequestOptions options) {
+    recordRequested(requestId, accountId, accountEmail, clientName, options, null);
+  }
+
+  /**
+   * Records the immutable source, transfer choices, price and plan for a new purchase.
+   *
+   * @param requestId server-generated checkout correlation id
+   * @param accountId authenticated platform account id
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param options immutable demo, transfer, and price choices for this purchase
+   * @param plan the Subscription Plan Catalog row being bought, kept so the subscription opened
+   *     after payment records the plan the buyer actually saw rather than whatever is current by
+   *     then
+   */
+  public void recordRequested(String requestId, String accountId, String accountEmail,
+      String clientName, RequestOptions options, Plan plan) {
     RequestOptions requestOptions = options == null
         ? new RequestOptions(null, false, false, false, null) : options;
     runAsSystem(() -> {
@@ -343,6 +359,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       request.setEtendoGoAccount(OBDal.getInstance().get(Account.class, accountId));
       request.setAccountEmail(StringUtils.trimToEmpty(accountEmail));
       request.setClientName(StringUtils.trimToEmpty(clientName));
+      request.setPlan(plan);
       request.setDemoClient(StringUtils.isBlank(requestOptions.getDemoClientId()) ? null
           : OBDal.getInstance().get(Client.class,
               StringUtils.trimToEmpty(requestOptions.getDemoClientId())));
@@ -493,9 +510,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @return the matching request, or {@code null} when the identity tuple does not match
    */
   public CheckoutRequest find(String requestId, String accountId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(requestId) || StringUtils.isBlank(accountId)
           || StringUtils.isBlank(accountEmail)) {
         return null;
@@ -511,9 +526,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -544,9 +557,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @return recent requests for the account
    */
   public List<CheckoutRequest> findForAccount(String accountId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) return List.of();
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.etendoGoAccount.id = :accountId"
@@ -559,9 +570,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(20);
       return query.list();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -578,9 +587,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * @return newest purchase with a nonblank Stripe subscription and customer, or {@code null}
    */
   public CheckoutRequest findSubscriptionForAccount(String accountId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) {
         return null;
       }
@@ -597,9 +604,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -639,9 +644,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       String clientName) {
     if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
         || StringUtils.isBlank(clientName)) return null;
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.etendoGoAccount.id = :accountId"
               + " and lower(cr.accountEmail) = lower(:accountEmail)"
@@ -655,9 +658,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -1009,27 +1010,16 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
    * handed {@code null}, which is precisely the wanted behaviour — substituting a system context
    * for it would leave the thread more privileged than it was found.
    *
+   * <p>Delegates to {@link SystemContext#call(String, Supplier)}, the one implementation of this
+   * capture / install / unwind sequence.
+   *
    * @param body the work to run as system
    * @param <T> the body's result type
    * @return whatever the body returned
    */
   @Override
   protected <T> T runAsSystem(Supplier<T> body) {
-    OBContext previousContext = OBContext.getOBContext();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return body.get();
-    } finally {
-      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
-      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
-      // and then looks at whichever context is current at that moment, clearing it outright when
-      // the stack empties on the shared admin context. Putting the caller's context back first
-      // would expose that context to the check and could null it out — reintroducing, from the
-      // other end, the very leak this method exists to close.
-      exitAdminModeQuietly();
-      restoreContextQuietly(previousContext);
-    }
+    return SystemContext.call("a checkout-request store operation", body);
   }
 
   /**
@@ -1042,34 +1032,6 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       body.run();
       return null;
     });
-  }
-
-  /**
-   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
-   * would replace the real failure from the body with a misleading one.
-   */
-  private void exitAdminModeQuietly() {
-    try {
-      OBContext.restorePreviousMode();
-    } catch (RuntimeException e) {
-      log.error("Could not leave admin mode after a checkout-request store operation", e);
-    }
-  }
-
-  /**
-   * Reinstates the caller's context without ever throwing, for the same reason as
-   * {@link #exitAdminModeQuietly()}.
-   *
-   * @param previousContext the context captured on entry; {@code null} is a real value and is
-   *     restored as "no context"
-   */
-  private void restoreContextQuietly(OBContext previousContext) {
-    try {
-      OBContext.setOBContext(previousContext);
-    } catch (RuntimeException e) {
-      log.error("Could not restore the caller's OBContext after a checkout-request store operation",
-          e);
-    }
   }
 
   private void flushAndCommit() {
