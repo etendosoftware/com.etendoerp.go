@@ -31,7 +31,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -47,6 +46,8 @@ import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.WarehouseResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -54,7 +55,6 @@ import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
-import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -65,8 +65,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * always did — a cookie session whose selected environment was {@code DEMO_TRIAL_EXPIRED} or
  * {@code SUBSCRIPTION_REQUIRED} still got full NEO access instead of {@code 402}.
  *
- * <p>{@link GoSessionAuthenticator} and {@link TenantEnvironmentLifecycleService} are swapped for
- * mocks via reflection (both are {@code private final} fields assigned at construction), and
+ * <p>{@link GoSessionAuthenticator} and {@link TenantEnvironmentLifecycleService} are mocks handed
+ * to the shared {@link EnvironmentRequestAuthenticator} pipeline (ETP-5455), and
  * {@link SecureWebServicesUtils}/{@link OBContext}/{@link OAuth2Filter} are statically stubbed, so
  * these run with no database.
  *
@@ -91,7 +91,6 @@ class NeoAuthenticatorEnvironmentAccessTest {
   private NeoAuthenticator authenticator;
   private GoSessionAuthenticator sessionAuthenticator;
   private TenantEnvironmentLifecycleService lifecycleService;
-  private GoSessionRoleReconciler roleReconciler;
 
   private MockedStatic<OBContext> obContextStatic;
   private MockedStatic<SecureWebServicesUtils> swsStatic;
@@ -100,15 +99,11 @@ class NeoAuthenticatorEnvironmentAccessTest {
   @BeforeEach
   void setUp() throws Exception {
     servlet = mock(NeoServlet.class);
-    authenticator = new NeoAuthenticator(servlet);
-
     sessionAuthenticator = mock(GoSessionAuthenticator.class);
     lifecycleService = mock(TenantEnvironmentLifecycleService.class);
-    setField(authenticator, "sessionAuthenticator", sessionAuthenticator);
-    setField(authenticator, "environmentLifecycleService", lifecycleService);
-    // ETP-5395 — the role check hits the database; by default it reports the role as still valid.
-    roleReconciler = mock(GoSessionRoleReconciler.class);
-    setField(authenticator, "sessionRoleReconciler", roleReconciler);
+    authenticator = new NeoAuthenticator(servlet, new EnvironmentRequestAuthenticator(
+        sessionAuthenticator, lifecycleService, mock(WarehouseResolver.class),
+        mock(GoSessionRoleReconciler.class)));
 
     obContextStatic = mockStatic(OBContext.class);
     swsStatic = mockStatic(SecureWebServicesUtils.class);
@@ -193,47 +188,6 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertTrue(authenticated, "a legacy tenant with no lifecycle metadata must not be refused");
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
-  }
-
-  /**
-   * ETP-5395 — a user promoted or demoted after entering the environment must be authorized with
-   * the role they hold now, not the one the session was opened with.
-   */
-  @Test
-  void cookieSessionIsAuthorizedWithTheReboundRole() throws Exception {
-    GoSessionRecord sessionRecord = validRecord(CLIENT_ID);
-    when(sessionAuthenticator.authenticate(any())).thenReturn(
-        GoSessionAuthResult.authenticated(sessionRecord));
-    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
-        .thenReturn(Decision.ALLOWED);
-    when(roleReconciler.reconcile(sessionRecord)).thenAnswer(invocation -> {
-      sessionRecord.setRoleId("REBOUND_ROLE");
-      return true;
-    });
-
-    boolean authenticated = authenticator.authenticateRequest(cookieRequest(),
-        mock(HttpServletResponse.class));
-
-    assertTrue(authenticated);
-    swsStatic.verify(() -> SecureWebServicesUtils.createContext(USER_ID, "REBOUND_ROLE", ORG_ID,
-        WAREHOUSE_ID, CLIENT_ID));
-  }
-
-  @Test
-  void cookieSessionWhoseUserHoldsNoRoleIsRejected() throws Exception {
-    GoSessionRecord sessionRecord = validRecord(CLIENT_ID);
-    when(sessionAuthenticator.authenticate(any())).thenReturn(
-        GoSessionAuthResult.authenticated(sessionRecord));
-    when(roleReconciler.reconcile(sessionRecord))
-        .thenThrow(new SessionRoleRevokedException("no role left"));
-    HttpServletResponse response = mock(HttpServletResponse.class);
-
-    boolean authenticated = authenticator.authenticateRequest(cookieRequest(), response);
-
-    assertFalse(authenticated);
-    verify(servlet).sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "no role left");
-    swsStatic.verify(() -> SecureWebServicesUtils.createContext(anyString(), anyString(),
-        anyString(), any(), anyString()), never());
   }
 
   // ===================== Legacy Bearer (USE_LEGACY_BEARER) path is unchanged =====================
@@ -532,9 +486,4 @@ class NeoAuthenticatorEnvironmentAccessTest {
     return claim;
   }
 
-  private static void setField(Object target, String fieldName, Object value) throws Exception {
-    Field field = NeoAuthenticator.class.getDeclaredField(fieldName);
-    field.setAccessible(true);
-    field.set(target, value);
-  }
 }

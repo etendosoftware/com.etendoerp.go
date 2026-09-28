@@ -57,7 +57,7 @@ public class EmailLayoutTest {
 
   @Test
   public void pinsTheLogoToProductionRegardlessOfEnvironment() {
-    assertEquals("https://app.etendo.software/favicon.png", EmailLayout.LOGO_URL);
+    assertEquals("https://app.etendo.ai/favicon.png", EmailLayout.LOGO_URL);
   }
 
   @Test
