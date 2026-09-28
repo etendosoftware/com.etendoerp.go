@@ -760,26 +760,47 @@ public class TenantEnvironmentLifecycleService {
           reason);
     }
 
-    /** The tenant the event belongs to. */
+    /**
+     * The tenant the event belongs to.
+     *
+     * @return the tenant's {@code AD_CLIENT_ID}
+     */
     public String clientId() {
       return clientId;
     }
 
-    /** The row to write, or null for the preference route (and for an ignored target). */
+    /**
+     * The subscription row the event is written to.
+     *
+     * @return the row, or null for the preference route (and for an ignored target)
+     */
     public Subscription subscription() {
       return subscription;
     }
 
-    /** The stored projection the applier evaluates the event against. */
+    /**
+     * The stored projection the applier evaluates the event against.
+     *
+     * @return the stored status, grace anchor and ordering watermark; never null
+     */
     public SubscriptionLifecycleApplier.StoredState storedState() {
       return storedState;
     }
 
+    /**
+     * Whether the event lands nowhere.
+     *
+     * @return true when the event must not be applied; {@link #ignoreReason()} says why
+     */
     public boolean isIgnored() {
       return ignoreReason != null;
     }
 
-    /** Why the event is not applied; recorded verbatim in {@code ETGO_BILLING_EVENT}. */
+    /**
+     * Why the event is not applied; recorded verbatim in {@code ETGO_BILLING_EVENT}.
+     *
+     * @return the audit reason, or null when the target is not ignored
+     */
     public String ignoreReason() {
       return ignoreReason;
     }

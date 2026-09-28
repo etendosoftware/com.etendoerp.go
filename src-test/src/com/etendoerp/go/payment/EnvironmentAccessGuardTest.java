@@ -70,7 +70,7 @@ class EnvironmentAccessGuardTest {
   private final List<String> flagQueries = new ArrayList<>();
 
   @BeforeEach
-  void setUp() {
+  void mockLifecycle() {
     lifecycle = mock(TenantEnvironmentLifecycleService.class);
   }
 

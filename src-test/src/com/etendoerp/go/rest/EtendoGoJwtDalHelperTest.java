@@ -822,7 +822,7 @@ class EtendoGoJwtDalHelperTest {
     }
 
     /** A productive tenant whose grace ran out 45 days ago (default grace: 15 days). */
-    private java.time.Instant givenPastDueTenantOutOfGrace(String clientId) {
+    private java.time.Instant givenPastDueTenantOutOfGrace() {
       // Millisecond precision: the anchor travels through a java.util.Date column.
       java.time.Instant anchor = java.time.Instant.now().minus(java.time.Duration.ofDays(45))
           .truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
@@ -881,7 +881,7 @@ class EtendoGoJwtDalHelperTest {
         + "enforcing, ALLOWED when switched off, with the same subscription facts")
     void aPastDueTenantOutOfGraceReportsTheEnforcedDecision() throws Exception {
       String clientId = givenTenant();
-      java.time.Instant anchor = givenPastDueTenantOutOfGrace(clientId);
+      java.time.Instant anchor = givenPastDueTenantOutOfGrace();
 
       JSONObject enforced = buildWithSwitch(clientId, false);
       JSONObject switchedOff = buildWithSwitch(clientId, true);
@@ -949,7 +949,7 @@ class EtendoGoJwtDalHelperTest {
     @DisplayName("QA-low: the switch of ANOTHER tenant does not change this tenant's refusal")
     void theSwitchIsPerTenant() throws Exception {
       String clientId = givenTenant();
-      givenPastDueTenantOutOfGrace(clientId);
+      givenPastDueTenantOutOfGrace();
       JSONObject result;
       try (MockedStatic<com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag> flag =
           mockStatic(com.etendoerp.go.payment.EnvironmentAccessEnforcementFlag.class)) {

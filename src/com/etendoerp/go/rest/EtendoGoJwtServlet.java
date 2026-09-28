@@ -221,6 +221,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
+  /** Key of the resource a Stripe event carries under {@code data}. */
+  private static final String STRIPE_EVENT_OBJECT = "object";
   private static final String HEADER_ORIGIN = "Origin";
   private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
   private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
@@ -1383,12 +1385,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void applyAlertOnlyEvent(String eventId, String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
-    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
     log.warn("Billing alert: Stripe event '{}' ({}) — dispute {} on charge {} (payment intent {}),"
         + " amount {} {}, reason '{}'. No access change was made; review it in the Stripe"
         + " dashboard.", eventId, type, optProviderText(object, "id"),
         optProviderText(object, "charge"), optProviderText(object, "payment_intent"),
-        optProviderText(object, "amount"), optProviderText(object, "currency"),
+        optProviderText(object, "amount"), optProviderText(object, FIELD_CURRENCY),
         optProviderText(object, "reason"));
     billingEventStore.markApplied(eventId);
   }
@@ -1409,7 +1411,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private void applyCheckoutPaid(String eventId, String type, JSONObject event) {
     JSONObject data = event.optJSONObject("data");
-    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
     JSONObject metadata = object == null ? null : object.optJSONObject("metadata");
     String requestId = metadata == null ? "" : metadata.optString("request_id", "");
     String email = metadata == null ? "" : metadata.optString("account_email", "");
@@ -1472,7 +1474,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     JSONObject data = event.optJSONObject("data");
-    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject object = data == null ? null : data.optJSONObject(STRIPE_EVENT_OBJECT);
     String subscriptionId = SubscriptionLifecycleApplier.subscriptionIdOf(type, object);
     TenantEnvironmentLifecycleService.LifecycleTarget target =
         resolveLifecycleTarget(subscriptionId, object);

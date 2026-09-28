@@ -40,6 +40,8 @@ public final class EnvironmentAccessEnforcementFlag {
   }
 
   /**
+   * Whether the control plane switched commercial access enforcement off for a tenant.
+   *
    * @param clientId the tenant whose access is being decided, published as
    *     {@link FeatureFlagContext#ATTRIBUTE_CLIENT_ID} so a targeting rule can name one tenant;
    *     may be null

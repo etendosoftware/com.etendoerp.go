@@ -193,6 +193,11 @@ public class EnvironmentAccessGuard {
       this.decision = decision;
     }
 
+    /**
+     * The policy decision that refused the entry.
+     *
+     * @return a refusing decision; never {@code ALLOWED} and never null
+     */
     public EnvironmentAccessPolicy.Decision decision() {
       return decision;
     }

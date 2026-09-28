@@ -83,6 +83,9 @@ public class SubscriptionService {
    */
   private static final int CHUNK_SIZE = 1000;
 
+  /** The HQL alias and {@code where} every row query of this class starts with. */
+  private static final String WHERE_SUB = "as sub where sub.";
+
   private static final String OPEN_ROW_PREDICATE =
       " and sub." + Subscription.PROPERTY_ENDDATE + " is null"
           + " and sub." + Subscription.PROPERTY_ACTIVE + " = true";
@@ -110,7 +113,7 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-          "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
               + PARAM_CLIENT_ID + OPEN_ROW_PREDICATE);
       query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
       query.setFilterOnReadableClients(false);
@@ -140,7 +143,7 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-          "as sub where sub." + Subscription.PROPERTY_STRIPESUBSCRIPTION + " = :"
+          WHERE_SUB + Subscription.PROPERTY_STRIPESUBSCRIPTION + " = :"
               + PARAM_STRIPE_SUBSCRIPTION_ID + OPEN_ROW_PREDICATE);
       query.setNamedParameter(PARAM_STRIPE_SUBSCRIPTION_ID,
           StringUtils.trimToEmpty(stripeSubscriptionId));
@@ -175,7 +178,7 @@ public class SubscriptionService {
     OBContext.setAdminMode(true);
     try {
       OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-          "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
+          WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id = :"
               + PARAM_CLIENT_ID + CLOSED_ROW_PREDICATE + LATEST_CLOSED_ORDER);
       query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(environmentClientId));
       query.setFilterOnReadableClients(false);
@@ -215,7 +218,7 @@ public class SubscriptionService {
     try {
       for (List<String> chunk : chunks(missing)) {
         OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-            "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id in (:"
+            WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id in (:"
                 + PARAM_CLIENT_IDS + ")" + CLOSED_ROW_PREDICATE + LATEST_CLOSED_ORDER);
         query.setNamedParameter(PARAM_CLIENT_IDS, chunk);
         query.setFilterOnReadableClients(false);
@@ -279,7 +282,7 @@ public class SubscriptionService {
 
   private List<Subscription> queryOpenForChunk(List<String> chunk) {
     OBQuery<Subscription> query = OBDal.getInstance().createQuery(Subscription.class,
-        "as sub where sub." + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id in (:"
+        WHERE_SUB + Subscription.PROPERTY_ENVIRONMENTCLIENT + ".id in (:"
             + PARAM_CLIENT_IDS + ")" + OPEN_ROW_PREDICATE);
     query.setNamedParameter(PARAM_CLIENT_IDS, chunk);
     query.setFilterOnReadableClients(false);

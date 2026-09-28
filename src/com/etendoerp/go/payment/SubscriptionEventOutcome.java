@@ -100,22 +100,38 @@ public final class SubscriptionEventOutcome {
     return reason;
   }
 
-  /** Start of the provider billing period this event reports, or null when it reports none. */
+  /**
+   * Start of the provider billing period this event reports.
+   *
+   * @return the period start, or null when the event reports none
+   */
   public Instant periodStart() {
     return periodStart;
   }
 
-  /** End of the provider billing period this event reports, or null when it reports none. */
+  /**
+   * End of the provider billing period this event reports.
+   *
+   * @return the period end, or null when the event reports none
+   */
   public Instant periodEnd() {
     return periodEnd;
   }
 
-  /** Whether the event terminates the subscription, closing its row. */
+  /**
+   * Whether the event terminates the subscription, closing its row.
+   *
+   * @return true when applying the event closes the subscription row
+   */
   public boolean closesSubscription() {
     return closesSubscription;
   }
 
-  /** When the provider ended the subscription; null when unknown (the row closes "now"). */
+  /**
+   * When the provider ended the subscription.
+   *
+   * @return the end instant, or null when unknown (the row then closes "now")
+   */
   public Instant endedAt() {
     return endedAt;
   }
