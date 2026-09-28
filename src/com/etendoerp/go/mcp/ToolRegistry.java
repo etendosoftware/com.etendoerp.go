@@ -1127,7 +1127,8 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_PARAMETERS, objectProp("Process input parameters", paramProps));
 
-    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()),
+        McpToolTitles.forSpec(spec));
   }
 
   // ── Report tool ────────────────────────────────────────────────────────
@@ -1177,7 +1178,8 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_FORMAT, enumProp(
         "Output format (default: " + contract.getDefaultFormat() + ")", contract.getFormats()));
 
-    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
+    return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()),
+        McpToolTitles.forSpec(spec));
   }
 
   /**

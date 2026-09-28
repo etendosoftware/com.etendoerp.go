@@ -1,9 +1,10 @@
 # ADR-0001 — Backend-managed opaque cookie session for Etendo Go
 
-- **Status:** Accepted
+- **Status:** Accepted · amended 2026-09-23 by ETP-5455 (see *Amendment — one authentication
+  pipeline per surface*)
 - **Date:** 2026-07-23
 - **Deciders:** Etendo Go backend (ETP-4575 assignee)
-- **Jira:** ETP-4575 (Auth 1/2, backend) · ETP-4576 (Auth 2/2, frontend) · Epic ETP-3504
+- **Jira:** ETP-4575 (Auth 1/2, backend) · ETP-4576 (Auth 2/2, frontend) · ETP-5455 (single pipeline) · Epic ETP-3504
 - **Source:** [PRD — Client & Delivery Security Hardening](https://etendoproject.atlassian.net/wiki/spaces/PYPI/pages/5106892804/), WS-1 / SEC-10
 - **Supersedes:** the two browser-persisted Bearer tokens (`sf_platform_token`, `sf_auth_token`)
 
@@ -293,3 +294,93 @@ frontend removes all `Authorization: Bearer` construction, stops persisting toke
 `sf_auth_client_id`, `sf_auth_client_name` *(currently orphaned by `logout()`)*, `sf_auth_rolelist`,
 `sf_auth_selected_role`, `sf_auth_selected_org`, `sf_platform_token`, `sf_platform_auth_method`,
 `sf_onboarding_initial_view`, `sf_onboarding_notice`.
+
+---
+
+## Amendment (ETP-5455) — One authentication pipeline per surface
+
+**Why.** This ADR added the cookie *next to* the legacy Bearer flow, and each servlet then grew
+its own copy of "credential → identity". Rules added later reached some copies and not others:
+commercial access on the NEO JWT branch only, warehouse repair on the JWT branch only, the legacy
+kill switch in front of OAuth2 too, cookie support on some servlets and not others (report
+selectors, survey configuration, remove-auth-method and the `/oauth2` management endpoints answered
+the SPA's cookie with `401`, which logs the user out). The fix is structural, not another copy.
+
+**Rule.** Every scheme (cookie, legacy JWT, OAuth2) passes through the same post-authentication
+checks. Per surface there is exactly one resolver; the only per-endpoint knob is a declared policy.
+
+### Environment surfaces — `com.etendoerp.go.auth.EnvironmentRequestAuthenticator`
+
+Two phases:
+
+1. **Resolve.** The cookie first; a dead cookie is final (`401`, no fallback to a Bearer sent
+   alongside it). Only without a session does a Bearer count. A legacy JWT is gated by
+   `GoLegacyBearer` and is the only credential counted as a legacy use. An OAuth2
+   client-credentials token is accepted where the policy allows it, and is **not** gated by the
+   legacy switch, because it is not the browser's credential (D7). A resolved cookie session is
+   also run through `GoSessionRoleReconciler` here (ETP-5395, above), so every policy in the table
+   below gets a revoked role rebound — or the request refused `401` when none is left — for free,
+   the same way `GET /sws/go/session` and the OAuth2 authorize step already did on their own.
+2. **Bind.** Build the context, repair a warehouse the role cannot read, install the context,
+   refuse a commercially blocked environment (`402`) when the policy says so, and apply the request
+   language.
+
+`identify()` resolves without binding. It is for a surface that builds its own per-operation
+context. It is refused for policies that require commercial access, because that check lives in
+the bind step.
+
+| Policy | Commercial check (402) | OAuth2 | Used by |
+|---|---|---|---|
+| `NEO_API` | yes | yes | `/sws/neo/*` (`NeoServlet`) |
+| `NEO_DATA` | yes | no | `/sws/neo/favorites`, `/sws/neo/fiscal-test-mode`, `/sws/report-selectors/*`, `/oauth2/api-keys*` |
+| `NEO_AUXILIARY` | no | no | `/sws/survey-config/*`, `/sws/support/*` (via `identify`), `/oauth2/clients*` (via `identify` + System Administrator check) |
+
+### Account surface — `EtendoGoJwtServlet#resolveAccount(request, response, AccountRequirement)`
+
+The cookie wins (a dead one is final). A Bearer is accepted only without a session, always behind
+the kill switch and counted. The only knob is which Bearer an endpoint accepts:
+
+| Requirement | Bearer accepted | Used by |
+|---|---|---|
+| `ANY_ACCOUNT_CREDENTIAL` | account session token or environment JWT (wide lookup) | `/me`, `/environments`, onboarding, invitations, change-password, `/auth-methods/remove` |
+| `PLATFORM_CREDENTIAL_ONLY` | account session (platform) token only | billing, checkout, upgrade |
+
+A blank `__Host-go_session` value is no credential and does not change which Bearer is accepted.
+It used to send billing down the wide lookup, where an environment JWT got past the
+platform-token-only rule.
+
+### Commercially blocked environment
+
+A blocked environment's data is fully inaccessible. It is not deleted (TL, 2026-09-23).
+
+- **Refused with `402`:** `/sws/neo/*`, favorites, fiscal test mode, report selectors, OAuth2 API
+  keys, and every `/sws/go` endpoint that acts on the session's tenant (`resolveTenantSession`:
+  onboarding company data, demo-to-productive transfer status and retry).
+- **Reachable:** the account (`/me`, `/environments`, `/session*`, billing, checkout, upgrade,
+  invitations, auth methods, change-password), support and surveys.
+- The owner can always pay. The transfer is decided on the productive tenant it fills, so buying
+  PRO after the demo expired still brings the demo's data along (ETP-5396).
+- Entering a blocked environment (`POST /session/environment`, `GET /login?userId=`) is not
+  refused. The first environment request answers `402`, identically for every scheme.
+
+### Guards — `AuthenticationEntryPointGuardTest`
+
+- **G-01 (ratchet).** Outside `com.etendoerp.go.auth`, only listed files may read an inbound
+  credential (`Authorization` header, JWT decode, OAuth2 validation), each with an exact
+  allowance. The documented exceptions:
+  - the account resolver itself;
+  - the wide account lookup;
+  - the OAuth2 protocol (`/token`, `/revoke`, `/introspect`, `/register`, `/metadata`, the MCP
+    filter and endpoint), which authenticates OAuth clients by their own credentials;
+  - `/oauth2/authorize` (cookie first, legacy JWT in the body);
+  - the customer portal token;
+  - `SFRefreshToken`, which decodes a token it has just issued;
+  - `DalRoleDirectory` (ETP-5395), which mints a token for an already-resolved user/role and
+    decodes its own output to derive an org/warehouse pair, the same trick as `SFRefreshToken`;
+  - the `/sws/apps` spike (out of scope).
+- **G-02.** Every servlet mapped under an environment surface is discovered from
+  `AD_MODEL_OBJECT_MAPPING.xml` and must authenticate through the pipeline. `/sws/neo/currency-format`
+  is public by design.
+- **G-03.** In `EtendoGoJwtServlet`, the Bearer header is read only by `resolveAccount`,
+  `hasAnyCredential` (presence check), `resolveTenantSession` (claims of an already-resolved JWT)
+  and the legacy `GET /login?userId=`.

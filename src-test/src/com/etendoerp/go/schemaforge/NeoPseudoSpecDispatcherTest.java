@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -120,6 +121,54 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Batch endpoint only supports POST"));
     verify(batchService, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // usage (ETP-5462)
+  // -------------------------------------------------------------------------
+
+  private NeoPseudoSpecDispatcher usageDispatcher(NeoUsageEventEndpoint usageEndpoint) {
+    return new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint,
+        vectorSearchEndpoint, goWebhookBridge, usageEndpoint);
+  }
+
+  @Test
+  public void usagePostWritesTheEndpointResponse() throws Exception {
+    NeoUsageEventEndpoint usageEndpoint = mock(NeoUsageEventEndpoint.class);
+    NeoResponse payload = new NeoResponse(HttpServletResponse.SC_ACCEPTED, new JSONObject());
+    when(usageEndpoint.handle(request)).thenReturn(payload);
+
+    boolean handled = usageDispatcher(usageEndpoint)
+        .handle(pathInfo("usage"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(usageEndpoint).handle(request);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void usageRejectsEveryOtherMethodWithoutCallingTheEndpoint() throws Exception {
+    NeoUsageEventEndpoint usageEndpoint = mock(NeoUsageEventEndpoint.class);
+    NeoPseudoSpecDispatcher usage = usageDispatcher(usageEndpoint);
+
+    for (String method : new String[] { "GET", "PUT", "DELETE", "PATCH" }) {
+      assertTrue(method, usage.handle(pathInfo("usage"), method, request, response));
+    }
+
+    verify(servlet, times(4)).sendError(eq(response),
+        eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), eq("Usage endpoint only supports POST"));
+    verify(usageEndpoint, never()).handle(any());
+    verify(servlet, never()).writeResponse(any(), any());
+  }
+
+  @Test
+  public void theFiveArgConstructorWiresARealUsageEndpoint() throws Exception {
+    // Without the injected endpoint, a non-POST still answers 405: the default one is wired.
+    boolean handled = dispatcher.handle(pathInfo("usage"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Usage endpoint only supports POST"));
   }
 
   // -------------------------------------------------------------------------
