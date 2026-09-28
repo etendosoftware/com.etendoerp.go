@@ -210,12 +210,17 @@ public class NeoFieldFilter {
    * is an opt-in the filter never second-guesses, so this allowlists it the same way {@link
    * #includeFkIdentifierVariant} allowlists the {@code $_identifier} variant NEO always adds.
    *
+   * @param sfEntity
+   *     the schema forge entity configuration
+   * @param dalEntityName
+   *     the DAL entity name (from adTab.getTable().getName())
    * @param queryParams
    *     the request's raw query parameters (as {@link
    *     com.etendoerp.go.schemaforge.NeoContext#getQueryParams()} returns them), or {@code null}
    *     when there is no request context to consult (write paths, tests, etc. — those should
    *     keep calling the 2-arg overload instead of passing a write request's params here, since
    *     {@code included} also gates {@link #filterCreateRequest}).
+   * @return a filter instance, which may be inactive if no fields are configured
    */
   @SuppressWarnings("unchecked")
   public static NeoFieldFilter forEntity(SFEntity sfEntity, String dalEntityName,
