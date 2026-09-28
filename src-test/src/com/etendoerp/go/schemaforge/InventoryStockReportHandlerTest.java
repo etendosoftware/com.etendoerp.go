@@ -32,6 +32,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -55,6 +56,7 @@ import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
  * Unit tests for {@link InventoryStockReportHandler}.
@@ -213,6 +215,103 @@ class InventoryStockReportHandlerTest {
     when(nativeQuery.setParameterList(anyString(), org.mockito.ArgumentMatchers.<Set<String>>any())).thenReturn(
         nativeQuery);
     when(nativeQuery.list()).thenReturn(rows);
+  }
+
+  // ── reportParameters() contract (ETP-5483 follow-up) ────────────────────
+
+  /**
+   * Verifies that {@code reportParameters()} declares all four filters the handler actually
+   * reads from the POST body — {@code M_Product_ID}, {@code M_Warehouse_ID},
+   * {@code M_Product_Category_ID} and {@code includeZeroStock} — with the expected JSON Schema
+   * types, so the MCP tool schema offers every filter an agent can use, not just the first two.
+   */
+  @Test
+  void testReportParametersDeclaresAllFourFilters() {
+    Optional<List<NeoReportParam>> params = handler.reportParameters();
+    assertTrue(params.isPresent());
+
+    List<NeoReportParam> declared = params.get();
+    assertEquals(4, declared.size());
+
+    NeoReportParam productParam = declared.get(0);
+    assertEquals("M_Product_ID", productParam.getName());
+    assertEquals(NeoReportParam.TYPE_STRING, productParam.getType());
+    assertTrue(!productParam.isRequired());
+
+    NeoReportParam warehouseParam = declared.get(1);
+    assertEquals("M_Warehouse_ID", warehouseParam.getName());
+    assertEquals(NeoReportParam.TYPE_STRING, warehouseParam.getType());
+    assertTrue(!warehouseParam.isRequired());
+
+    NeoReportParam categoryParam = declared.get(2);
+    assertEquals("M_Product_Category_ID", categoryParam.getName());
+    assertEquals(NeoReportParam.TYPE_STRING, categoryParam.getType());
+    assertTrue(!categoryParam.isRequired());
+
+    NeoReportParam includeZeroStockParam = declared.get(3);
+    assertEquals("includeZeroStock", includeZeroStockParam.getName());
+    assertEquals(NeoReportParam.TYPE_BOOLEAN, includeZeroStockParam.getType());
+    assertTrue(!includeZeroStockParam.isRequired());
+  }
+
+  // ── POST with category filter / includeZeroStock (ETP-5483 follow-up) ──
+
+  /**
+   * Verifies that {@code M_Product_Category_ID} IDs are passed as named parameters to the
+   * query — the handler already read this filter, this only confirms it still binds correctly
+   * now that it is a declared, documented input.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPostWithCategoryFilterSetsParameters() throws Exception {
+    mockQueryReturning(Collections.singletonList(
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+
+    JSONObject body = new JSONObject();
+    body.put("M_Product_Category_ID", "cat-id-1, cat-id-2");
+
+    NeoResponse response = handler.handle(postContext(body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(nativeQuery).setParameter("categoryId0", "cat-id-1");
+    verify(nativeQuery).setParameter("categoryId1", "cat-id-2");
+  }
+
+  /**
+   * Verifies that {@code includeZeroStock=true} is bound as a boolean query parameter.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPostWithIncludeZeroStockTrueBindsParameter() throws Exception {
+    mockQueryReturning(Collections.singletonList(
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
+            BigDecimal.ZERO, new BigDecimal("2.00"), BigDecimal.ZERO }));
+
+    JSONObject body = new JSONObject();
+    body.put("includeZeroStock", true);
+
+    NeoResponse response = handler.handle(postContext(body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(nativeQuery).setParameter("includeZeroStock", true);
+  }
+
+  /**
+   * Verifies that omitting {@code includeZeroStock} defaults to {@code false}, matching the
+   * documented default in {@code reportParameters()}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPostWithoutIncludeZeroStockDefaultsToFalse() throws Exception {
+    mockQueryReturning(Collections.singletonList(
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unit",
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+
+    NeoResponse response = handler.handle(postContext(new JSONObject()));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(nativeQuery).setParameter("includeZeroStock", false);
   }
 
   // ── Method guard ─────────────────────────────────────────────────────────

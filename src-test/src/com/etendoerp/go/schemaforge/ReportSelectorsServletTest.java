@@ -24,7 +24,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -436,7 +438,7 @@ class ReportSelectorsServletTest {
     }
 
     @Test
-    @DisplayName("currency query also accepts the selected org's currency and sorts it first")
+    @DisplayName("currency query also accepts the selected org's currencies and sorts its acct-schema currency first")
     void currencyQueryWithSelectedOrg() throws Exception {
       configureAuthenticatedGet("currency");
       when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
@@ -448,9 +450,52 @@ class ReportSelectorsServletTest {
       verify(session, times(2)).createNativeQuery(sql.capture());
       String dataSql = sql.getAllValues().get(1);
       assertTrue(dataSql.contains("OR c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)"), dataSql);
-      assertTrue(dataSql.contains("ORDER BY (CASE WHEN c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)"), dataSql);
+      // ETP-5483: the org's accounting-schema currency is the first choice, and it is also in
+      // the ETP-5420 scope so it can never be filtered out.
+      assertTrue(dataSql.contains("OR c_currency_id = COALESCE((SELECT acs.c_currency_id FROM ad_org o"), dataSql);
+      assertTrue(dataSql.contains("ORDER BY (CASE WHEN c_currency_id = COALESCE((SELECT acs.c_currency_id FROM ad_org o"), dataSql);
+      assertTrue(dataSql.contains("WHEN c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId) THEN 1"), dataSql);
       verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
       verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+    }
+
+    /**
+     * ETP-5483: without selectedOrgId, the currency ORDER BY still has no reference to it —
+     * unchanged from before — so it must never be bound on either query (Hibernate would
+     * reject an attempt to bind a name absent from the query text).
+     */
+    @Test
+    @DisplayName("currency query without selectedOrgId never binds it (order unchanged)")
+    @SuppressWarnings("unchecked")
+    void currencyQueryWithoutSelectedOrgIdDoesNotBindIt() throws Exception {
+      configureAuthenticatedGet("currency");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(countQuery, never()).setParameter(eq("selectedOrgId"), any());
+      verify(dataQuery, never()).setParameter(eq("selectedOrgId"), any());
+      // clientId (the pre-existing default-currency ordering) is still bound on the data query.
+      verify(dataQuery).setParameter("clientId", TEST_CLIENT_ID);
+    }
+
+    /**
+     * ETP-5483 + ETP-5420: with selectedOrgId, both the org-currency-first ORDER BY and the
+     * tenant-currency scope (WHERE) reference it, so it must be bound as a real parameter on the
+     * data query AND on the count query — otherwise the count would not match the scoped list.
+     */
+    @Test
+    @DisplayName("currency query with selectedOrgId binds it on both the count and the data query")
+    @SuppressWarnings("unchecked")
+    void currencyQueryWithSelectedOrgIdBindsBothQueries() throws Exception {
+      configureAuthenticatedGet("currency");
+      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
     }
   }
 

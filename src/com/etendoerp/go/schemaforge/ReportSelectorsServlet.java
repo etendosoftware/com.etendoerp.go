@@ -226,13 +226,18 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
 
     bindSearchParameter(countQuery, dataQuery, req.q);
     bindClientParameter(countQuery, dataQuery, fromWhereStr, sq.bindClient, req.clientId);
-    bindOptionalParameter(countQuery, dataQuery, fromWhereStr, PARAM_SELECTED_ORG_ID,
+    // ETP-5483: checked against countSql/dataSql (not just fromWhereStr) so a selector's
+    // ORDER BY can also reference an optional named parameter — e.g. buildCurrencyQuery's
+    // org-currency-first ordering, which has no WHERE-clause use for :selectedOrgId at all.
+    // Binding a name Hibernate never sees in that query's own SQL throws, so each query is
+    // checked independently rather than assuming both share every placeholder.
+    bindOptionalParameter(countQuery, dataQuery, countSql, dataSql, PARAM_SELECTED_ORG_ID,
         req.selectedOrgId);
-    bindOptionalParameter(countQuery, dataQuery, fromWhereStr, PARAM_SELECTED_ACCT_SCHEMA_ID,
+    bindOptionalParameter(countQuery, dataQuery, countSql, dataSql, PARAM_SELECTED_ACCT_SCHEMA_ID,
         req.selectedAcctSchemaId);
-    bindOptionalListParameter(countQuery, dataQuery, fromWhereStr, PARAM_WAREHOUSE_IDS,
+    bindOptionalListParameter(countQuery, dataQuery, countSql, dataSql, PARAM_WAREHOUSE_IDS,
         req.warehouseIds);
-    bindOptionalListParameter(countQuery, dataQuery, fromWhereStr, PARAM_ROLE_ORG_IDS,
+    bindOptionalListParameter(countQuery, dataQuery, countSql, dataSql, PARAM_ROLE_ORG_IDS,
         req.roleOrgIds);
 
     Number countResult = (Number) countQuery.uniqueResult();
@@ -412,21 +417,54 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         fromWhere, "ORDER BY y.year DESC", true);
   }
 
+  /**
+   * The currencies a report can be filtered by, scoped and ordered for the tenant.
+   *
+   * <p><b>Scope (ETP-5420).</b> {@code c_currency} is a global table holding the full ISO catalog
+   * (~160 rows), so it must be scoped to the currencies the tenant actually uses: the client's base
+   * currency, the selected organization's own currency and its accounting-schema currency, and
+   * anything with an active {@code C_Conversion_Rate} row for this client (either direction). Same
+   * rule as report-api.js's dev-plugin selector and /sales-order's CurrencyRatePicker.
+   * {@code :clientId} and {@code :selectedOrgId} both live in {@code fromWhere}, so
+   * {@code executeSelector} binds them on the count query as well as on the data query.</p>
+   *
+   * <p><b>Order (ETP-5483).</b> The default/first-choice currency must follow the ACTIVE
+   * ORGANIZATION's own accounting-schema currency, not just the client's base currency — a
+   * multi-org tenant can have an org whose general ledger is booked in a different currency than
+   * {@code AD_Client.C_Currency_ID}. Same precedence as
+   * {@code TaxReportHandler#resolveOrgAcctSchemaCurrency} /
+   * {@code AgingReportHandler#resolveAcctSchemaForOrg} (ETP-4918), expressed in SQL instead of
+   * Java since this is a plain selector query: {@code ad_org.c_acctschema_id} (the org's own
+   * general-ledger FK) first, falling back to the first active {@code ad_org_acctschema} link.
+   * Then the org's own currency, then the client's, then the rest by ISO code.</p>
+   *
+   * <p>{@code :selectedOrgId} and {@code :clientId} are never concatenated: they are bound as
+   * real parameters by {@code executeSelector}'s per-query placeholder check. Without a selected
+   * organization neither the scope nor the order references {@code :selectedOrgId}.</p>
+   */
   private SelectorQuery buildCurrencyQuery(SelectorRequest req) {
-    // ETP-5420 — c_currency is a global table holding the full ISO catalog (~160 rows), so it
-    // must be scoped to the currencies the tenant actually uses: the client's base currency, the
-    // selected organization's own currency, and anything with an active C_Conversion_Rate row
-    // for this client (either direction). Same rule as report-api.js's dev-plugin selector and
-    // /sales-order's CurrencyRatePicker. :clientId and :selectedOrgId both live in fromWhere,
-    // so executeSelector binds them on the count query as well as on the data query.
+    String clientCurrency = "(SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)";
     StringBuilder fromWhere = new StringBuilder("FROM c_currency WHERE isactive='Y'"
         + " AND (iso_code ILIKE :search OR description ILIKE :search)"
-        + " AND (c_currency_id = (SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)");
-    String firstChoice = "(SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)";
+        + " AND (c_currency_id = " + clientCurrency);
+    String orgFirst = "";
     if (req.selectedOrgId != null) {
-      fromWhere.append(
-          " OR c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)");
-      firstChoice = "(SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)";
+      String orgCurrency =
+          "(SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)";
+      String orgAcctSchemaCurrency = "COALESCE("
+          + "(SELECT acs.c_currency_id FROM ad_org o"
+          + " JOIN c_acctschema acs ON acs.c_acctschema_id = o.c_acctschema_id"
+          + " WHERE o.ad_org_id = :selectedOrgId),"
+          + "(SELECT acs2.c_currency_id FROM ad_org_acctschema oas"
+          + " JOIN c_acctschema acs2 ON acs2.c_acctschema_id = oas.c_acctschema_id"
+          // Ordered so an org linked to several schemas always yields the same currency
+          // (same pick as TaxReportHandler / AgingReportHandler: lowest schema id).
+          + " WHERE oas.ad_org_id = :selectedOrgId AND oas.isactive = 'Y'"
+          + " AND acs2.isactive = 'Y' ORDER BY acs2.c_acctschema_id LIMIT 1))";
+      fromWhere.append(" OR c_currency_id = ").append(orgCurrency)
+          .append(" OR c_currency_id = ").append(orgAcctSchemaCurrency);
+      orgFirst = "WHEN c_currency_id = " + orgAcctSchemaCurrency + " THEN 0 "
+          + "WHEN c_currency_id = " + orgCurrency + " THEN 1 ";
     }
     fromWhere.append(" OR EXISTS (SELECT 1 FROM c_conversion_rate cr"
         + " WHERE cr.isactive = 'Y' AND cr.ad_client_id IN (:clientId, '0')"
@@ -436,7 +474,8 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         "SELECT c_currency_id AS id, iso_code AS name,"
         + " iso_code || ' - ' || description AS label",
         fromWhere,
-        "ORDER BY (CASE WHEN c_currency_id = " + firstChoice + " THEN 0 ELSE 1 END), iso_code",
+        "ORDER BY (CASE " + orgFirst
+        + "WHEN c_currency_id = " + clientCurrency + " THEN 2 ELSE 3 END), iso_code",
         true);
   }
 
@@ -469,22 +508,46 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     dataQuery.setParameter(PARAM_CLIENT_ID, clientId);
   }
 
+  /**
+   * Binds an optional named parameter on whichever of {@code countQuery}/{@code dataQuery}
+   * actually references it in its own SQL text.
+   *
+   * <p>Most optional parameters (selectedOrgId for product/warehouse/year, selectedAcctSchemaId
+   * for account) live in the shared {@code fromWhere} fragment, so both queries reference them
+   * identically. {@code buildCurrencyQuery}'s org-currency-first ordering (ETP-5483) is the one
+   * exception: {@code :selectedOrgId} appears only in the {@code ORDER BY}, which
+   * {@code countSql} never includes. Checking {@code countSql} and {@code dataSql}
+   * independently — instead of a single shared {@code fromWhereStr} check — binds it on
+   * {@code dataQuery} without ever attempting to bind it on {@code countQuery}, where Hibernate
+   * would reject it as an unknown parameter.
+   */
   private void bindOptionalParameter(NativeQuery countQuery, NativeQuery dataQuery,
-      String fromWhereStr, String parameterName, String parameterValue) {
-    if (parameterValue == null || !fromWhereStr.contains(sqlParameter(parameterName))) {
+      String countSql, String dataSql, String parameterName, String parameterValue) {
+    if (parameterValue == null) {
       return;
     }
-    countQuery.setParameter(parameterName, parameterValue);
-    dataQuery.setParameter(parameterName, parameterValue);
+    String placeholder = sqlParameter(parameterName);
+    if (countSql.contains(placeholder)) {
+      countQuery.setParameter(parameterName, parameterValue);
+    }
+    if (dataSql.contains(placeholder)) {
+      dataQuery.setParameter(parameterName, parameterValue);
+    }
   }
 
+  /** List-valued counterpart of {@link #bindOptionalParameter}; same per-query independence. */
   private void bindOptionalListParameter(NativeQuery countQuery, NativeQuery dataQuery,
-      String fromWhereStr, String parameterName, List<String> parameterValues) {
-    if (parameterValues.isEmpty() || !fromWhereStr.contains(sqlParameter(parameterName))) {
+      String countSql, String dataSql, String parameterName, List<String> parameterValues) {
+    if (parameterValues.isEmpty()) {
       return;
     }
-    countQuery.setParameterList(parameterName, parameterValues);
-    dataQuery.setParameterList(parameterName, parameterValues);
+    String placeholder = sqlParameter(parameterName);
+    if (countSql.contains(placeholder)) {
+      countQuery.setParameterList(parameterName, parameterValues);
+    }
+    if (dataSql.contains(placeholder)) {
+      dataQuery.setParameterList(parameterName, parameterValues);
+    }
   }
 
   private JSONArray toJsonItems(List<Object[]> rows) throws JSONException {
