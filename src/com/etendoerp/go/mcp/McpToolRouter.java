@@ -1005,7 +1005,9 @@ public class McpToolRouter {
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
-    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    // ETP-5474: DELETE-specific runner, so a handler answering 204 No Content gets the same
+    // confirmation as the generic path below instead of an empty `{}`.
+    JSONObject preHookResult = McpHookExecutor.runDeletePreHook(handler, hookCtx, recordId);
     if (preHookResult != null) {
       return preHookResult;
     }
@@ -1018,6 +1020,18 @@ public class McpToolRouter {
       return wrapAsErrorContent(error);
     }
 
+    return deleteConfirmation(recordId);
+  }
+
+  /**
+   * The single {@code neo_delete} success answer, {@code {"deleted": true, "id": recordId}}.
+   * Shared by the generic removal path and {@link McpHookExecutor#runDeletePreHook} (a handler
+   * resolving the DELETE with 204 No Content) so the two cannot diverge (ETP-5474).
+   *
+   * @param recordId the id of the deleted record
+   * @return the MCP text-content result carrying the confirmation
+   */
+  static JSONObject deleteConfirmation(String recordId) throws JSONException {
     JSONObject deleteResult = new JSONObject();
     deleteResult.put("deleted", true);
     deleteResult.put("id", recordId);

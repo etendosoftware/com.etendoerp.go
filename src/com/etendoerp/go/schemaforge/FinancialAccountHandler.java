@@ -821,7 +821,7 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     FIN_FinancialAccount account = loadAccount(id);
     if (account == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Account not found");
     }
     List<String> blockers = FinancialAccountDeleteSupport.findDeleteBlockers(account, hasTransactions(account));
     if (!blockers.isEmpty()) {
