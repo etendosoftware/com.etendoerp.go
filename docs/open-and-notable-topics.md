@@ -736,6 +736,57 @@ parser, so a price that saves is a price that can be bought. Their specs
 (`StripePriceServiceTest`, `StripeCustomerPortalServiceTest`) then use the recording fake instead
 of static `CheckoutConfiguration` mocks. Found after the ETP-5046 develop merge; not implemented.
 
+### 🟡 4.12 `NeoAuthenticatorEnvironmentAccessTest` re-tests the shared auth pipeline (ETP-5047)
+
+**Ticket:** owner ETP-5047; related ETP-5455.
+
+`schemaforge/NeoAuthenticatorEnvironmentAccessTest` (572 lines, 16 tests) was written for ETP-5443,
+when NEO had three separate auth paths — the cookie session (`applySessionContext`), the legacy
+Bearer JWT (`authenticateJwt`) and the OAuth2 client-credentials token
+(`authenticateOAuth2Token`) — each running its own access check (`enforceEnvironmentAccess`), so
+each path needed its own cases. ETP-5455 collapsed all three into the shared
+`EnvironmentRequestAuthenticator` pipeline, and the ETP-5046 → ETP-5047 merge rewired the class onto
+it, but kept its per-scheme structure. Its class javadoc still names the four removed methods; none
+of them exists in `NeoAuthenticator` any more.
+
+Most of its tests now assert what two other classes already pin at the pipeline level:
+
+| Tests in `NeoAuthenticatorEnvironmentAccessTest` | Already covered by |
+|---|---|
+| 9 decision cases: cookie and OAuth2 × `SUBSCRIPTION_REQUIRED` / `DEMO_TRIAL_EXPIRED` / `ALLOWED` / null decision, plus the Bearer `SUBSCRIPTION_REQUIRED` case | `auth/EnvironmentRequestAuthenticatorTest.everySchemeGetsTheOutcomeItsPolicyDictates` — a 36-case matrix (3 `SurfacePolicy` × 3 `AuthScheme` × 4 decisions) asserting the 402-or-authenticated outcome, the message, the denial's decision and that the policy is consulted exactly once |
+| 2 kill-switch cases (switched off / explicitly false) | `EnvironmentRequestAuthenticatorTest.theEnforcementKillSwitchLetsABlockedTenantThrough` (`NEO_API`, `NEO_DATA`) plus `payment/EnvironmentAccessEnforcementFlagTest` (every spelling of the flag value) |
+| 2 OAuth2 401 cases (missing identity, insufficient scope — access never asked) | the matrix's rejected-scheme branch, `EnvironmentRequestAuthenticatorTest.anOAuth2TokenWithAReadScopeCannotWrite`, and `NeoAuthenticatorSchemeParityTest.theAccessPolicyIsConsultedExactlyOnceOn{Cookie,Jwt,OAuth2}Path` |
+| 2 three-scheme parity cases (same refusal message, same allowed outcome) | mostly by construction now — one pipeline and one 402 writer; the matrix asserts parity at the outcome level |
+
+Two things are **not covered anywhere else** and must survive any trim:
+
+- `theSharedGuardIsAskedForTheSessionTenantUnderTheNeoLabel` — the guard is asked with
+  `(clientId, "neo")`. The entry-point label is NEO's own argument to the pipeline; nothing else
+  checks it.
+- The `assertRefusedWith402` helper — NEO writes the guard's **structured** body through
+  `writeResponse` (HTTP 402, exactly `message`, `status`, `code = ENVIRONMENT_ACCESS_DENIED`,
+  `decision`) and never the plain-text `sendError`. That is the one decision `NeoAuthenticator`
+  itself makes on top of the pipeline outcome.
+
+**Suggested shape:** ~4 tests, ~150–200 lines, down from 572:
+
+1. A blocked tenant gets the structured 402 through `writeResponse`, never `sendError` —
+   parameterized over the two refusal decisions (optionally also over the three schemes, which
+   keeps a cheap "same body on every scheme" check).
+2. An allowed or null decision authenticates, with neither `writeResponse` nor `sendError` called.
+3. The guard is asked with `(clientId, "neo")`.
+4. A non-commercial refusal (401 / 403) still goes through `sendError`, not the structured body.
+   `NeoAuthenticatorSchemeParityTest` already asserts the `sendError` side of this (401s and the
+   CSRF 403) but not that `writeResponse` stays unused, so this can equally be one `never()`
+   assertion added there.
+
+Rewrite the class javadoc for the single pipeline at the same time.
+
+Why it matters: every change to the auth pipeline currently has to be mirrored in three test
+classes asserting the same thing, which is what made the ETP-5046 → ETP-5047 merge heavy. Low
+risk — test-only, no behaviour change — and the lowest priority in this section. Raised by Martin
+on 2026-09-28, after the ETP-5046 → ETP-5047 merge; not yet actioned.
+
 ## 5. Handed forward to later tickets
 
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
