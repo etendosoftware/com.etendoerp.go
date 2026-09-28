@@ -4,7 +4,6 @@ package com.etendoerp.go.payment;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -55,20 +54,6 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
       new TenantEnvironmentLifecycleService(mock(TenantPlanService.class), subscriptionService);
 
   @Test
-  public void blankClientReadsAsTheEmptyProjectionWithoutTouchingTheDal() {
-    // readPreference enters admin mode, which needs no real session in a unit test.
-    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
-        MockedStatic<org.openbravo.dal.core.OBContext> context =
-            mockStatic(org.openbravo.dal.core.OBContext.class)) {
-      assertSame(SubscriptionLifecycleApplier.StoredState.NONE,
-          service.readSubscriptionState(null));
-      assertSame(SubscriptionLifecycleApplier.StoredState.NONE,
-          service.readSubscriptionState("  "));
-      dal.verify(OBDal::getInstance, never());
-    }
-  }
-
-  @Test
   public void storedPreferencesAreReadBackAsTheProjection() {
     Map<String, String> stored = new HashMap<>();
     stored.put(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "PAST_DUE");
@@ -82,7 +67,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
         MockedStatic<org.openbravo.dal.core.OBContext> context =
             mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
-      SubscriptionLifecycleApplier.StoredState state = service.readSubscriptionState(CLIENT_ID);
+      SubscriptionLifecycleApplier.StoredState state = service.targetForTenant(CLIENT_ID, null)
+          .storedState();
 
       assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
       assertEquals(DUE_AT, state.dueAt());
@@ -102,7 +88,8 @@ public class TenantEnvironmentLifecycleServiceSubscriptionStateTest {
         MockedStatic<org.openbravo.dal.core.OBContext> context =
             mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dal.when(OBDal::getInstance).thenReturn(dalInstance);
-      SubscriptionLifecycleApplier.StoredState state = service.readSubscriptionState(CLIENT_ID);
+      SubscriptionLifecycleApplier.StoredState state = service.targetForTenant(CLIENT_ID, null)
+          .storedState();
 
       assertNull(state.status());
       assertNull(state.dueAt());

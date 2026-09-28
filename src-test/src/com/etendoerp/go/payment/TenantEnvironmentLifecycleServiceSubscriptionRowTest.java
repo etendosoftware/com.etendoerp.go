@@ -75,13 +75,29 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   private final TenantEnvironmentLifecycleService service =
       new TenantEnvironmentLifecycleService(tenantPlanService, new SubscriptionService());
 
+  /**
+   * The production path of an outcome resolved through the tenant rather than a row match (the
+   * webhook's checkout-request fallback): {@code targetForTenant}, then
+   * {@code applySubscriptionEvent}, with a status-only outcome and no watermark.
+   */
+  private boolean storeForTenant(EnvironmentAccessPolicy.SubscriptionStatus status,
+      Instant dueAt) {
+    return service.applySubscriptionEvent(service.targetForTenant(CLIENT_ID, null),
+        SubscriptionEventOutcome.apply(status, dueAt), null);
+  }
+
+  /** The stored state an event for the tenant is decided against, as the webhook reads it. */
+  private SubscriptionLifecycleApplier.StoredState storedStateOfTenant() {
+    return service.targetForTenant(CLIENT_ID, null).storedState();
+  }
+
   // ===================== write routing (tenant level) =====================
 
   @Test
   public void aTenantWithARowGetsCurrentWrittenAsActiveOnTheRowAndNoPreference() {
     Fixture fixture = new Fixture().withOpenRow("past_due", ANCHOR);
 
-    assertTrue(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+    assertTrue(fixture.run(() -> storeForTenant(
         EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)));
 
     verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_ACTIVE);
@@ -99,7 +115,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void aTenantWithARowGetsPastDueAndItsGraceAnchorOnTheRow() {
     Fixture fixture = new Fixture().withOpenRow("active", null);
 
-    assertTrue(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+    assertTrue(fixture.run(() -> storeForTenant(
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR)));
 
     verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_PAST_DUE);
@@ -112,11 +128,11 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void aTenantWithARowGetsExpiredAsCanceledWithoutClosingTheRow() {
     Fixture fixture = new Fixture().withOpenRow("past_due", ANCHOR);
 
-    assertTrue(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+    assertTrue(fixture.run(() -> storeForTenant(
         EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, null)));
 
     verify(fixture.row).setSubscriptionStatus(SubscriptionService.STATUS_CANCELED);
-    // The tenant-level write (the development tool) never closes a row: only a terminating
+    // A status-only outcome routed through the tenant never closes a row: only a terminating
     // webhook outcome does (ETP-5047).
     verify(fixture.row, never()).setEndDate(any());
     assertTrue(fixture.savedPreferenceAttributes.isEmpty());
@@ -126,7 +142,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void aTenantWithoutARowKeepsThePreferenceRoute() {
     Fixture fixture = new Fixture().asWebhook();
 
-    assertTrue(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+    assertTrue(fixture.run(() -> storeForTenant(
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR)));
 
     assertEquals(List.of(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE,
@@ -142,7 +158,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // the preference projection is only for a tenant that never had a row.
     Fixture fixture = new Fixture().withClosedRow("canceled", ENDED_AT).asWebhook();
 
-    assertFalse(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+    assertFalse(fixture.run(() -> storeForTenant(
         EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null)));
 
     verify(fixture.dal, never()).save(any());
@@ -416,7 +432,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             "2020-01-01T00:00:00Z");
 
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+        fixture.run(() -> storedStateOfTenant());
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
     assertEquals(ANCHOR, state.dueAt());
@@ -434,7 +450,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             EVENT_AT.toString());
 
     assertEquals(EVENT_AT,
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).lastEventAt());
+        fixture.run(() -> storedStateOfTenant()).lastEventAt());
   }
 
   @Test
@@ -463,7 +479,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             "2020-01-01T00:00:00Z");
 
     assertEquals(EVENT_AT,
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).lastEventAt());
+        fixture.run(() -> storedStateOfTenant()).lastEventAt());
     assertFalse(fixture.queriedPreferenceAttributes.contains(
         TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE));
   }
@@ -492,7 +508,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // pre-ETP-5047 R37 left. Without the fallback it would read as zero grace — blocked on deploy.
     Fixture fixture = new Fixture().withLegacyOpenRow("past_due", ANCHOR);
 
-    assertEquals(ANCHOR, fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).dueAt());
+    assertEquals(ANCHOR, fixture.run(() -> storedStateOfTenant()).dueAt());
   }
 
   @Test
@@ -500,7 +516,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // The billing period is not a grace anchor: only past_due falls back to it.
     Fixture fixture = new Fixture().withLegacyOpenRow("active", PERIOD_END);
 
-    assertNull(fixture.run(() -> service.readSubscriptionState(CLIENT_ID)).dueAt());
+    assertNull(fixture.run(() -> storedStateOfTenant()).dueAt());
   }
 
   @Test
@@ -508,7 +524,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     Fixture fixture = new Fixture().withOpenRow("canceled", null);
 
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+        fixture.run(() -> storedStateOfTenant());
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED, state.status());
     assertNull(state.dueAt());
@@ -524,7 +540,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
             EVENT_AT.toString());
 
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+        fixture.run(() -> storedStateOfTenant());
 
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, state.status());
     assertEquals(ANCHOR, state.dueAt());
@@ -852,7 +868,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void anOlderEventIsStillRejectedAsStaleOnceTheTenantHasARow() throws Exception {
     Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT);
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+        fixture.run(() -> storedStateOfTenant());
 
     // A late payment_failed created before the invoice.paid already applied.
     SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
@@ -872,7 +888,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_EVENT_AT_ATTRIBUTE,
             EVENT_AT.toString());
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+        fixture.run(() -> storedStateOfTenant());
 
     SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
         SubscriptionLifecycleApplier.INVOICE_PAYMENT_FAILED,
@@ -885,7 +901,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   public void aNewerEventIsAppliedOnTheRowRoute() throws Exception {
     Fixture fixture = new Fixture().withOpenRow("active", null).withLastEventAt(EVENT_AT);
     SubscriptionLifecycleApplier.StoredState state =
-        fixture.run(() -> service.readSubscriptionState(CLIENT_ID));
+        fixture.run(() -> storedStateOfTenant());
 
     SubscriptionEventOutcome outcome = new SubscriptionLifecycleApplier().evaluate(
         SubscriptionLifecycleApplier.INVOICE_PAYMENT_FAILED,
@@ -917,12 +933,12 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     // of these reads leaking out of admin mode would come back empty (or throw) here.
     Fixture withRow = new Fixture().withOpenRow("past_due", ANCHOR);
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE,
-        withRow.run(() -> service.readSubscriptionState(CLIENT_ID)).status());
+        withRow.run(() -> storedStateOfTenant()).status());
 
     Fixture withoutRow = new Fixture()
         .withPreference(TenantEnvironmentLifecycleService.SUBSCRIPTION_STATUS_ATTRIBUTE, "EXPIRED");
     assertEquals(EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED,
-        withoutRow.run(() -> service.readSubscriptionState(CLIENT_ID)).status());
+        withoutRow.run(() -> storedStateOfTenant()).status());
   }
 
   @Test
@@ -944,10 +960,10 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
   @Test
   public void theRowRouteWritesInAdminMode() {
     // The subscription row lives at client 0; saving it outside admin mode is refused by the DAL
-    // (the Fixture throws), which updateSubscriptionStatus would swallow into a false.
+    // (the Fixture throws), which applySubscriptionEvent would swallow into a false.
     Fixture fixture = new Fixture().withOpenRow("active", null);
 
-    assertTrue(fixture.run(() -> service.updateSubscriptionStatus(CLIENT_ID,
+    assertTrue(fixture.run(() -> storeForTenant(
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, ANCHOR)));
 
     verify(fixture.dal).save(fixture.row);

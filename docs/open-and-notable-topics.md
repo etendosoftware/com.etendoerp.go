@@ -352,7 +352,7 @@ Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice
 The row gets `STATUS` (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`),
 `GRACE_ANCHOR` (the applier's grace anchor; `null` clears it), the Stripe billing period in
 `CURRENT_PERIOD_START/END` when the event reports one, and `LAST_EVENT_AT` (the ordering
-watermark, forward-only) — see "Three columns, three jobs" below. `readSubscriptionState`,
+watermark, forward-only) — see "Three columns, three jobs" below. The target's `storedState()`,
 `resolve` and `TenantPlanService.resolvePlan` read the same row, so the access policy, the plan and
 the environment list agree. Every read runs in admin mode (ETP-5488; the NEO check runs as the
 calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION`).

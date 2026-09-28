@@ -459,44 +459,6 @@ public class TenantEnvironmentLifecycleService {
   }
 
   /**
-   * Tenant-level form of {@link #applySubscriptionEvent}: stores a status and grace anchor for the
-   * tenant's own subscription, with no Stripe subscription id to check and no watermark. Routed
-   * exactly like a webhook event resolved through the tenant ({@link #targetForTenant}): the open
-   * row, else the preference projection of a tenant that never had a row; a tenant whose only rows
-   * are closed stores nothing.
-   *
-   * <p>Not committed here.
-   *
-   * @param clientId environment client id
-   * @param status subscription status to store
-   * @param renewalDueAt grace anchor (end of the paid period), or null to clear it
-   * @return true when the outcome was stored
-   */
-  public boolean updateSubscriptionStatus(String clientId,
-      EnvironmentAccessPolicy.SubscriptionStatus status, Instant renewalDueAt) {
-    if (StringUtils.isBlank(clientId) || status == null) {
-      return false;
-    }
-    return applySubscriptionEvent(targetForTenant(clientId, null),
-        SubscriptionEventOutcome.apply(status, renewalDueAt), null);
-  }
-
-  /**
-   * Tenant-level form of {@link LifecycleTarget#storedState()}: the stored state a lifecycle event
-   * for this tenant is decided against — its open row, else the preference projection of a tenant
-   * that never had a row; empty for a blank id or a tenant whose only rows are closed.
-   *
-   * @param clientId environment client id
-   * @return stored status, grace anchor and last applied event instant
-   */
-  public SubscriptionLifecycleApplier.StoredState readSubscriptionState(String clientId) {
-    if (StringUtils.isBlank(clientId)) {
-      return SubscriptionLifecycleApplier.StoredState.NONE;
-    }
-    return targetForTenant(clientId, null).storedState();
-  }
-
-  /**
    * Records the provider creation instant of the last applied lifecycle event, so an older event
    * delivered later can be recognised as stale.
    *
