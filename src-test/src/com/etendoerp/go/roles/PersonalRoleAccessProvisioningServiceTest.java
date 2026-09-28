@@ -110,7 +110,6 @@ class PersonalRoleAccessProvisioningServiceTest {
   void keepsTodaysNameWhenThereIsNoCollision() {
     takeFirstNames(0);
     assertEquals(PREFIX + "Jane Doe", service.buildPersonalRoleName(userNamed("Jane Doe")));
-    assertEquals(PREFIX + "Jane Doe", service.personalRoleBaseName(userNamed("Jane Doe")));
   }
 
   @Test
@@ -119,7 +118,6 @@ class PersonalRoleAccessProvisioningServiceTest {
     String longName = StringUtils.repeat('x', 80);
     String expected = (PREFIX + longName).substring(0, 60);
     assertEquals(expected, service.buildPersonalRoleName(userNamed(longName)));
-    assertEquals(expected, service.personalRoleBaseName(userNamed(longName)));
   }
 
   @ParameterizedTest

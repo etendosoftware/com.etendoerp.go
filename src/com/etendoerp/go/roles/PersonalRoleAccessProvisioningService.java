@@ -88,14 +88,6 @@ class PersonalRoleAccessProvisioningService {
   }
 
   /**
-   * Deterministic BASE name for a user's personal role, WITHOUT the collision-avoidance suffix
-   * {@link #buildPersonalRoleName(User)} applies — {@code personalRoleName(source, 1)}.
-   */
-  String personalRoleBaseName(User user) {
-    return personalRoleName(personalRoleNameSource(user), 1);
-  }
-
-  /**
    * The text a user's personal role is named after: their trimmed name, else trimmed username,
    * else their id. The backfill data-fix (etendo_schema_forge {@code cli/src/data-fixes/}) mirrors
    * this rule in SQL — keep both in lockstep.
