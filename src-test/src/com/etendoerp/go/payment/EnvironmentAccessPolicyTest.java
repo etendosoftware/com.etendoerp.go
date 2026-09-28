@@ -166,7 +166,10 @@ public class EnvironmentAccessPolicyTest {
     when(plans.resolvePlan("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
     TenantEnvironmentLifecycleService lifecycle = new TenantEnvironmentLifecycleService(plans);
 
-    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
 
       TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = lifecycle.resolve("demo-client");
@@ -204,7 +207,10 @@ public class EnvironmentAccessPolicyTest {
     when(plans.resolvePlan("demo-client")).thenReturn(TenantPlanService.PLAN_FREE);
     TenantEnvironmentLifecycleService lifecycle = new TenantEnvironmentLifecycleService(plans);
 
-    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+    // readPreference enters admin mode, which needs no real session in a unit test.
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
       dalStatic.when(OBDal::getInstance).thenReturn(dal);
 
       assertEquals(Decision.DEMO_TRIAL_EXPIRED,
