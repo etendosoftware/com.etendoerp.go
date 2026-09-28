@@ -34,16 +34,16 @@ final class NeoReadOnlyFieldResponse {
     try {
       String fieldName = exception.getFieldName();
       JSONObject error = new JSONObject();
-      error.put("status", STATUS_UNPROCESSABLE);
-      error.put("error", "read_only_field");
-      error.put("detail", "Field '" + fieldName
+      error.put(NeoCrudHandler.KEY_STATUS, STATUS_UNPROCESSABLE);
+      error.put(NeoCrudHandler.KEY_ERROR, "read_only_field");
+      error.put(NeoCrudHandler.KEY_DETAIL, "Field '" + fieldName
           + "' is read-only and cannot be set by the caller; its value was rejected, not silently"
           + " dropped, so the write does not answer 200 with the field left unset.");
-      error.put("field", fieldName);
-      error.put("hint", "Remove '" + fieldName + "' from the request. If this value must "
-          + "be set, it is derived automatically (e.g. by a callout or a dedicated write path) — "
+      error.put(NeoCrudHandler.KEY_FIELD, fieldName);
+      error.put(NeoCrudHandler.KEY_HINT, "Remove '" + fieldName + "' from the request. If this value "
+          + "must be set, it is derived automatically (e.g. by a callout or a dedicated write path) — "
           + "check neo_schema's field descriptor for this entity before retrying.");
-      error.put("seeAlso", "docs(topic:\"creating records\")");
+      error.put(NeoCrudHandler.KEY_SEE_ALSO, "docs(topic:\"creating records\")");
       return NeoResponse.error(STATUS_UNPROCESSABLE, error);
     } catch (Exception e) {
       log.warn("Could not build READ_ONLY_FIELD_REJECTED body: {}", e.getMessage());
