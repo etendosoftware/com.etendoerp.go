@@ -35,6 +35,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.copilot.util.ConversationUtils;
+import com.etendoerp.copilot.util.ConversationWriteUtils;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ServletResponseUtils;
@@ -49,7 +50,7 @@ import com.etendoerp.go.common.ServletResponseUtils;
  * cookie session, while every servlet of this module authenticates through
  * {@link JwtAuthUtils#authenticateOrFail} (cookie session plus CSRF proof for unsafe methods, or
  * the legacy Bearer). The persistence itself is NOT reimplemented here: it is
- * {@link ConversationUtils}, the same code the Copilot module uses.
+ * {@link ConversationUtils} and {@link ConversationWriteUtils}, the same code the Copilot module uses.
  *
  * <p>Every operation acts on the session user's own conversations. Unlike the legacy by-id
  * Copilot endpoints, reading, renaming, archiving, restoring and deleting a conversation that
@@ -94,7 +95,7 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
         return new JSONObject().put(CONVERSATIONS, ConversationUtils.getArchivedConversations(null));
       }
       if (parts.length == 3 && CONVERSATIONS.equals(parts[0]) && MESSAGES.equals(parts[2])) {
-        JSONArray messages = ConversationUtils.getOwnedConversationMessages(parts[1]);
+        JSONArray messages = ConversationWriteUtils.getOwnedConversationMessages(parts[1]);
         return new JSONObject().put(MESSAGES, messages);
       }
       return null;
@@ -121,7 +122,7 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
       return null;
     }
     if (parts.length == 1) {
-      return ConversationUtils.createConversation(body);
+      return ConversationWriteUtils.createConversation(body);
     }
     if (parts.length != 3) {
       return null;
@@ -130,15 +131,15 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
     switch (parts[2]) {
       case MESSAGES:
         // The path id wins over anything the body says: a body cannot redirect the write.
-        return ConversationUtils.appendMessages(body.put(CONVERSATION_ID, id));
+        return ConversationWriteUtils.appendMessages(body.put(CONVERSATION_ID, id));
       case "rename":
-        return ConversationUtils.renameOwnedConversation(id, body.optString("title", null));
+        return ConversationWriteUtils.renameOwnedConversation(id, body.optString("title", null));
       case "archive":
-        return ConversationUtils.setOwnedConversationActive(id, false);
+        return ConversationWriteUtils.setOwnedConversationActive(id, false);
       case "restore":
-        return ConversationUtils.setOwnedConversationActive(id, true);
+        return ConversationWriteUtils.setOwnedConversationActive(id, true);
       case "permanent-delete":
-        return ConversationUtils.deleteOwnedConversation(id);
+        return ConversationWriteUtils.deleteOwnedConversation(id);
       default:
         return null;
     }

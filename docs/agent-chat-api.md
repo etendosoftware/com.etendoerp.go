@@ -18,7 +18,7 @@ module fronts the same persistence instead:
   because the bridge is GET-only and answers `{"result": "<string>"}` for `Map<String,String>`
   webhooks, while this API needs JSON POST bodies, path parameters and CSRF-protected writes.
   `SupportConversationsServlet` is the sibling with that shape.
-* No persistence code lives here. It calls `ConversationUtils` (Copilot module), whose owner-checked
+* No persistence code lives here. It calls `ConversationWriteUtils` (Copilot module), whose owner-checked
   methods (`getOwnedConversationMessages`, `renameOwnedConversation`, `setOwnedConversationActive`,
   `deleteOwnedConversation`, `createConversation`, `appendMessages`) take plain arguments.
 

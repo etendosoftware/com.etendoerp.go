@@ -50,17 +50,26 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.copilot.util.ConversationUtils;
+import com.etendoerp.copilot.util.ConversationWriteUtils;
 import com.etendoerp.go.common.JwtAuthUtils;
 
 /**
  * Tests for {@link AgentChatConversationsServlet}: routing, HTTP mapping and transaction handling.
- * The persistence and ownership rules live in {@link ConversationUtils} (tested in the Copilot
- * module); here it is mocked.
+ * The persistence and ownership rules live in {@link ConversationUtils} and
+ * {@link ConversationWriteUtils} (tested in the Copilot module); here they are mocked.
  */
 class AgentChatConversationsServletTest {
 
+  private static final String C1 = "C1";
+  private static final String PATH_CONVERSATIONS = "/conversations";
+  private static final String KEY_CONVERSATIONS = "conversations";
+  private static final String KEY_SUCCESS = "success";
+  private static final String KEY_ID = "id";
+  private static final String KEY_CONVERSATION_ID = "conversation_id";
+
   private MockedStatic<JwtAuthUtils> auth;
   private MockedStatic<ConversationUtils> conversations;
+  private MockedStatic<ConversationWriteUtils> writes;
   private MockedStatic<OBContext> obContext;
   private MockedStatic<OBDal> obDal;
   private OBDal dal;
@@ -73,6 +82,7 @@ class AgentChatConversationsServletTest {
     auth = mockStatic(JwtAuthUtils.class);
     auth.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString())).thenReturn(true);
     conversations = mockStatic(ConversationUtils.class);
+    writes = mockStatic(ConversationWriteUtils.class);
     obContext = mockStatic(OBContext.class);
     obDal = mockStatic(OBDal.class);
     dal = mock(OBDal.class);
@@ -87,6 +97,7 @@ class AgentChatConversationsServletTest {
   void tearDown() {
     auth.close();
     conversations.close();
+    writes.close();
     obContext.close();
     obDal.close();
   }
@@ -113,25 +124,25 @@ class AgentChatConversationsServletTest {
 
   @Test
   void listsActiveAndArchivedConversationsWithNoApp() throws Exception {
-    JSONArray active = new JSONArray().put(new JSONObject().put("id", "C1"));
+    JSONArray active = new JSONArray().put(new JSONObject().put(KEY_ID, C1));
     conversations.when(() -> ConversationUtils.getConversations(null)).thenReturn(active);
-    servlet.doGet(request("/conversations", null), response);
+    servlet.doGet(request(PATH_CONVERSATIONS, null), response);
     assertStatus(200);
-    assertEquals("C1", new JSONObject(out.toString()).getJSONArray("conversations").getJSONObject(0).getString("id"));
+    assertEquals(C1, new JSONObject(out.toString()).getJSONArray(KEY_CONVERSATIONS).getJSONObject(0).getString(KEY_ID));
 
-    JSONArray archived = new JSONArray().put(new JSONObject().put("id", "C9"));
+    JSONArray archived = new JSONArray().put(new JSONObject().put(KEY_ID, "C9"));
     conversations.when(() -> ConversationUtils.getArchivedConversations(null)).thenReturn(archived);
     out.getBuffer().setLength(0);
     servlet.doGet(request("/conversations/archived", null), response);
-    assertEquals("C9", new JSONObject(out.toString()).getJSONArray("conversations").getJSONObject(0).getString("id"));
+    assertEquals("C9", new JSONObject(out.toString()).getJSONArray(KEY_CONVERSATIONS).getJSONObject(0).getString(KEY_ID));
     verify(dal, never()).commitAndClose();
   }
 
   @Test
   void readsMessagesThroughTheOwnerCheckedMethod() throws Exception {
-    conversations.when(() -> ConversationUtils.getOwnedConversationMessages("C1"))
+    writes.when(() -> ConversationWriteUtils.getOwnedConversationMessages(C1))
         .thenReturn(new JSONArray().put(new JSONObject().put("content", "hola")));
-    servlet.doGet(request("/conversations/C1/messages", null), response);
+    servlet.doGet(request(PATH_CONVERSATIONS + "/" + C1 + "/messages", null), response);
     assertStatus(200);
     assertEquals("hola", new JSONObject(out.toString()).getJSONArray("messages").getJSONObject(0).getString("content"));
   }
@@ -139,59 +150,60 @@ class AgentChatConversationsServletTest {
   @Test
   void refusesUnauthenticatedRequestsBeforeTouchingAnyData() throws Exception {
     auth.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString())).thenReturn(false);
-    servlet.doGet(request("/conversations", null), response);
-    servlet.doPost(request("/conversations", "{}"), response);
+    servlet.doGet(request(PATH_CONVERSATIONS, null), response);
+    servlet.doPost(request(PATH_CONVERSATIONS, "{}"), response);
     conversations.verifyNoInteractions();
+    writes.verifyNoInteractions();
     verify(dal, never()).commitAndClose();
   }
 
   @Test
   void createsAConversationAndCommits() throws Exception {
-    conversations.when(() -> ConversationUtils.createConversation(any()))
-        .thenReturn(new JSONObject().put("success", true).put("conversation_id", "X1"));
-    servlet.doPost(request("/conversations", "{\"external_id\":\"X1\",\"title\":\"t\"}"), response);
+    writes.when(() -> ConversationWriteUtils.createConversation(any()))
+        .thenReturn(new JSONObject().put(KEY_SUCCESS, true).put(KEY_CONVERSATION_ID, "X1"));
+    servlet.doPost(request(PATH_CONVERSATIONS, "{\"external_id\":\"X1\",\"title\":\"t\"}"), response);
     assertStatus(200);
     ArgumentCaptor<JSONObject> body = ArgumentCaptor.forClass(JSONObject.class);
-    conversations.verify(() -> ConversationUtils.createConversation(body.capture()));
+    writes.verify(() -> ConversationWriteUtils.createConversation(body.capture()));
     assertEquals("X1", body.getValue().getString("external_id"));
     verify(dal).commitAndClose();
   }
 
   @Test
   void appendUsesThePathIdAndIgnoresAConversationIdInTheBody() throws Exception {
-    conversations.when(() -> ConversationUtils.appendMessages(any())).thenReturn(new JSONObject().put("saved", 1));
+    writes.when(() -> ConversationWriteUtils.appendMessages(any())).thenReturn(new JSONObject().put("saved", 1));
     servlet.doPost(request("/conversations/MINE/messages",
         "{\"conversation_id\":\"SOMEONE-ELSES\",\"messages\":[{\"role\":\"user\",\"text\":\"a\"}]}"), response);
     ArgumentCaptor<JSONObject> body = ArgumentCaptor.forClass(JSONObject.class);
-    conversations.verify(() -> ConversationUtils.appendMessages(body.capture()));
-    assertEquals("MINE", body.getValue().getString("conversation_id"));
+    writes.verify(() -> ConversationWriteUtils.appendMessages(body.capture()));
+    assertEquals("MINE", body.getValue().getString(KEY_CONVERSATION_ID));
     verify(dal).commitAndClose();
   }
 
   @Test
   void routesRenameArchiveRestoreAndPermanentDelete() throws Exception {
-    JSONObject ok = new JSONObject().put("success", true);
-    conversations.when(() -> ConversationUtils.renameOwnedConversation("C1", "New")).thenReturn(ok);
-    conversations.when(() -> ConversationUtils.setOwnedConversationActive("C1", false)).thenReturn(ok);
-    conversations.when(() -> ConversationUtils.setOwnedConversationActive("C1", true)).thenReturn(ok);
-    conversations.when(() -> ConversationUtils.deleteOwnedConversation("C1")).thenReturn(ok);
+    JSONObject ok = new JSONObject().put(KEY_SUCCESS, true);
+    writes.when(() -> ConversationWriteUtils.renameOwnedConversation(C1, "New")).thenReturn(ok);
+    writes.when(() -> ConversationWriteUtils.setOwnedConversationActive(C1, false)).thenReturn(ok);
+    writes.when(() -> ConversationWriteUtils.setOwnedConversationActive(C1, true)).thenReturn(ok);
+    writes.when(() -> ConversationWriteUtils.deleteOwnedConversation(C1)).thenReturn(ok);
 
-    servlet.doPost(request("/conversations/C1/rename", "{\"title\":\"New\"}"), response);
-    servlet.doPost(request("/conversations/C1/archive", null), response);
-    servlet.doPost(request("/conversations/C1/restore", null), response);
-    servlet.doPost(request("/conversations/C1/permanent-delete", null), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/rename", "{\"title\":\"New\"}"), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/archive", null), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/restore", null), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/permanent-delete", null), response);
 
-    conversations.verify(() -> ConversationUtils.renameOwnedConversation("C1", "New"));
-    conversations.verify(() -> ConversationUtils.setOwnedConversationActive("C1", false));
-    conversations.verify(() -> ConversationUtils.setOwnedConversationActive("C1", true));
-    conversations.verify(() -> ConversationUtils.deleteOwnedConversation("C1"));
+    writes.verify(() -> ConversationWriteUtils.renameOwnedConversation(C1, "New"));
+    writes.verify(() -> ConversationWriteUtils.setOwnedConversationActive(C1, false));
+    writes.verify(() -> ConversationWriteUtils.setOwnedConversationActive(C1, true));
+    writes.verify(() -> ConversationWriteUtils.deleteOwnedConversation(C1));
   }
 
   @Test
   void aMissingOrForeignConversationIsA404AndRollsBack() throws Exception {
-    conversations.when(() -> ConversationUtils.deleteOwnedConversation("C1"))
+    writes.when(() -> ConversationWriteUtils.deleteOwnedConversation(C1))
         .thenThrow(new OBException(ConversationUtils.CONVERSATION_NOT_FOUND));
-    servlet.doPost(request("/conversations/C1/permanent-delete", null), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/permanent-delete", null), response);
     assertStatus(404);
     assertEquals("Conversation not found", new JSONObject(out.toString()).getString("error"));
     verify(dal).rollbackAndClose();
@@ -200,32 +212,33 @@ class AgentChatConversationsServletTest {
 
   @Test
   void invalidInputIsA400() throws Exception {
-    conversations.when(() -> ConversationUtils.appendMessages(any()))
+    writes.when(() -> ConversationWriteUtils.appendMessages(any()))
         .thenThrow(new OBException("Invalid role 'system'"));
-    servlet.doPost(request("/conversations/C1/messages", "{\"messages\":[]}"), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/messages", "{\"messages\":[]}"), response);
     assertStatus(400);
     assertTrue(out.toString().contains("Invalid role"));
   }
 
   @Test
   void aMalformedJsonBodyIsA400() throws Exception {
-    servlet.doPost(request("/conversations", "{not json"), response);
+    servlet.doPost(request(PATH_CONVERSATIONS, "{not json"), response);
     assertStatus(400);
     conversations.verifyNoInteractions();
+    writes.verifyNoInteractions();
   }
 
   @Test
   void unknownPathsAre404() throws Exception {
     servlet.doGet(request("/nope", null), response);
     assertStatus(404);
-    servlet.doPost(request("/conversations/C1/explode", null), response);
+    servlet.doPost(request(PATH_CONVERSATIONS + "/" + C1 + "/explode", null), response);
     verify(dal, never()).commitAndClose();
   }
 
   @Test
   void anUnexpectedFailureIsA500WithoutLeakingTheMessage() throws Exception {
-    conversations.when(() -> ConversationUtils.createConversation(any())).thenThrow(new IllegalStateException("db password"));
-    servlet.doPost(request("/conversations", "{}"), response);
+    writes.when(() -> ConversationWriteUtils.createConversation(any())).thenThrow(new IllegalStateException("db password"));
+    servlet.doPost(request(PATH_CONVERSATIONS, "{}"), response);
     assertStatus(500);
     assertEquals("Internal error", new JSONObject(out.toString()).getString("error"));
     verify(dal).rollbackAndClose();
@@ -235,7 +248,7 @@ class AgentChatConversationsServletTest {
   void routeReturnsNullForShapesItDoesNotKnow() throws Exception {
     assertEquals(null, AgentChatConversationsServlet.route(new String[0], new JSONObject()));
     assertEquals(null, AgentChatConversationsServlet.route(new String[] {"other"}, new JSONObject()));
-    assertEquals(null, AgentChatConversationsServlet.route(new String[] {"conversations", "C1"}, new JSONObject()));
+    assertEquals(null, AgentChatConversationsServlet.route(new String[] {"conversations", C1}, new JSONObject()));
     assertNotNull(new AgentChatConversationsServlet());
   }
 }
