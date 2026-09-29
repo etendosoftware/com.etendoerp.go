@@ -4985,10 +4985,41 @@ service" convention `SFAssignUserRoles` uses for a missing `UserId`.
 **Promote replaces, never deletes.** Promoting sets the target's `Default_Ad_Role_ID` to the
 client's Admin role and syncs `AD_User_Roles` (`UserRoleSyncSupport#syncSingleActiveUserRole`) —
 the personal role's own `AD_Role` row and its `AD_Role_Inheritance` composition are left completely
-intact, only unassigned, so a later demote can find and restore it by name
-(`findDormantPersonalRoleByName`, scoped to the user's client) rather than starting from an empty
-role again. If no dormant personal role is found (e.g. the user never had one), demote falls back to
+intact, only unassigned, so a later demote can restore it rather than starting from an empty role
+again. If no dormant personal role is found (e.g. the user never had one), demote falls back to
 creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersonalRole` already uses.
+
+**Demote restores the role the user owns (ETP-5502).** Every personal role records its owner in
+`AD_Role.EM_ETGO_Personal_Owner_ID` (DAL `Role#getETGOPersonalOwner()`), set once by
+`createPersonalRole`. It is a foreign key to `AD_User` with `ON DELETE SET NULL`
+(`EM_ETGO_ROLE_PERSOWNER_FK`): deleting a user leaves their role behind with no owner, and the
+fallback below rejects it for any namesake created later because it is older than them. Demote
+(`findDormantPersonalRole`, scoped to the user's client) looks for:
+
+1. **The role owned by the user** — active, not a template, not client-admin, passing
+   `isReusablePersonalRole`. Earliest created if (unexpectedly) several.
+2. **Fallback for legacy roles** (owner still `NULL`: created before ETP-5502 and not backfilled
+   by the `R41-personal-role-owner-backfill` data-fix). The name must be one
+   `PersonalRoleAccessProvisioningService` builds for the user — `"Personal – <name>"` or a
+   `" (n)"` variant — and the role must **not be older than the user** (a deleted namesake's orphan
+   is). The earliest survivor wins and is **claimed** (its owner is set in the same transaction),
+   so the next demote takes path 1.
+
+The name-only lookup it replaces (ETP-5019) restored the first role called
+`"Personal – <name>"` and accepted it when it had zero `AD_User_Roles` rows — exactly what a
+deleted user's orphan looks like. A second user with the same name got the deleted user's
+permissions; a user whose role had a `" (2)"` suffix, or who was renamed, got a new empty role.
+
+`isReusablePersonalRole` also rejects a role whose owner is someone else, on every path
+(composition included), and the composition write path claims a legacy role it reuses. Known limit:
+a renamed user whose legacy role was never backfilled gets a fresh role on demote (no owner, and
+the name no longer matches).
+
+**Personal role names (ETP-5502).** `buildPersonalRoleName` appends the `" (n)"` collision suffix
+after truncating the base, so it always fits `AD_Role.Name`'s 60 characters. It used to append then
+truncate, which for a user name of 47+ characters cut every suffix off to the same string and looped
+forever on the first collision; attempts are now capped (`MAX_NAME_ATTEMPTS`) and throw an
+`OBException`.
 
 ```json
 // success (personalRoleId reused as the field name for whichever role id is now active —
