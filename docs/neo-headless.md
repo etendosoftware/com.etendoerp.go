@@ -239,6 +239,40 @@ overwritten by a re-cascaded callout.
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
 
+#### 4.3.5 Curated read-only fields are refused before a REST write (ETP-5347)
+
+`POST`, `PUT`, and `PATCH` reject a value submitted for an included field that the NEO
+curation marks read-only. The rejection happens at the REST boundary, before a
+`NeoHandler` or the generic persistence path sees the request, so all three verbs have the
+same result instead of silently dropping a value on one route and accepting it on another.
+
+```json
+{
+  "status": 422,
+  "error": "read_only_field",
+  "field": "documentNo",
+  "detail": "...",
+  "hint": "..."
+}
+```
+
+The field name is the API key the caller sent, including a configured alias. The check uses
+the same `ETGO_SF_FIELD` metadata that the REST filter already uses: an included field is
+writable only when it is in that filter's writable set. Explicit grants for identifiers,
+`active`, and link-to-parent columns therefore keep their existing behavior.
+
+Edge cases:
+
+- **API-key alias.** The rejected `field` is the key the caller actually sent (e.g.
+  `documentNumber`), not the DAL property it resolves to (`documentNo`), so the error points at
+  something the caller recognizes.
+- **Server-authored values added after the check.** Mandatory defaults, callouts, and
+  `NeoHandler` hooks may still add a derived read-only value once this boundary has passed;
+  that is a server-authored value, not an attempted client write, and is not rejected.
+- **`client` / `organization` are not read-only-field rejections.** They are a separate
+  session-ownership policy: REST strips any caller-supplied value and resolves both from the
+  authenticated context instead of rejecting the request.
+
 **DELETE** -- `DELETE /{specName}/{entityName}/{recordId}`
 
 Delegated to DataSourceServlet's DELETE handler.
@@ -2471,7 +2505,8 @@ disagreement this section exists to end, reintroduced by the fix for it.
 
 ##### Scope and what is not fixed
 
-- **MCP only.** The REST layer keeps its own `NeoFieldFilter` and is untouched.
+- **The excluded-field gate is MCP only.** REST has its own `NeoFieldFilter`; its separate
+  read-only REST gate is documented in §4.3.5 (ETP-5347).
 - **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
   write path in silence. The set refused here is only the explicitly excluded one.
 - **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
