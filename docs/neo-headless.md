@@ -1005,6 +1005,18 @@ Plain text (`text/plain`) is deliberately **not** accepted — the ticket's orig
 that `.txt` uploaded fine while the UI advertised "PDF, Word, Excel, PowerPoint, images". ZIP, XML
 and RTF are kept: Facturae XML and zipped document bundles are real use cases.
 
+#### Write-tier authorization (ETP-5205)
+
+Every attachment **write** — `POST` upload, `DELETE /attachments/file/{id}`,
+`PATCH /attachments/file/{id}` (description) and `PATCH /attachments/file/{id}/main` — is checked
+by `NeoAttachmentAuthorizer` in `NeoBuiltInEndpointHandler` before the operation runs. The current
+role needs **editable** access (`AD_Window_Access.IsReadWrite = 'Y'`, or an admin/client-admin
+role) to at least one active window that shows the attachment's table; otherwise the answer is
+`403` `"Access denied to spec for current role"`, which the SPA already translates. A table no
+window shows is allowed (WARN log). For the bare-ID operations the table comes from the stored
+`C_File` row, never from the request. Reads (list, download, zip, main) are unchanged. This is
+only the window-tier slice of ADR-0003; record/org scoping and the uniform `404` remain ETP-4570.
+
 #### GET — List attachments
 
 ```
