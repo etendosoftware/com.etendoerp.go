@@ -50,13 +50,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * {@link ReconciliationWriteoffSupport} and {@link ReconciliationHandlerSupport}. Every DAL /
  * Classic-layer call routes back through the passed handler so the unit-test spies keep working.
  *
- * <p><b>Why the order of operations is the whole safety mechanism.</b> A returned
- * {@code NeoResponse.error(...)} does NOT roll back — it commits. {@code DalThreadHandler.doFinal}
- * only takes the rollback branch when an exception escapes the filter chain, and
- * {@code ReconciliationHandlerSupport.runPostAction} catches everything and <i>returns</i> a
- * response. So any write performed before a returned 400/409 is persisted for good. Every
- * validation that can fail therefore runs BEFORE the single write in
- * {@link #createDifferenceTransaction}.
+ * <p><b>Why the order of operations is still the safety mechanism.</b> A returned
+ * {@code NeoResponse.error(...)} does not roll back by itself — it commits.
+ * {@code DalThreadHandler.doFinal} only takes the rollback branch when an exception escapes the
+ * filter chain. Since ETP-5472 {@code ReconciliationHandlerSupport.runPostAction} rolls back any
+ * returned status &gt;= 400 of its actions, but that is a net under this class, not a licence to
+ * write first: any other caller of these helpers would commit. Every validation that can fail
+ * therefore still runs BEFORE the single write in {@link #createDifferenceTransaction}.
  *
  * <p><b>The remainder is its own physical row.</b> A partially reconciled <i>logical</i> line is
  * several {@code FIN_BankStatementLine} rows sharing a match-group id (Core's
@@ -84,7 +84,8 @@ final class ReconciliationDifferenceSupport {
   private static final String KEY_GL_ITEM_ID = "glItemId";
   private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_OPERATION_IDS = "operationIds";
-  private static final String KEY_REMAINDER_LINE_ID = "remainderLineId";
+  /** Shared with {@link ReconciliationLineTargetSupport}, which reports the same row id. */
+  static final String KEY_REMAINDER_LINE_ID = "remainderLineId";
 
   private static final String MSG_NOT_PARTIAL =
       "This action closes the pending remainder of a partially reconciled statement line. "
@@ -278,20 +279,35 @@ final class ReconciliationDifferenceSupport {
   }
 
   private static NeoResponse alreadyReconciled(GroupSnapshot snap) {
+    return alreadyReconciled(ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED,
+        snap != null ? snap.remainderLineId() : null);
+  }
+
+  /**
+   * The 409 for a statement line that is already matched, carrying {@code remainderLineId}
+   * whenever the line's group still has a pending row, so the caller can retarget. Shared with
+   * {@link ReconciliationLineTargetSupport}, which answers the same refusal for
+   * {@code reconcileGroup} and {@code applySuggestions}.
+   *
+   * @param message         the refusal text; callers pass one starting with
+   *                        {@link ReconciliationHandler#MSG_LINE_ALREADY_RECONCILED}, which the
+   *                        frontend matches
+   * @param remainderLineId the group's pending row, or {@code null} when there is none
+   */
+  static NeoResponse alreadyReconciled(String message, String remainderLineId) {
     try {
       JSONObject error = new JSONObject();
-      error.put("message", ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED);
+      error.put("message", message);
       error.put(ReconciliationHandler.KEY_STATUS, HttpServletResponse.SC_CONFLICT);
       JSONObject payload = new JSONObject();
       payload.put("error", error);
-      if (snap != null && StringUtils.isNotBlank(snap.remainderLineId())) {
-        payload.put(KEY_REMAINDER_LINE_ID, snap.remainderLineId());
+      if (StringUtils.isNotBlank(remainderLineId)) {
+        payload.put(KEY_REMAINDER_LINE_ID, remainderLineId);
       }
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, payload);
     } catch (Exception e) {
       log.debug("Could not build the already-reconciled payload", e);
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED);
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, message);
     }
   }
 
