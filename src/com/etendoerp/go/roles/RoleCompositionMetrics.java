@@ -42,6 +42,7 @@ final class RoleCompositionMetrics implements AutoCloseable {
   private final long startNanos = System.nanoTime();
   private final Map<String, Long> stageNanos = new LinkedHashMap<>();
   private int prevented;
+  private int skipped;
   private int copied;
   private int widened;
   private int repointed;
@@ -65,6 +66,17 @@ final class RoleCompositionMetrics implements AutoCloseable {
     RoleCompositionMetrics metrics = CURRENT.get();
     if (metrics != null) {
       metrics.prevented += count;
+    }
+  }
+
+  /**
+   * Rows the add-path guard left in place because a higher-precedence template of the same call
+   * already sourced them (ETP-5507, {@code HigherPrecedenceSkip}).
+   */
+  static void addSkipped(int count) {
+    RoleCompositionMetrics metrics = CURRENT.get();
+    if (metrics != null) {
+      metrics.skipped += count;
     }
   }
 
@@ -104,6 +116,10 @@ final class RoleCompositionMetrics implements AutoCloseable {
     return prevented;
   }
 
+  int getSkipped() {
+    return skipped;
+  }
+
   int getCopied() {
     return copied;
   }
@@ -118,8 +134,8 @@ final class RoleCompositionMetrics implements AutoCloseable {
     for (Map.Entry<String, Long> stage : stageNanos.entrySet()) {
       stages.add(stage.getKey() + "=" + toMillis(stage.getValue()));
     }
-    return "prevented=" + prevented + " copied=" + copied + " widened=" + widened
-        + " repointed=" + repointed + " stagesMs=" + stages + " totalMs="
+    return "prevented=" + prevented + " skipped=" + skipped + " copied=" + copied
+        + " widened=" + widened + " repointed=" + repointed + " stagesMs=" + stages + " totalMs="
         + toMillis(System.nanoTime() - startNanos);
   }
 
