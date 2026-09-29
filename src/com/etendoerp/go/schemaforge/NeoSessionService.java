@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.Optional;
 
@@ -161,8 +162,12 @@ public class NeoSessionService {
       body.put(KEY_CURRENCY_STANDARD_PRECISION, standardPrecision);
       body.put(KEY_YOUR_COMPANY_DOCUMENT_IMAGE_ID,
           yourCompanyDocumentImageId != null ? yourCompanyDocumentImageId : JSONObject.NULL);
+      // Whole seconds, like the attachment's `updatedAt` (NeoAttachmentsHelper), so the
+      // client's strict comparison treats a same-second change as fresh on both sides.
       body.put(KEY_BRANDING_UPDATED, brandingUpdated != null
-          ? DateTimeFormatter.ISO_INSTANT.format(brandingUpdated.toInstant()) : JSONObject.NULL);
+          ? DateTimeFormatter.ISO_INSTANT.format(
+              brandingUpdated.toInstant().truncatedTo(ChronoUnit.SECONDS))
+          : JSONObject.NULL);
       body.put(KEY_ORGANIZATION, organization != null ? organization : JSONObject.NULL);
       putAccountIdentity(body);
       return NeoResponse.ok(body);
