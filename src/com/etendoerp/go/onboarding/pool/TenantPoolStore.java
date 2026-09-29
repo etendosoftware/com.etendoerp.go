@@ -51,10 +51,15 @@ public class TenantPoolStore {
 
   private static final String SQL_COUNT = "SELECT count(*) FROM etgo_tenant_pool"
       + " WHERE status = ? AND isactive = 'Y'";
-  private static final String SQL_COUNT_READY = SQL_COUNT + " AND provisioning_version = ?";
+  private static final String FIXTURE_READY = "E2E fixture:READY";
+  private static final String FIXTURE_RESERVED_PREFIX = "E2E fixture:";
+  private static final String SQL_COUNT_READY = SQL_COUNT + " AND provisioning_version = ?"
+      + " AND coalesce(error_message, '') NOT LIKE 'E2E fixture:%'";
   private static final String SQL_RETIRE_STALE = "UPDATE etgo_tenant_pool"
       + " SET status = '" + STATUS_STALE + "', updated = now(), updatedby = '" + SYSTEM_USER + "'"
-      + " WHERE status = '" + STATUS_READY + "' AND (provisioning_version <> ? OR created < ?)";
+      + " WHERE status = '" + STATUS_READY + "'"
+      + " AND coalesce(error_message, '') NOT LIKE 'E2E fixture:%'"
+      + " AND (provisioning_version <> ? OR created < ?)";
   private static final String SQL_EXPIRE_PROVISIONING = "UPDATE etgo_tenant_pool"
       + " SET status = '" + STATUS_FAILED + "', error_message = 'Provisioning lease expired',"
       + " updated = now(), updatedby = '" + SYSTEM_USER + "'"
@@ -67,6 +72,14 @@ public class TenantPoolStore {
   private static final String SQL_MARK_READY = SQL_UPDATE_STATUS
       + STATUS_READY + "', pool_client_id = ?, updated = now() WHERE etgo_tenant_pool_id = ?"
       + " AND status = '" + STATUS_PROVISIONING + "'";
+  private static final String SQL_RESTORE_READY = SQL_UPDATE_STATUS
+      + STATUS_READY + "', claimed_at = null, error_message = '" + FIXTURE_READY
+      + "', updated = now() WHERE etgo_tenant_pool_id = ? AND pool_client_id = ?"
+      + " AND status = '" + STATUS_CLAIMED + "' AND error_message = ?";
+  private static final String SQL_MARK_FIXTURE_READY = SQL_UPDATE_STATUS
+      + STATUS_READY + "', pool_client_id = ?, error_message = '" + FIXTURE_READY
+      + "', updated = now() WHERE etgo_tenant_pool_id = ? AND status = '"
+      + STATUS_PROVISIONING + "'";
   private static final String SQL_MARK_FAILED = SQL_UPDATE_STATUS
       + STATUS_FAILED + "', pool_client_id = coalesce(CAST(? AS VARCHAR), pool_client_id),"
       + " error_message = ?, updated = now() WHERE etgo_tenant_pool_id = ?";
@@ -81,8 +94,30 @@ public class TenantPoolStore {
       + " WHERE etgo_tenant_pool_id = (SELECT etgo_tenant_pool_id FROM etgo_tenant_pool"
       + "   WHERE status = '" + STATUS_READY + "' AND isactive = 'Y'"
       + "   AND provisioning_version = ? AND pool_client_id IS NOT NULL"
+      + "   AND coalesce(error_message, '') NOT LIKE 'E2E fixture:%'"
       + "   ORDER BY created LIMIT 1 FOR UPDATE SKIP LOCKED)"
       + " RETURNING etgo_tenant_pool_id, pool_client_id";
+  private static final String SQL_CLAIM_FIXTURE = SQL_UPDATE_STATUS + STATUS_CLAIMED
+      + "', claimed_at = now(), error_message = ?, updated = now()"
+      + " WHERE etgo_tenant_pool_id = (SELECT etgo_tenant_pool_id FROM etgo_tenant_pool"
+      + " WHERE status = '" + STATUS_READY + "' AND isactive = 'Y'"
+      + " AND provisioning_version = ? AND error_message = '" + FIXTURE_READY + "'"
+      + " AND pool_client_id IS NOT NULL ORDER BY created LIMIT 1 FOR UPDATE SKIP LOCKED)"
+      + " RETURNING etgo_tenant_pool_id, pool_client_id";
+  private static final String SQL_LOCK_RESERVED_FIXTURE = "SELECT etgo_tenant_pool_id, pool_client_id"
+      + " FROM etgo_tenant_pool WHERE status = '" + STATUS_CLAIMED + "'"
+      + " AND isactive = 'Y' AND pool_client_id = ? AND error_message = ?"
+      + " FOR UPDATE SKIP LOCKED";
+  private static final String SQL_FIXTURE_READY = "SELECT 1 FROM etgo_tenant_pool"
+      + " WHERE etgo_tenant_pool_id = ? AND pool_client_id = ?"
+      + " AND status = '" + STATUS_READY + "' AND error_message = '" + FIXTURE_READY + "'";
+  private static final String SQL_RETIRE_OLD_FIXTURES = "UPDATE etgo_tenant_pool"
+      + " SET status = '" + STATUS_STALE + "', updated = now(), updatedby = '" + SYSTEM_USER
+      + "' WHERE status = '" + STATUS_READY + "' AND error_message = '" + FIXTURE_READY
+      + "' AND provisioning_version <> ?";
+  private static final String SQL_FIND_RESERVED_FIXTURE = "SELECT etgo_tenant_pool_id,"
+      + " pool_client_id FROM etgo_tenant_pool WHERE status = '" + STATUS_CLAIMED + "'"
+      + " AND error_message = ? AND isactive = 'Y' LIMIT 1";
 
   /** A claimed pool row: its own id and the tenant it hands out. */
   public record Claim(String poolRowId, String clientId) {
@@ -156,6 +191,19 @@ public class TenantPoolStore {
     update(SQL_MARK_READY, clientId, poolRowId);
   }
 
+  /** Makes a newly provisioned tenant exclusively available to the local fixture. */
+  public void markFixtureReady(String poolRowId, String clientId) {
+    if (update(SQL_MARK_FIXTURE_READY, clientId, poolRowId) != 1) {
+      throw new OBException("Could not mark the fixture tenant ready");
+    }
+  }
+
+  /** Restores only the reservation owned by this fixture request. */
+  public boolean restoreReady(String poolRowId, String clientId, String requestId) {
+    return update(SQL_RESTORE_READY, poolRowId, clientId,
+        FIXTURE_RESERVED_PREFIX + requestId) == 1;
+  }
+
   /**
    * Marks a pool row FAILED and stores a bounded diagnostic message.
    *
@@ -184,6 +232,62 @@ public class TenantPoolStore {
       }
     } catch (SQLException e) {
       throw new OBException("Could not claim a pooled tenant", e);
+    }
+  }
+
+  /** Reserves a dedicated READY fixture tenant, excluding it from ordinary onboarding. */
+  public Claim claimFixture(String requestId, String version) {
+    try (PreparedStatement ps = connection().prepareStatement(SQL_CLAIM_FIXTURE)) {
+      ps.setString(1, FIXTURE_RESERVED_PREFIX + requestId);
+      ps.setString(2, version);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? new Claim(rs.getString(1), rs.getString(2)) : null;
+      }
+    } catch (SQLException e) {
+      throw new OBException("Could not claim the dedicated fixture tenant", e);
+    }
+  }
+
+  /** Locks the already reserved tenant inside its actual onboarding transaction. */
+  public Claim lockFixture(String clientId, String requestId) {
+    try (PreparedStatement ps = connection().prepareStatement(SQL_LOCK_RESERVED_FIXTURE)) {
+      ps.setString(1, StringUtils.trimToEmpty(clientId));
+      ps.setString(2, FIXTURE_RESERVED_PREFIX + requestId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? new Claim(rs.getString(1), rs.getString(2)) : null;
+      }
+    } catch (SQLException e) {
+      throw new OBException("Could not lock the reserved fixture tenant", e);
+    }
+  }
+
+  /** Finds the durable reservation after a servlet restart. */
+  public Claim findFixtureReservation(String requestId) {
+    try (PreparedStatement ps = connection().prepareStatement(SQL_FIND_RESERVED_FIXTURE)) {
+      ps.setString(1, FIXTURE_RESERVED_PREFIX + requestId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? new Claim(rs.getString(1), rs.getString(2)) : null;
+      }
+    } catch (SQLException e) {
+      throw new OBException("Could not find the fixture reservation", e);
+    }
+  }
+
+  /** Retires old dedicated rows only after a replacement has been provisioned and reserved. */
+  public int retireOutdatedFixtures(String version) {
+    return update(SQL_RETIRE_OLD_FIXTURES, version);
+  }
+
+  /** Supports retrying cleanup after the pool restore committed but checkout deletion failed. */
+  public boolean isFixtureReady(String poolRowId, String clientId) {
+    try (PreparedStatement ps = connection().prepareStatement(SQL_FIXTURE_READY)) {
+      ps.setString(1, poolRowId);
+      ps.setString(2, clientId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    } catch (SQLException e) {
+      throw new OBException("Could not inspect the fixture tenant", e);
     }
   }
 

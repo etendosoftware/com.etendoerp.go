@@ -242,6 +242,22 @@ reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
 
 ## 2. The onboarding paywall
 
+### Local pooled failure fixture
+
+The provisioning failure E2E fixture is available only when
+`etendo.go.runtime.environment=local` (or `ETGO_RUNTIME_ENVIRONMENT=local`).
+`POST /sws/go/dev/provisioning-failure-fixture` creates a paid test checkout and
+reserves a dedicated pooled tenant. If no reusable fixture tenant exists, it provisions one with
+the normal pool provisioner. No client ID or pool feature flag is required. The fixture pool row
+has an `E2E fixture:` marker; normal pool claims exclude it. The returned `requestId` is used as
+`paymentToken` in the real onboarding request, which claims only that reserved tenant and fails
+during its finalization. A new provisioning version replaces the dedicated fixture tenant; the
+previous fixture pool row becomes `STALE` only after the replacement is reserved. Its client
+(whose admin remains inactive) is retained for explicit operator cleanup. Repeated E2E runs on one version reuse the same
+dedicated tenant. `DELETE /sws/go/dev/provisioning-failure-fixture/{cleanupToken}` deletes
+the test checkout and restores the dedicated tenant to `READY` for reuse. Both routes require the
+authenticated fixture owner. These routes are rejected outside `local`.
+
 `POST /sws/go/onboarding` gains a payment gate.
 
 ### Contract
@@ -432,6 +448,27 @@ payment Stripe's webhook confirmed:
 | A `requestId` from `POST /sws/go/checkout/sessions` that the webhook later recorded as paid, for this account and environment name | Approved |
 | Any other value, including one merely *shaped* like the retired mock token | `PAYMENT_DECLINED` |
 | absent / blank | `PAYMENT_REQUIRED` |
+
+### Checkout provisioning status contract
+
+`GET /sws/go/checkout/sessions/{requestId}` is the account-scoped polling contract after the
+Stripe return. It uses the checkout request row as the source of truth and returns a derived
+`status`, `clientId` when an environment has been linked, a safe `failureReason` when an attempt
+failed, and `retryAllowed`:
+
+| `status` | Meaning | `retryAllowed` |
+|----------|---------|----------------|
+| `pending` | Unknown, unpaid, or pre-payment request | `false` |
+| `paid` | Payment confirmed; provisioning has not claimed the request | `true` |
+| `provisioning` | An active fenced provisioning attempt is running | `false` |
+| `provisioning_failed` | The last attempt recorded a diagnostic failure | `true` |
+| `stalled` | The provisioning lease expired without a diagnostic failure | `true` |
+| `provisioned` | The request is terminal and carries its created client id | `false` |
+
+Retrying always reuses the same `requestId`. `claimForProvisioning` advances the attempt token
+atomically; an active `PROVISIONING` row and a terminal `PROVISIONED` row cannot be claimed again,
+and a failed or stale attempt can be reclaimed with a new fencing token. This prevents a browser
+retry from creating a second environment or charging the customer again.
 
 The token is server-generated and correlated server-side, so a browser cannot turn a successful
 return URL into authorization. `CheckoutRequestStore.isPaidFor` matches on the request id **plus**

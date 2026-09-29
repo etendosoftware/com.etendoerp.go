@@ -277,11 +277,52 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   static final String STATUS_PROVISIONING = "PROVISIONING";
   static final String STATUS_PROVISIONED = "PROVISIONED";
 
+  /** Wire status returned by the checkout status endpoint when a failed attempt can be retried. */
+  public static final String DERIVED_STATUS_PROVISIONING_FAILED = "provisioning_failed";
+  /** Wire status returned when a provisioning lease expired without a diagnostic reason. */
+  public static final String DERIVED_STATUS_STALLED = "stalled";
+
   private static final String PROVISIONING_LEASE_MINUTES_PROPERTY =
       "etendo.go.billing.provisioning.lease.minutes";
   private static final String PROVISIONING_LEASE_MINUTES_ENV =
       "ETGO_BILLING_PROVISIONING_LEASE_MINUTES";
   private static final long DEFAULT_PROVISIONING_LEASE_MINUTES = 30L;
+
+  /**
+   * Derives the customer-facing provisioning state from the durable checkout row.
+   *
+   * <p>The persisted lifecycle remains deliberately small ({@code PAID}, {@code PROVISIONING},
+   * {@code PROVISIONED}). A failed attempt is represented by its diagnostic reason and a stale
+   * lease by its timestamp; exposing those as derived states keeps retries fenced without adding a
+   * second mutable status that could drift from the attempt token.
+   *
+   * @param request checkout row, possibly {@code null}
+   * @return stable lowercase status for the API
+   */
+  public String deriveProvisioningStatus(CheckoutRequest request) {
+    if (request == null) return "pending";
+    String status = StringUtils.defaultString(request.getCheckoutRequestStatus());
+    if (STATUS_PROVISIONED.equals(status)) return "provisioned";
+    if (STATUS_PROVISIONING.equals(status)) {
+      if (StringUtils.isNotBlank(request.getFailureReason())) {
+        return DERIVED_STATUS_PROVISIONING_FAILED;
+      }
+      Date provisioningAt = request.getProvisioningAt();
+      if (provisioningAt != null
+          && provisioningAt.before(new Date(System.currentTimeMillis() - provisioningLeaseMillis()))) {
+        return DERIVED_STATUS_STALLED;
+      }
+      return "provisioning";
+    }
+    return STATUS_PAID.equals(status) ? "paid" : "pending";
+  }
+
+  /** @return whether a new fenced provisioning attempt may be claimed for the row. */
+  public boolean isProvisioningRetryAllowed(CheckoutRequest request) {
+    String derived = deriveProvisioningStatus(request);
+    return "paid".equals(derived) || DERIVED_STATUS_PROVISIONING_FAILED.equals(derived)
+        || DERIVED_STATUS_STALLED.equals(derived);
+  }
 
   /** Lifecycle order. A request may only move to a strictly later element. */
   private static final List<String> LIFECYCLE = Arrays.asList(STATUS_CREATING, STATUS_CREATED,
@@ -930,6 +971,22 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
       } catch (RuntimeException e) {
         log.error("Could not record the failure reason for checkout request '{}'", requestId, e);
       }
+    });
+  }
+
+  /** Removes one local E2E fixture purchase when its immutable account tuple matches. */
+  public boolean deleteFixture(String requestId, String accountId, String accountEmail) {
+    return runAsSystem(() -> {
+      List<CheckoutRequest> matches = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.request = :requestId and cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)")
+          .setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
+          .setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId))
+          .setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
+          .list();
+      matches.forEach(OBDal.getInstance()::remove);
+      flushAndCommit();
+      return !matches.isEmpty();
     });
   }
 

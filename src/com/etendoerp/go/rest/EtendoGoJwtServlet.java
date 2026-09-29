@@ -354,6 +354,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
+  DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
+      new DevProvisioningFailureFixtureService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
       new TenantEnvironmentLifecycleService();
@@ -497,6 +499,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (isPath(path, "/dev/provisioning-failure-fixture")
+        && DevProvisioningFailureFixtureService.isEnabled()) {
+      handleDevProvisioningFailureFixturePost(request, response);
+      return;
+    }
     if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
       handleDevLifecyclePost(request, response);
       return;
@@ -521,6 +528,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+  }
+
+  private void handleDevProvisioningFailureFixturePost(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithPlatformAccount(request, response, "dev-provisioning-failure-fixture", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      writeResponse(response, HttpServletResponse.SC_OK,
+          devProvisioningFailureFixtureService.create(account,
+              body.optString("clientName", "")));
+    });
+  }
+
+  private void handleDevProvisioningFailureFixtureDelete(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String prefix = "/dev/provisioning-failure-fixture/";
+    String token = request.getPathInfo().substring(prefix.length());
+    runWithPlatformAccount(request, response, "dev-provisioning-failure-fixture-cleanup", account -> {
+      JSONObject result = new JSONObject();
+      result.put("cleaned", devProvisioningFailureFixtureService.cleanup(account, token));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
   }
 
   /** The `/session*` family (ETP-4575): cookie-backed sessions. */
@@ -636,7 +665,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (isPath(path, PATH_SESSION)) {
+    if (path != null && path.startsWith("/dev/provisioning-failure-fixture/")
+        && DevProvisioningFailureFixtureService.isEnabled()) {
+      handleDevProvisioningFailureFixtureDelete(request, response);
+    } else if (isPath(path, PATH_SESSION)) {
       handleSessionDelete(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
@@ -861,15 +893,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Answers "pending" for an unknown request id, for another account's request id, and for a
       // genuinely unpaid one alike. That is deliberate: the endpoint must never confirm that a
       // request id exists, and the account predicate inside find() is what enforces it.
-      boolean paid = checkoutRequest != null
-          && checkoutRequestStore.isPaidFor(requestId, account.getId(), account.getEmail(), null);
       JSONObject result = new JSONObject();
       result.put(FIELD_REQUEST_ID, requestId);
-      result.put(FIELD_STATUS, paid ? "paid" : "pending");
-      if (paid) {
+      String status = checkoutRequestStore.deriveProvisioningStatus(checkoutRequest);
+      result.put(FIELD_STATUS, status);
+      result.put("retryAllowed", checkoutRequestStore.isProvisioningRetryAllowed(checkoutRequest));
+      if (checkoutRequest != null) {
         result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
         if (checkoutRequest.getDemoClient() != null) {
           result.put(FIELD_DEMO_CLIENT_ID, checkoutRequest.getDemoClient().getId());
+        }
+        if (checkoutRequest.getCreatedClient() != null) {
+          result.put("clientId", checkoutRequest.getCreatedClient().getId());
+        }
+        if (StringUtils.isNotBlank(checkoutRequest.getFailureReason())) {
+          result.put("failureReason", safeProvisioningFailureReason(
+              checkoutRequest.getFailureReason()));
         }
       }
       if (checkoutRequest != null && checkoutRequest.getDemoClient() != null) {
@@ -877,6 +916,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /** Keeps provider/internal exception text out of the public polling contract. */
+  private static String safeProvisioningFailureReason(String reason) {
+    String normalized = StringUtils.normalizeSpace(StringUtils.defaultString(reason));
+    return StringUtils.abbreviate(normalized, 255);
   }
 
   /** Account-level billing overview; it remains available when every ERP environment is blocked. */
@@ -3059,31 +3104,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * ETP-5117: a tenant converting to productive must stop overriding the System-level
    * ETSG_ForceTestMode default (e.g. a tenant that started as Demo and got its own row via
-   * {@link OnboardingForceTestModeService}). Same best-effort philosophy as {@code
-   * markProductive} itself — commercial/fiscal-config metadata, never allowed to abort an
-   * otherwise-successful paid signup. See {@link OnboardingForceTestModeService}'s own javadoc
-   * ("The reverse direction") for why this needs its own service call, not a one-liner.
+   * {@link OnboardingForceTestModeService}). This operation is part of the paid onboarding
+   * transaction and therefore propagates failures so the plan and fiscal mode cannot diverge.
+   * See {@link OnboardingForceTestModeService}'s own javadoc ("The reverse direction") for why
+   * this needs its own service call, not a one-liner.
    *
    * @param clientId the tenant just marked productive
    */
-  private void revertTestModeForProductiveTenantBestEffort(String clientId) {
-    try {
-      onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
-    } catch (RuntimeException e) {
-      log.error("Could not revert ETSG_ForceTestMode for now-productive tenant '{}': {}",
-          clientId, e.getMessage(), e);
-    }
+  private void revertTestModeForProductiveTenant(String clientId) {
+    onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
   }
 
   /**
    * ETP-5117: applies the side effects of a paid upgrade once {@code handleOnboarding}'s paywall
    * has approved the request — marks the tenant productive and, only on success, reverts any
-   * {@code ETSG_ForceTestMode} override (see {@link #revertTestModeForProductiveTenantBestEffort}).
-   * Joins the onboarding transaction, so a successful marker commits with the tenant. Still
-   * best-effort in the revert direction, mirroring {@code markProductive} itself: commercial/fiscal
-   * -config metadata must never abort an otherwise-successful paid signup. A failed marker is only
-   * logged — "paid but demo" is the symptom ETP-4966 was reported as, and this line is what makes it
-   * searchable instead of indistinguishable from a marker that was never attempted.
+   * {@code ETSG_ForceTestMode} override. All writes join the onboarding transaction; a failure
+   * aborts it so a paid tenant cannot commit with contradictory metadata.
    *
    * @param clientId the tenant just created/resolved
    * @param starOrgId the tenant's "*" organization id, required by {@code markProductive}
@@ -3093,16 +3129,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
       String accountEmail) {
     if (!tenantPlanService.markProductive(clientId, starOrgId)) {
-      log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
-          + "'{}' and will read back as free", clientName, clientId,
-          maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
-    } else {
-      if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
-        log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
-            + "projection", clientName, clientId);
-      }
-      revertTestModeForProductiveTenantBestEffort(clientId);
+      throw new OBException("Paid environment '" + clientName + "' (client " + clientId
+          + ") for account " + maskEmail(accountEmail) + " could not be marked as plan '"
+          + TenantPlanService.PLAN_PRODUCTIVE + "'");
     }
+    if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
+      throw new OBException("Paid environment '" + clientName + "' (client " + clientId
+          + ") could not be marked in the lifecycle projection");
+    }
+    // A tenant must not commit with a productive plan and an active demo override.
+    revertTestModeForProductiveTenant(clientId);
   }
 
   /**
@@ -3277,6 +3313,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     try {
       provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword);
+      if (!provisioningCompleted) {
+        // Boolean failure exits are promoted to the same exception path as thrown failures. This
+        // is especially important for a pooled tenant: claim and personalization must be rolled
+        // back before the diagnostic write in finally can commit its independent update.
+        throw new OBException("Onboarding provisioning did not complete");
+      }
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
@@ -3308,7 +3350,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
     // ETP-5389: a pre-provisioned tenant when the pool can serve this request, otherwise null and
     // everything below is the classic path, unchanged.
-    String pooledClientId = claimPooledTenant(writer, accountEmail, onboardingRequest,
+    String pooledClientId = claimPooledTenant(writer, accountId, accountEmail, onboardingRequest,
         adminPassword, correlationId);
     boolean pooled = pooledClientId != null;
     String clientId = pooled ? pooledClientId
@@ -3366,12 +3408,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * ETP-5389 — takes a pre-provisioned tenant for this request, or answers {@code null} so the
    * caller runs the classic path. See {@link PooledTenantClaimService} for when that happens.
    */
-  private String claimPooledTenant(PrintWriter writer, String accountEmail,
+  private String claimPooledTenant(PrintWriter writer, String accountId, String accountEmail,
       OnboardingRequestData request, String adminPassword, String correlationId) {
-    return pooledTenantClaimService.claim(new NdjsonOnboardingProgressSink(writer),
+    String fixtureClientId = devProvisioningFailureFixtureService.reservedClientId(
+        request.paymentToken, accountId, accountEmail);
+    if (DevProvisioningFailureFixtureService.isFixtureRequest(request.paymentToken)
+        && fixtureClientId == null) {
+      throw new OBException("Dedicated E2E fixture reservation is unavailable for this account");
+    }
+    NdjsonOnboardingProgressSink sink = new NdjsonOnboardingProgressSink(writer);
+    PooledTenantClaimService.ClaimRequest claimRequest =
         new PooledTenantClaimService.ClaimRequest(accountEmail, request.clientName,
             request.fullName, request.currencyIso, request.countryCode, request.language,
-            request.address, adminPassword), correlationId);
+            request.address, adminPassword);
+    return fixtureClientId == null
+        ? pooledTenantClaimService.claim(sink, claimRequest, correlationId)
+        : pooledTenantClaimService.claim(sink, claimRequest, correlationId, fixtureClientId,
+            request.paymentToken);
   }
 
   private static long elapsedMillis(long startedAt) {
@@ -3386,6 +3439,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private boolean finishPooledTenant(PrintWriter writer, String clientId, String orgId,
       OnboardingProvisioningChain.AdminContext adminContext, OnboardingRequestData request) {
+    if (devProvisioningFailureFixtureService.shouldFail(request.paymentToken)) {
+      throw new IllegalStateException("E2E fixture forced pooled tenant finalization failure");
+    }
     return wireOrgInfo(writer, clientId, orgId, adminContext.adminUserId,
         adminContext.adminRoleId, request)
         && wireWarehouseAddress(writer, clientId, orgId, adminContext.adminUserId,

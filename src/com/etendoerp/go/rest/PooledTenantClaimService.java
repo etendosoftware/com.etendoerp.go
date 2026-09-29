@@ -90,22 +90,32 @@ public class PooledTenantClaimService {
    * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
    */
   public String claim(OnboardingProgressSink sink, ClaimRequest request, String correlationId) {
-    if (!isEligible(request)) {
+    return claim(sink, request, correlationId, null, null);
+  }
+
+  /** Claims only the request's reserved tenant when a guarded local fixture is active. */
+  public String claim(OnboardingProgressSink sink, ClaimRequest request, String correlationId,
+      String fixtureClientId, String fixtureRequestId) {
+    boolean fixture = StringUtils.isNotBlank(fixtureClientId);
+    if (!fixture && !isEligible(request)) {
       return null;
     }
     long claimStartedAt = System.nanoTime();
     TenantPoolStore.Claim claim;
     try {
       long storeStartedAt = System.nanoTime();
-      claim = store.claimReady(OnboardingProvisioningChain.provisioningVersion());
+      claim = fixture ? store.lockFixture(fixtureClientId, fixtureRequestId)
+          : store.claimReady(OnboardingProvisioningChain.provisioningVersion());
       log.info("[ONBOARDING-PERF] phase=pool_claim_store correlationId={} elapsedMs={}",
           correlationId, elapsedMillis(storeStartedAt));
     } catch (RuntimeException e) {
       log.error("Could not read the tenant pool; onboarding falls back to the classic path", e);
       EtendoGoDalHelper.rollbackDalChanges("tenant pool claim", e, log);
+      if (fixture) throw new OBException("Could not lock the dedicated E2E fixture tenant", e);
       return null;
     }
     if (claim == null) {
+      if (fixture) throw new OBException("Dedicated E2E fixture tenant is unavailable");
       log.info("[ONBOARDING-PERF] phase=pool_claim outcome=empty mode=classic correlationId={} "
           + "elapsedMs={}", correlationId, elapsedMillis(claimStartedAt));
       return null;
@@ -122,6 +132,7 @@ public class PooledTenantClaimService {
       log.error("Claimed pooled tenant {} (pool row {}) could not be personalized; onboarding "
           + "falls back to the classic path", claim.clientId(), claim.poolRowId(), e);
       EtendoGoDalHelper.rollbackDalChanges("pooled tenant personalization", e, log);
+      if (fixture) throw new OBException("Could not personalize the dedicated E2E fixture tenant", e);
       retireBrokenTenantBestEffort(claim, e);
       return null;
     }
@@ -164,10 +175,17 @@ public class PooledTenantClaimService {
    * {@code applyClientAdminEmail} (ETP-5019) set.
    */
   void personalize(String clientId, ClaimRequest request) {
+    long personalizeStartedAt = System.nanoTime();
     String clientName = request.clientName();
+    long lookupClientStartedAt = System.nanoTime();
     Client client = OBDal.getInstance().get(Client.class, clientId);
+    long lookupClientElapsed = elapsedMillis(lookupClientStartedAt);
+    long lookupOrgStartedAt = System.nanoTime();
     Organization org = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
+    long lookupOrgElapsed = elapsedMillis(lookupOrgStartedAt);
+    long lookupAdminStartedAt = System.nanoTime();
     UserRoles adminRole = EtendoGoJwtDalHelper.findClientAdminUserRole(clientId);
+    long lookupAdminElapsed = elapsedMillis(lookupAdminStartedAt);
     if (client == null || org == null || adminRole == null) {
       throw new OBException("Pooled tenant " + clientId + " is incomplete");
     }
@@ -192,7 +210,13 @@ public class PooledTenantClaimService {
     OBDal.getInstance().save(admin);
 
     applySignupAddress(org, request.address());
+    long beforeFlushElapsed = elapsedMillis(personalizeStartedAt);
+    long flushStartedAt = System.nanoTime();
     OBDal.getInstance().flush();
+    log.info("[ONBOARDING-PERF] phase=pool_personalization_detail clientId={} lookupClientMs={} "
+        + "lookupOrgMs={} lookupAdminMs={} beforeFlushMs={} flushMs={}", clientId,
+        lookupClientElapsed, lookupOrgElapsed, lookupAdminElapsed, beforeFlushElapsed,
+        elapsedMillis(flushStartedAt));
   }
 
   /**

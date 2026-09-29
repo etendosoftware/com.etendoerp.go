@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -65,6 +66,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
@@ -85,6 +87,7 @@ import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.onboarding.OnboardingDataTransferService;
+import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.session.GoSessionRecord;
@@ -1797,6 +1800,69 @@ public class EtendoGoJwtServletCoverageTest {
     dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
         .thenReturn(account);
     return account;
+  }
+
+  /** A paid onboarding must abort when its productive plan marker cannot be written. */
+  @Test
+  public void paidUpgradeMustAbortWhenProductivePlanMarkerCannotBeWritten() throws Exception {
+    TenantPlanService plans = mock(TenantPlanService.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    when(plans.markProductive("CLIENT-PAID", "ORG-STAR")).thenReturn(false);
+    servlet.tenantPlanService = plans;
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+
+    Method sideEffects = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "applyPaidUpgradeSideEffects", String.class, String.class, String.class, String.class);
+    sideEffects.setAccessible(true);
+
+    assertThrows(java.lang.reflect.InvocationTargetException.class,
+        () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
+            "paid@example.test"));
+    verify(lifecycle, never()).markProductive(anyString());
+  }
+
+  /** A lifecycle projection failure must also abort before the pooled tenant can commit. */
+  @Test
+  public void paidUpgradeMustAbortWhenLifecycleProjectionCannotBeWritten() throws Exception {
+    TenantPlanService plans = mock(TenantPlanService.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    when(plans.markProductive("CLIENT-PAID", "ORG-STAR")).thenReturn(true);
+    when(lifecycle.markProductive("CLIENT-PAID")).thenReturn(false);
+    servlet.tenantPlanService = plans;
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+
+    Method sideEffects = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "applyPaidUpgradeSideEffects", String.class, String.class, String.class, String.class);
+    sideEffects.setAccessible(true);
+
+    assertThrows(java.lang.reflect.InvocationTargetException.class,
+        () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
+            "paid@example.test"));
+    verify(lifecycle).markProductive("CLIENT-PAID");
+  }
+
+  /** A failed demo override removal must abort the paid transaction as well. */
+  @Test
+  public void paidUpgradeMustAbortWhenDemoOverrideCannotBeRemoved() throws Exception {
+    TenantPlanService plans = mock(TenantPlanService.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    OnboardingForceTestModeService forceTestMode = mock(OnboardingForceTestModeService.class);
+    when(plans.markProductive("CLIENT-PAID", "ORG-STAR")).thenReturn(true);
+    when(lifecycle.markProductive("CLIENT-PAID")).thenReturn(true);
+    doThrow(new OBException("override removal failed"))
+        .when(forceTestMode).revertTestModeForProductiveTenant("CLIENT-PAID");
+    servlet.tenantPlanService = plans;
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    servlet.onboardingForceTestModeService = forceTestMode;
+
+    Method sideEffects = EtendoGoJwtServlet.class.getDeclaredMethod(
+        "applyPaidUpgradeSideEffects", String.class, String.class, String.class, String.class);
+    sideEffects.setAccessible(true);
+
+    assertThrows(java.lang.reflect.InvocationTargetException.class,
+        () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
+            "paid@example.test"));
+    verify(forceTestMode).revertTestModeForProductiveTenant("CLIENT-PAID");
   }
 
   private static HttpServletRequest mockRequest(String pathInfo) {
