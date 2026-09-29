@@ -247,6 +247,14 @@ class NeoCrudHandler {
   /**
    * Validates the original REST write body before a handler can enrich it with server-owned
    * values. Filtering later in the CRUD path remains responsible only for the persistence body.
+   *
+   * <p>Passes the HTTP method through to {@link NeoFieldFilter#validateClientWriteRequest(
+   * JSONObject, String)} so a POST (create) can honor the same "entity has a {@code NeoHandler}
+   * that may legitimately supply this value" exemption {@code rejectableOnCreateFields} already
+   * grants later, at {@code filterCreateRequest} (IMP-28 clause 2 / ETP-5537). Without the method,
+   * this earlier check ran before any handler had a chance to run and rejected such a value
+   * unconditionally, pre-empting the exemption the rest of the write path already implements.
+   * PUT/PATCH are unaffected — they never carried that exemption.
    */
   NeoResponse validateClientWriteRequest(NeoContext context) {
     try {
@@ -256,7 +264,7 @@ class NeoCrudHandler {
       }
       NeoFieldFilter filter = NeoFieldFilter.forEntity(context.getSfEntity(),
           adTab.getTable().getName());
-      filter.validateClientWriteRequest(context.getRequestBody());
+      filter.validateClientWriteRequest(context.getRequestBody(), context.getHttpMethod());
       return null;
     } catch (ReadOnlyFieldRejectedException e) {
       return NeoReadOnlyFieldResponse.build(e);

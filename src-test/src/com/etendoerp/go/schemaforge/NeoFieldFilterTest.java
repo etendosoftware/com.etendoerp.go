@@ -587,7 +587,8 @@ class NeoFieldFilterTest {
           .put("documentNo", "SO-9999");
 
       ReadOnlyFieldRejectedException exception = assertThrows(
-          ReadOnlyFieldRejectedException.class, () -> filter.validateClientWriteRequest(body));
+          ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "PATCH"));
       assertEquals("documentNo", exception.getFieldName());
     }
 
@@ -602,7 +603,8 @@ class NeoFieldFilterTest {
 
       ReadOnlyFieldRejectedException exception = assertThrows(
           ReadOnlyFieldRejectedException.class,
-          () -> filter.validateClientWriteRequest(new JSONObject().put("documentNumber", "SO-9999")));
+          () -> filter.validateClientWriteRequest(
+              new JSONObject().put("documentNumber", "SO-9999"), "PATCH"));
       assertEquals("documentNumber", exception.getFieldName());
     }
 
@@ -614,7 +616,49 @@ class NeoFieldFilterTest {
 
       filter.validateClientWriteRequest(new JSONObject()
           .put("client", "other-client")
-          .put("organization", "other-org"));
+          .put("organization", "other-org"), "PATCH");
+    }
+
+    @Test
+    @DisplayName("POST: does not reject a field already exempted via rejectableOnCreateFields "
+        + "(entity has a NeoHandler that may legitimately supply it — IMP-28/ETP-5537)")
+    void allowsCreateExemptedFieldOnPost() throws Exception {
+      // Simulates an entity with a Java_Qualifier (e.g. assets/AssetsHandler): "currency" is
+      // included + read-only, but NOT in rejectableOnCreateFields because the entity has a
+      // handler (see NeoFieldFilter#forEntity / processFieldMappings entityHasHandler branch).
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "currency")), Set.of("id"), Collections.emptySet());
+
+      filter.validateClientWriteRequest(new JSONObject().put("currency", "102"), "POST");
+      // No exception -> the create-time value is accepted, deferring to filterCreateRequest's
+      // already-established policy instead of pre-empting it.
+    }
+
+    @Test
+    @DisplayName("PUT/PATCH: still rejects the same field once the record already exists")
+    void rejectsCreateExemptedFieldOnUpdate() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "currency")), Set.of("id"), Collections.emptySet());
+
+      JSONObject body = new JSONObject().put("currency", "102");
+      assertThrows(ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "PUT"));
+      assertThrows(ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "PATCH"));
+    }
+
+    @Test
+    @DisplayName("POST: still rejects a field that is genuinely unwritable on create "
+        + "(present in rejectableOnCreateFields)")
+    void rejectsGenuinelyUnwritableFieldOnPost() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "salePrice")), Set.of("id"), Set.of("salePrice"));
+
+      JSONObject body = new JSONObject().put("salePrice", "10.00");
+      ReadOnlyFieldRejectedException exception = assertThrows(
+          ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "POST"));
+      assertEquals("salePrice", exception.getFieldName());
     }
   }
 

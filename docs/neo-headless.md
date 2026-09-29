@@ -243,8 +243,9 @@ Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. 
 
 `POST`, `PUT`, and `PATCH` reject a value submitted for an included field that the NEO
 curation marks read-only. The rejection happens at the REST boundary, before a
-`NeoHandler` or the generic persistence path sees the request, so all three verbs have the
-same result instead of silently dropping a value on one route and accepting it on another.
+`NeoHandler` or the generic persistence path sees the request, so PUT and PATCH always
+answer the same for the same field — and POST does too, *unless* the field is exempted at
+create time (see below).
 
 ```json
 {
@@ -272,6 +273,27 @@ Edge cases:
 - **`client` / `organization` are not read-only-field rejections.** They are a separate
   session-ownership policy: REST strips any caller-supplied value and resolves both from the
   authenticated context instead of rejecting the request.
+
+##### POST-only exemption for entities with a `NeoHandler` (ETP-5537)
+
+On `POST` (create) only, a field is exempted from this check when it is already exempted from
+`NeoFieldFilter#rejectableOnCreateFields` — i.e. when the entity has a `Java_Qualifier`
+(a `NeoHandler` that might legitimately be the one supplying the value, IMP-28 clause 2) or the
+AD column has a configured default. `filterCreateRequest` already granted this exemption later
+in the same request, inside `handleDefault`; before ETP-5537 this earlier, pre-dispatch check
+used a stricter, unconditional predicate and rejected the value first, so the later exemption
+was never reached.
+
+This matters for a genuine, client-authored, **create-once** value: the entity's own
+config panel intentionally submits it in the create body, and the field is locked
+(`readOnly: true`) for every write after that. `assets` / `AssetsHandler` is the first case:
+`AssetsConfigPanel.jsx` sends `currency` once, at asset creation, so it is not lost; every
+`PUT`/`PATCH` on an existing asset still rejects a `currency` value with the same 422, because
+this exemption never applies outside `POST`.
+
+This is a property of the shared `NeoFieldFilter`/`NeoCrudHandler` policy, not a per-entity
+carve-out: any entity with a `Java_Qualifier` gets the same create-time exemption for its
+read-only fields, and none of them get it on `PUT`/`PATCH`.
 
 **DELETE** -- `DELETE /{specName}/{entityName}/{recordId}`
 
