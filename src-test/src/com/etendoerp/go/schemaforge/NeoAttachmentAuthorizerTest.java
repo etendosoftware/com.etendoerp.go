@@ -177,6 +177,48 @@ public class NeoAttachmentAuthorizerTest {
     }
   }
 
+  // ETP-5205 — ETGO_Fiscal_Decl is shown only by the technical "Fiscal Declarations NEO Support"
+  // window, which no role template grants; Finance reaches fiscal models through Tax Report.
+  private static final String FISCAL_SUPPORT_WINDOW = "64D940BC436346329DD4DED863FFA40B";
+
+  @Test
+  public void fiscalDeclarationWriteIsAllowedThroughTheTaxReportProxy() {
+    try (Env env = new Env(window(FISCAL_SUPPORT_WINDOW, true))) {
+      env.access.when(() -> NeoAccessHelper.hasWindowAccess(FISCAL_SUPPORT_WINDOW, "POST"))
+          .thenReturn(false);
+      env.access.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "POST")).thenReturn(true);
+
+      assertNull(NeoAttachmentAuthorizer.checkWrite(NeoAttachmentAuthorizer.FISCAL_DECL_TABLE_ID));
+    }
+  }
+
+  @Test
+  public void fiscalDeclarationWriteIsForbiddenWithoutSupportOrProxyAccess() {
+    try (Env env = new Env(window(FISCAL_SUPPORT_WINDOW, true))) {
+      env.access.when(() -> NeoAccessHelper.hasWindowAccess(anyString(), anyString()))
+          .thenReturn(false);
+
+      NeoResponse denied =
+          NeoAttachmentAuthorizer.checkWrite(NeoAttachmentAuthorizer.FISCAL_DECL_TABLE_ID);
+
+      assertNotNull(denied);
+      assertEquals(403, denied.getHttpStatus());
+    }
+  }
+
+  @Test
+  public void theProxyDoesNotLeakToOtherTables() {
+    try (Env env = new Env(window(SALES_ORDER_WINDOW, true))) {
+      env.access.when(() -> NeoAccessHelper.hasWindowAccess(SALES_ORDER_WINDOW, "POST"))
+          .thenReturn(false);
+      env.access.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "POST")).thenReturn(true);
+
+      assertNotNull(NeoAttachmentAuthorizer.checkWrite(TABLE_ID));
+    }
+  }
+
   // ───────────────────────────────── helpers ─────────────────────────────────
 
   private static Tab window(String windowId, boolean active) {

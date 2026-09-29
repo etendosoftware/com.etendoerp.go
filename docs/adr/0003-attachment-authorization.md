@@ -101,6 +101,9 @@ Six call sites, one policy.
 > parent-record org/client scoping (SEC-11b), the uniform `404`, D3's admin-mode narrowing and
 > D6 are still ETP-4570, which should extend this class rather than replace it. Known residual:
 > the rule is per table (`C_Order` is shown by both sales-order and purchase-order windows).
+> Proxy windows: `ETGO_Fiscal_Decl` is shown only by a technical support window no role grants,
+> so the authorizer also accepts the Tax Report proxy window (`PROXY_WINDOWS_BY_TABLE`). Hardcoded,
+> mirroring the ETP-5116 proxy; a data-driven replacement is ETP-5540.
 
 ```java
 // Conceptual shape. Returns the authorized attachment or throws/returns a uniform not-found.

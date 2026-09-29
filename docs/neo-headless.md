@@ -1013,7 +1013,10 @@ by `NeoAttachmentAuthorizer` in `NeoBuiltInEndpointHandler` before the operation
 role needs **editable** access (`AD_Window_Access.IsReadWrite = 'Y'`, or an admin/client-admin
 role) to at least one active window that shows the attachment's table; otherwise the answer is
 `403` `"Access denied to spec for current role"`, which the SPA already translates. A table no
-window shows is allowed (WARN log). For the bare-ID operations the table comes from the stored
+window shows is allowed (WARN log). A few tables are only shown by a technical support window
+that no role template grants; for those `NeoAttachmentAuthorizer.PROXY_WINDOWS_BY_TABLE` also
+accepts the window that proxies the feature — today `ETGO_Fiscal_Decl` → Tax Report, the proxy
+Finance already holds for "Modelos fiscales" (ETP-5116), so justificante uploads keep working. For the bare-ID operations the table comes from the stored
 `C_File` row, never from the request. Reads (list, download, zip, main) are unchanged. This is
 only the window-tier slice of ADR-0003; record/org scoping and the uniform `404` remain ETP-4570.
 
