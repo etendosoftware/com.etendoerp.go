@@ -258,16 +258,18 @@ public class OnboardingDatasetNormalizerTest {
     // Product categories: exactly two survive. "Beverages" is filtered out (ETP-5079, after
     // inspecting the FranOB2 tenant); the starter category stays, and "Discounts" is required by
     // ETGO_DTO.
-    // The starter category was also renamed as part of ETP-5079 — English base name and VALUE
-    // "Generic", with the Spanish "Genérico" moved into a real M_PRODUCT_CATEGORY_TRL row, the
-    // same English-base-plus-translation convention this ticket applied to document types.
+    // The starter category was renamed twice: ETP-5079 moved it from the Spanish "Otros" to the
+    // English base name "Generic" plus a real M_PRODUCT_CATEGORY_TRL row ("Genérico"); ETP-5498
+    // moved the base itself to "Genérico" (both VALUE and NAME), because the Product Category
+    // window and the Stock Report read the base NAME directly and never consulted the Trl row —
+    // so the category now needs NO translation row at all, and the old one was deleted.
     //
     // It is still asserted BY ID rather than by name, and that reason has not weakened: an ID is
     // the only handle that cannot be satisfied by a coincidental string somewhere else in the
     // dataset. The old name Otros used to collide with the Spanish chart of accounts in
-    // C_ELEMENTVALUE. The new Generic and Generico are far less collision-prone, but a name
-    // assertion would still pass on a row that merely mentions the word, and it would break
-    // again on the next rename.
+    // C_ELEMENTVALUE; the current name "Genérico" collides with an A_ASSET_GROUP row of the same
+    // name (see below) — a bare substring assertion on the category's own name is therefore unsafe
+    // and would pass even on the wrong row, or on no row at all.
     // Both halves of the filtered category: its English base name and the es_ES translation row
     // the dataset now ships for it. "Bebidas" absent is the assertion that would catch the _TRL
     // row leaking through while its parent category is dropped — a tenant would then hold a
@@ -277,22 +279,28 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue("starter product category (M_Product_Category EBAE46FD...) missing",
         xml.contains("EBAE46FD129049DEB26B948E160C6AD8"));
     assertTrue("Discounts category (required by ETGO_DTO) missing", xml.contains("Discounts"));
-    // The rename itself. "Generic" is safe to assert as a bare substring: across the whole GOClient
-    // sampledata it occurs in M_PRODUCT_CATEGORY.xml and nowhere else. "Otros" is deliberately NOT
-    // asserted absent — it legitimately survives in the Spanish chart of accounts (C_ELEMENTVALUE
-    // and C_ELEMENTVALUE_TRL), which is the same collision that made the ID the right handle above.
-    assertTrue("starter product category must ship its English base name",
-        xml.contains("Generic"));
-    // The es_ES translation is asserted through the TRL ELEMENT, not through the string "Genérico":
-    // that word also names the A_ASSET_GROUP row, which is an included table, so a substring
-    // assertion would stay green with M_PRODUCT_CATEGORY_TRL.xml deleted. The element tag comes
-    // from the entity name (toLowerCamel of the table), so it can only be emitted by the category
-    // translation file being normalized into the dataset.
-    assertTrue("M_PRODUCT_CATEGORY_TRL.xml must be normalized into the dataset",
+    // The rename itself, scoped to the starter category's OWN element rather than a bare substring:
+    // "Genérico" also names an A_ASSET_GROUP row (an included table), so xml.contains("Genérico")
+    // would stay green even on the wrong entity. Bounding the search to between this category's
+    // <mProductCategory id="EBAE46FD..."> opening tag and its closing tag makes the assertion
+    // specific to this row's own <name> element.
+    int categoryStart = xml.indexOf("<mProductCategory id=\"EBAE46FD129049DEB26B948E160C6AD8\"");
+    assertTrue("starter product category element (id EBAE46FD...) missing", categoryStart >= 0);
+    int categoryEnd = xml.indexOf("</mProductCategory>", categoryStart);
+    assertTrue("starter product category element (id EBAE46FD...) not closed", categoryEnd >= 0);
+    String categoryXml = xml.substring(categoryStart, categoryEnd);
+    assertTrue("starter product category must ship its Spanish base name 'Genérico' (ETP-5498)",
+        categoryXml.contains("<name>Genérico</name>"));
+    // No M_PRODUCT_CATEGORY_TRL row survives normalization any more: "Beverages" is filtered out
+    // together with its own Trl row ("Bebidas", asserted absent above), and the starter category's
+    // Trl row ("Genérico") was deleted outright by ETP-5498 since it only repeated the base NAME
+    // once the base itself became Spanish. The element tag comes from the entity name (toLowerCamel
+    // of the table), so its absence can only mean no M_PRODUCT_CATEGORY_TRL row was normalized.
+    assertFalse("no M_Product_Category_Trl row should survive normalization any more (ETP-5498)",
         xml.contains("<mProductCategoryTrl"));
-    // ...and shipping the row is only half the claim: without the table in the import allowlist the
-    // es_ES name never reaches a tenant and the category renders as "Generic" for a Spanish user.
-    // That is the exact trap C_DOCTYPE_TRL fell into (ETP-5079).
+    // The table stays in the import allowlist regardless: a future category whose base name is
+    // still English (or a tenant-added translation) still needs it to actually reach the tenant —
+    // that is the exact trap C_DOCTYPE_TRL fell into (ETP-5079).
     assertTrue("M_PRODUCT_CATEGORY_TRL must be an included table",
         OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
 
@@ -354,7 +362,10 @@ public class OnboardingDatasetNormalizerTest {
         countEntities(xml, "mLocator"));
     assertEquals("only the primary warehouse keeps its organization assignment", 1,
         countEntities(xml, "adOrgWarehouse"));
-    assertEquals("only the starter category keeps its es_ES translation", 1,
+    // ETP-5498 deleted the starter category's own M_Product_Category_Trl row (its base NAME is now
+    // Spanish itself, "Genérico"), and "Beverages" — the other category with one — is filtered out
+    // together with its Trl row. No M_Product_Category_Trl row survives normalization any more.
+    assertEquals("no product category translation row should survive normalization (ETP-5498)", 0,
         countEntities(xml, "mProductCategoryTrl"));
   }
 
