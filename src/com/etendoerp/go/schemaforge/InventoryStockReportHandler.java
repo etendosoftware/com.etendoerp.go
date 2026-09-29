@@ -47,6 +47,8 @@ public class InventoryStockReportHandler implements NeoHandler {
 
   private static final String PARAM_PRODUCT_ID = "M_Product_ID";
   private static final String PARAM_WAREHOUSE_ID = "M_Warehouse_ID";
+  private static final String PARAM_CATEGORY_ID = "M_Product_Category_ID";
+  private static final String PARAM_INCLUDE_ZERO_STOCK = "includeZeroStock";
 
   /**
    * {@code AD_Window_ID} of the brand-new pseudo-{@code AD_Window} ("Informes de inventario" /
@@ -79,7 +81,12 @@ public class InventoryStockReportHandler implements NeoHandler {
                 + "Default: every product."),
         NeoReportParam.optional(PARAM_WAREHOUSE_ID, NeoReportParam.TYPE_STRING,
             "Restrict to these warehouses: one M_Warehouse id, or several separated by commas. "
-                + "Default: every warehouse in the session's organization tree.")));
+                + "Default: every warehouse in the session's organization tree."),
+        NeoReportParam.optional(PARAM_CATEGORY_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to these product categories: one M_Product_Category id, or several "
+                + "separated by commas. Default: every category."),
+        NeoReportParam.optional(PARAM_INCLUDE_ZERO_STOCK, NeoReportParam.TYPE_BOOLEAN,
+            "Include products whose on-hand quantity is zero. Default: false.")));
   }
 
   @Override
@@ -102,8 +109,8 @@ public class InventoryStockReportHandler implements NeoHandler {
 
       List<String> productIds = parseIds(body.optString(PARAM_PRODUCT_ID, ""));
       List<String> warehouseIds = parseIds(body.optString(PARAM_WAREHOUSE_ID, ""));
-      List<String> categoryIds = parseIds(body.optString("M_Product_Category_ID", ""));
-      boolean includeZeroStock = body.optBoolean("includeZeroStock", false);
+      List<String> categoryIds = parseIds(body.optString(PARAM_CATEGORY_ID, ""));
+      boolean includeZeroStock = body.optBoolean(PARAM_INCLUDE_ZERO_STOCK, false);
 
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();

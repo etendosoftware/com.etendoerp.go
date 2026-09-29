@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 import org.hibernate.criterion.Restrictions;
@@ -64,10 +65,16 @@ final class BankStatementLinePruner {
   static final class PruneResult {
     private final int kept;
     private final int discarded;
+    private final Date latestTransactionDate;
 
     PruneResult(int kept, int discarded) {
+      this(kept, discarded, null);
+    }
+
+    PruneResult(int kept, int discarded, Date latestTransactionDate) {
       this.kept = kept;
       this.discarded = discarded;
+      this.latestTransactionDate = latestTransactionDate;
     }
 
     /** @return number of lines left attached to the statement */
@@ -78,6 +85,17 @@ final class BankStatementLinePruner {
     /** @return number of lines removed because both amounts were zero */
     int getDiscarded() {
       return discarded;
+    }
+
+    /**
+     * The latest {@code datetrx} among the KEPT lines, exactly as the parser stored it (no
+     * calendar-day normalisation here), or {@code null} when no kept line carries a date. A
+     * discarded line never counts: its date is not part of the imported statement (ETP-5447).
+     *
+     * @return the latest kept-line transaction date, or {@code null}
+     */
+    Date getLatestTransactionDate() {
+      return latestTransactionDate;
     }
   }
 
@@ -91,7 +109,11 @@ final class BankStatementLinePruner {
    * back from the DB.
    *
    * @param statement the statement whose lines were just parsed and saved
-   * @return the kept / discarded counts
+   * <p>While walking the survivors it also records the latest transaction date among them, which
+   * {@code handleImport} uses as the statement's transaction date (ETP-5447) — collected here so the
+   * import needs no second read of the lines.
+   *
+   * @return the kept / discarded counts and the latest kept-line transaction date
    */
   static PruneResult pruneZeroAmountLines(FIN_BankStatement statement) {
     List<FIN_BankStatementLine> lines = readLines(statement);
@@ -101,6 +123,7 @@ final class BankStatementLinePruner {
 
     List<FIN_BankStatementLine> discarded = new ArrayList<>();
     long counter = 0L;
+    Date latest = null;
     for (FIN_BankStatementLine line : lines) {
       if (hasUnusableAmounts(line)) {
         discarded.add(line);
@@ -108,6 +131,7 @@ final class BankStatementLinePruner {
       }
       counter++;
       line.setLineNo(counter * 10L);
+      latest = later(latest, line.getTransactionDate());
       OBDal.getInstance().save(line);
     }
 
@@ -116,7 +140,7 @@ final class BankStatementLinePruner {
     }
     OBDal.getInstance().flush();
 
-    return new PruneResult((int) counter, discarded.size());
+    return new PruneResult((int) counter, discarded.size(), latest);
   }
 
   /**
@@ -181,6 +205,12 @@ final class BankStatementLinePruner {
    */
   private static boolean hasBothSides(FIN_BankStatementLine line) {
     return !isZero(line.getCramount()) && !isZero(line.getDramount());
+  }
+
+  /** The later of two possibly-null dates; a null never wins over a real date. */
+  private static Date later(Date current, Date candidate) {
+    if (candidate == null) return current;
+    return current == null || candidate.after(current) ? candidate : current;
   }
 
   private static boolean isZero(BigDecimal amount) {
