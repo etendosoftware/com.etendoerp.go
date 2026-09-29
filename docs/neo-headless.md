@@ -5692,3 +5692,39 @@ forever. Both refusal types are now mapped: `SecurityException` and Openbravo's 
 **The fail-open itself is not closed by this.** A report handler that declares nothing still
 passes. See `schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md` for the
 remaining work, including the guardrail test that would make the omission fail the build.
+
+#### 4.12.17 `neo_list` resolves the parent placeholders of a child tab's where clause (ETP-5542)
+
+A child tab can store, in `AD_Tab.HQLWhereClause`, a placeholder for its **parent record** — the
+Bin Contents tab stores `e.quantityOnHand<>0 AND e.storageBin.id=@Locator.id@`. The `@…@` is a hole
+the caller has to fill, not a value.
+
+- **REST** filled it: `NeoCrudHandler.applyWhereClause` resolves the placeholders with the parent id.
+- **MCP did not.** `McpToolRouter.handleList` used the stored clause verbatim, so the query filtered
+  on the literal text `@Locator.id@`, matched nothing and answered `200` with `data: []` — no error,
+  no log line. An agent that listed a bin's contents was told the bin was empty, and without the rows
+  it could not obtain the ids `neo_get` needs to reach the cost and valuation the read hook injects.
+
+Both channels now go through one method, `NeoParentTabFilterResolver.resolveTabWhere(tab, parentId)`:
+
+| Input | Result |
+|---|---|
+| tab with no where clause | `null`, as declared |
+| clause without `@` | unchanged, with or without a parent id |
+| clause with `@`, **no parent id** (top-level read) | unchanged — left to the core JSON service |
+| clause with `@` and a parent id | each `@token@` replaced by the value taken from the parent record; `@AD_Org_ID@` / `@AD_Client_ID@` from the parent's organization / client, the parent's own key from `parentId` |
+| a session variable such as `@#AccessibleOrgTree@` | unchanged: `#` is outside the placeholder pattern |
+
+The method names no entity and reads no business property, so it is shared code that respects the
+"structure yes, identity no" rule. Guards: `NeoParentTabFilterResolverTest` (the rule),
+`NeoCrudHandlerTest.ApplyWhereClause` (REST still resolves) and `McpListTabWhereCallSiteTest`
+(`handleList` goes through the resolver and never reads the raw clause).
+
+Visible effects: `binContents` over MCP now lists only rows with `quantityOnHand <> 0`, as the UI
+does. Entities exposed to MCP whose tab clause carries a parent placeholder (`warehouse/binContents`,
+`warehouse/productTransactions`, `purchase-invoice/accounting`, `payment-in`/`payment-out` line
+entities, the `sii-monitor` entities) resolve it from the parent, which for `sii-monitor`'s
+`@AD_Org_ID@` means the parent's organization, as REST always did.
+
+Not covered: `NeoCrudHandler.addTabWherePredicate` (the `_distinct` read) still carries its own copy
+of the same rule.

@@ -490,11 +490,9 @@ class NeoCrudHandler {
    */
   private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId) {
     StringBuilder where = new StringBuilder();
-    String tabWhere = adTab.getHqlwhereclause();
+    // Shared with the MCP read (ETP-5542): one rule for resolving the parent placeholders.
+    String tabWhere = NeoParentTabFilterResolver.resolveTabWhere(adTab, parentId);
     if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = NeoParentTabFilterResolver.resolveTabWhereTokens(adTab, tabWhere, parentId);
-      }
       where.append("(").append(tabWhere).append(")");
     }
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {

@@ -21,6 +21,7 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.model.Entity;
@@ -51,13 +52,41 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * <p>Moved verbatim — signatures, order of operations, exception handling and logging are
  * unchanged from their previous home in {@code NeoCrudHandler}.</p>
  */
-final class NeoParentTabFilterResolver {
+public final class NeoParentTabFilterResolver {
 
   private static final Logger log = LogManager.getLogger(NeoParentTabFilterResolver.class);
 
   private static final Pattern TAB_WHERE_TOKEN_PATTERN = Pattern.compile("@([A-Za-z_.]+)@");
 
   private NeoParentTabFilterResolver() {
+  }
+
+  /**
+   * The tab's HQL where clause, with the placeholders that refer to the parent record resolved.
+   *
+   * <p>The one rule both channels apply to a child tab's own where clause. A tab such as Bin
+   * Contents stores {@code e.storageBin.id=@Locator.id@}: the {@code @...@} is a hole for the
+   * parent record, not a value. The REST read fills it (see {@code NeoCrudHandler}); the MCP read
+   * used to pass the clause on verbatim, so the query filtered on the literal text and answered
+   * {@code 200} with an empty list — no error, no log line (ETP-5542).</p>
+   *
+   * <p>Placeholders are resolved only when a parent id is known and the clause contains one; a
+   * clause without {@code @}, or a call without a parent id, is returned unchanged. That is the
+   * condition REST always used, so session variables such as {@code @#AccessibleOrgTree@} on a
+   * top-level tab keep being left to the core JSON service. The method names no entity and reads
+   * no business property: the parent is found through the tab hierarchy.</p>
+   *
+   * @param adTab    the tab whose where clause is wanted
+   * @param parentId the id of the parent record, or {@code null} for a top-level read
+   * @return the where clause with parent placeholders resolved; {@code null} or blank exactly as
+   *         the tab declares it when there is none
+   */
+  public static String resolveTabWhere(Tab adTab, String parentId) {
+    String tabWhere = adTab.getHqlwhereclause();
+    if (StringUtils.isNotBlank(tabWhere) && parentId != null && tabWhere.contains("@")) {
+      return resolveTabWhereTokens(adTab, tabWhere, parentId);
+    }
+    return tabWhere;
   }
 
   /**

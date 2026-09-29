@@ -70,6 +70,7 @@ import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
+import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -477,8 +478,10 @@ public class McpToolRouter {
       }
     }
 
-    // Apply tab-level HQL where clause
-    String tabWhere = adTab.getHqlwhereclause();
+    // Apply tab-level HQL where clause. ETP-5542: a child tab's clause can carry a placeholder for
+    // its parent record (Bin Contents: `e.storageBin.id=@Locator.id@`). REST fills it with the
+    // parent id; passing it on verbatim here matched nothing and returned an empty list with a 200.
+    String tabWhere = NeoParentTabFilterResolver.resolveTabWhere(adTab, parentId);
     if (StringUtils.isNotBlank(tabWhere)) {
       String existing = params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE);
       if (StringUtils.isNotBlank(existing)) {
