@@ -669,6 +669,49 @@ paths — so nothing here affects editing an existing user.
   `IDENTITY_KEYS` to include `"P|"`-prefixed keys, or route this fallback through a live
   `AD_Preference` query instead of the session snapshot.
 
+#### 4.3.5 A GET's `_extraProperties` companion key was silently stripped by `NeoFieldFilter` (ETP-5432)
+
+**`_extraProperties`/`additionalProperties` is the classic Openbravo datasource query parameter** a
+GET/list request uses to ask `DefaultJsonDataService` for a related property beyond the entity's own
+curated fields — e.g. `_extraProperties=invoice.salesTransaction` on a request against a
+`TBAI_SyncInvoice`-backed entity, to also get the linked invoice's `IsSOTrx` flag. `NeoCrudHandler`
+forwards the whole incoming query-param map to `DefaultJsonDataService.fetch()` verbatim, so the
+requested property resolves and `DataToJsonConverter` joins it into the response under a flat,
+`$`-joined key (`invoice$salesTransaction` for the dotted request-side path
+`invoice.salesTransaction` — see `DataToJsonConverter#replaceDots` /
+`DalUtil.FIELDSEPARATOR`/`DalUtil.DOT`).
+
+**The bug:** `NeoFieldFilter#filterGetResponse` strips any response key that isn't already known to
+the entity's `ETGO_SF_FIELD` config, UNLESS `isMetadataKey` recognizes it — and `isMetadataKey` only
+recognizes a key starting with `_` or `$`. A joined companion key like `invoice$salesTransaction`
+starts with the FK **property name** instead, so it fell straight through both checks and was
+deleted before ever reaching the client — indistinguishable from a client typo (no error; the value
+was just always absent). This is a **general bug affecting any window** that requests a
+non-curated field via `_extraProperties` on a filtered entity, not specific to any one spec — it
+surfaced via TBAI's fiscal-monitor `isSalesRow(row)` check (`tools/app-shell/src/windows/custom/
+fiscal-monitor/TbaiMonitorSection.jsx` in the functional repo), which read the never-populated
+`invoice$issotrx`/`issotrx` (the DAL property name for `IsSOTrx` is actually `salesTransaction`, not
+the generic `IsXxx`→`xxx` pattern) and defaulted every row to "not sales" as a result — see that
+repo's `docs/generated-custom-windows/fiscal-monitor.md` for the frontend-side fix and symptom.
+
+**Fix — `NeoFieldFilter.forEntity` gained a 3-arg overload,** `forEntity(sfEntity, dalEntityName,
+queryParams)`, that additionally allowlists whatever the caller explicitly requested via
+`_extraProperties` before `filterGetResponse` runs. A new private `includeRequestedExtraProperties`
+parses the query param's comma-separated dotted paths and adds each one to the `included` set,
+converted to the same flat `$`-joined shape the response actually carries
+(`invoice.salesTransaction` → `invoice$salesTransaction`). A caller naming a property this way has
+already opted into seeing it — the same reasoning `includeFkIdentifierVariant` already applies to
+the `$_identifier` variant NEO always adds for a resolved FK.
+
+**Scoped to GET only, deliberately.** `NeoCrudHandler.handleWindowEntityCrud` picks the overload
+based on `context.getHttpMethod()`: `"GET".equals(...)` uses the 3-arg overload (with
+`context.getQueryParams()`), every other verb keeps calling the 2-arg overload unchanged. Only a
+GET/list request can carry a client-requested `_extraProperties` key, and `included` also gates
+`filterCreateRequest`/`filterWriteRequest` on the write paths — allowlisting a write-side field this
+way would be a write permission grant, not a response projection, so the two are kept strictly
+separate. `queryParams` is `null` for every existing 2-arg call site (write paths, tests), which is
+a no-op for `includeRequestedExtraProperties`.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -1069,7 +1112,27 @@ DELETE /sws/neo/attachments/file/{attachmentId}
 Authorization: Bearer {token}
 ```
 
-Returns `204` on success, `404` if the attachment does not exist.
+Returns `204` on success, `404` if the attachment does not exist, `409` if it belongs to a
+non-draft fiscal declaration (see below).
+
+**Fiscal-declaration guard (ETP-5432).** Before this change, `NeoAttachmentsHelper#handleDelete`
+had **no ownership/status check of any kind** — any attachment could be deleted regardless of the
+state of the record it belonged to. A frontend-only guard already hid the delete action for a
+non-draft fiscal declaration's justificante (`AttachmentsTab.jsx`'s `readOnly` prop, functional
+repo — see `docs/generated-custom-windows/fiscal-models.md`, "Justificante delete blocked outside
+draft status"), but that hid a UI control, not the endpoint: a direct `DELETE` call still succeeded
+unconditionally.
+
+`handleDelete` now calls a new private `rejectDeleteOfNonDraftFiscalDeclAttachment(attachment)`
+right after resolving the attachment and before invoking `AttachImplementationManager#delete`.
+It is **deliberately narrow** — it inspects the attachment's own `AD_Table`/`AD_Record_ID` and
+short-circuits (returns `null`, delete proceeds) on the very first check for any table other than
+`ETGO_Fiscal_Decl`, so every other table's attachments (goods-receipt, invoice, …) are completely
+unaffected. For an `ETGO_Fiscal_Decl` attachment, it resolves the owning declaration via `OBDal`
+and rejects with `409` (`"Cannot delete an attachment of a fiscal declaration that is not in
+draft status: <declId>"`) when `DeclarationStatus` is set and is not the draft default — mirroring
+the same 409 shape `FiscalDeclCrudHandler#handleDeclDelete` already uses for deleting the
+declaration record itself.
 
 #### PATCH — Update description
 
@@ -1562,6 +1625,19 @@ Behavior details (`McpActionsView`):
   → process name → the column name with its `EM_<module>_` prefix stripped.
 - An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
 
+**Button actions pass the real key column (ETP-5447).** `NeoButtonActionHelper.addTabParamsCore`
+puts the record id under `<TableName>_ID` and, when it differs, also under the table's real
+primary-key column name (`AD_Column.IsKey = 'Y'`). Classic `FIN_BankStatementProcess` reads
+`FIN_Bankstatement_ID` while the table is `FIN_BankStatement`, so with the derived key alone its
+`recordID` was null and the process failed with *id to load is required for loading*. Both keys
+carry the same value, so processes that read the table-name casing are unaffected.
+
+**`docAction` is also passed as `action` (ETP-5447).** The catalog advertises `actionParameter:"docAction"` for every list-backed button, but Classic Java
+processes read the chosen value as `action` (`FIN_BankStatementProcess`:
+`bundle.getParams().get("action")`), so `NeoProcessService.buildBundleParams` also puts `action` =
+`docAction` when `action` is absent — on the Classic `DalBaseProcess`/scheduling bundle path only
+(DB procedures consume `docAction` themselves, OBUIAPP handlers get their params unchanged).
+
 **When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a
 record (complete, cancel, post, …), not the full editable/read-only column list.
 
@@ -1627,6 +1703,119 @@ the UI makes (the IMP-19 §4 reasoning); without either the handler answers `GL_
 Multi-currency needs no parameter: conversion uses the same exchange rate as the UI, and
 `candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
 `applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
+
+The role gate, the SPA-shaped derived context and the flush-to-clean after a successful write
+(ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
+keeps only its contracts and its routing.
+
+##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
+
+The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
+`@Named("bank-statements")`), the report spec (`SPEC_TYPE=R`) behind the SPA's
+`/sws/neo/bank-statements?action=…` routes. Its one included entity is also named
+`bank-statements`, so that is the `entity` `neo_action` / `neo_schema` take (the value
+`NeoActionContract.SpecActions#getEntityName()` resolves, and `actionEntity` in `neo_discover`).
+`BankStatementsHandler#actionContracts()` returns `BankStatementAgentActions.CONTRACTS`, and
+`handle()` sends only `NeoEndpointType.ACTION` to `BankStatementAgentActions.dispatch` — purely
+additive: the SPA's requests carry no endpoint type and keep their routing untouched.
+
+```
+neo_action {spec:"bank-statements", entity:"bank-statements", id:"<id>", action:"createStatement",
+            parameters:{name, transactionDate:"2026-06-30", importDate:"2026-07-01",
+                        lines:[{date:"2026-06-02", description, bpartnerName, in:3500, out:0}]}}
+```
+
+Before these actions, an agent could only reach statements through the generic
+`financial-account` entities `importedBankStatements` / `bankStatementLines`: a statement written
+there was never processed (its lines never became reconcilable), could not be processed,
+reactivated or imported at all, stamped today on both header dates and skipped every check the UI
+applies to a manual statement.
+
+- **Same handler methods as the SPA.** Each action re-enters the SAME package-private method the
+  SPA route uses (`handleList`, `handleGetLines`, `handlePreview`, `handleCreate`, `handleImport`,
+  `handleUpdate`, `handleProcess`, `handleReactivate`, `handleDelete`) with a derived context that
+  has no endpoint type, so it cannot loop back into the ACTION branch. Required header dates, the
+  account's BSF document type, the line amount rules (exactly one of `in`/`out` above zero, never
+  negative), the draft/processed state machine and the PSD2 delete guard are the UI's own.
+- **`id` semantics.** Account-level actions take the **financial account** id (sent as
+  `FIN_Financial_Account_ID`); statement-level actions take the **bank statement** id (sent as
+  `statementId` for `statementLines`, as `id` in the body otherwise). The record `id` always wins:
+  an id-like key in `parameters` is refused by the contract as undeclared. Each contract carries an
+  `idDescription` saying which one it is.
+- **Guards before anything runs.** Contract validation (§4.12.1.1 refusals, 422), blank `id` → 422
+  (`id is required: <idDescription>`), then the report-spec role gate — `POST` for writes, `GET`
+  for the reads, including `previewStatement`, which only reads even though the handler receives it
+  as a POST (it needs the upload body) — then the agent-only input checks below (422).
+- **Flush while the context is set.** Successful writes are flushed to a clean session inside the
+  dispatcher (the MCP session scope flushes once and restores a null `OBContext`; a leftover dirty
+  session would fail at request end with an HTML 500 after a reported success). A flush failure is
+  rolled back and answered as JSON. The reads never flush.
+
+| Action | Kind | `id` | Parameters (required in **bold**) | SPA route reused |
+|---|---|---|---|---|
+| `listStatements` | read | financial account | — | `GET ?FIN_Financial_Account_ID=` |
+| `statementLines` | read | bank statement | — | `GET ?action=lines&statementId=` |
+| `previewStatement` | read | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=preview` (never persists) |
+| `createStatement` | write | financial account | **`name`**, **`transactionDate`**, **`importDate`** (`yyyy-MM-dd`), **`lines[]`**, `process` (default `true`), `notes`, `fileName` | `POST ?action=create` |
+| `importStatement` | write | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=import` |
+| `updateStatement` | write | bank statement | **`name`**, **`transactionDate`**, **`importDate`**, `lines[]` (required unless matched lines remain), `process` (default `false`), `notes`, `fileName` (omitted = cleared) | `POST ?action=update` |
+| `processStatement` | write | bank statement | — | `POST ?action=process` |
+| `reactivateStatement` | write | bank statement | — | `POST ?action=reactivate` |
+| `deleteStatement` | write | bank statement | — | `POST ?action=delete` |
+
+Notes: `lines[]` items are `{date, in, out, description, reference, bpartnerName, bpartnerId,
+glItemId}`; `reference` defaults to `**`. `updateStatement` replaces only the unmatched lines and
+works on drafts only; `reactivateStatement` needs a processed, not posted statement and does not
+reverse reconciliations; `deleteStatement` works on drafts only, answers **409** on a
+PSD2-connected account and **400** while matched lines remain. Upload formats are Cuaderno 43 or a
+generic CSV with header `Transaction Date, Reference No., Business Partner Name, Description,
+Amount OUT, Amount IN` (dates `dd/MM/yyyy`).
+
+**Import date rule.** `importStatement` stores the statement **processed**, with `importdate` = now
+and `statementdate` (`transactionDate`) = the last movement date among the kept lines (today when
+no line has a date) — the same rule as the SPA's CSV import. A file with no valid line answers
+**400** with code `NO_VALID_LINES` and saves nothing.
+
+**Agent-only input checks (`BankStatementAgentValidation`).** The UI never sends a statement that
+fails its own client-side checks, so the handler fills the gaps silently (a missing line date
+becomes the statement date, an unparseable amount becomes 0, an over-long text is truncated, an
+unknown contact / G/L item id is dropped). Tightening the handler would change what the SPA route
+accepts, so the agent path applies the UI's checks to the agent's input instead — on
+`createStatement` and `updateStatement` — answering 422 with `lines[<i>]: <problem>`:
+
+- every line needs `date` (a real `yyyy-MM-dd` date) and an amount on exactly one side — `in` or
+  `out` > 0, the other absent/0, none negative, each a JSON number or a dot-decimal numeric string
+  (same rule as the UI's `isLineComplete` and the handler's `validateLineAmounts`, which still
+  runs);
+- a line accepts only the eight keys above (a typo such as `amount` would otherwise produce a line
+  the handler treats as blank and skips);
+- lengths are refused, not truncated: `name` / `bpartnerName` ≤ 60, `fileName` / `notes` ≤ 255,
+  `reference` ≤ 30, `description` ≤ 2000, measured on the raw value as sent (the handler
+  truncates it untrimmed); a blank `reference` is still stored as `**`;
+- `bpartnerId` / `glItemId` must be a contact / G/L item of the current tenant;
+- header `transactionDate` / `importDate` must be real dates (the contract already requires them
+  and checks their shape);
+- `importStatement` / `previewStatement`: `contentBase64` must be standard base64 (RFC 4648
+  alphabet, no line breaks: the handler decodes it with `Base64.getDecoder()`) and is capped at
+  1 MiB of file content (1,398,104 base64 characters) — refused before decoding. The UI import is
+  not limited.
+
+Business refusals keep the handler's own literals and statuses (e.g. `Only draft (unprocessed)
+statements can be modified`, `The statement is posted and cannot be reactivated`, code
+`NO_VALID_LINES`).
+
+**Generic writes are closed (405).** On the `financial-account` W spec, `importedBankStatements`
+and `bankStatementLines` are `readOnly: true` in `artifacts/financial-account/decisions.json`, so
+`ETGO_SF_ENTITY` grants `GET`/`GETBYID` only and `POST`/`PUT`/`PATCH`/`DELETE` answer 405
+(`<METHOD> not enabled for <entity>`) on REST and MCP alike. Both entities also carry
+`Java_Qualifier = bankStatementEntityHandler` (`BankStatementEntityHandler`), which refuses any
+generic create / update / delete that still reaches it with a 405 naming the concrete action —
+create → `createStatement` (or `importStatement` from a file) with `id` = the financial account;
+update → `updateStatement`; delete → `deleteStatement`; any line write → `updateStatement` on the
+line's statement. The SPA is unaffected: it never wrote through those entities (it uses
+`/sws/neo/bank-statements`). Reads (`neo_list` / `neo_get`) pass through, and the agent guidance
+(`AGENT_PROMPT` of `financial-account`, `bank-statements` and of both entities) sends agents to the
+actions.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
@@ -3374,7 +3563,7 @@ NEO Headless enforces security at multiple levels:
 
 5. **Process access control:** For process specs and button actions, the servlet checks `ADProcessAccess` for the current role before execution — binary, no read/write tiering: any active row grants full execute access. A request with no role assigned is denied the same as an unrecognized role. Denied requests return `403 Forbidden`.
 
-6. **OBUIAPP process access for report handlers:** two report-type specs (`not-posted-documents`, `aging-receivable`) have no `AD_Process` and no backing `AD_Window`, and previously had zero access control. Their `NeoHandler.handle()` now gates access via `NeoAccessHelper.hasObuiappProcessAccess(processId)` against the real OBUIAPP process, resolved through the `AD_Menu.em_obuiapp_process_id` FK (never by name-matching).
+6. **OBUIAPP process access for report handlers:** report-type specs with no `AD_Process` and no backing `AD_Window` (`not-posted-documents`, `aging-receivable`, and — since ETP-5483 gave the payables side its own spec/handler — `aging-payable`) previously had zero access control. Their `NeoHandler.handle()` now gates access via `NeoAccessHelper.hasObuiappProcessAccess(processId)` against the real OBUIAPP process, resolved through the `AD_Menu.em_obuiapp_process_id` FK (never by name-matching).
 
 7. **Aging report prerequisites:** before `aging-receivable` delegates to Core's `AgingDao`, its NEO handler validates the resolved organization, organization tree, accounting schema/currency, and confirmed-payment-status reference. A missing derived prerequisite returns an actionable `400` or `422`; it does not surface as a generic `500` from the Core DAO.
 
@@ -3775,8 +3964,11 @@ this section**, which wrongly included 6 rows tied to `ETGO_SF_ENTITY.ad_tab_id`
 "Financial Account" window (`bank-statements`, `bank-reconciliation`, `cash-close`, `financial-
 account-transactions`, `financial-account-bank-connection`, `financial-accounts-page`) — none of
 which is an actual gallery card — while missing 5 real ones (`balance-sheet`, `profit-loss`,
-`report-general-ledger`, `report-journal-entries`, `report-trial-balance`) that have no
-`ETGO_SF_SPEC` row of their own at all. None of the 9 real rows is a candidate for the
+`report-general-ledger`, `report-journal-entries`, `report-trial-balance`) that, AT THE TIME,
+had no `ETGO_SF_SPEC` row of their own at all — all five (`report-trial-balance`,
+`report-journal-entries`, `balance-sheet`, `profit-loss`, `report-general-ledger`) have since
+gained one as their own MCP report tool was added (ETP-5483 slices 2/3/4/5/6; see the table
+below). None of the 9 real rows is a candidate for the
 `SPEC_TYPE = 'W'` window resolution above (windowless by construction), so each row's access is
 resolved via whichever mechanism its own NEO handler actually gates on:
 
@@ -3784,8 +3976,113 @@ resolved via whichever mechanism its own NEO handler actually gates on:
 |---|---|---|
 | `tax-report` | Classic `AD_Process_Access` (`TaxReportHandler` → `NeoAccessHelper#hasProcessAccess`) | `8C1331B9EC14CED7E040007F010119A0` |
 | `aging-receivable` / `aging-payable` | OBUIAPP `ProcessAccess` (`AgingReportHandler`, receivable/payable tiers) | `0D37A9F6109549DEB058373EF2DAEB6A` / `EB4C4053F3B94A17A08D1DD7E89CEB7E` |
-| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`, `report-trial-balance` (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
+| `balance-sheet`*, `profit-loss`*, `report-journal-entries`*, `report-trial-balance`*, `report-general-ledger`* (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance — resolved via each handler's own `isAccessibleForCurrentRole()` rather than the shared spec gate (see below) | `D647D118F5014D00AF47A636B2CD0DD3` |
 | `inventory-stock-report` | `AD_Window_Access` on a tab-less pseudo-window | `6346B88619F948F9A42224BDB0B239FA` |
+
+\* `report-trial-balance` (ETP-5483 slice 2), `report-journal-entries` (ETP-5483 slice 3),
+`balance-sheet` (ETP-5483 slice 4), `profit-loss` (ETP-5483 slice 5) and `report-general-ledger`
+(ETP-5483 slice 6, the last one) are the five rows that ALSO have their own `ETGO_SF_SPEC`/
+`ETGO_SF_ENTITY` row and their own MCP report tool —
+`generate_report_trial_balance` (`TrialBalanceReportHandler`, `@Named(
+"trialBalanceReportHandler")`), `generate_report_journal_entries` (`JournalEntriesReportHandler`,
+`@Named("journalEntriesReportHandler")`), `generate_balance_sheet` (`BalanceSheetReportHandler`,
+`@Named("balanceSheetReportHandler")`), `generate_profit_loss` (`ProfitLossReportHandler`,
+`@Named("profitLossReportHandler")`) and `generate_report_general_ledger`
+(`GeneralLedgerReportHandler`, `@Named("generalLedgerReportHandler")`) — each a faithful Java port
+of the SAME `artifacts/report-trial-balance/report-contract.json` / `artifacts/report-journal-
+entries/report-contract.json` / `artifacts/balance-sheet/report-contract.json` /
+`artifacts/profit-loss/report-contract.json` / `artifacts/report-general-ledger/
+report-contract.json` SQL the two Node report engines (`schema_forge`'s Vite dev plugin and
+`schema_forge_core`'s production `report-server`) already run for the SPA. All five handlers'
+`isAccessibleForCurrentRole()` gate on the exact same `FINANCIAL_REPORTS_WINDOW_ID` anchor this
+table already uses — adding a spec/entity row did not change that report's access boundary, only
+added a second, MCP-reachable way to run it. **Drift risk:** each is now a dual implementation
+(Node/SQL-placeholder for the SPA, Java/bind-parameter for MCP) of the same query.
+`report-trial-balance` additionally ports `report-grouping.js`'s row-folding post-processing (as
+`TrialBalanceFolding`); `report-journal-entries` nests its own flat SQL result into one object per
+journal entry via `JournalEntriesGrouping` — a shape this handler defines for the MCP response
+(the SPA's own nesting for this report's `grouped-listing` contract type lives entirely in the
+report templates, not in a shared JS module, so there is nothing to port there); `report-general-
+ledger` ports `report-grouping.js`'s `buildNestedGroups`/`foldOpeningBalance` — the SAME function
+BOTH Node report engines actually call for this report (unlike `report-trial-balance`'s
+`resolveGrouping`, `buildNestedGroups` is NOT gated off for a `grouped-listing` contract type) —
+as `GeneralLedgerGrouping`; `balance-sheet` and `profit-loss` BOTH port `report-grouping.js`'s
+`buildAccountReportTree` (the same roll-up/formula-node engine both reports use) as the SAME
+shared class, `AccountReportTree` — `ProfitLossReportHandler` calls `AccountReportTree.build`
+unchanged, exactly as that class's own javadoc anticipated; only the SQL that PRODUCES its input
+rows differs (period-activity `BETWEEN` vs Balance Sheet's cumulative `<=`, `reporttype = 'N'` vs
+`'Y'`, no `income_summary`/`net_income` synthetic row). No Java class here is structurally linked
+to its Node counterpart — see each handler's own class javadoc for what must be mirrored by hand
+on either side.
+
+`generate_balance_sheet`'s and `generate_profit_loss`'s responses share the exact same shape — a
+flattened, document-ordered list of account-tree rows (`node_id`, `value`, `name`, `element`
+(`"<value> - <name>"`), `elementLevel`, `level` (indent depth), `amount`, `amount_ref` when
+`compareTo` is true, `isHeading`, `isFormula`, `group`, `isGroupStart`), mirroring the indented
+tree the SPA's Handlebars template renders. They differ in what `yearId`/`dateFrom`/`dateTo` bound:
+for `generate_balance_sheet`, `yearId` bounds the snapshot to that fiscal year's last period end
+(further narrowed by `dateTo`), and `dateFrom`/`fromReferenceDate` are accepted for parameter
+symmetry with the report contract but have NO EFFECT — Balance Sheet is a cumulative snapshot, not
+a period-activity report (see that handler's own class javadoc for the placeholder-extraction
+evidence). For `generate_profit_loss`, `yearId` bounds a RANGE — that fiscal year's own period
+start through its period end — further narrowed by BOTH `dateFrom` and `dateTo`, which DO have a
+real effect (the opposite of Balance Sheet): P&L is a period-activity total of postings within the
+year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
+(`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
+
+`generate_report_journal_entries`'s response nests one object per journal entry
+(`fact_acct_group_id`) with header fields (`entry_no`, `dateacct` as `yyyy-MM-dd`,
+`document_type`, `docbasetype`, `isreturn`, `doc_window`, `doc_record_id`, `doc_query_key`,
+`doc_query_value`, `record_id`, `ad_table_id`, and `entry_description` when `showEntryDescription`
+is true) and a `lines` array (`account_no`, `account_name`, `amtacctdr`, `amtacctcr`, plus
+`bpname`/`productname`/`projectname`/`costcentername` when `showDimensions` is true). `doc_window`
+is the NEO spec name of the entry's source document, so an MCP caller reads it with
+`neo_get(spec: doc_window, id: doc_record_id)`.
+
+`document_type` is Etendo's own `ad_ref_list` (reference 183) name for `docbasetype`, translated to
+the session language — NOT the SPA's printed "Detail" label. The SPA relabels a few docbasetypes
+and the MMR/MMS return variants through a hand-maintained dictionary in
+`schema_forge_core/cli/src/report-i18n.js` (`DOC_TYPE_LABEL_OVERRIDES`, `RETURN_LABELS`); that
+dictionary is deliberately not copied into Java. A caller that needs the distinction reads
+`docbasetype` plus `isreturn` instead (`MMR` + `isreturn` is a vendor return, `MMS` + `isreturn` a
+customer return).
+Because a full period can carry far more lines than are safe to return in one call, the entries
+(never lines) are capped via `limit` (default 200, hard max 1000) applied AT THE SQL LEVEL against
+the query's own `DENSE_RANK()`-based `entry_no`, so a cap never splits an entry across a
+truncation boundary; `meta.truncated`/`meta.totalEntries`/`meta.hint` tell the caller when to
+narrow the request. See `JournalEntriesReportHandler`'s own class javadoc for the full parameter
+list, the entry-type toggle fallback (all five `show*Entries` toggles false falls back to regular
+entries only, matching the report contract's own SQL), and the multi-value id parameters
+(`bPartnerId`/`productId`/`projectId`/`costCenterId`), which — unlike an early assumption — the
+live Node `applyPlaceholders` genuinely supports via its own comma-to-`IN` rewrite, so this Java
+port needed no deviation from a faithful multi-id port.
+
+`generate_report_general_ledger`'s response nests one object per dimension GROUP (`dimensionValue`
+present only when `groupBy` was set), each with a nested `accounts` array — one object per account
+(`account_id`, `value`, `name`, `opening` (an `{amtacctdr, amtacctcr, total}` triple, present only
+when `showOpenBalances` is true — default), a `lines` array (`dateacct` as `yyyy-MM-dd`,
+`fact_acct_group_id`, `groupbyname`, `amtacctdr`, `amtacctcr`, `runningBalance`, plus
+`bpname`/`productname`/`projectname`/`costcentername` when `showDimensions` is true), `subtotal`
+(the same triple, period movements only), `total` (the same triple, `opening + subtotal`),
+`totalLines` and `linesTruncated`). Unlike
+`report-journal-entries`'s single entries cap, this report enforces TWO independent SQL-level
+caps at once — `accountLimit` (default 100, hard max 500; DISTINCT accounts, never cuts one in
+half) and `linesPerAccountLimit` (default 500, hard max 2000; lines within a single account, so
+one extremely active account like a bank account cannot alone blow up the response even when
+`accountLimit` is small) — both via window functions (`DENSE_RANK()`/`ROW_NUMBER()`) on the same
+CTE, never by pulling every row into the JVM first. Critically, `opening`/`subtotal`/`total` are
+ALWAYS computed from a SEPARATE, uncapped SQL aggregate query (never by summing the — possibly
+line-capped — `lines` array), so those numbers stay numerically correct even when
+`linesPerAccountLimit` cut a very active account's line list short; `meta.truncatedAccounts`/
+`meta.totalAccounts`/`meta.accountsReturned` cover the account-level cap, and each account's own
+`totalLines`/`linesTruncated` covers the per-account line cap independently. `groupBy` accepts
+`bpartner`/`product`/`project`/`costcenter` (mirroring the contract's `groupByValue`/
+`groupByField` parameter pairs) and nests accounts inside each dimension group exactly like
+`report-grouping.js`'s `buildNestedGroups` does for the SPA. See `GeneralLedgerReportHandler`'s
+own class javadoc for the full parameter list, the `factaccttype NOT IN ('R', 'C')` scope (the
+contract's own main-query filter — its `openingQuery` deliberately carries NO `factaccttype`
+filter at all, exactly reproduced here), and the org-filter semantics (exact-match, same as
+`report-trial-balance`/`report-journal-entries`).
 
 This resolution logic lives in `com.etendoerp.go.schemaforge.util.ReportAccessCatalog` — a shared
 utility, NOT duplicated per-webhook, because `SFSystemRoleTemplates` (§8f) needs the exact same

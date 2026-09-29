@@ -272,8 +272,13 @@ class NeoCrudHandler {
       // core's write path would commit this record on its own and defeat the caller's rollback
       // (IMP-23). NeoBatchJsonDataService decides which of the two applies to this thread.
       DefaultJsonDataService jsonService = BatchService.currentJsonService();
-      NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
-          context.getSfEntity(), dalEntityName);
+      // ETP-5432 #6/#7: only a GET/list response can carry a client-requested _extraProperties
+      // key, and only a GET response is what filterGetResponse (not filterCreateRequest/
+      // filterWriteRequest) reads `included` for — so the 3-arg overload (which allowlists that
+      // key) is scoped to GET, leaving every write path's allowlist untouched.
+      NeoFieldFilter fieldFilter = "GET".equals(context.getHttpMethod())
+          ? NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName, context.getQueryParams())
+          : NeoFieldFilter.forEntity(context.getSfEntity(), dalEntityName);
       Map<String, String> params = buildDalParams(context, adTab, dalEntityName);
 
       return executeJsonServiceAndBuildResponse(
