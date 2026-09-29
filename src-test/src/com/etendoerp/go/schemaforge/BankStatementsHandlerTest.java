@@ -120,6 +120,14 @@ public class BankStatementsHandlerTest {
   private static final String MSG_STATEMENT_BANK_CONNECTED =
       "Statements from a bank-connected account cannot be deleted.";
 
+  /**
+   * The bank-connected create / import / preview rejection (ETP-5471). Kept as a literal copy for
+   * the same reason as {@link #MSG_STATEMENT_BANK_CONNECTED}: the frontend's
+   * {@code backendError.statementBankConnectedNotCreatable} matches it by EXACT text.
+   */
+  private static final String MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE =
+      "This account is synchronized with the bank; statements cannot be created or imported manually.";
+
   private BankStatementsHandler handler;
 
   /** ETP-5447: the spec / entity an agent ACTION context carries. */
@@ -1957,6 +1965,163 @@ public class BankStatementsHandlerTest {
 
       assertEquals(200, r.getHttpStatus());
       verify(dal).remove(draft);
+    }
+  }
+
+  // ── ETP-5471: no manual create / import / preview on a bank-connected account ──
+
+  /** A valid ?action=create body for {@code acc-1} with one non-blank line. */
+  private static JSONObject manualCreateBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    // Both header dates are required since ETP-5447; without them the create is refused (400)
+    // before the account is even looked at.
+    body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("importDate", "2026-06-04T00:00:00Z");
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2026-06-02T00:00:00Z", "Transferencia", "Acme", 3500.0, 0));
+    body.put("lines", lines);
+    return body;
+  }
+
+  /**
+   * A connected account's statements come from the bank sync, so a manual statement is refused
+   * with a 409 BEFORE anything is built or saved — the refusal leaves nothing to roll back.
+   */
+  @Test
+  public void testHandleCreateRejectsBankConnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(manualCreateBody());
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(connectedAccount);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+
+      assertEquals(409, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).newManualBankStatement(any(), any());
+      verify(handler, never()).processStatement(any());
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * The guard compares against the exact "connected" code: a disconnected account (the column's
+   * default, a non-null status) keeps creating manual statements exactly as before.
+   */
+  @Test
+  public void testHandleCreateAllowsDisconnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(manualCreateBody());
+    FIN_FinancialAccount account = accountWithConnectionStatus(PSD2_DISCONNECTED);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-new");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+    doNothing().when(handler).processStatement(any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+
+      assertEquals(201, r.getHttpStatus());
+      assertEquals("stmt-new",
+          r.getBody().getJSONObject("response").getJSONObject("data").getString("id"));
+      verify(dal).save(statement);
+      verify(handler).processStatement(statement);
+    }
+  }
+
+  /** ?action=import on a connected account: 409, the parser never runs and nothing is saved. */
+  @Test
+  public void testImportRejectsBankConnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body("acc-1", "f.c43", encode(c43LineEighty())));
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(connectedAccount);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "import"));
+
+      assertEquals(409, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).newBankStatement(any(), anyString());
+      verify(handler, never()).parseC43(any(), any());
+      verify(handler, never()).parseGenericCsv(any(), any());
+      verify(handler, never()).processStatement(any());
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * The refusal comes before the file is decoded: content that is not even valid base64 (which
+   * would otherwise answer 400 "Invalid base64 content") still gets the 409.
+   */
+  @Test
+  public void testImportRejectsBankConnectedAccountBeforeDecodingTheFile() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body("acc-1", "f.c43", "%%% not base64 %%%"));
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(connectedAccount);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "import"));
+
+      assertEquals(409, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE,
+          r.getBody().getJSONObject("error").getString("message"));
+    }
+  }
+
+  /** ?action=preview shares the upload validation, so it is refused the same way. */
+  @Test
+  public void testPreviewRejectsBankConnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body("acc-1", "f.c43", encode(c43LineEighty())));
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(connectedAccount);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "preview"));
+
+      assertEquals(409, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(handler, never()).newBankStatement(any(), anyString());
+      verify(handler, never()).parseC43(any(), any());
+      verify(handler, never()).readLinesForPreview(anyString());
+      verify(dal, never()).save(any());
     }
   }
 
