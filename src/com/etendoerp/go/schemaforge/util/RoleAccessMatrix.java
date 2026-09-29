@@ -290,6 +290,9 @@ public final class RoleAccessMatrix {
    * Returns a copy of {@code windowsById} without the {@link #UI_EXCLUDED_WINDOW_IDS} entries,
    * preserving insertion order — lets a caller that already resolved the unfiltered set derive
    * the UI set without a second query.
+   *
+   * @param windowsById the windows to filter, keyed by id; never mutated
+   * @return a new map with the same entries minus the UI-excluded ids (and any {@code null} key)
    */
   public static Map<String, Window> withoutUiExcluded(Map<String, Window> windowsById) {
     Map<String, Window> filtered = new LinkedHashMap<>();
@@ -307,6 +310,10 @@ public final class RoleAccessMatrix {
    * {@code role}'s full row-id → tier map for the {@code matrix}: its real Etendo GO windows
    * ({@link #resolveWindowTierMap(Role, Set)} over {@code goWindowsById}) plus the ETP-5071 proxy
    * rows ({@link #mergeProxyAccessTiers(Role, Map)}). A row absent from the map means no grant.
+   *
+   * @param role the role (tenant or system template) to resolve tiers for
+   * @param goWindowsById the UI window set the real-window tiers are intersected with
+   * @return row id → {@link #FULL} or {@link #READ_ONLY}; never {@code null}
    */
   public static Map<String, String> resolveTierMap(Role role, Map<String, Window> goWindowsById) {
     Map<String, String> tiers = resolveWindowTierMap(role, goWindowsById.keySet());
@@ -319,6 +326,10 @@ public final class RoleAccessMatrix {
    * ({@link #FULL} for {@code IsReadWrite = true}, {@link #READ_ONLY} otherwise), intersected
    * with {@code goWindowIds} — a role may hold native window-access rows for windows Etendo GO
    * never exposes, and those must not leak into the matrix.
+   *
+   * @param role the role whose active window grants are read
+   * @param goWindowIds the window ids to keep; any other grant is ignored
+   * @return window id → {@link #FULL} or {@link #READ_ONLY}; never {@code null}
    */
   @SuppressWarnings("unchecked")
   public static Map<String, String> resolveWindowTierMap(Role role, Set<String> goWindowIds) {
@@ -388,6 +399,11 @@ public final class RoleAccessMatrix {
    * Turns a row-id → tier map into the sorted-by-name {@code windows} JSON array a role card
    * carries. Only ids present in {@code goWindowsById} are emitted, so the ETP-5071 proxy rows
    * never reach it.
+   *
+   * @param tiers row id → tier, as returned by {@link #resolveTierMap(Role, Map)}
+   * @param goWindowsById the windows that may be emitted, keyed by id
+   * @return the {@code [{id, name, tier}]} array, sorted by window name (case-insensitive)
+   * @throws JSONException if a JSON value cannot be written (not expected in practice)
    */
   public static JSONArray windowsJson(Map<String, String> tiers, Map<String, Window> goWindowsById)
       throws JSONException {
@@ -437,6 +453,9 @@ public final class RoleAccessMatrix {
    *
    * @param goWindowsById the UI window set ({@link #resolveActiveEtendoGoWindowsById()})
    * @param tierMapsByRoleId role id → {@link #resolveTierMap(Role, Map)}, in column order
+   * @return {@code {categories: [{name, windows: [{id, name, access}]}]}}, categories and rows
+   *     sorted by name
+   * @throws JSONException if a JSON value cannot be written (not expected in practice)
    */
   public static JSONObject buildMatrix(Map<String, Window> goWindowsById,
       Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
@@ -501,6 +520,9 @@ public final class RoleAccessMatrix {
    * adapter code path for both keys.
    *
    * @param reportTierMapsByRoleId role id → {@link ReportAccessCatalog#resolveTierMap(Role)}
+   * @return {@code {categories: [{name, reports: [{id, name, access}]}]}}, categories and rows
+   *     sorted by name
+   * @throws JSONException if a JSON value cannot be written (not expected in practice)
    */
   public static JSONObject buildReportsMatrix(
       Map<String, Map<String, String>> reportTierMapsByRoleId) throws JSONException {
