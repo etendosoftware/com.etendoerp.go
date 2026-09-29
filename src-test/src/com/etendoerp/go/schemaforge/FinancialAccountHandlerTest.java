@@ -83,7 +83,7 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  * <b>mutates the request body</b> (normalized {@code type}, {@code iBAN} and
  * {@code country}, default {@code matchingAlgorithm}) and returns
  * {@code null} so the generic CRUD persists; on DELETE it short-circuits with a
- * soft-archive. Strategy: spy the handler and stub the package-private DAL seams
+ * hard delete. Strategy: spy the handler and stub the package-private DAL seams
  * ({@code loadCurrency}, {@code loadAccount}, {@code nameExists},
  * {@code hasOpenReconciliations}, {@code loadCountry},
  * {@code listMatchingAlgorithms}) so every path runs without a database or a
@@ -99,8 +99,8 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  *   <li>update: name uniqueness (excluding self) → 409; (IBAN, country) pair
  *       validation; missing-name body passes through. The full ETP-5473 country
  *       rule matrix lives in {@link FinancialAccountHandlerCountryTest}.</li>
- *   <li>delete: soft-archive → 204 + setActive(false); open reconciliations →
- *       409; missing id / unknown account → 400.</li>
+ *   <li>delete: hard delete → 204; blockers → 409; missing id → 400; unknown
+ *       account → 404 (ETP-5474).</li>
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
@@ -891,11 +891,19 @@ public class FinancialAccountHandlerTest {
     verify(handler, never()).loadAccount(any());
   }
 
-  /** An id that resolves to no account is rejected with a 400. */
+  /**
+   * An id that resolves to no account is a 404, not a 400 (ETP-5474): the request is well formed,
+   * the record just does not exist — an agent must be able to tell "already gone" apart from a
+   * malformed call.
+   */
   @Test
-  public void testDeleteAccountMissingAccountReturns400() {
+  public void testDeleteAccountMissingAccountReturns404() {
     doReturn(null).when(handler).loadAccount(ACC_ID);
-    assertEquals(400, handler.deleteAccount(ACC_ID).getHttpStatus());
+
+    NeoResponse response = handler.deleteAccount(ACC_ID);
+
+    assertEquals(404, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("Account not found"));
   }
 
   /**

@@ -2743,6 +2743,38 @@ A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key i
 and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
 humanized name, so a cosmetic field can never drop a tool from the list.
 
+#### 4.12.17 `neo_delete` always confirms a successful delete (ETP-5474)
+
+A successful `neo_delete` answers `{"deleted": true, "id": "<recordId>"}` whichever path removed
+the row — the generic removal, or an entity `NeoHandler` whose pre-hook resolved the DELETE itself
+and returned `204 No Content` (e.g. `FinancialAccountHandler#deleteAccount` on
+`financial-account/account`). Before ETP-5474 that 204 went through `neoResponseToMcpResult` with a
+null body and was rendered as `{}`, which an agent read as a failed delete although the row was gone.
+
+`McpToolRouter.handleDelete` calls `McpHookExecutor.runDeletePreHook` instead of the generic
+`runPreHook`:
+
+| Pre-hook returns | MCP answer |
+|---|---|
+| `null` | generic removal, then the confirmation |
+| status &ge; 400 | the normalized error, unchanged (`neoResponseToMcpResult`) |
+| 2xx other than 202, with a null or empty body | the confirmation (`McpToolResponses.deleteConfirmation`) |
+| 2xx with a non-empty body | that body, unchanged (e.g. a future handler that answers with its own payload) |
+| `202 Accepted`, or any other non-error code (1xx, 3xx) | passed through unchanged (`neoResponseToMcpResult`) |
+
+Only a completed-success 2xx with no body counts as a confirmation. A `202 Accepted` means the
+delete was queued and has not happened yet, so an asynchronous handler is never reported to the
+agent as a completed delete.
+
+Both confirmation sites build it through `McpToolResponses.deleteConfirmation`, so they cannot drift.
+The rule lives in the router, not in each handler: any future handler that resolves DELETE with 204
+is covered. `runPreHook` itself is untouched — on the process, report and widget paths a 204 does
+not mean "deleted".
+
+A `financial-account/account` delete for an id that resolves to no account answers `404`
+(`Account not found`), not `400`: the call is well formed, the record just does not exist. A blank
+id is still `400`.
+
 ---
 
 ### 4.13 Image Fields and Image Upload (ETP-5184)
