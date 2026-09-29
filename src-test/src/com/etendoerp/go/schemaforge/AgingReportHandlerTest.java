@@ -776,6 +776,88 @@ class AgingReportHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // round / resolvePrecision (ETP-5483 follow-up — output rounding)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("round")
+  class Round {
+
+    @Test
+    @DisplayName("Rounds a long-fraction value to 2 decimals with HALF_UP")
+    void roundsToTwoDecimalsHalfUp() throws Exception {
+      BigDecimal result = (BigDecimal) invokeStatic("round",
+          new Class<?>[] { BigDecimal.class, int.class },
+          new BigDecimal("107.06442176871364"), 2);
+      assertEquals(new BigDecimal("107.06"), result);
+    }
+
+    @Test
+    @DisplayName("HALF_UP rounds .005 up, not to even")
+    void halfUpRoundsUp() throws Exception {
+      BigDecimal result = (BigDecimal) invokeStatic("round",
+          new Class<?>[] { BigDecimal.class, int.class },
+          new BigDecimal("1.005"), 2);
+      assertEquals(new BigDecimal("1.01"), result);
+    }
+
+    @Test
+    @DisplayName("Rounds to 0 decimals")
+    void roundsToZeroDecimals() throws Exception {
+      BigDecimal result = (BigDecimal) invokeStatic("round",
+          new Class<?>[] { BigDecimal.class, int.class },
+          new BigDecimal("100.5"), 0);
+      assertEquals(new BigDecimal("101"), result);
+    }
+  }
+
+  @Nested
+  @DisplayName("resolvePrecision")
+  class ResolvePrecision {
+
+    @Test
+    @DisplayName("Uses the currency's own standardPrecision")
+    void usesCurrencyPrecision() throws Exception {
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(3L);
+
+      Integer result = (Integer) invokeStatic("resolvePrecision",
+          new Class<?>[] { Currency.class }, currency);
+      assertEquals(3, result);
+    }
+
+    @Test
+    @DisplayName("Falls back to 2 when the currency is null")
+    void fallsBackWhenCurrencyNull() throws Exception {
+      Integer result = (Integer) invokeStatic("resolvePrecision",
+          new Class<?>[] { Currency.class }, (Currency) null);
+      assertEquals(2, result);
+    }
+
+    @Test
+    @DisplayName("Falls back to 2 when standardPrecision itself is null")
+    void fallsBackWhenPrecisionNull() throws Exception {
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(null);
+
+      Integer result = (Integer) invokeStatic("resolvePrecision",
+          new Class<?>[] { Currency.class }, currency);
+      assertEquals(2, result);
+    }
+
+    @Test
+    @DisplayName("Supports a 0-decimal currency")
+    void supportsZeroDecimalCurrency() throws Exception {
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(0L);
+
+      Integer result = (Integer) invokeStatic("resolvePrecision",
+          new Class<?>[] { Currency.class }, currency);
+      assertEquals(0, result);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // buildBpInClause
   // -------------------------------------------------------------------------
 
@@ -1009,8 +1091,8 @@ class AgingReportHandlerTest {
     @DisplayName("Returns empty array for null data")
     void nullDataReturnsEmpty() throws Exception {
       JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          (FieldProvider[]) null, 4);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          (FieldProvider[]) null, 4, 2);
       assertEquals(0, result.length());
     }
 
@@ -1018,8 +1100,8 @@ class AgingReportHandlerTest {
     @DisplayName("Returns empty array for empty data")
     void emptyDataReturnsEmpty() throws Exception {
       JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          new FieldProvider[0], 4);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[0], 4, 2);
       assertEquals(0, result.length());
     }
 
@@ -1041,8 +1123,8 @@ class AgingReportHandlerTest {
 
       FieldProvider fp = stubFieldProvider(fields);
       JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          new FieldProvider[] { fp }, 4);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[] { fp }, 4, 2);
 
       assertEquals(1, result.length());
       JSONObject row = result.getJSONObject(0);
@@ -1054,6 +1136,9 @@ class AgingReportHandlerTest {
       assertEquals(new BigDecimal("400.00"), row.get("days90"));
       assertEquals(new BigDecimal("500.00"), row.get("days120"));
       assertEquals(new BigDecimal("600.00"), row.get("days150plus"));
+      assertEquals(new BigDecimal("2100.00"), row.get("total"));
+      assertEquals(new BigDecimal("50.00"), row.get("credits"));
+      assertEquals(new BigDecimal("2050.00"), row.get("net"));
     }
 
     @Test
@@ -1074,15 +1159,15 @@ class AgingReportHandlerTest {
 
       FieldProvider fp = stubFieldProvider(fields);
       JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          new FieldProvider[] { fp }, 2);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[] { fp }, 2, 2);
 
       JSONObject row = result.getJSONObject(0);
-      assertEquals(new BigDecimal("30"), row.get("days60"));
-      assertEquals(BigDecimal.ZERO, row.get("days90"));
-      assertEquals(BigDecimal.ZERO, row.get("days120"));
+      assertEquals(new BigDecimal("30.00"), row.get("days60"));
+      assertEquals(new BigDecimal("0.00"), row.get("days90"));
+      assertEquals(new BigDecimal("0.00"), row.get("days120"));
       // days150plus = amount5 + amount4 + amount3 = 60+50+40 = 150
-      assertEquals(new BigDecimal("150"), row.get("days150plus"));
+      assertEquals(new BigDecimal("150.00"), row.get("days150plus"));
     }
 
     @Test
@@ -1103,15 +1188,70 @@ class AgingReportHandlerTest {
 
       FieldProvider fp = stubFieldProvider(fields);
       JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          new FieldProvider[] { fp }, 1);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[] { fp }, 1, 2);
 
       JSONObject row = result.getJSONObject(0);
-      assertEquals(BigDecimal.ZERO, row.get("days60"));
-      assertEquals(BigDecimal.ZERO, row.get("days90"));
-      assertEquals(BigDecimal.ZERO, row.get("days120"));
+      assertEquals(new BigDecimal("0.00"), row.get("days60"));
+      assertEquals(new BigDecimal("0.00"), row.get("days90"));
+      assertEquals(new BigDecimal("0.00"), row.get("days120"));
       // days150plus = amount5 + amount4 + amount3 + amount2 = 60+50+40+30 = 180
-      assertEquals(new BigDecimal("180"), row.get("days150plus"));
+      assertEquals(new BigDecimal("180.00"), row.get("days150plus"));
+    }
+
+    @Test
+    @DisplayName("Rounds a long-fraction amount to the given precision with HALF_UP")
+    void roundsLongFractionToPrecision() throws Exception {
+      java.util.Map<String, String> fields = new java.util.HashMap<>();
+      fields.put("BPartnerID", "BP-004");
+      fields.put("BPartner", "Long Fraction Co");
+      fields.put("amount0", "107.06442176871364");
+      fields.put("amount1", "0");
+      fields.put("amount2", "317100.21102040822076");
+      fields.put("amount3", "0");
+      fields.put("amount4", "0");
+      fields.put("amount5", "0");
+      fields.put("Total", "181385.63442176871364");
+      fields.put("credit", "0");
+      fields.put("net", "181385.63442176871364");
+
+      FieldProvider fp = stubFieldProvider(fields);
+      JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[] { fp }, 4, 2);
+
+      JSONObject row = result.getJSONObject(0);
+      assertEquals(new BigDecimal("107.06"), row.get("current"));
+      assertEquals(new BigDecimal("317100.21"), row.get("days60"));
+      assertEquals(new BigDecimal("181385.63"), row.get("total"));
+      assertEquals(new BigDecimal("181385.63"), row.get("net"));
+    }
+
+    @Test
+    @DisplayName("Rounds to a 0-decimal currency precision (e.g. JPY-style)")
+    void roundsToZeroDecimalPrecision() throws Exception {
+      java.util.Map<String, String> fields = new java.util.HashMap<>();
+      fields.put("BPartnerID", "BP-005");
+      fields.put("BPartner", "Zero Decimal Co");
+      fields.put("amount0", "100.5");
+      fields.put("amount1", "0");
+      fields.put("amount2", "0");
+      fields.put("amount3", "0");
+      fields.put("amount4", "0");
+      fields.put("amount5", "0");
+      fields.put("Total", "100.5");
+      fields.put("credit", "0");
+      fields.put("net", "100.5");
+
+      FieldProvider fp = stubFieldProvider(fields);
+      JSONArray result = (JSONArray) invokeStatic("buildSummaryRows",
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[] { fp }, 4, 0);
+
+      JSONObject row = result.getJSONObject(0);
+      // HALF_UP: 100.5 -> 101 (0 decimals)
+      assertEquals(new BigDecimal("101"), row.get("current"));
+      assertEquals(new BigDecimal("101"), row.get("total"));
     }
   }
 
@@ -1139,13 +1279,34 @@ class AgingReportHandlerTest {
 
       FieldProvider fp = stubFieldProvider(fields);
       JSONObject doc = (JSONObject) invokeStatic("buildDocRow",
-          new Class<?>[] { FieldProvider.class, int.class }, fp, 4);
+          new Class<?>[] { FieldProvider.class, int.class, int.class }, fp, 4, 2);
 
       assertEquals("INV-001", doc.getString("invoiceId"));
       assertEquals("2025/001", doc.getString("docNo"));
       assertEquals("2025-01-15", doc.getString("dateInvoiced"));
-      assertEquals(new BigDecimal("100"), doc.get("current"));
-      assertEquals(new BigDecimal("600"), doc.get("days150plus"));
+      assertEquals(new BigDecimal("100.00"), doc.get("current"));
+      assertEquals(new BigDecimal("600.00"), doc.get("days150plus"));
+    }
+
+    @Test
+    @DisplayName("Rounds a long-fraction detail amount to the given precision with HALF_UP")
+    void roundsLongFractionToPrecision() throws Exception {
+      java.util.Map<String, String> fields = new java.util.HashMap<>();
+      fields.put("INVOICE_ID", "INV-003");
+      fields.put("INVOICE_NUMBER", "2025/003");
+      fields.put("INVOICE_DATE", "2025-03-01");
+      fields.put("AMOUNT0", "107.06442176871364");
+      fields.put("AMOUNT1", "0");
+      fields.put("AMOUNT2", "0");
+      fields.put("AMOUNT3", "0");
+      fields.put("AMOUNT4", "0");
+      fields.put("AMOUNT5", "0");
+
+      FieldProvider fp = stubFieldProvider(fields);
+      JSONObject doc = (JSONObject) invokeStatic("buildDocRow",
+          new Class<?>[] { FieldProvider.class, int.class, int.class }, fp, 4, 2);
+
+      assertEquals(new BigDecimal("107.06"), doc.get("current"));
     }
 
     @Test
@@ -1164,13 +1325,13 @@ class AgingReportHandlerTest {
 
       FieldProvider fp = stubFieldProvider(fields);
       JSONObject doc = (JSONObject) invokeStatic("buildDocRow",
-          new Class<?>[] { FieldProvider.class, int.class }, fp, 1);
+          new Class<?>[] { FieldProvider.class, int.class, int.class }, fp, 1, 2);
 
-      assertEquals(BigDecimal.ZERO, doc.get("days60"));
-      assertEquals(BigDecimal.ZERO, doc.get("days90"));
-      assertEquals(BigDecimal.ZERO, doc.get("days120"));
+      assertEquals(new BigDecimal("0.00"), doc.get("days60"));
+      assertEquals(new BigDecimal("0.00"), doc.get("days90"));
+      assertEquals(new BigDecimal("0.00"), doc.get("days120"));
       // 60 + 50 + 40 + 30 = 180
-      assertEquals(new BigDecimal("180"), doc.get("days150plus"));
+      assertEquals(new BigDecimal("180.00"), doc.get("days150plus"));
     }
   }
 
@@ -1315,8 +1476,8 @@ class AgingReportHandlerTest {
       @SuppressWarnings("unchecked")
       java.util.Map<String, JSONArray> result = (java.util.Map<String, JSONArray>) invokeStatic(
           "groupDetailByBp",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          (FieldProvider[]) null, 4);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          (FieldProvider[]) null, 4, 2);
       assertTrue(result.isEmpty());
     }
 
@@ -1340,8 +1501,8 @@ class AgingReportHandlerTest {
       @SuppressWarnings("unchecked")
       java.util.Map<String, JSONArray> result = (java.util.Map<String, JSONArray>) invokeStatic(
           "groupDetailByBp",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          new FieldProvider[] { fp }, 4);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          new FieldProvider[] { fp }, 4, 2);
 
       assertTrue(result.isEmpty());
     }
@@ -1392,8 +1553,8 @@ class AgingReportHandlerTest {
       @SuppressWarnings("unchecked")
       java.util.Map<String, JSONArray> result = (java.util.Map<String, JSONArray>) invokeStatic(
           "groupDetailByBp",
-          new Class<?>[] { FieldProvider[].class, int.class },
-          data, 4);
+          new Class<?>[] { FieldProvider[].class, int.class, int.class },
+          data, 4, 2);
 
       assertEquals(2, result.size());
       assertEquals(2, result.get("BP-001").length());

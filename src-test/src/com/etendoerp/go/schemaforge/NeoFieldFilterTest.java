@@ -53,6 +53,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -1020,6 +1021,92 @@ class NeoFieldFilterTest {
           apiKeyMap.get("account$_identifier"),
           "apiKeyMap must map qualifier variant to DAL variant");
       assertEquals(1, apiKeyMap.size());
+    }
+  }
+
+  private static void invokeIncludeRequestedExtraProperties(Set<String> included,
+      Map<String, String> queryParams) throws Exception {
+    Method m = NeoFieldFilter.class.getDeclaredMethod("includeRequestedExtraProperties",
+        Set.class, Map.class);
+    m.setAccessible(true);
+    m.invoke(null, included, queryParams);
+  }
+
+  /**
+   * ETP-5432 #6/#7 — {@code includeRequestedExtraProperties} allowlists whatever the caller
+   * explicitly asked for via the classic {@code _extraProperties} datasource parameter, so
+   * {@link NeoFieldFilter#filterGetResponse} does not silently strip it. Before this fix a
+   * dotted extra property like {@code invoice.salesTransaction} produced the joined response key
+   * {@code invoice$salesTransaction} (per {@code DataToJsonConverter#replaceDots}), which starts
+   * with the FK property name rather than {@code _}/{@code $} — {@code isMetadataKey} never
+   * recognized it, so it fell through the allowlist exactly like an unrequested field, making a
+   * caller-requested value silently and permanently absent.
+   */
+  @Nested
+  @DisplayName("includeRequestedExtraProperties (ETP-5432 #6/#7)")
+  class IncludeRequestedExtraProperties {
+
+    @Test
+    @DisplayName("no-op when queryParams is null")
+    void noOpWhenQueryParamsNull() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      invokeIncludeRequestedExtraProperties(included, null);
+      assertEquals(Set.of("id"), included);
+    }
+
+    @Test
+    @DisplayName("no-op when queryParams carries no _extraProperties key")
+    void noOpWhenParameterAbsent() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      invokeIncludeRequestedExtraProperties(included, Map.of("_startRow", "0"));
+      assertEquals(Set.of("id"), included);
+    }
+
+    @Test
+    @DisplayName("no-op when _extraProperties is blank")
+    void noOpWhenParameterBlank() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "   "));
+      assertEquals(Set.of("id"), included);
+    }
+
+    @Test
+    @DisplayName("converts a dotted extra property to the $-joined response key")
+    void convertsDottedPropertyToJoinedKey() throws Exception {
+      Set<String> included = new HashSet<>();
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "invoice.salesTransaction"));
+      assertEquals(Set.of("invoice$salesTransaction"), included,
+          "a dotted DAL path must be converted the same way DataToJsonConverter joins it");
+    }
+
+    @Test
+    @DisplayName("a non-dotted extra property is added verbatim")
+    void nonDottedPropertyAddedVerbatim() throws Exception {
+      Set<String> included = new HashSet<>();
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "customField"));
+      assertEquals(Set.of("customField"), included);
+    }
+
+    @Test
+    @DisplayName("splits and trims a comma-separated list, ignoring empty entries")
+    void splitsCommaSeparatedListAndTrims() throws Exception {
+      Set<String> included = new HashSet<>();
+      invokeIncludeRequestedExtraProperties(included, Map.of(
+          JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER,
+          " invoice.salesTransaction , customField ,, thirdOne"));
+      assertEquals(Set.of("invoice$salesTransaction", "customField", "thirdOne"), included);
+    }
+
+    @Test
+    @DisplayName("adds to an already-populated included set without removing existing entries")
+    void addsToExistingIncludedSet() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "customField"));
+      assertEquals(Set.of("id", "name", "customField"), included);
     }
   }
 
