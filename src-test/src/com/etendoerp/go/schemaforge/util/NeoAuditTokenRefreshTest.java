@@ -473,9 +473,7 @@ class NeoAuditTokenRefreshTest {
         // been green while checking nothing, which is the failure mode this class exists to
         // prevent.
         boolean invokesDirectly = source.contains(".afterHandle(");
-        boolean dispatchesPostPhase = source.contains("NeoExtensionDispatcher")
-            && source.contains(".post(");
-        if (!invokesDirectly && !dispatchesPostPhase) {
+        if (!invokesDirectly && !dispatchesPostPhase(source)) {
           continue;
         }
         String relative = relativeUnixPath(sourceRoot, file);
@@ -500,10 +498,23 @@ class NeoAuditTokenRefreshTest {
               + " cannot carry a CRUD write (ETP-5262). Sites found: " + dispatchSites);
     }
 
+    /**
+     * The second shape of a dispatch site (ETP-5415): the file asks for the post phase by deriving
+     * the request with {@code .post(...)} and dispatching it through
+     * {@code NeoExtensionDispatcher}, so no literal {@code .afterHandle(} appears in it.
+     */
+    private static boolean dispatchesPostPhase(String source) {
+      return source.contains("NeoExtensionDispatcher") && source.contains(".post(");
+    }
+
     private static boolean isSuperDelegationOnly(String relativePath) {
       Path sourceRoot = moduleSourceRoot();
       String source = codeOf(sourceRoot.resolve(relativePath));
-      return !source.replace("super.afterHandle(", "").contains(".afterHandle(");
+      // A file that dispatches the post phase through the dispatcher has no literal `.afterHandle(`
+      // either, and must not be mistaken for a handler merely delegating up its own chain: that
+      // mistake dropped NeoServletSupport and NeoHookDispatcher from the inventory.
+      return !dispatchesPostPhase(source)
+          && !source.replace("super.afterHandle(", "").contains(".afterHandle(");
     }
   }
 

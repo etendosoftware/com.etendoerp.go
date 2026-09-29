@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1785,6 +1786,12 @@ class McpToolRouterRouteTest {
     private static final Set<String> ACTION_SCOPES = Set.of("neo:write");
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
+    /**
+     * ETP-5415: {@code NeoExtensionDispatcher} answers "no customization" for a blank
+     * {@code Java_Qualifier} before it consults {@code NeoHandlerLookup}, so an entity mock has to
+     * carry one for the stubbed handler to be reached.
+     */
+    private static final String HANDLER_QUALIFIER = "action-test-handler";
 
     @BeforeEach
     void setupActionSupport() {
@@ -1792,6 +1799,12 @@ class McpToolRouterRouteTest {
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
           .thenCallRealMethod();
+      // ETP-5415: a handler's pre-hook error now reaches the caller through
+      // McpHookExecutor.neoResponseToMcpResult, which normalizes it with toMcpHandlerError. With the
+      // class statically mocked that method returned null and the handler's message was lost; here
+      // the body is passed through so the test asserts on what the handler said.
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     private JSONObject buildActionArgs() throws Exception {
@@ -1920,6 +1933,7 @@ class McpToolRouterRouteTest {
     void actionRunsEntityHandlerHooks() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -1984,6 +1998,7 @@ class McpToolRouterRouteTest {
     void actionPreHookShortCircuitsWithoutFiringTheProcess() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -2045,6 +2060,7 @@ class McpToolRouterRouteTest {
     void actionPostHookReplacesResult() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -2450,8 +2466,10 @@ class McpToolRouterRouteTest {
 
         assertFalse(result.optBoolean("isError"), result.toString());
         assertTrue(contentText(result).contains("\"servedBy\":\"handler\""), contentText(result));
-        hookMock.verify(() -> McpHookExecutor.buildReadHookContext(anyString(), anyString(),
-            eq("rec-1"), isNull(), eq(entity), any()));
+        // The seam the router now calls is runReadProvider (ETP-5415, D13); the earlier assertion on
+        // buildReadHookContext could not hold once the whole McpHookExecutor is stubbed.
+        hookMock.verify(() -> McpHookExecutor.runReadProvider(eq(SPEC_NAME), eq(ENTITY_NAME),
+            eq("rec-1"), eq(entity), any()));
       }
     }
 
