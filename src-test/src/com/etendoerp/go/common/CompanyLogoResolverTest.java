@@ -90,7 +90,8 @@ class CompanyLogoResolverTest {
   @Test
   void step1ReturnsTheCurrentOrganizationLogo() {
     Image orgLogo = mock(Image.class);
-    when(dal.get(OrganizationInformation.class, ORG_ID)).thenReturn(orgInfo(CLIENT_ID, orgLogo));
+    OrganizationInformation current = orgInfo(CLIENT_ID, orgLogo);
+    when(dal.get(OrganizationInformation.class, ORG_ID)).thenReturn(current);
 
     assertSame(orgLogo, resolve(CLIENT_ID, ORG_ID));
     verify(dal, never()).createQuery(eq(OrganizationInformation.class), anyString());
@@ -115,8 +116,8 @@ class CompanyLogoResolverTest {
   void anOrganizationOfAnotherClientFallsToStep2AndNeverLeaksItsLogo() {
     Image foreignLogo = mock(Image.class);
     Image ownLogo = mock(Image.class);
-    when(dal.get(OrganizationInformation.class, ORG_ID))
-        .thenReturn(orgInfo(FOREIGN_CLIENT_ID, foreignLogo));
+    OrganizationInformation foreign = orgInfo(FOREIGN_CLIENT_ID, foreignLogo);
+    when(dal.get(OrganizationInformation.class, ORG_ID)).thenReturn(foreign);
     OrganizationInformation own = orgInfo(CLIENT_ID, ownLogo);
     when(firstOrgQuery.uniqueResult()).thenReturn(own);
 
@@ -127,7 +128,8 @@ class CompanyLogoResolverTest {
   @Test
   void step3FallsBackToTheClientInformationLogo() {
     Image clientLogo = mock(Image.class);
-    when(dal.get(OrganizationInformation.class, ORG_ID)).thenReturn(orgInfo(CLIENT_ID, null));
+    OrganizationInformation withoutLogo = orgInfo(CLIENT_ID, null);
+    when(dal.get(OrganizationInformation.class, ORG_ID)).thenReturn(withoutLogo);
     when(firstOrgQuery.uniqueResult()).thenReturn(null);
     givenClientInfoLogo(clientLogo);
 
