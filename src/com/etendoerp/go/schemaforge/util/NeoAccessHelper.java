@@ -148,35 +148,6 @@ public final class NeoAccessHelper {
   }
 
   /**
-   * Checks whether the current role has access to {@code spec} for the given HTTP method,
-   * covering both ordinary window specs and windowless/custom "combination" specs
-   * (ETP-4510 BUG-3).
-   *
-   * <p>Before this fix, {@code spec.getADWindow() == null} skipped the access check
-   * entirely for every caller — including a request with no role assigned at all, which
-   * contradicts "a user with no role assigned is denied on every window." This method
-   * closes that gap in three tiers, in priority order:</p>
-   * <ol>
-   *   <li><b>No role assigned → always deny.</b> Checked first and unconditionally,
-   *       regardless of whether the spec has a window or not.</li>
-   *   <li><b>Spec has a directly linked {@code AD_Window}</b> → delegates straight to
-   *       {@link #hasWindowAccess(String, String)} for that window.</li>
-   *   <li><b>Windowless spec ({@code spec.getADWindow() == null}):</b> delegates to
-   *       {@link #allConstituentWindowsAllow(List, String)} — see that method for the
-   *       "combination of windows" mechanism and its permissive fallback. As of ETP-4596
-   *       the only specs still relying on that fallback here (no {@code AD_Process}, no
-   *       constituent {@code AD_TAB_ID} data) are the windowless {@code "W"}-type specs
-   *       {@code not-posted-documents} and {@code dashboard} — every windowless "R" (report)
-   *       spec goes through {@link #hasReportSpecAccess(SFSpec, String)} instead, which
-   *       shares this same constituent-window helper.</li>
-   * </ol>
-   *
-   * @param spec the spec to check (may be {@code null}, in which case access is denied)
-   * @param httpMethod the HTTP method of the current request (e.g. {@code GET}, {@code POST})
-   * @return {@code true} if the current role is allowed to perform {@code httpMethod}
-   *         against {@code spec}
-   */
-  /**
    * Checks whether the current role may WRITE through the spec named {@code specName}
    * (ETP-5205): resolves the active {@link SFSpec} by name and applies
    * {@link #hasWindowAccessForSpec(SFSpec, String)} with {@code POST}, i.e. a Solo-Lectura
@@ -208,7 +179,36 @@ public final class NeoAccessHelper {
     }
   }
 
-    public static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
+  /**
+   * Checks whether the current role has access to {@code spec} for the given HTTP method,
+   * covering both ordinary window specs and windowless/custom "combination" specs
+   * (ETP-4510 BUG-3).
+   *
+   * <p>Before this fix, {@code spec.getADWindow() == null} skipped the access check
+   * entirely for every caller — including a request with no role assigned at all, which
+   * contradicts "a user with no role assigned is denied on every window." This method
+   * closes that gap in three tiers, in priority order:</p>
+   * <ol>
+   *   <li><b>No role assigned → always deny.</b> Checked first and unconditionally,
+   *       regardless of whether the spec has a window or not.</li>
+   *   <li><b>Spec has a directly linked {@code AD_Window}</b> → delegates straight to
+   *       {@link #hasWindowAccess(String, String)} for that window.</li>
+   *   <li><b>Windowless spec ({@code spec.getADWindow() == null}):</b> delegates to
+   *       {@link #allConstituentWindowsAllow(List, String)} — see that method for the
+   *       "combination of windows" mechanism and its permissive fallback. As of ETP-4596
+   *       the only specs still relying on that fallback here (no {@code AD_Process}, no
+   *       constituent {@code AD_TAB_ID} data) are the windowless {@code "W"}-type specs
+   *       {@code not-posted-documents} and {@code dashboard} — every windowless "R" (report)
+   *       spec goes through {@link #hasReportSpecAccess(SFSpec, String)} instead, which
+   *       shares this same constituent-window helper.</li>
+   * </ol>
+   *
+   * @param spec the spec to check (may be {@code null}, in which case access is denied)
+   * @param httpMethod the HTTP method of the current request (e.g. {@code GET}, {@code POST})
+   * @return {@code true} if the current role is allowed to perform {@code httpMethod}
+   *         against {@code spec}
+   */
+  public static boolean hasWindowAccessForSpec(SFSpec spec, String httpMethod) {
     if (spec == null || resolveCurrentRole() == null) {
       return false;
     }
