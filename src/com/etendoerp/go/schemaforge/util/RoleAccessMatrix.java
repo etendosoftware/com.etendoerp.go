@@ -103,6 +103,11 @@ public final class RoleAccessMatrix {
    * Category bucket used for a window whose top-level {@code AD_Menu} folder could not be
    * resolved (should not happen for a window Etendo GO actually exposes, but degrading to a
    * named bucket is safer than silently dropping the window from the matrix).
+   *
+   * <p>The frontend renders category names through {@code useMenuLabel()}, so this literal is
+   * also a locale key: {@code menus.Other} in {@code etendo_schema_forge}'s
+   * {@code tools/app-shell/src/locales/*.json} ("Otros" in Spanish), guarded by
+   * {@code otherCategoryLocale.vitest.js}. Renaming it here requires renaming that key too.
    */
   public static final String OTHER_CATEGORY = "Other";
 

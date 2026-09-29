@@ -1487,7 +1487,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
      *
      * <p>Grants Finance an active {@code AD_Window_Access} row on {@code TAX_MODELS_PROXY_WINDOW_ID}
      * with {@code isEditableField() == true} and asserts its "Fiscal Models" {@code matrix} row
-     * resolves to {@link SFRolesOverview#FULL "full"} for Finance, while every other role (which
+     * resolves to {@link RoleAccessMatrix#FULL "full"} for Finance, while every other role (which
      * got no grant) still reads {@code "none"}.
      *
      * <p>The baseline Etendo-GO window set is empty (see {@link #stubBaselineQueries(List, List)}),
@@ -1633,7 +1633,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
      * <p>Grants Finance an active {@code OBUIAPP_Process_Access} row on {@code
      * NOT_POSTED_DOCS_PROXY_PROCESS_ID} with {@code isEditableField() == true} and asserts its
      * "Not Posted Documents" {@code matrix} row resolves to {@link
-     * SFRolesOverview#FULL "full"} for Finance, while every other role (which got no grant, per
+     * RoleAccessMatrix#FULL "full"} for Finance, while every other role (which got no grant, per
      * {@code setUp()}'s default) still reads {@code "none"}.
      */
     @Test

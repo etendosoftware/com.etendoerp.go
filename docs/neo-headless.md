@@ -3842,8 +3842,21 @@ are deliberately kept so administrators can still reach the window in Etendo cla
 deliberately NOT applied in `SFListMenu`, whose tree must keep reporting the native AD menu as-is for
 its other consumers (`useRoleMenu`'s allowed-id filter, the Explorer's spec picker).
 
-Current contents: `6FEBA130CDE24CC09041FFA6117ADFA9` — "Conversion Rate Downloader Log" (ETP-5068),
-an internal log of the conversion-rate downloader job that adds no value to the Etendo Go end user.
+Current contents (10 ids — `RoleAccessMatrix.UI_EXCLUDED_WINDOW_IDS` and its javadoc are the source
+of truth; keep this table in sync when the set changes):
+
+| Window id | Window | Why it is excluded |
+|-----------|--------|--------------------|
+| `6FEBA130CDE24CC09041FFA6117ADFA9` | Conversion Rate Downloader Log | ETP-5068 — internal job log, no value to the Etendo Go end user |
+| `F4675DAB02134762B66881DAE4672AD0` | Monitor Verifactu | ETP-5116 — folded into "Fiscal Monitor" (representative: SII Monitor) |
+| `71F24BF89DE748B483BE87594747D6FB` | TBAI Facturas Enviadas | ETP-5116 — folded into "Fiscal Monitor" (representative: SII Monitor) |
+| `C327DE215AC945F69363905840118177` | Configuración TBAI | ETP-5116 — folded into "Fiscal Configuration" (representative: SII Configuration) |
+| `27A453FA86974745977672F1A8DCCEFF` | Configuración Verifactu | ETP-5116 — folded into "Fiscal Configuration" (representative: SII Configuration) |
+| `B5673F73F613496C8BEA22FB55E4E1E4` | End Year Close | ETP-5116 — an action inside Fiscal Calendar (window `117`), not its own page |
+| `121` | Location | ETP-5116 — classic embedded address reference window |
+| `82922976BB524D1BAA3CF8462B9219FE` | Transaction Type | ETP-5116 — classic embedded reference window |
+| `C50A8AEE6F044825B5EF54FAAE76826F` | Return to Vendor | ETP-5116 — dead window, replaced by Return to Vendor Shipment (`273673D2ED914C399A6C51DB758BE0F9`) |
+| `FF808081330213E60133021822E40007` | Return from Customer | ETP-5116 — dead window, replaced by Return Receipt (`123271B9AD60469BAE8A924841456B63`) |
 
 > **Doc correction (ETP-4907):** this section previously described a `SFRolesOverview.GOCLIENT_ROLE_IDS` hardcoded to GOClient's own 5 per-client role ids. That was already stale — the webhook was fixed on 2026-07-27 (live RolesPresa bug) to resolve roles by name (`Finance`/`Sales`/`Purchasing`/`Inventory`) plus `is_client_admin='Y'`, scoped to `currentRole.getClient()`, with no hardcoded id list at all. This section now documents the actual current behavior, including the ETP-4907 system-template fallback below.
 

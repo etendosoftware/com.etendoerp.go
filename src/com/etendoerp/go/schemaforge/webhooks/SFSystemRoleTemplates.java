@@ -103,12 +103,14 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
 
   /**
    * ETP-5402 — JSON key for a role's assigned-reports array (the Informes subsection), parallel
-   * to {@link #WINDOWS} — needed here, not just on {@code SFRolesOverview}, because THIS
-   * webhook's roles are the User window's "Roles del usuario" tab matrix COLUMNS
-   * (`UserRolesTab.jsx`'s `columns`, sourced from {@code fetchTemplateRoles()`}): without a
-   * {@code reports} array here too, every Informes cell in that tab would resolve "no access"
-   * for every role regardless of the role's real grant, since that tab's cell lookup reads
-   * `role.reports`/`role.windows` off exactly this response, not {@code SFRolesOverview}'s.
+   * to {@link #WINDOWS}. Part of the DEFAULT response shape, which callers that list or pick
+   * template roles still consume ({@code RoleChipsCell.jsx}, {@code AssignTemplateRolesControl.jsx}
+   * in {@code etendo_schema_forge}), so it stays even though it is no longer the matrix source.
+   *
+   * <p>Since ETP-5485 the User window's "Roles del usuario" tab does NOT read per-role
+   * {@code windows}/{@code reports} for its cells: it requests {@link #INCLUDE_MATRIX_PARAM} and
+   * renders {@link #MATRIX}/{@link #REPORTS_MATRIX}, built by the same {@code RoleAccessMatrix}
+   * as {@code SFRolesOverview}. Keep that in mind before trimming or extending either array.
    */
   private static final String REPORTS = "reports";
 
