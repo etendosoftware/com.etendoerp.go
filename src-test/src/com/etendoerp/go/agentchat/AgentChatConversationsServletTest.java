@@ -111,7 +111,9 @@ class AgentChatConversationsServletTest {
       @Override public int read() { return in.read(); }
       @Override public boolean isFinished() { return in.available() == 0; }
       @Override public boolean isReady() { return true; }
-      @Override public void setReadListener(javax.servlet.ReadListener listener) { }
+      @Override public void setReadListener(javax.servlet.ReadListener listener) {
+        // Intentionally empty: the stream is fully in memory, so no async read notification is needed.
+      }
     });
     return request;
   }

@@ -116,7 +116,17 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
   }
 
-  /** Routes a POST; returns null for an unknown path. Package-private for tests. */
+  /**
+   * Routes a POST to the matching conversation operation. Package-private for tests.
+   *
+   * @param parts
+   *     the path segments after {@code /sws/agent-chat}
+   * @param body
+   *     the parsed JSON request body
+   * @return the JSON to send, or null for an unknown path
+   * @throws JSONException
+   *     if the body or the response cannot be processed as JSON
+   */
   static JSONObject route(String[] parts, JSONObject body) throws JSONException {
     if (parts.length == 0 || !CONVERSATIONS.equals(parts[0])) {
       return null;
@@ -147,7 +157,15 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
 
   @FunctionalInterface
   interface Action {
-    /** Returns the JSON to send, or null when the path is not an endpoint. */
+    /**
+     * Executes the endpoint logic.
+     *
+     * @return the JSON to send, or null when the path is not an endpoint
+     * @throws JSONException
+     *     if the request body or the response cannot be processed as JSON
+     * @throws IOException
+     *     if the request body cannot be read
+     */
     JSONObject run() throws JSONException, IOException;
   }
 
