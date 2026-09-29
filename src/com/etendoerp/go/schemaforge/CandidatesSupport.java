@@ -70,15 +70,28 @@ final class CandidatesSupport {
    * line's own transaction (1:1) plus every transaction of its 1:N match group, so the merged
    * reconciled line shows exactly the movements it groups — and nothing else. {@code lineId} is
    * bound twice (the line itself, and the group sub-query).
+   *
+   * <p>Also reads the transaction's stored foreign-currency trio ({@code foreign_currency_id},
+   * {@code foreign_amount}, {@code foreign_convert_rate}) that Core fills when the payment currency
+   * differs from the account currency, plus the transaction (= account) currency, so a linked
+   * foreign-currency document keeps its original amount and final rate after reconciling
+   * (ETP-5450).
    */
   private static final String LINKED_TXNS_SQL =
       "SELECT ft.fin_finacc_transaction_id,"
           + "       ft.statementdate,"
           + "       COALESCE(fp.documentno, '') AS document_no,"
           + "       COALESCE(bp.name, '') AS partner_name,"
-          + "       COALESCE(ft.depositamt, 0) - COALESCE(ft.paymentamt, 0) AS amount"
+          + "       COALESCE(ft.depositamt, 0) - COALESCE(ft.paymentamt, 0) AS amount,"
+          + "       ft.foreign_amount,"
+          + "       ft.foreign_convert_rate,"
+          + "       ft.foreign_currency_id,"
+          + "       fcur.iso_code AS foreign_currency_iso,"
+          + "       acur.iso_code AS account_currency_iso"
           + "  FROM fin_bankstatementline bsl"
           + "  JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
+          + "  LEFT JOIN c_currency fcur ON fcur.c_currency_id = ft.foreign_currency_id"
+          + "  LEFT JOIN c_currency acur ON acur.c_currency_id = ft.c_currency_id"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = COALESCE(ft.c_bpartner_id, fp.c_bpartner_id)"
           + " WHERE bsl.fin_finacc_transaction_id IS NOT NULL"
@@ -132,6 +145,10 @@ final class CandidatesSupport {
    * Read-only "linked movements" list for a reconciled line: its 1:1 transaction, or every
    * transaction of its 1:N match group. Same row shape as the candidates list, flagged
    * {@code linked} with a reconciled status so the UI renders the panel read-only.
+   *
+   * <p>{@code amount}/{@code pendingBalance} are in the account currency, except for a movement
+   * whose stored foreign currency differs from the account currency: then they carry the original
+   * document amount (see {@link #appendForeignOriginal}), matching the pending-invoice row shape.
    */
   static NeoResponse buildLinkedTransactions(String lineId) throws Exception {
     JSONArray candidates = new JSONArray();
@@ -152,6 +169,7 @@ final class CandidatesSupport {
           row.put(KEY_STATUS, STATUS_RECONCILED);
           row.put(KEY_SUGGESTED, false);
           row.put("linked", true);
+          appendForeignOriginal(row, rs, amount);
           candidates.put(row);
         }
       }
@@ -159,6 +177,44 @@ final class CandidatesSupport {
     JSONObject data = new JSONObject();
     data.put(ACTION_CANDIDATES, candidates);
     return envelope(data);
+  }
+
+  /**
+   * Re-expresses a linked row in its original document currency when the transaction stored a
+   * foreign-currency trio different from the account currency (ETP-5450): {@code amount} and
+   * {@code pendingBalance} become the stored {@code foreign_amount} (unsigned in the DB, so it takes
+   * the sign of the account-currency amount), {@code amountBase} keeps the signed account-currency
+   * amount, and {@code currency}/{@code currencyId}/{@code baseCurrency}/{@code rate} describe the
+   * pair with the FINAL rate of the reconciliation. Same keys as a pending foreign-invoice row, so
+   * the panel renders both identically. Same-currency rows are left untouched.
+   *
+   * @param row        the linked row being built
+   * @param rs         the {@code LINKED_TXNS_SQL} result set positioned on the current row
+   * @param signedBase the signed account-currency amount ({@code deposit - payment})
+   * @throws Exception if reading the result set or writing the JSON fails
+   */
+  static void appendForeignOriginal(JSONObject row, ResultSet rs, BigDecimal signedBase)
+      throws Exception {
+    String foreignIso = StringUtils.trimToEmpty(rs.getString("foreign_currency_iso"));
+    String accountIso = StringUtils.trimToEmpty(rs.getString("account_currency_iso"));
+    BigDecimal foreignAmount = rs.getBigDecimal("foreign_amount");
+    // Not a foreign pair (or no stored original amount): keep the row as is.
+    if (foreignIso.isEmpty() || accountIso.isEmpty() || foreignIso.equals(accountIso)
+        || foreignAmount == null) {
+      return;
+    }
+    BigDecimal signedForeign = signedBase.signum() < 0 ? foreignAmount.abs().negate()
+        : foreignAmount.abs();
+    row.put(KEY_AMOUNT, signedForeign);
+    row.put(KEY_PENDING_BALANCE, signedForeign);
+    row.put("amountBase", signedBase);
+    row.put("currency", foreignIso);
+    row.put("currencyId", rs.getString("foreign_currency_id"));
+    row.put("baseCurrency", accountIso);
+    BigDecimal rate = rs.getBigDecimal("foreign_convert_rate");
+    if (rate != null) {
+      row.put("rate", rate);
+    }
   }
 
   /**

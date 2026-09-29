@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -58,6 +59,7 @@ import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.service.OBCriteria;
@@ -603,6 +605,223 @@ public class NeoAttachmentsHelperTest {
     }
   }
 
+  /**
+   * Verifies deletes of attachments belonging to any table OTHER than a fiscal declaration are
+   * completely unaffected by the ETP-5432 guard — the very first check
+   * ({@code table.getDBTableName()} mismatch) short-circuits before any DAL lookup of a
+   * declaration happens at all.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentOfNonFiscalDeclTable() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_Invoice");
+    when(attachment.getTable()).thenReturn(table);
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * Verifies deletes of an attachment with no owning table at all (never wired to any AD_Table)
+   * are unaffected — {@code table == null} short-circuits the guard the same way a table
+   * mismatch does.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWithNoTable() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    when(attachment.getTable()).thenReturn(null);
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * ETP-5432: verifies the delete is REJECTED (409) when the attachment belongs to a fiscal
+   * declaration whose {@code declarationStatus} is anything other than draft — the live scenario
+   * the guard was written for (a justificante of an already-presented declaration).
+   */
+  @Test
+  public void handleDeleteRejectsAttachmentOfNonDraftFiscalDecl() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("presented");
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(409, response.getHttpStatus());
+      assertEquals(
+          "Cannot delete an attachment of a fiscal declaration that is not in draft status: DECL1",
+          errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5432: verifies the delete PROCEEDS when the owning fiscal declaration is still a draft —
+   * the guard must not block the ordinary case of removing a justificante before presentation.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentOfDraftFiscalDecl() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn(FiscalDeclCrudHandler.DEFAULT_STATUS);
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * ETP-5432 edge case: the owning declaration record id is blank (should not normally happen,
+   * but {@code Attachment.getRecord()} is a free-text AD_Record_ID) — the guard must not attempt
+   * a DAL lookup with a blank id and must let the delete proceed.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWhenRecordIdIsBlank() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn(" ");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+      verify(dal, never()).get(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), any());
+    }
+  }
+
+  /**
+   * ETP-5432 edge case: the owning declaration record no longer exists (already deleted) — the
+   * guard has nothing left to enforce, so the attachment delete must still proceed.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWhenOwningDeclNotFound() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(null);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * ETP-5432 edge case: the owning declaration exists but has no {@code declarationStatus} value
+   * at all (blank) — the guard's {@code StringUtils.isNotBlank(statusStr)} check must treat a
+   * blank status the same as "no status recorded" and let the delete proceed, rather than
+   * defaulting to "not draft" and blocking a perfectly deletable attachment.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWhenDeclStatusIsBlank() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(null);
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
 
   /**
    * Verifies main-lookup validation for blank table/record identifiers.
