@@ -3375,6 +3375,15 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`CreateDraftInvoiceHandler#handleList`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
 
+  **`listInvoices` response shape.** `GET /sws/neo/<spec>/<entity>/<id>/action/listInvoices` (the SPA calls it on `sales-order/header` and `sales-quotation/quotation`) returns `{ "response": { "data": [ … ] } }`, sales invoices only (`IsSOTrx = 'Y'`), newest `invoiceDate` first, one item per invoice:
+
+  ```json
+  { "id": "…", "documentNo": "FAC-0012", "documentStatus": "CO",
+    "grandTotalAmount": 121.00, "currency$_identifier": "EUR", "invoiceDate": "2026-09-01" }
+  ```
+
+  `currency$_identifier` (ETP-5527) is the invoice currency's ISO code, or `null` when the invoice has no currency — the same key the CRUD list returns, so the SPA's related-documents chip (`DOCUMENT_CHIP_TYPES['sales-invoice'].currencyField`) formats the amount in the invoice's own currency in both the form and the list preview. `invoiceDate` is omitted when the invoice has none.
+
   **Cost and shape.** Three batched queries per GET response, independent of page size — never one per row: ordered-vs-delivered quantity grouped by order, draft `M_InOut` by order, and the linked-invoice union above. Sales vs purchase (`IsSOTrx` `'Y'`/`'N'`) is parameterized off the existing `isSalesTransaction()` override, the same switch the callout price-list fallback already uses, so a subclass needs to know nothing about this annotation to be classified correctly. Comparisons are exact-decimal (`BigDecimal.compareTo`), not float subtraction. The order total is read from the JSON record rather than re-queried, so it is the same number the form sees — `applyTotalDiscountToRecord` has already adjusted `grandTotalAmount` for a draft carrying a not-yet-materialized total discount by the time this runs.
 
   **Status-agnostic.** Both flags are annotated for every document status; the form only evaluates them once the order is completed and the kebab already gates its own entry on `status === 'CO'`, so the backend stays a pure function of the order's documents and never re-reads `documentStatus`.
