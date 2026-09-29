@@ -2857,7 +2857,8 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   @Test
   public void autoCreateOrUpdateFromContext_patchWithRecordId_resolvesAndDelegates() {
-    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").recordId("inv-patch").build();
+    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-patch").build();
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -2883,7 +2884,8 @@ public class AbstractInvoiceHeaderHandlerTest {
     NeoResponse prevResult = new NeoResponse(201, respBody);
 
     NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").recordId(null).previousResult(prevResult).build();
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).recordId(null)
+        .previousResult(prevResult).build();
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -2902,7 +2904,8 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   @Test
   public void autoCreateOrUpdateFromContext_putResolvesViaRecordId() {
-    NeoContext ctx = NeoContext.builder().httpMethod("PUT").recordId("inv-put").build();
+    NeoContext ctx = NeoContext.builder().httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-put").build();
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -2916,6 +2919,306 @@ public class AbstractInvoiceHeaderHandlerTest {
       callAutoCreateOrUpdate(ctx);
 
       verify(dal).get(Invoice.class, "inv-put");
+    }
+  }
+
+  // ── ETP-5547: rate-doc sync must not touch posted invoices / action POSTs ────
+
+  private static final String ETP5547_ORG_CURRENCY = "eur-5547";
+  private static final String ETP5547_DOC_CURRENCY = "usd-5547";
+  private static final String ETP5547_ORG = "org-5547";
+  private static final String ETP5547_INVOICE = "inv-5547";
+  private static final String ETP5547_CLONE = "inv-5547-clone";
+  private static final String POSTED = "Y";
+  private static final String NOT_POSTED = "N";
+
+  /**
+   * Stubs {@code OBDal.get(Invoice, id)} with a foreign- or org-currency invoice that has an
+   * exchange-rate override and a grand total, i.e. one the sync WOULD write for if nothing
+   * stopped it. Everything the String overload reads before reaching
+   * {@link ConversionRateDocumentSync} is stubbed, so a missing guard shows up as an interaction
+   * on the (statically mocked) sync class rather than as an NPE.
+   */
+  private static Invoice stubSyncableInvoice(OBDal dal, MockedStatic<OBCurrencyUtils> curMock,
+      String invoiceId, String currencyId, String posted, boolean processed) {
+    Invoice invoice = mock(Invoice.class);
+    Currency currency = mock(Currency.class);
+    Organization org = mock(Organization.class);
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    when(dal.get(Invoice.class, invoiceId)).thenReturn(invoice);
+    when(dal.getSession()).thenReturn(session);
+    when(invoice.getId()).thenReturn(invoiceId);
+    when(invoice.getCurrency()).thenReturn(currency);
+    when(currency.getId()).thenReturn(currencyId);
+    when(invoice.getOrganization()).thenReturn(org);
+    when(org.getId()).thenReturn(ETP5547_ORG);
+    when(invoice.getPosted()).thenReturn(posted);
+    when(invoice.isProcessed()).thenReturn(processed);
+    when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
+    when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("29.39"));
+    curMock.when(() -> OBCurrencyUtils.getOrgCurrency(ETP5547_ORG)).thenReturn(ETP5547_ORG_CURRENCY);
+    return invoice;
+  }
+
+  private static void stubAdminMode(MockedStatic<OBContext> ctxMock) {
+    ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+    ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+  }
+
+  private static NeoResponse createdResponse(String newId) throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", newId));
+    return new NeoResponse(201, new JSONObject().put("response", new JSONObject().put("data", data)));
+  }
+
+  /**
+   * The root cause of ETP-5547: a posted invoice's rate row is immutable (Core's
+   * {@code c_conversion_rate_document_trg} raises {@code @20501@}), and the failed UPDATE aborted
+   * the whole request transaction. The sync must not even try.
+   */
+  @Test
+  public void testAutoCreateOrUpdateSkipsSyncWhenInvoiceIsPosted() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, POSTED, true);
+
+      callAutoCreateOrUpdate(ETP5547_INVOICE);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  /** Same rule on the org-currency branch: a posted invoice's stale row is not deleted either. */
+  @Test
+  public void testAutoCreateOrUpdateSkipsDeleteWhenPostedInvoiceIsInOrgCurrency() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_ORG_CURRENCY, POSTED, true);
+
+      callAutoCreateOrUpdate(ETP5547_INVOICE);
+
+      syncMock.verifyNoInteractions();
+    }
+  }
+
+  /** Control: the posted guard must not swallow the normal case of an unposted invoice. */
+  @Test
+  public void testAutoCreateOrUpdateStillSyncsWhenInvoiceIsNotPosted() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, false);
+
+      callAutoCreateOrUpdate(ETP5547_INVOICE);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * Confirming a payment ({@code POST /action/registerPayment}) on a processed invoice changes
+   * neither its rate nor its total, yet used to rewrite the invoice's rate row — which is how the
+   * confirmed payment was lost when that write failed.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsRegisterPaymentAction() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("registerPayment")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // Not posted on purpose: isolates the endpoint gate from the posted guard.
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, true);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  /**
+   * Cloning ({@code POST /action/cloneRecord}) must not re-sync the SOURCE invoice (the record
+   * the action is posted to) nor the clone whose id the action returns.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsCloneRecordAction() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("cloneRecord")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject())
+        .previousResult(createdResponse(ETP5547_CLONE)).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, true);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).get(Invoice.class, ETP5547_CLONE);
+    }
+  }
+
+  /** Non-CRUD, non-ACTION write requests (callouts, selectors…) never edit the rate. */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsCalloutEndpoint() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CALLOUT).recordId(ETP5547_INVOICE).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      callAutoCreateOrUpdate(ctx);
+
+      Mockito.verify(dal, Mockito.never()).get(eq(Invoice.class), anyString());
+      syncMock.verifyNoInteractions();
+    }
+  }
+
+  /** Control: a CRUD PATCH — where the rate and currency are actually edited — still syncs. */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSyncsOnCrudPatch() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD).recordId(ETP5547_INVOICE)
+        .requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, false);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * Positive ACTION branch 1: the "Complete" document action recalculates the total-discount
+   * line right before completing, which moves the grand total — the rate row must follow. By the
+   * time afterHandle runs the invoice is already processed, so this also proves the Complete
+   * branch does not depend on the draft check.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSyncsOnCompleteDocumentAction() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("fieldValues", new JSONObject().put("documentAction", "CO"));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("documentAction")
+        .recordId(ETP5547_INVOICE).requestBody(body).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, true);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * Positive ACTION branch 2: an action on a still-draft invoice (e.g. the generic AD process
+   * that creates lines from an order) adds or reprices lines, which moves the grand total — the
+   * rate row must follow.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSyncsOnActionForDraftInvoice() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("createLinesFromOrder")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, false);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * The draft check behind a non-Complete ACTION cannot read the invoice (lookup throws): the
+   * request must neither fail nor sync — "unknown" is treated as "not a draft".
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsActionWhenDraftLookupFails() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("createLinesFromOrder")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, ETP5547_INVOICE)).thenThrow(new IllegalStateException("DB down"));
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
     }
   }
 
