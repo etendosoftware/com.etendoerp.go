@@ -185,7 +185,7 @@ public final class NeoExtensionDispatcher {
         request.entityName(), request.surface(), request.channel(), request.qualifier(),
         customization == null ? null : customization.getClass().getName(),
         customization == null ? null : request.phase().methodName(), outcome);
-    NeoExtensionTraceRecorder.record(trace);
+    NeoExtensionTraceRecorder.recordTrace(trace);
     logTrace(trace);
     return new NeoExtensionResult(customization, response, trace);
   }

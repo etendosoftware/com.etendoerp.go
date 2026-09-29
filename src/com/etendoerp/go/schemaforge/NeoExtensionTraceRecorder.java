@@ -79,7 +79,7 @@ public final class NeoExtensionTraceRecorder {
   }
 
   /** Append a trace, if this thread is recording. */
-  static void record(NeoExtensionTrace trace) {
+  static void recordTrace(NeoExtensionTrace trace) {
     List<NeoExtensionTrace> buffer = BUFFER.get();
     if (buffer != null) {
       buffer.add(trace);

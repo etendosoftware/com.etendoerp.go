@@ -312,15 +312,13 @@ final class McpWriteRequestSupport {
     Iterator<String> keys = body.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      if (McpConstants.PARAM_PARENT_ID.equals(key)) {
-        continue;
+      // parentId is the batch's own linking key, not a field of the entity, so it has no gate.
+      Property prop = McpConstants.PARAM_PARENT_ID.equals(key) ? null
+          : resolveProperty(dalEntity, key);
+      if (prop != null) {
+        applyWriteGates(gate, key, mappedKeyFor(dalEntity, key, prop), body.opt(key), sfEntity,
+            dalEntity);
       }
-      Property prop = resolveProperty(dalEntity, key);
-      if (prop == null) {
-        continue;
-      }
-      applyWriteGates(gate, key, mappedKeyFor(dalEntity, key, prop), body.opt(key), sfEntity,
-          dalEntity);
     }
   }
 

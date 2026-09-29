@@ -104,31 +104,68 @@ public record NeoExtensionRequest(String qualifier, String specName, String enti
     private Builder() {
     }
 
+    /**
+     * Sets the {@code Java_Qualifier} the entity row declares; may be blank when the
+     * customization is bound by {@link NeoExtension} alone.
+     *
+     * @param value the qualifier, or {@code null}
+     * @return this builder
+     */
     public Builder qualifier(String value) {
       this.qualifier = value;
       return this;
     }
 
+    /**
+     * Sets the spec name, the kebab-case name every dispatch path passes and never the UUID.
+     *
+     * @param value the spec name
+     * @return this builder
+     */
     public Builder specName(String value) {
       this.specName = value;
       return this;
     }
 
+    /**
+     * Sets the entity within the spec.
+     *
+     * @param value the entity name
+     * @return this builder
+     */
     public Builder entityName(String value) {
       this.entityName = value;
       return this;
     }
 
+    /**
+     * Sets the surface being served. When left unset it is derived from the context.
+     *
+     * @param value the surface, or {@code null} to derive it
+     * @return this builder
+     */
     public Builder surface(NeoExtensionSurface value) {
       this.surface = value;
       return this;
     }
 
+    /**
+     * Sets the channel the request arrived on, which is what the trace reports it under.
+     *
+     * @param value the channel
+     * @return this builder
+     */
     public Builder channel(NeoExtensionChannel value) {
       this.channel = value;
       return this;
     }
 
+    /**
+     * Sets the context handed to the customization.
+     *
+     * @param value the context
+     * @return this builder
+     */
     public Builder context(NeoContext value) {
       this.context = value;
       return this;

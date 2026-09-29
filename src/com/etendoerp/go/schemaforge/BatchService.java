@@ -422,8 +422,8 @@ public class BatchService {
     // ETP-5415: the caller's own body transforms, run here rather than over the whole array up
     // front — this is the first point where $ref placeholders are resolved and the parent exists.
     // See executeBatch(JSONArray, OperationPreprocessor).
-    JSONObject preprocessFailure = runPreprocessor(preprocessor, i, opId, specName, entityName,
-        opBody, parentId, tracker);
+    JSONObject preprocessFailure = runPreprocessor(preprocessor,
+        new OperationContext(i, opId, specName, entityName, opBody, parentId), tracker);
     if (preprocessFailure != null) {
       return preprocessFailure;
     }
@@ -461,19 +461,17 @@ public class BatchService {
    *
    * <p>A {@code null} preprocessor is the REST case and means "no transforms" — not an error.
    */
-  private JSONObject runPreprocessor(OperationPreprocessor preprocessor, int i, String opId,
-      String specName, String entityName, JSONObject opBody, String parentId,
+  private JSONObject runPreprocessor(OperationPreprocessor preprocessor, OperationContext op,
       TransactionTracker tracker) throws JSONException {
     if (preprocessor == null) {
       return null;
     }
     try {
-      return preprocessor.preprocess(
-          new OperationContext(i, opId, specName, entityName, opBody, parentId));
+      return preprocessor.preprocess(op);
     } catch (Exception e) {
-      log.error("[BATCH] preprocessor failed on op '{}' (index {})", opId, i, e);
-      return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to preprocess operation '" + opId + "': " + e.getMessage(), null,
+      log.error("[BATCH] preprocessor failed on op '{}' (index {})", op.opId(), op.index(), e);
+      return failureBody(op.index(), op.opId(), HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to preprocess operation '" + op.opId() + "': " + e.getMessage(), null,
           tracker.durable());
     }
   }
@@ -507,6 +505,8 @@ public class BatchService {
   @FunctionalInterface
   public interface OperationPreprocessor {
     /**
+     * Transforms one operation just before it is written, or rejects it.
+     *
      * @param op the operation about to be written; mutate {@code op.body()} in place
      * @return {@code null} to proceed with the write, or a batch failure envelope (as built by the
      *         caller, carrying {@code committed:false} and a {@code failedAt} pointer) to reject

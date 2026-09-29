@@ -167,28 +167,46 @@ public final class NeoExtensionIndex {
     for (Bean<?> bean : beans) {
       // getBeanClass(), not the class of an instance: see the class javadoc on the proxy trap.
       Class<?> beanClass = bean.getBeanClass();
-      NeoExtension annotation = beanClass.getAnnotation(NeoExtension.class);
-      if (annotation == null) {
-        continue;
-      }
-      if (StringUtils.isBlank(annotation.spec()) || StringUtils.isBlank(annotation.entity())) {
-        log.error("(warn) @NeoExtension on {} declares a blank spec or entity and binds nothing",
-            beanClass.getName());
-        continue;
-      }
-      Key key = Key.of(annotation.spec(), annotation.entity());
-      Bean<?> previous = built.putIfAbsent(key, bean);
-      if (previous != null) {
-        log.error(
-            "(warn) @NeoExtension conflict on spec={} entity={}: {} and {} both claim it; "
-                + "keeping {}",
-            annotation.spec(), annotation.entity(), previous.getBeanClass().getName(),
-            beanClass.getName(), previous.getBeanClass().getName());
+      Key key = declaredKey(beanClass);
+      if (key != null) {
+        claim(built, key, bean, beanClass);
       }
     }
     log.info("(debug) @NeoExtension index built: annotated={} of {} deployed NeoHandler beans",
         built.size(), beans.size());
     return built;
+  }
+
+  /**
+   * The (spec, entity) pair a class declares through {@link NeoExtension}.
+   *
+   * @return the pair, or {@code null} when the class carries no annotation or declares a blank
+   *         spec or entity — the latter is logged, because it binds nothing and would otherwise
+   *         look like a customization that is simply never reached
+   */
+  private static Key declaredKey(Class<?> beanClass) {
+    NeoExtension annotation = beanClass.getAnnotation(NeoExtension.class);
+    if (annotation == null) {
+      return null;
+    }
+    if (StringUtils.isBlank(annotation.spec()) || StringUtils.isBlank(annotation.entity())) {
+      log.error("(warn) @NeoExtension on {} declares a blank spec or entity and binds nothing",
+          beanClass.getName());
+      return null;
+    }
+    return Key.of(annotation.spec(), annotation.entity());
+  }
+
+  /** Record a claim on a pair, keeping the first claimant and logging any later one. */
+  private static void claim(Map<Key, Bean<?>> built, Key key, Bean<?> bean, Class<?> beanClass) {
+    Bean<?> previous = built.putIfAbsent(key, bean);
+    if (previous != null) {
+      log.error(
+          "(warn) @NeoExtension conflict on spec={} entity={}: {} and {} both claim it; "
+              + "keeping {}",
+          key.spec(), key.entity(), previous.getBeanClass().getName(), beanClass.getName(),
+          previous.getBeanClass().getName());
+    }
   }
 
   /**
