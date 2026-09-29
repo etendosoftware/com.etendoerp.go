@@ -250,7 +250,7 @@ public class WidgetKpisHandler implements NeoHandler {
    * Returns 0 if previous value is zero (avoids division by zero).
    * Result is rounded to 1 decimal place.
    */
-  private static double calculateTrend(BigDecimal current, BigDecimal previous) {
+  static double calculateTrend(BigDecimal current, BigDecimal previous) {
     if (previous.compareTo(BigDecimal.ZERO) == 0) {
       return 0.0;
     }
@@ -264,7 +264,7 @@ public class WidgetKpisHandler implements NeoHandler {
    * A comparison is meaningful only when the previous-period value is non-zero; otherwise the
    * percentage change is undefined and the client should hide the trend badge.
    */
-  private static boolean hasPrevious(BigDecimal previous) {
+  static boolean hasPrevious(BigDecimal previous) {
     return previous.compareTo(BigDecimal.ZERO) != 0;
   }
 

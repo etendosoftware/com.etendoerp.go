@@ -569,7 +569,8 @@ public class ToolRegistry {
         "Optional parameters forwarded to the widget. Most widgets accept "
             + "'range' to scope the period. Valid values: 'ytd', 'mtd', 'last30d', "
             + "'last90d', 'lastYear'. Omit for the widget's default window "
-            + "(for 'kpis', an omitted range means 'ytd'); any other value falls back "
+            + "(for 'kpis', an omitted range means 'ytd'; for 'revenue-trend' it means "
+            + "the rolling last 12 months, bucketed by month); any other value falls back "
             + "to the rolling last 12 months."));
 
     return new McpToolDefinition(
