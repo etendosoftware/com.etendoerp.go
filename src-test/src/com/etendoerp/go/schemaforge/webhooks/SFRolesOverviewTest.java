@@ -111,7 +111,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
         // ETP-5071: every role card now also resolves 3 proxy access tiers (2 extra
         // WindowAccess lookups plus one ProcessAccess lookup — see
-        // SFRolesOverview#mergeProxyAccessTiers) right after its own real-GO-window tier map.
+        // RoleAccessMatrix#mergeProxyAccessTiers) right after its own real-GO-window tier map.
         // Default the new ProcessAccess criteria to "no grants" so tests that don't care about
         // it don't need to know about it (mirrors categoryQuery's own default above). Tests
         // that stub OBCriteria<WindowAccess>'s list() with an exact per-role sequence must
@@ -250,13 +250,13 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
     /**
      * Stubs the shared {@code OBCriteria<WindowAccess>} mock so {@code list()} returns the rows
-     * for whichever role {@link SFRolesOverview#resolveWindowTierMap(Role, java.util.Set)} most
+     * for whichever role {@link RoleAccessMatrix#resolveWindowTierMap(Role, java.util.Set)} most
      * recently built the criteria for — keyed by the {@code WindowAccess.role.id} restriction the
      * production code adds via {@code Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id",
      * role.getId())}, the same restriction shape structurally asserted in {@link
      * #testAdminRoleCountExcludesCrossClientBootstrapUser}.
      *
-     * <p>ETP-5071's {@link SFRolesOverview#mergeProxyAccessTiers} issues an EXTRA {@code
+     * <p>ETP-5071's {@link RoleAccessMatrix#mergeProxyAccessTiers} issues an EXTRA {@code
      * WindowAccess.list()} call per role card (for {@code TAX_MODELS_PROXY_WINDOW_ID}), on top of
      * the role's own real-window tier-map call. A fixed-length positional {@code thenReturn(a, b,
      * c, ...)} sequence — one value per role, in role order — silently misaligns the moment an
@@ -292,7 +292,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     /**
      * The {@link ProcessAccess} equivalent of {@link #stubWindowAccessCriteriaKeyedByRole(Map)} —
      * keys {@code list()}'s return by the {@code ProcessAccess.role.id} restriction {@link
-     * SFRolesOverview#resolveProcessTierMap(Role, String)} adds via {@code
+     * RoleAccessMatrix#resolveProcessTierMap(Role, String)} adds via {@code
      * Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", role.getId())}, so a test can grant a
      * real {@code OBUIAPP_Process_Access} row to exactly one role in a multi-role response without
      * every other role's (default-empty, per {@code setUp()}) call being misaligned by a
@@ -1439,7 +1439,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
      * Monitor already backs its own active Etendo-GO window/spec today, so its id is already a
      * key in {@code goWindowsById} and already produces its own real {@code matrix} row from the
      * main window loop. Appending the "Fiscal Monitor" proxy row (same id — see {@code
-     * SFRolesOverview#FISCAL_MONITOR_PROXY_WINDOW_ID}) unconditionally would have added a SECOND
+     * RoleAccessMatrix#FISCAL_MONITOR_PROXY_WINDOW_ID}) unconditionally would have added a SECOND
      * row with the identical id — a real collision, since the frontend keys matrix rows by
      * category+id ({@code buildRowKey} in {@code useRolesOverviewData.js}). Exactly one row for
      * that id must survive, carrying the real window's own raw name (the frontend's own {@code
@@ -1477,9 +1477,9 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Positive-path regression test for {@link SFRolesOverview#mergeProxyAccessTiers(Role, Map)}'s
+     * Positive-path regression test for {@link RoleAccessMatrix#mergeProxyAccessTiers(Role, Map)}'s
      * window-based proxy call — {@code resolveWindowTierMap(role, Set.of(TAX_MODELS_PROXY_WINDOW_ID))}
-     * — which reuses the already-well-tested {@link SFRolesOverview#resolveWindowTierMap(Role,
+     * — which reuses the already-well-tested {@link RoleAccessMatrix#resolveWindowTierMap(Role,
      * java.util.Set)} method, so it is very likely correct, but was completely unverified for this
      * specific proxy id before this test (mirrors {@link
      * #testResolveProcessTierMapWithEditableGrantResolvesToFull()}'s rationale for the process-based
@@ -1542,9 +1542,9 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Proves the id-intersection filter inside {@link SFRolesOverview#resolveWindowTierMap(Role,
+     * Proves the id-intersection filter inside {@link RoleAccessMatrix#resolveWindowTierMap(Role,
      * java.util.Set)}'s loop, for the Tax Models proxy call specifically: a grant on a DIFFERENT
-     * {@code AD_Window_ID} (not {@link SFRolesOverview#TAX_MODELS_PROXY_WINDOW_ID}) must be
+     * {@code AD_Window_ID} (not {@link RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID}) must be
      * ignored — without the filter, any active {@code WindowAccess} row at all (on any window)
      * would incorrectly light up the "Fiscal Models" proxy row.
      */
@@ -1604,7 +1604,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     /**
      * Finds the {@code "access"} map of the {@code matrix} row identified by {@code rowId},
      * searching across every category — used by the {@code resolveProcessTierMap} tests below,
-     * which do not care which category {@link SFRolesOverview#buildMatrix(Map, Map)} bucketed the
+     * which do not care which category {@link RoleAccessMatrix#buildMatrix(Map, Map)} bucketed the
      * row into (categoryQuery defaults to empty in {@code setUp()}, so it is always "Other" here,
      * but asserting via id search keeps these tests decoupled from that incidental fact).
      */
@@ -1623,7 +1623,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Positive-path regression test for {@link SFRolesOverview#resolveProcessTierMap(Role,
+     * Positive-path regression test for {@link RoleAccessMatrix#resolveProcessTierMap(Role,
      * String)}: before this test, every existing test relied on {@code setUp()}'s blanket
      * {@code processAccessCriteria.list() -> emptyList()} default, so the tri-state logic
      * ({@code isEditableField() ? FULL : READ_ONLY}) and the id-equality filter inside that
@@ -1681,9 +1681,9 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Proves the id-equality filter inside {@link SFRolesOverview#resolveProcessTierMap(Role,
+     * Proves the id-equality filter inside {@link RoleAccessMatrix#resolveProcessTierMap(Role,
      * String)}'s loop: a grant on a DIFFERENT {@code OBUIAPP_Process_ID} (not {@link
-     * SFRolesOverview#NOT_POSTED_DOCS_PROXY_PROCESS_ID}) must be ignored — without the filter, any
+     * RoleAccessMatrix#NOT_POSTED_DOCS_PROXY_PROCESS_ID}) must be ignored — without the filter, any
      * active {@code ProcessAccess} row at all (on any process) would incorrectly light up the
      * "Not Posted Documents" proxy row.
      */
@@ -1707,16 +1707,16 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Proves {@link SFRolesOverview#buildMatrix(Map, Map)}'s {@code categoryLookupIds} union
-     * actually resolves a REAL non-{@link SFRolesOverview#OTHER_CATEGORY "Other"} category for
-     * {@link SFRolesOverview#TAX_MODELS_PROXY_WINDOW_ID} when the classic-AD-menu-tree SQL
+     * Proves {@link RoleAccessMatrix#buildMatrix(Map, Map)}'s {@code categoryLookupIds} union
+     * actually resolves a REAL non-{@link RoleAccessMatrix#OTHER_CATEGORY "Other"} category for
+     * {@link RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID} when the classic-AD-menu-tree SQL
      * legitimately has one for it — every other test in this class leaves {@code categoryQuery} at
      * its {@code setUp()} default (empty result), so the Tax Models proxy row has only ever been
      * seen landing in "Other" by omission, never actually exercising the lookup for its own id.
      *
-     * <p>{@link SFRolesOverview#FISCAL_MONITOR_PROXY_WINDOW_ID} is also in {@code
+     * <p>{@link RoleAccessMatrix#FISCAL_MONITOR_PROXY_WINDOW_ID} is also in {@code
      * categoryLookupIds}, but this test's {@code categoryQuery} stub deliberately has no row for
-     * it (nor for {@link SFRolesOverview#NOT_POSTED_DOCS_PROXY_PROCESS_ID}, which the SQL cannot
+     * it (nor for {@link RoleAccessMatrix#NOT_POSTED_DOCS_PROXY_PROCESS_ID}, which the SQL cannot
      * resolve at all — it is a process id, not a window id) — both fall back to "Other", which
      * this test also asserts, so the "Fiscal Reports" bucket is shown to hold ONLY the Tax Models
      * row, not every proxy row indiscriminately.
