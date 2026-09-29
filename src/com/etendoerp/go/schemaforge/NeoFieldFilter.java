@@ -556,21 +556,33 @@ public class NeoFieldFilter {
     Iterator<String> keys = body.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      if (!isMetadataKey(key)) {
-        String propertyName = apiKeyToPropName.getOrDefault(key, key);
-        boolean readOnlyIncluded = !NeoServerOwnedFields.isServerOwned(propertyName)
-            && includedFields.contains(propertyName) && !writableFields.contains(propertyName);
-        if (!readOnlyIncluded) {
-          continue;
-        }
-        if (isCreate && (rejectableOnCreateFields == null
-            || !rejectableOnCreateFields.contains(propertyName))) {
-          // Create-time exemption: filterCreateRequest would not reject this field either.
-          continue;
-        }
-        throw new ReadOnlyFieldRejectedException(key);
+      if (isMetadataKey(key) || isWritableOrExemptOnCreate(key, isCreate)) {
+        continue;
       }
+      throw new ReadOnlyFieldRejectedException(key);
     }
+  }
+
+  /**
+   * Tells whether {@code key} may be safely written by the client: either it is not a read-only
+   * included field at all, or (on a POST) it is exempted by {@link #rejectableOnCreateFields} —
+   * the same create-time exemption {@link #filterCreateRequest} applies (ETP-5537, see
+   * {@link #validateClientWriteRequest} javadoc).
+   *
+   * @param key the raw API-level key from the request body
+   * @param isCreate whether the current request is a POST
+   * @return {@code true} if the client may supply this key
+   */
+  private boolean isWritableOrExemptOnCreate(String key, boolean isCreate) {
+    String propertyName = apiKeyToPropName.getOrDefault(key, key);
+    boolean readOnlyIncluded = !NeoServerOwnedFields.isServerOwned(propertyName)
+        && includedFields.contains(propertyName) && !writableFields.contains(propertyName);
+    if (!readOnlyIncluded) {
+      return true;
+    }
+    // Create-time exemption: filterCreateRequest would not reject this field either.
+    return isCreate && (rejectableOnCreateFields == null
+        || !rejectableOnCreateFields.contains(propertyName));
   }
 
   /**
