@@ -61,6 +61,11 @@ final class FinancialAccountCountrySupport {
   /** ISO 13616 defines 15 as the shortest real IBAN (Norway); nothing shorter is worth checking
    *  against a country at all. */
   static final int IBAN_MIN_LENGTH = 15;
+  /** Returned for a Bank account whose effective IBAN is non-blank but has no country — both by
+   *  {@link #validateIbanCountryPair} and by {@code FinancialAccountHandler#validateCountryAndIban}
+   *  (ETP-5473). A wire contract with the SPA: {@code backendErrors.js} maps this exact text to
+   *  {@code backendError.countryIban}, so rewording it silently un-translates the toast. */
+  static final String MSG_IBAN_REQUIRES_COUNTRY = "A bank account with an IBAN must have a country.";
 
   private static final String KEY_ID = "id";
   private static final String KEY_ISO = "iso";
@@ -162,7 +167,7 @@ final class FinancialAccountCountrySupport {
       return "The IBAN is too short.";
     }
     if (country == null) {
-      return "A bank account with an IBAN must have a country.";
+      return MSG_IBAN_REQUIRES_COUNTRY;
     }
     String ibanPrefix = country.getIBANCode();
     Long ibanLength = country.getIBANLength();
@@ -188,28 +193,6 @@ final class FinancialAccountCountrySupport {
   // ---------------------------------------------------------------------------
   // Country resolution
   // ---------------------------------------------------------------------------
-
-  /**
-   * Resolves the {@link Country} an IBAN belongs to from its first two characters, preferring a
-   * match on {@link Country#PROPERTY_IBANCODE} over {@link Country#PROPERTY_ISOCOUNTRYCODE}: only
-   * ~45 of 243 seeded countries carry IBAN metadata, and matching on the plain ISO code can return
-   * one of the other ~198, which {@code FIN_FINANCIAL_ACCOUNT_TRG2} then rejects. The ISO match is
-   * kept as a fallback for datasets where {@code IBANCOUNTRY} was never populated.
-   *
-   * @return the matching country, or {@code null} when the IBAN is too short or no active country
-   *         matches the prefix either way.
-   */
-  static Country resolveCountryForIbanPrefix(String normalizedIban) {
-    if (normalizedIban == null || normalizedIban.length() < 2) {
-      return null;
-    }
-    String prefix = normalizedIban.substring(0, 2).toUpperCase(Locale.ROOT);
-    Country byIbanCode = findCountryByIbanCode(prefix);
-    if (byIbanCode != null) {
-      return byIbanCode;
-    }
-    return findCountryByIsoCode(prefix);
-  }
 
   /**
    * The active organization's country (ETP-4896 requirement 1), walking up the org tree when the
@@ -265,16 +248,6 @@ final class FinancialAccountCountrySupport {
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(Country.PROPERTY_IBANCODE, ibanCode));
-    criteria.add(Restrictions.eq(Country.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Country) criteria.uniqueResult();
-  }
-
-  private static Country findCountryByIsoCode(String isoCode) {
-    OBCriteria<Country> criteria = OBDal.getInstance().createCriteria(Country.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, isoCode));
     criteria.add(Restrictions.eq(Country.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return (Country) criteria.uniqueResult();
@@ -385,6 +358,12 @@ final class FinancialAccountCountrySupport {
       return StringUtils.trimToEmpty(bodyString(body, FinancialAccountHandler.FIELD_TYPE));
     }
     return stored != null ? stored.getType() : null;
+  }
+
+  /** The stored account's country, or {@code null} when there is no stored account (create) or
+   *  it has none (legacy rows). Used by the update-path IBAN pair check (ETP-5473). */
+  static Country storedCountry(FIN_FinancialAccount stored) {
+    return stored != null ? stored.getCountry() : null;
   }
 
   /**

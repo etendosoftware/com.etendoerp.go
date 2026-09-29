@@ -55,8 +55,8 @@ import org.openbravo.model.common.geography.Location;
  * <p>Pure-logic methods ({@code normalizeIban}, {@code isChecksumValid}, {@code
  * validateIbanCountryPair}, {@code bodyString}, {@code isExplicitClear}) run with plain
  * Mockito-stubbed {@link Country} objects, no DAL. DAL-backed lookups follow the same
- * {@code mockStatic(OBDal.class)} + {@code mock(OBCriteria.class)} idiom already used in
- * {@link FinancialAccountHandlerTest#testResolveCountryFromIbanUppercasesPrefixAndReturnsMatch}.
+ * {@code mockStatic(OBDal.class)} + {@code mock(OBCriteria.class)} idiom used across the
+ * module's handler tests.
  */
 public class FinancialAccountCountrySupportTest {
 
@@ -193,58 +193,6 @@ public class FinancialAccountCountrySupportTest {
   public void pairAcceptedForConsistentIbanAndCountry() {
     Country spain = countryWithIbanMeta("ES", "ES", 24, "Spain");
     assertNull(FinancialAccountCountrySupport.validateIbanCountryPair(VALID_ES_IBAN, spain));
-  }
-
-  // ---------------------------------------------------------------------------
-  // resolveCountryForIbanPrefix
-  // ---------------------------------------------------------------------------
-
-  @Test
-  public void resolveCountryForIbanPrefixReturnsNullWithoutDalWhenTooShort() {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      assertNull(FinancialAccountCountrySupport.resolveCountryForIbanPrefix("E"));
-      obDal.verifyNoInteractions();
-    }
-  }
-
-  @Test
-  public void resolveCountryForIbanPrefixMatchesByIbanCodeFirst() {
-    Country spain = mock(Country.class);
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<Country> criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(Country.class)).thenReturn(criteria);
-      when(criteria.uniqueResult()).thenReturn(spain);
-
-      Country result = FinancialAccountCountrySupport.resolveCountryForIbanPrefix(VALID_ES_IBAN);
-
-      assertSame(spain, result);
-      // Only the IBAN-code lookup should run when it already finds a match.
-      verify(dal, times(1)).createCriteria(Country.class);
-    }
-  }
-
-  @Test
-  public void resolveCountryForIbanPrefixFallsBackToIsoCodeWhenIbanCodeLookupMisses() {
-    Country matchByIso = mock(Country.class);
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<Country> firstMiss = mock(OBCriteria.class);
-      @SuppressWarnings("unchecked")
-      OBCriteria<Country> secondHit = mock(OBCriteria.class);
-      when(dal.createCriteria(Country.class)).thenReturn(firstMiss, secondHit);
-      when(firstMiss.uniqueResult()).thenReturn(null);
-      when(secondHit.uniqueResult()).thenReturn(matchByIso);
-
-      Country result = FinancialAccountCountrySupport.resolveCountryForIbanPrefix(VALID_ES_IBAN);
-
-      assertSame(matchByIso, result);
-      verify(dal, times(2)).createCriteria(Country.class);
-    }
   }
 
   // ---------------------------------------------------------------------------
