@@ -183,6 +183,6 @@ public class FinancialAccountHandlerProviderLogoTest extends FinancialAccountPro
           .put(PROVIDER_LOGO_URL, raw);
       assertUpsertedWithLogo(body, null);
     }
-    verify(handler, never()).findExistingProvider(anyString());
+    verify(enricher, never()).findExistingProvider(anyString());
   }
 }

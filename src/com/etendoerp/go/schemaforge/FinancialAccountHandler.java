@@ -17,14 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -50,8 +47,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
-import com.etendoerp.psd2.bank.integration.data.Provider;
-import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -107,12 +102,6 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
-  /** Salt Edge provider chosen at offline creation (optional); persisted so a later bank connect
-   *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
-   *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
-  private static final String FIELD_PROVIDER_CODE = "providerCode";
-  private static final String FIELD_PROVIDER_NAME = "providerName";
-  private static final String FIELD_PSD2_PROVIDER = "psd2Provider";
   /** Computed flag (ETP-4530): {@code true} when the account has at least one active
    *  {@link FIN_FinaccTransaction}. Injected into every GET row so the frontend can lock the
    *  Currency field once real movements exist — a different, stricter condition than
@@ -152,18 +141,8 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
   /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. Also the
    *  transient create-body key (ETP-5521) carrying the logo of the Salt Edge provider picked in the
-   *  offline bank picker — see {@link #enrichProvider}. */
-  private static final String FIELD_PROVIDER_LOGO_URL = "providerLogoUrl";
-  /** Size of {@code PSD2_PROVIDER.LOGO_URL}; a longer logo URL is dropped, never truncated. */
-  private static final int MAX_PROVIDER_LOGO_URL_LENGTH = 255;
-  private static final String HTTPS_SCHEME = "https";
-  private static final int HTTPS_DEFAULT_PORT = 443;
-  /** Hosts a client-supplied provider logo may point at: the Salt Edge logo CDN, as observed in
-   *  every stored {@code PSD2_PROVIDER.LOGO_URL} ({@code /logos/providers/<cc>/<code>.svg}). A
-   *  logo on any other host is dropped — {@code PSD2_PROVIDER} is shared across tenants, so an
-   *  arbitrary host would let one tenant plant an image (or tracking pixel) for everyone. */
-  private static final Set<String> TRUSTED_PROVIDER_LOGO_HOSTS =
-      Set.of("d1uuj3mi6rzwpm.cloudfront.net");
+   *  offline bank picker — see {@link FinancialAccountProviderEnricher}. */
+  static final String FIELD_PROVIDER_LOGO_URL = "providerLogoUrl";
   /** Reserved for the sync badge; never computed server-side (mirrors the R spec's constant false). */
   private static final String FIELD_BANK_CONNECTION_PENDING = "bankConnectionPending";
   /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
@@ -206,9 +185,9 @@ public class FinancialAccountHandler implements NeoHandler {
    *  {@link FinancialAccountCountrySupport#buildIbanRules}. */
   private static final String FIELD_COUNTRY_IBAN_RULES = "countryIbanRules";
 
-  private static final String TYPE_BANK = "B";
+  static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
-  private static final String TYPE_CARD = "CA";
+  static final String TYPE_CARD = "CA";
   /** Package-private: {@link FinancialAccountSupport#validateLengths} enforces the same limits. */
   static final int NAME_MAX_LENGTH = 60;
   static final int IBAN_MAX_LENGTH = 34;
@@ -216,6 +195,13 @@ public class FinancialAccountHandler implements NeoHandler {
 
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
+
+  /**
+   * Provider enrichment of the offline create (ETP-5521): links the Salt Edge provider and fills
+   * its logo. Package-visible and non-final so unit tests can swap in a spy of the enricher (its
+   * {@code findExistingProvider} lookup is the DAL seam) without static mocking.
+   */
+  FinancialAccountProviderEnricher providerEnricher = new FinancialAccountProviderEnricher();
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -597,7 +583,7 @@ public class FinancialAccountHandler implements NeoHandler {
     // Persist the chosen Salt Edge provider (offline "with bank selected" flow, bank and card
     // accounts): upsert the provider and inject the FK so the account remembers its bank. The account stays offline —
     // this is metadata only — but a later bank connect can then preselect that provider.
-    enrichProvider(body, type);
+    providerEnricher.enrichProvider(body, type);
 
     // Validates the (IBAN, country) pair and injects/normalizes both in the body before the
     // insert — the trigger FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no
@@ -614,122 +600,6 @@ public class FinancialAccountHandler implements NeoHandler {
     return null;
   }
 
-  /**
-   * When the offline create carries a Salt Edge provider (bank and card accounts —
-   * {@link #supportsProvider}; cash ignores it), upsert the provider
-   * record and inject its id under the {@code psd2Provider} FK property so the generic CRUD links
-   * it — same mechanism used for {@code country}.
-   *
-   * <p>The optional {@code providerLogoUrl} (ETP-5521) is a client-supplied value written to the
-   * {@code PSD2_PROVIDER} catalog, which is shared across tenants by provider code. It is therefore
-   * trusted only to <em>fill a missing logo</em>: it must pass {@link #sanitizeProviderLogoUrl}
-   * (https on a Salt Edge CDN host, at most 255 chars) and it is passed to the upsert only when
-   * the provider does not exist yet or has no stored logo ({@link #fillOnlyLogo}). It never
-   * replaces an existing logo — refreshing logos is {@code SyncBankProviders}' job. An unusable
-   * logo is dropped, never a reason to fail the create.
-   *
-   * <p>The transient {@code providerCode}/{@code providerName}/{@code providerLogoUrl} keys are
-   * always removed (also for cash accounts or without a provider code) so they are not treated
-   * as entity properties.
-   */
-  private void enrichProvider(JSONObject body, String type) throws JSONException {
-    String providerCode = body.optString(FIELD_PROVIDER_CODE, "").trim();
-    if (supportsProvider(type) && StringUtils.isNotBlank(providerCode)) {
-      String providerName = body.optString(FIELD_PROVIDER_NAME, providerCode).trim();
-      String logoUrl = fillOnlyLogo(providerCode,
-          sanitizeProviderLogoUrl(body.optString(FIELD_PROVIDER_LOGO_URL, null)));
-      Provider provider = ProviderCatalogUtils.upsertProvider(providerCode, providerName, null,
-          logoUrl);
-      OBDal.getInstance().flush();
-      body.put(FIELD_PSD2_PROVIDER, provider.getId());
-    }
-    stripTransientProviderKeys(body);
-  }
-
-  /**
-   * Bank and card accounts (ETP-5521) both go through the wizard's bank picker and can remember
-   * their Salt Edge provider; cash accounts have no bank, so they never link one.
-   */
-  private static boolean supportsProvider(String type) {
-    return TYPE_BANK.equals(type) || TYPE_CARD.equals(type);
-  }
-
-  /** Removes the create-only provider keys so the generic CRUD never sees them as properties. */
-  private static void stripTransientProviderKeys(JSONObject body) {
-    body.remove(FIELD_PROVIDER_CODE);
-    body.remove(FIELD_PROVIDER_NAME);
-    body.remove(FIELD_PROVIDER_LOGO_URL);
-  }
-
-  /**
-   * Returns {@code logoUrl} only when it may fill the catalog row: the provider is not registered
-   * yet, or its stored logo is blank. Otherwise {@code null}, which the upsert reads as "leave the
-   * stored logo untouched". Skips the lookup entirely when there is no usable logo.
-   */
-  private String fillOnlyLogo(String providerCode, String logoUrl) {
-    if (logoUrl == null) {
-      return null;
-    }
-    Provider existing = findExistingProvider(providerCode);
-    return existing == null || StringUtils.isBlank(existing.getLogoURL()) ? logoUrl : null;
-  }
-
-  /** DAL seam (stubbed in unit tests): the catalog row for {@code providerCode}, or null. */
-  Provider findExistingProvider(String providerCode) {
-    return FinancialAccountBankConnectionSupport.findProviderByCode(providerCode);
-  }
-
-  /**
-   * Accepts a provider logo URL only when it is non-blank, at most 255 chars (the size of
-   * {@code PSD2_PROVIDER.LOGO_URL}) and a trusted Salt Edge CDN URL
-   * ({@link #isTrustedLogoUri}). Anything else yields {@code null}; a rejected non-blank logo is
-   * logged at debug level by its host only, never the full URL.
-   *
-   * @param raw
-   *     the logo URL sent by the client, possibly {@code null}
-   * @return the trimmed URL when acceptable, otherwise {@code null}
-   */
-  private static String sanitizeProviderLogoUrl(String raw) {
-    String logoUrl = StringUtils.trimToNull(raw);
-    if (logoUrl == null) {
-      return null;
-    }
-    if (logoUrl.length() <= MAX_PROVIDER_LOGO_URL_LENGTH && isTrustedLogoUri(logoUrl)) {
-      return logoUrl;
-    }
-    log.debug("Dropped client-supplied provider logo (ETP-5521); host: {}", logoHostForLog(logoUrl));
-    return null;
-  }
-
-  /** The host of {@code url} for a log line — {@code "none"} or {@code "unparsable"} otherwise. */
-  private static String logoHostForLog(String url) {
-    try {
-      String host = new URI(url).getHost();
-      return host != null ? host : "none";
-    } catch (URISyntaxException e) {
-      return "unparsable";
-    }
-  }
-
-  /**
-   * Parses {@code url} with {@link URI} (never string prefix checks) and accepts it only when the
-   * scheme is https (case-insensitive), there is no user-info (rejects
-   * {@code https://trusted.host@evil.tld}), the port is the default one and the host is in
-   * {@link #TRUSTED_PROVIDER_LOGO_HOSTS}. A malformed URL is rejected.
-   */
-  private static boolean isTrustedLogoUri(String url) {
-    try {
-      URI uri = new URI(url);
-      String host = uri.getHost();
-      int port = uri.getPort();
-      return HTTPS_SCHEME.equalsIgnoreCase(uri.getScheme()) && uri.getRawUserInfo() == null
-          && (port == -1 || port == HTTPS_DEFAULT_PORT) && host != null
-          && TRUSTED_PROVIDER_LOGO_HOSTS.contains(host.toLowerCase(Locale.ROOT));
-    } catch (URISyntaxException e) {
-      return false;
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Update (pre-hook: validate + keep country in sync with the IBAN)
   // ---------------------------------------------------------------------------
@@ -738,9 +608,9 @@ public class FinancialAccountHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
-    // The provider keys are create-only (see enrichProvider); an update never re-links or
-    // re-logos the provider, so strip them before the generic CRUD sees them.
-    stripTransientProviderKeys(body);
+    // The provider keys are create-only (see FinancialAccountProviderEnricher); an update never
+    // re-links or re-logos the provider, so strip them before the generic CRUD sees them.
+    FinancialAccountProviderEnricher.stripTransientProviderKeys(body);
     // Archive guard moved here from the old DELETE-based archive() (ETP-4871): the frontend now
     // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
     // that used to gate the soft-archive must gate this instead, before the generic CRUD persists

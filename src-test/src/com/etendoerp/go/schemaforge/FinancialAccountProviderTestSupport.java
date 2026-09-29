@@ -49,9 +49,11 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  * Shared fixtures for the {@link FinancialAccountHandler#validateAndEnrichCreate} provider tests
  * ({@link FinancialAccountHandlerProviderTest}, {@link FinancialAccountHandlerProviderLogoTest}).
  *
- * <p>Strategy: spy the handler, stub the DAL-bound seams ({@code loadCurrency}, {@code nameExists},
- * {@code listMatchingAlgorithms}, and the fill-only {@code findExistingProvider}) and statically
- * mock {@link ProviderCatalogUtils} / {@link OBDal} so no database or live OBContext is needed.
+ * <p>Strategy: spy the handler and stub its DAL-bound seams ({@code loadCurrency},
+ * {@code nameExists}, {@code listMatchingAlgorithms}); wire a spied
+ * {@link FinancialAccountProviderEnricher} into {@code handler.providerEnricher} and stub the
+ * fill-only {@code findExistingProvider} seam on that enricher spy; statically mock
+ * {@link ProviderCatalogUtils} / {@link OBDal} so no database or live OBContext is needed.
  * The two concrete classes are split only to keep each under the Sonar 35-method-per-class limit.
  * Subclasses supply {@code @RunWith(MockitoJUnitRunner.Silent.class)}; it also initializes the
  * {@code @Mock} fields declared here.
@@ -81,10 +83,14 @@ abstract class FinancialAccountProviderTestSupport {
 
   FinancialAccountHandler handler;
 
+  FinancialAccountProviderEnricher enricher;
+
   /** Spies the handler and neutralizes the OBContext/rollback seams (no live session in CI). */
   @Before
   public void setUp() {
     handler = spy(new FinancialAccountHandler());
+    enricher = spy(new FinancialAccountProviderEnricher());
+    handler.providerEnricher = enricher;
     doNothing().when(handler).enterAdminMode();
     doNothing().when(handler).exitAdminMode();
     doNothing().when(handler).doRollbackAndClose();
@@ -122,13 +128,13 @@ abstract class FinancialAccountProviderTestSupport {
   /**
    * Same as {@link #assertUpsertedWithLogo(JSONObject, String)} with {@code existing} returned by
    * the fill-only seam {@code findExistingProvider} ({@code null} = not in the catalog yet). The
-   * seam is stubbed on the spy — never MockedStatic FinancialAccountBankConnectionSupport, which
-   * would also mock its private statics.
+   * seam is stubbed on the enricher spy — never MockedStatic
+   * FinancialAccountBankConnectionSupport, which would also mock its private statics.
    */
   void assertUpsertedWithLogo(JSONObject body, Provider existing, String expectedLogo)
       throws Exception {
     stubValidCreate();
-    doReturn(existing).when(handler).findExistingProvider(SANTANDER_CODE);
+    doReturn(existing).when(enricher).findExistingProvider(SANTANDER_CODE);
     when(logoProvider.getId()).thenReturn(PROVIDER_FK_ID);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
@@ -155,7 +161,7 @@ abstract class FinancialAccountProviderTestSupport {
    */
   void assertLogoRejected(String rawLogo) throws Exception {
     assertUpsertedWithLogo(bankBodyWithLogo(rawLogo), null);
-    verify(handler, never()).findExistingProvider(anyString());
+    verify(enricher, never()).findExistingProvider(anyString());
   }
 
   JSONObject validCreateBody() throws Exception {

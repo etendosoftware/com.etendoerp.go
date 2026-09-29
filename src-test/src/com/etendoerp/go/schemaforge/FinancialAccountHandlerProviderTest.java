@@ -161,7 +161,7 @@ public class FinancialAccountHandlerProviderTest extends FinancialAccountProvide
     JSONObject body = validCreateBody().put(PROVIDER_CODE, SANTANDER_CODE).put(PROVIDER_NAME,
         SANTANDER_NAME);
     assertUpsertedWithLogo(body, null);
-    verify(handler, never()).findExistingProvider(anyString());
+    verify(enricher, never()).findExistingProvider(anyString());
   }
 
   /**
@@ -174,7 +174,7 @@ public class FinancialAccountHandlerProviderTest extends FinancialAccountProvide
     when(existing.getLogoURL()).thenReturn("https://" + TRUSTED_LOGO_HOST + "/stored.svg");
 
     assertUpsertedWithLogo(bankBodyWithLogo(SANTANDER_LOGO), existing, null);
-    verify(handler).findExistingProvider(SANTANDER_CODE);
+    verify(enricher).findExistingProvider(SANTANDER_CODE);
   }
 
   /** ETP-5521 fill-only: an existing provider with a blank logo gets the client logo filled in. */
@@ -265,7 +265,7 @@ public class FinancialAccountHandlerProviderTest extends FinancialAccountProvide
         .put(PROVIDER_NAME, SANTANDER_NAME);
     assertUpsertedWithLogo(body, null);
     assertEquals(TYPE_CARD, body.getString(FIELD_TYPE));
-    verify(handler, never()).findExistingProvider(anyString());
+    verify(enricher, never()).findExistingProvider(anyString());
   }
 
   /**
@@ -276,7 +276,7 @@ public class FinancialAccountHandlerProviderTest extends FinancialAccountProvide
   public void testCreateCardWithCdnLogoFillsLogo() throws Exception {
     JSONObject body = bankBodyWithLogo(SANTANDER_LOGO).put(FIELD_TYPE, TYPE_CARD);
     assertUpsertedWithLogo(body, null, SANTANDER_LOGO);
-    verify(handler).findExistingProvider(SANTANDER_CODE);
+    verify(enricher).findExistingProvider(SANTANDER_CODE);
   }
 
   /**
