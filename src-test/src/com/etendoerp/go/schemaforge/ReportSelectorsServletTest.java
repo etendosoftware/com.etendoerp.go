@@ -24,8 +24,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,16 +54,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
-
-import com.etendoerp.go.common.JwtAuthUtils;
+import com.etendoerp.go.auth.AuthScheme;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.SurfacePolicy;
 
 /**
  * Unit tests for {@link ReportSelectorsServlet}.
@@ -100,7 +105,7 @@ class ReportSelectorsServletTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
-  private MockedStatic<JwtAuthUtils> jwtAuthMock;
+  private MockedStatic<NeoServletSupport> neoSupportMock;
   private MockedStatic<com.etendoerp.go.common.CorsUtils> corsMock;
 
   private StringWriter stringWriter;
@@ -119,7 +124,7 @@ class ReportSelectorsServletTest {
 
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
-    jwtAuthMock = mockStatic(JwtAuthUtils.class);
+    neoSupportMock = mockStatic(NeoServletSupport.class);
     corsMock = mockStatic(com.etendoerp.go.common.CorsUtils.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
@@ -146,7 +151,7 @@ class ReportSelectorsServletTest {
   @AfterEach
   void tearDown() {
     corsMock.close();
-    jwtAuthMock.close();
+    neoSupportMock.close();
     obContextMock.close();
     obDalMock.close();
   }
@@ -156,8 +161,7 @@ class ReportSelectorsServletTest {
   // ---------------------------------------------------------------------------
 
   private void configureAuthenticatedGet(String type) throws Exception {
-    jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-        .thenReturn(true);
+    neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
     when(request.getPathInfo()).thenReturn("/" + type);
     when(request.getParameter("q")).thenReturn("");
     when(request.getParameter("limit")).thenReturn("20");
@@ -198,47 +202,59 @@ class ReportSelectorsServletTest {
   class DoGetGuardTests {
 
     @Test
-    @DisplayName("authenticateOrFail returning false aborts the request: handler body never runs")
-    void authenticateOrFailFalseAbortsRequest() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(false);
+    @DisplayName("returns 401 when JWT authentication throws OBException")
+    void authFailureOBException() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "bad token"));
 
       servlet.doGet(request, response);
 
-      // JwtAuthUtils.authenticateOrFail owns writing the error response (401/403) itself —
-      // the servlet only has to stop. Assert the handler body never ran: no pathInfo read,
-      // no 200, no selector query.
-      verify(request, never()).getPathInfo();
-      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
-      verify(obDal, never()).getSession();
+      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      assertTrue(getResponseBody().contains("bad token"));
     }
 
     @Test
-    @DisplayName("authenticateOrFail returning true (cookie session) runs the handler body")
-    void authenticateOrFailTrueViaCookieSessionRunsHandler() throws Exception {
-      configureAuthenticatedGet("bpartner");
+    @DisplayName("returns 401 when JWT authentication throws generic Exception")
+    void authFailureGenericException() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED,
+              "Invalid or expired token"));
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      assertTrue(getResponseBody().contains("Invalid or expired token"));
     }
 
     @Test
-    @DisplayName("authenticateOrFail returning true (legacy bearer) still runs the handler body — "
-        + "the servlet call site cannot tell cookie session and legacy bearer apart, by design")
-    void authenticateOrFailTrueViaLegacyBearerRunsHandler() throws Exception {
-      configureAuthenticatedGet("bpartner");
+    @DisplayName("ETP-5455: authenticates through the shared pipeline under NEO_DATA")
+    void asksForTheNeoDataPolicy() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "refused"));
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_OK);
+      neoSupportMock.verify(() -> NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA));
+    }
+
+    @Test
+    @DisplayName("ETP-5455: a commercially blocked environment answers 402, not the selector")
+    void blockedEnvironmentAnswers402() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.PAYMENT_REQUIRED,
+              "Environment access is not available: SUBSCRIPTION_REQUIRED"));
+      when(request.getPathInfo()).thenReturn("/bpartner");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(402);
+      assertTrue(getResponseBody().contains("SUBSCRIPTION_REQUIRED"));
     }
 
     @Test
     @DisplayName("returns 400 when pathInfo is null")
     void missingPathInfo() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(true);
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn(null);
 
       servlet.doGet(request, response);
@@ -250,8 +266,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 400 when pathInfo is just /")
     void rootPathInfo() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(true);
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn("/");
 
       servlet.doGet(request, response);
@@ -398,14 +413,89 @@ class ReportSelectorsServletTest {
       assertEquals(5, json.getInt("totalCount"));
     }
 
+    // ETP-5420 — c_currency is the full ISO catalog; the selector must be scoped to the
+    // tenant's base currency plus currencies with an active conversion rate, and the COUNT
+    // must be scoped the same way (it used to report all ~160 ISO currencies).
     @Test
-    @DisplayName("currency type uses cross-client query with ORDER BY clientId binding")
+    @DisplayName("currency query is scoped to client currency and conversion rates, in both count and data")
     void currencyQuery() throws Exception {
       configureAuthenticatedGet("currency");
 
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      String countSql = sql.getAllValues().get(0);
+      String dataSql = sql.getAllValues().get(1);
+      for (String s : new String[]{ countSql, dataSql }) {
+        assertTrue(s.contains("FROM ad_client WHERE ad_client_id = :clientId"), s);
+        assertTrue(s.contains("FROM c_conversion_rate cr"), s);
+        assertFalse(s.contains(":selectedOrgId"), s);
+      }
+      verify(countQuery).setParameter("clientId", TEST_CLIENT_ID);
+      verify(dataQuery).setParameter("clientId", TEST_CLIENT_ID);
+    }
+
+    @Test
+    @DisplayName("currency query also accepts the selected org's currencies and sorts its acct-schema currency first")
+    void currencyQueryWithSelectedOrg() throws Exception {
+      configureAuthenticatedGet("currency");
+      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(session, times(2)).createNativeQuery(sql.capture());
+      String dataSql = sql.getAllValues().get(1);
+      assertTrue(dataSql.contains("OR c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId)"), dataSql);
+      // ETP-5483: the org's accounting-schema currency is the first choice, and it is also in
+      // the ETP-5420 scope so it can never be filtered out.
+      assertTrue(dataSql.contains("OR c_currency_id = COALESCE((SELECT acs.c_currency_id FROM ad_org o"), dataSql);
+      assertTrue(dataSql.contains("ORDER BY (CASE WHEN c_currency_id = COALESCE((SELECT acs.c_currency_id FROM ad_org o"), dataSql);
+      assertTrue(dataSql.contains("WHEN c_currency_id = (SELECT c_currency_id FROM ad_org WHERE ad_org_id = :selectedOrgId) THEN 1"), dataSql);
+      verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+    }
+
+    /**
+     * ETP-5483: without selectedOrgId, the currency ORDER BY still has no reference to it —
+     * unchanged from before — so it must never be bound on either query (Hibernate would
+     * reject an attempt to bind a name absent from the query text).
+     */
+    @Test
+    @DisplayName("currency query without selectedOrgId never binds it (order unchanged)")
+    @SuppressWarnings("unchecked")
+    void currencyQueryWithoutSelectedOrgIdDoesNotBindIt() throws Exception {
+      configureAuthenticatedGet("currency");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(countQuery, never()).setParameter(eq("selectedOrgId"), any());
+      verify(dataQuery, never()).setParameter(eq("selectedOrgId"), any());
+      // clientId (the pre-existing default-currency ordering) is still bound on the data query.
+      verify(dataQuery).setParameter("clientId", TEST_CLIENT_ID);
+    }
+
+    /**
+     * ETP-5483 + ETP-5420: with selectedOrgId, both the org-currency-first ORDER BY and the
+     * tenant-currency scope (WHERE) reference it, so it must be bound as a real parameter on the
+     * data query AND on the count query — otherwise the count would not match the scoped list.
+     */
+    @Test
+    @DisplayName("currency query with selectedOrgId binds it on both the count and the data query")
+    @SuppressWarnings("unchecked")
+    void currencyQueryWithSelectedOrgIdBindsBothQueries() throws Exception {
+      configureAuthenticatedGet("currency");
+      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(countQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
     }
   }
 
@@ -420,8 +510,7 @@ class ReportSelectorsServletTest {
     @Test
     @DisplayName("returns 500 when executeSelector throws unexpected exception")
     void internalError() throws Exception {
-      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
-          .thenReturn(true);
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(obContext));
       when(request.getPathInfo()).thenReturn("/bpartner");
       when(request.getParameter("q")).thenReturn("");
       when(request.getParameter("limit")).thenReturn("20");
@@ -846,5 +935,16 @@ class ReportSelectorsServletTest {
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
     }
+  }
+
+  /** ETP-5455 — an outcome the shared pipeline would hand back for an authenticated request. */
+  private static EnvironmentAuthOutcome authenticatedOutcome(OBContext ctx) {
+    return EnvironmentAuthOutcome.authenticated(AuthScheme.COOKIE, ctx, "user-1", "role-1",
+        "client-1", "org-1");
+  }
+
+  private static EnvironmentAuthOutcome refusedOutcome(EnvironmentAuthOutcome.Status status,
+      String message) {
+    return EnvironmentAuthOutcome.refused(status, message, AuthScheme.COOKIE);
   }
 }

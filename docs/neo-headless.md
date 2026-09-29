@@ -669,6 +669,49 @@ paths — so nothing here affects editing an existing user.
   `IDENTITY_KEYS` to include `"P|"`-prefixed keys, or route this fallback through a live
   `AD_Preference` query instead of the session snapshot.
 
+#### 4.3.5 A GET's `_extraProperties` companion key was silently stripped by `NeoFieldFilter` (ETP-5432)
+
+**`_extraProperties`/`additionalProperties` is the classic Openbravo datasource query parameter** a
+GET/list request uses to ask `DefaultJsonDataService` for a related property beyond the entity's own
+curated fields — e.g. `_extraProperties=invoice.salesTransaction` on a request against a
+`TBAI_SyncInvoice`-backed entity, to also get the linked invoice's `IsSOTrx` flag. `NeoCrudHandler`
+forwards the whole incoming query-param map to `DefaultJsonDataService.fetch()` verbatim, so the
+requested property resolves and `DataToJsonConverter` joins it into the response under a flat,
+`$`-joined key (`invoice$salesTransaction` for the dotted request-side path
+`invoice.salesTransaction` — see `DataToJsonConverter#replaceDots` /
+`DalUtil.FIELDSEPARATOR`/`DalUtil.DOT`).
+
+**The bug:** `NeoFieldFilter#filterGetResponse` strips any response key that isn't already known to
+the entity's `ETGO_SF_FIELD` config, UNLESS `isMetadataKey` recognizes it — and `isMetadataKey` only
+recognizes a key starting with `_` or `$`. A joined companion key like `invoice$salesTransaction`
+starts with the FK **property name** instead, so it fell straight through both checks and was
+deleted before ever reaching the client — indistinguishable from a client typo (no error; the value
+was just always absent). This is a **general bug affecting any window** that requests a
+non-curated field via `_extraProperties` on a filtered entity, not specific to any one spec — it
+surfaced via TBAI's fiscal-monitor `isSalesRow(row)` check (`tools/app-shell/src/windows/custom/
+fiscal-monitor/TbaiMonitorSection.jsx` in the functional repo), which read the never-populated
+`invoice$issotrx`/`issotrx` (the DAL property name for `IsSOTrx` is actually `salesTransaction`, not
+the generic `IsXxx`→`xxx` pattern) and defaulted every row to "not sales" as a result — see that
+repo's `docs/generated-custom-windows/fiscal-monitor.md` for the frontend-side fix and symptom.
+
+**Fix — `NeoFieldFilter.forEntity` gained a 3-arg overload,** `forEntity(sfEntity, dalEntityName,
+queryParams)`, that additionally allowlists whatever the caller explicitly requested via
+`_extraProperties` before `filterGetResponse` runs. A new private `includeRequestedExtraProperties`
+parses the query param's comma-separated dotted paths and adds each one to the `included` set,
+converted to the same flat `$`-joined shape the response actually carries
+(`invoice.salesTransaction` → `invoice$salesTransaction`). A caller naming a property this way has
+already opted into seeing it — the same reasoning `includeFkIdentifierVariant` already applies to
+the `$_identifier` variant NEO always adds for a resolved FK.
+
+**Scoped to GET only, deliberately.** `NeoCrudHandler.handleWindowEntityCrud` picks the overload
+based on `context.getHttpMethod()`: `"GET".equals(...)` uses the 3-arg overload (with
+`context.getQueryParams()`), every other verb keeps calling the 2-arg overload unchanged. Only a
+GET/list request can carry a client-requested `_extraProperties` key, and `included` also gates
+`filterCreateRequest`/`filterWriteRequest` on the write paths — allowlisting a write-side field this
+way would be a write permission grant, not a response projection, so the two are kept strictly
+separate. `queryParams` is `null` for every existing 2-arg call site (write paths, tests), which is
+a no-op for `includeRequestedExtraProperties`.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -1069,7 +1112,27 @@ DELETE /sws/neo/attachments/file/{attachmentId}
 Authorization: Bearer {token}
 ```
 
-Returns `204` on success, `404` if the attachment does not exist.
+Returns `204` on success, `404` if the attachment does not exist, `409` if it belongs to a
+non-draft fiscal declaration (see below).
+
+**Fiscal-declaration guard (ETP-5432).** Before this change, `NeoAttachmentsHelper#handleDelete`
+had **no ownership/status check of any kind** — any attachment could be deleted regardless of the
+state of the record it belonged to. A frontend-only guard already hid the delete action for a
+non-draft fiscal declaration's justificante (`AttachmentsTab.jsx`'s `readOnly` prop, functional
+repo — see `docs/generated-custom-windows/fiscal-models.md`, "Justificante delete blocked outside
+draft status"), but that hid a UI control, not the endpoint: a direct `DELETE` call still succeeded
+unconditionally.
+
+`handleDelete` now calls a new private `rejectDeleteOfNonDraftFiscalDeclAttachment(attachment)`
+right after resolving the attachment and before invoking `AttachImplementationManager#delete`.
+It is **deliberately narrow** — it inspects the attachment's own `AD_Table`/`AD_Record_ID` and
+short-circuits (returns `null`, delete proceeds) on the very first check for any table other than
+`ETGO_Fiscal_Decl`, so every other table's attachments (goods-receipt, invoice, …) are completely
+unaffected. For an `ETGO_Fiscal_Decl` attachment, it resolves the owning declaration via `OBDal`
+and rejects with `409` (`"Cannot delete an attachment of a fiscal declaration that is not in
+draft status: <declId>"`) when `DeclarationStatus` is set and is not the draft default — mirroring
+the same 409 shape `FiscalDeclCrudHandler#handleDeclDelete` already uses for deleting the
+declaration record itself.
 
 #### PATCH — Update description
 
@@ -1538,6 +1601,16 @@ Behavior details (`McpActionsView`):
   the catalog still offered as callable while carrying no `actionValues`, no `actionParameter` and no
   `agentPrompt`. Curation cannot express this: `Processing` is curated `system`, which states that
   the server fills a payload value and says nothing about a button.
+- **Display logic is NOT part of invokability — not even a constant `'false'` (ETP-5468).** Only
+  `AD_Field.isDisplayed = 'N'` counts as hidden. A button AD hides through its display logic stays
+  invokable unless it is curated `discarded`, and `neo_action` / `POST …/action/<button>` execute it
+  (`NeoButtonActionHelper.findButtonColumn` gates only on `ETGO_SF_FIELD.ISINCLUDED`). That is how
+  Core APRM's "Add Transaction" (`EM_Aprm_Addtransactionpd`, display logic `false`) on
+  `financial-account/account` left statement lines matched into an unconfirmed draft
+  reconciliation. The fix was curation (the two `false`-display-logic APRM buttons, `…Addtransactionpd`
+  and `…Findtransactionspd`, are `discarded` there, which also makes the REST route answer 404; the
+  visible APRM buttons were left untouched) — so **a Classic/OBUIAPP button that must never run
+  outside its own popup has to be curated `discarded`**, not trusted to its display logic.
 - **`invokableCount`** sits next to `actionCount` so the split is visible before reading the array.
   On `sales-invoice/header` the catalog has 22 actions and only a handful are callable.
 - A button carries **no `required` flag** (IMP-21). A button has no payload value, so AD's NOT NULL
@@ -1552,8 +1625,197 @@ Behavior details (`McpActionsView`):
   → process name → the column name with its `EM_<module>_` prefix stripped.
 - An entity with no button fields returns `"actions": []` and `"actionCount": 0` (never `null`).
 
+**Button actions pass the real key column (ETP-5447).** `NeoButtonActionHelper.addTabParamsCore`
+puts the record id under `<TableName>_ID` and, when it differs, also under the table's real
+primary-key column name (`AD_Column.IsKey = 'Y'`). Classic `FIN_BankStatementProcess` reads
+`FIN_Bankstatement_ID` while the table is `FIN_BankStatement`, so with the derived key alone its
+`recordID` was null and the process failed with *id to load is required for loading*. Both keys
+carry the same value, so processes that read the table-name casing are unaffected.
+
+**`docAction` is also passed as `action` (ETP-5447).** The catalog advertises `actionParameter:"docAction"` for every list-backed button, but Classic Java
+processes read the chosen value as `action` (`FIN_BankStatementProcess`:
+`bundle.getParams().get("action")`), so `NeoProcessService.buildBundleParams` also puts `action` =
+`docAction` when `action` is absent — on the Classic `DalBaseProcess`/scheduling bundle path only
+(DB procedures consume `docAction` themselves, OBUIAPP handlers get their params unchanged).
+
 **When to use it:** the agent knows the entity and only wants the menu of things it can *do* to a
 record (complete, cancel, post, …), not the full editable/read-only column list.
+
+##### 4.12.1.1 Handler-declared actions — `NeoHandler#actionContracts()` (ETP-5468)
+
+Some actions have no AD button column behind them: they are served by a `NeoHandler` on a spec
+whose routes are its own. The first one is **`bank-reconciliation`** (`ReconciliationHandler`), a
+report spec (`SPEC_TYPE=R`) the SPA drives through `?action=` query routes. Its `generate_*` tool
+stays retired (IMP-19: it is not a report generator); its actions are published instead.
+
+- **Declaration.** `NeoHandler#actionContracts()` returns `Map<String, NeoActionContract>` (empty by
+  default). `NeoActionContract` (`schemaforge/util`) carries the name, a description, whether it
+  mutates, and typed parameters (`string`, `boolean`, `date` = `yyyy-MM-dd`, `array` of
+  `string`/`object`, closed `enum`s). A non-empty declaration also makes the default
+  `servesActions()` answer `true`; handlers that declare nothing keep answering `false`.
+- **Catalog.** `ToolRegistry` adds such R specs (role passing `hasReportSpecAccess(spec,"GET")`) to
+  the **`neo_schema` and `neo_action` enums only** — never to `neo_list`/`neo_get`, which cannot
+  serve them. `neo_discover` reports such a spec with `isReport:true`, `callable:false` (it is not a
+  report generator, IMP-19), `status:"actions_only"` (NOT `not_configured_for_report_generation`),
+  `message:"Not a report generator; '<spec>' serves named actions through neo_action (entity
+  <entity>)."`, plus `actionEntity`, `actions[]` and `actionsHint`. Three-way: a report generator
+  gets `callable:true` + `reportTool`; a spec with neither keeps `not_configured_for_report_generation`.
+- **Scope.** `neo_action` is registered only for write-capable tokens (`neo:write` / `neo:*`), so a
+  read-only token cannot call the read helpers (`pendingLines`, `candidates`, `autoMatch`) either.
+- **Schema.** For an entity whose handler declares actions, `neo_schema` returns the action catalog
+  whatever `view` is asked (`McpActionsView.buildDeclaredResponse`): each entry is
+  `{action, description, mutating, invokeVia:"neo_action", idDescription?, parameters:<JSON Schema>}`
+  — `idDescription` (from `NeoActionContract#withIdDescription`) says what `neo_action`'s `id` is,
+  so no window-specific wording lives in the generic MCP classes. The entity's
+  AD tab exists only for role gating; dumping its columns/buttons would advertise actions it does
+  not serve.
+- **Execution.** `neo_action(spec, entity, id, action, parameters)` reaches the handler's pre-hook
+  with `NeoEndpointType.ACTION`. `ReconciliationHandler.handle` sends only that endpoint type to
+  `ReconciliationAgentActions.dispatch`; the SPA's report-spec requests carry no endpoint type and
+  keep their route table untouched. The dispatcher validates the call against the contract
+  (`NeoActionContract.validate`) **before anything runs**, checks the same report-spec role gate the
+  SPA passes (`POST` for mutating actions, since `neo_action` itself is authorized as a read), maps
+  `id` → `financialAccountId` / `accountId`, and re-enters the SAME `ReconciliationHandlerSupport`
+  wrapper the SPA route uses — identical business validations, `runPostAction` rollback and error
+  mapping.
+- **Refusals (422, IMP-5 flat envelope after `toMcpHandlerError`).** Unknown action →
+  `availableActions`; undeclared key → `unknownParameters` + `acceptedParameters`; absent required
+  (or blank string / empty array) → `missingParameters`; wrong shape → `field` + `expectedType`;
+  value outside an enum → `field` + `allowedValues`; blank `id` → 422. Business refusals keep the
+  handler's own literals (and codes such as `GL_ITEM_REQUIRED`).
+
+| Action | Kind | Parameters (required in **bold**) | SPA route reused |
+|---|---|---|---|
+| `pendingLines` | read | `dateFrom`, `dateTo`, `q` | `GET ?action=pendingLines` |
+| `candidates` | read | **`statementLineId`**, `kind` (transactions\|invoices), `docType` (receipts\|payments), `dateFrom`, `dateTo` | `GET ?action=candidates` |
+| `autoMatch` | read | — | `GET ?action=autoMatch` |
+| `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `glItemId`, `description` | `POST ?action=reconcileGroup` |
+| `reconcileDifference` | write | **`statementLineId`**, `glItemId`, `description` | `POST ?action=reconcileDifference` |
+| `applySuggestions` | write | **`groups[{statementLineId, operationIds[], createPayment?}]`** | `POST ?action=applySuggestions` |
+| `undoReconciliation` | write | **`statementLineId`** | `POST ?action=reactivate` |
+| `removeOperation` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=removeOperation` |
+| `reactivateSelected` | write | **`statementLineId`**, **`transactionIds[]`** | `POST ?action=reactivateSelected` |
+
+Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond tolerance leaves
+a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
+because the account's difference GL item is the default — declaring it required would refuse calls
+the UI makes (the IMP-19 §4 reasoning); without either the handler answers `GL_ITEM_REQUIRED`.
+Multi-currency needs no parameter: conversion uses the same exchange rate as the UI, and
+`candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
+`applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
+
+The role gate, the SPA-shaped derived context and the flush-to-clean after a successful write
+(ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
+keeps only its contracts and its routing.
+
+##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
+
+The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
+`@Named("bank-statements")`), the report spec (`SPEC_TYPE=R`) behind the SPA's
+`/sws/neo/bank-statements?action=…` routes. Its one included entity is also named
+`bank-statements`, so that is the `entity` `neo_action` / `neo_schema` take (the value
+`NeoActionContract.SpecActions#getEntityName()` resolves, and `actionEntity` in `neo_discover`).
+`BankStatementsHandler#actionContracts()` returns `BankStatementAgentActions.CONTRACTS`, and
+`handle()` sends only `NeoEndpointType.ACTION` to `BankStatementAgentActions.dispatch` — purely
+additive: the SPA's requests carry no endpoint type and keep their routing untouched.
+
+```
+neo_action {spec:"bank-statements", entity:"bank-statements", id:"<id>", action:"createStatement",
+            parameters:{name, transactionDate:"2026-06-30", importDate:"2026-07-01",
+                        lines:[{date:"2026-06-02", description, bpartnerName, in:3500, out:0}]}}
+```
+
+Before these actions, an agent could only reach statements through the generic
+`financial-account` entities `importedBankStatements` / `bankStatementLines`: a statement written
+there was never processed (its lines never became reconcilable), could not be processed,
+reactivated or imported at all, stamped today on both header dates and skipped every check the UI
+applies to a manual statement.
+
+- **Same handler methods as the SPA.** Each action re-enters the SAME package-private method the
+  SPA route uses (`handleList`, `handleGetLines`, `handlePreview`, `handleCreate`, `handleImport`,
+  `handleUpdate`, `handleProcess`, `handleReactivate`, `handleDelete`) with a derived context that
+  has no endpoint type, so it cannot loop back into the ACTION branch. Required header dates, the
+  account's BSF document type, the line amount rules (exactly one of `in`/`out` above zero, never
+  negative), the draft/processed state machine and the PSD2 delete guard are the UI's own.
+- **`id` semantics.** Account-level actions take the **financial account** id (sent as
+  `FIN_Financial_Account_ID`); statement-level actions take the **bank statement** id (sent as
+  `statementId` for `statementLines`, as `id` in the body otherwise). The record `id` always wins:
+  an id-like key in `parameters` is refused by the contract as undeclared. Each contract carries an
+  `idDescription` saying which one it is.
+- **Guards before anything runs.** Contract validation (§4.12.1.1 refusals, 422), blank `id` → 422
+  (`id is required: <idDescription>`), then the report-spec role gate — `POST` for writes, `GET`
+  for the reads, including `previewStatement`, which only reads even though the handler receives it
+  as a POST (it needs the upload body) — then the agent-only input checks below (422).
+- **Flush while the context is set.** Successful writes are flushed to a clean session inside the
+  dispatcher (the MCP session scope flushes once and restores a null `OBContext`; a leftover dirty
+  session would fail at request end with an HTML 500 after a reported success). A flush failure is
+  rolled back and answered as JSON. The reads never flush.
+
+| Action | Kind | `id` | Parameters (required in **bold**) | SPA route reused |
+|---|---|---|---|---|
+| `listStatements` | read | financial account | — | `GET ?FIN_Financial_Account_ID=` |
+| `statementLines` | read | bank statement | — | `GET ?action=lines&statementId=` |
+| `previewStatement` | read | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=preview` (never persists) |
+| `createStatement` | write | financial account | **`name`**, **`transactionDate`**, **`importDate`** (`yyyy-MM-dd`), **`lines[]`**, `process` (default `true`), `notes`, `fileName` | `POST ?action=create` |
+| `importStatement` | write | financial account | **`fileName`**, **`contentBase64`** | `POST ?action=import` |
+| `updateStatement` | write | bank statement | **`name`**, **`transactionDate`**, **`importDate`**, `lines[]` (required unless matched lines remain), `process` (default `false`), `notes`, `fileName` (omitted = cleared) | `POST ?action=update` |
+| `processStatement` | write | bank statement | — | `POST ?action=process` |
+| `reactivateStatement` | write | bank statement | — | `POST ?action=reactivate` |
+| `deleteStatement` | write | bank statement | — | `POST ?action=delete` |
+
+Notes: `lines[]` items are `{date, in, out, description, reference, bpartnerName, bpartnerId,
+glItemId}`; `reference` defaults to `**`. `updateStatement` replaces only the unmatched lines and
+works on drafts only; `reactivateStatement` needs a processed, not posted statement and does not
+reverse reconciliations; `deleteStatement` works on drafts only, answers **409** on a
+PSD2-connected account and **400** while matched lines remain. Upload formats are Cuaderno 43 or a
+generic CSV with header `Transaction Date, Reference No., Business Partner Name, Description,
+Amount OUT, Amount IN` (dates `dd/MM/yyyy`).
+
+**Import date rule.** `importStatement` stores the statement **processed**, with `importdate` = now
+and `statementdate` (`transactionDate`) = the last movement date among the kept lines (today when
+no line has a date) — the same rule as the SPA's CSV import. A file with no valid line answers
+**400** with code `NO_VALID_LINES` and saves nothing.
+
+**Agent-only input checks (`BankStatementAgentValidation`).** The UI never sends a statement that
+fails its own client-side checks, so the handler fills the gaps silently (a missing line date
+becomes the statement date, an unparseable amount becomes 0, an over-long text is truncated, an
+unknown contact / G/L item id is dropped). Tightening the handler would change what the SPA route
+accepts, so the agent path applies the UI's checks to the agent's input instead — on
+`createStatement` and `updateStatement` — answering 422 with `lines[<i>]: <problem>`:
+
+- every line needs `date` (a real `yyyy-MM-dd` date) and an amount on exactly one side — `in` or
+  `out` > 0, the other absent/0, none negative, each a JSON number or a dot-decimal numeric string
+  (same rule as the UI's `isLineComplete` and the handler's `validateLineAmounts`, which still
+  runs);
+- a line accepts only the eight keys above (a typo such as `amount` would otherwise produce a line
+  the handler treats as blank and skips);
+- lengths are refused, not truncated: `name` / `bpartnerName` ≤ 60, `fileName` / `notes` ≤ 255,
+  `reference` ≤ 30, `description` ≤ 2000, measured on the raw value as sent (the handler
+  truncates it untrimmed); a blank `reference` is still stored as `**`;
+- `bpartnerId` / `glItemId` must be a contact / G/L item of the current tenant;
+- header `transactionDate` / `importDate` must be real dates (the contract already requires them
+  and checks their shape);
+- `importStatement` / `previewStatement`: `contentBase64` must be standard base64 (RFC 4648
+  alphabet, no line breaks: the handler decodes it with `Base64.getDecoder()`) and is capped at
+  1 MiB of file content (1,398,104 base64 characters) — refused before decoding. The UI import is
+  not limited.
+
+Business refusals keep the handler's own literals and statuses (e.g. `Only draft (unprocessed)
+statements can be modified`, `The statement is posted and cannot be reactivated`, code
+`NO_VALID_LINES`).
+
+**Generic writes are closed (405).** On the `financial-account` W spec, `importedBankStatements`
+and `bankStatementLines` are `readOnly: true` in `artifacts/financial-account/decisions.json`, so
+`ETGO_SF_ENTITY` grants `GET`/`GETBYID` only and `POST`/`PUT`/`PATCH`/`DELETE` answer 405
+(`<METHOD> not enabled for <entity>`) on REST and MCP alike. Both entities also carry
+`Java_Qualifier = bankStatementEntityHandler` (`BankStatementEntityHandler`), which refuses any
+generic create / update / delete that still reaches it with a 405 naming the concrete action —
+create → `createStatement` (or `importStatement` from a file) with `id` = the financial account;
+update → `updateStatement`; delete → `deleteStatement`; any line write → `updateStatement` on the
+line's statement. The SPA is unaffected: it never wrote through those entities (it uses
+`/sws/neo/bank-statements`). Reads (`neo_list` / `neo_get`) pass through, and the agent guidance
+(`AGENT_PROMPT` of `financial-account`, `bank-statements` and of both entities) sends agents to the
+actions.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
@@ -2458,6 +2720,29 @@ re-proposing the value already on the record records nothing, and `$_identifier`
 skipped. It travels on `NeoContext.supersededDefaults`. **The REST path never reads it**: there the
 protected value came from a person, and there is nothing to warn about.
 
+#### 4.12.15 Server identity and localized tool titles
+
+`initialize` advertises the server as `serverInfo.name = "etendo-mcp"` with
+`title = "Etendo MCP"`, `websiteUrl` and one `icons` entry pointing at the public
+`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973). `protocolVersion` is still
+`2024-11-05`: the new fields are additive and older clients ignore them. None of this is what a
+client lists the server as — that is the alias chosen at registration (`claude mcp add <alias>`,
+`[mcp_servers.<alias>]`), and Claude does not render `serverInfo.icons` for custom connectors today.
+
+`tools/list` gives every tool a `title` next to its `name`, in the language of the user the token
+belongs to (`OBContext` language — MCP carries no client locale). Only the title is localized; the
+`description` is read by the model and stays in English. Resolution (`McpToolTitles`):
+
+| Tool kind | Title source |
+|---|---|
+| Fixed (`neo_list`, `docs`, ...) | `mcp/messages/mcp_titles_<lang>.properties` (`en`, `es`), English fallback |
+| Process (`complete_order`) and report (`generate_*`) | Translated name of the spec's AD_Process, else its AD_Window |
+| Anything else | The name humanized, `neo_` prefix dropped |
+
+A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key in **both** catalogs
+and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
+humanized name, so a cosmetic field can never drop a tool from the list.
+
 ---
 
 ### 4.13 Image Fields and Image Upload (ETP-5184)
@@ -2624,6 +2909,90 @@ Two rules keep the links honest, and both are enforced in code:
 
 A proxied deployment therefore **must** set `etendo.go.app.baseUrl` to the public app URL, the same
 property the image upload URL depends on.
+
+### 4.15 Usage Events Endpoint (ETP-5462)
+
+```
+POST /sws/neo/usage
+Authorization: Bearer {token}
+Content-Type: application/json
+```
+
+Records product-usage events from the React UI and the AI BFF into `ETGO_USAGE_EVENT`. A global
+pseudo-spec like `batch`/`simsearch` (dispatched by `NeoPseudoSpecDispatcher`, implemented in
+`NeoUsageEventEndpoint`): no ETGO_SF_SPEC row, no Webhooks grant, only a valid NEO bearer token.
+Events are validated on the request thread and handed to `UsageEventRecorder`, whose writer thread
+does the INSERT; the response never waits for it.
+
+**Request:**
+
+```json
+{
+  "events": [
+    {
+      "eventType": "ai.agent.message",
+      "source": "ai-bff",
+      "target": "sales-invoice",
+      "action": "list",
+      "outcome": "ok",
+      "durationMs": 340,
+      "occurredAt": "2026-09-23T10:15:02.120Z",
+      "sessionKey": "b1f0…",
+      "appVersion": "2026.09.1",
+      "properties": { "model": "kimi-k2.6", "inputTokens": 1200 }
+    }
+  ]
+}
+```
+
+Only `eventType` is required. Events carry the **shape** of what happened, never business content
+(amounts, names, typed text) — see `UsageEvent`'s class javadoc.
+
+**Response:** `202 Accepted`
+
+```json
+{ "accepted": 1, "dropped": 0 }
+```
+
+`accepted + dropped` always equals the number of events sent. `accepted` counts events handed to
+the recorder with a known type; it does not confirm the INSERT (a writer-side failure is logged and
+counted server-side, not reported to the caller).
+
+**Rules:**
+
+| Aspect | Rule |
+|--------|------|
+| Who | Client, organization, user and role come from the token's `OBContext`. The body cannot set them; any such key is ignored. |
+| `source` | `ui` or `ai-bff`; anything else (including `backend`/`mcp`) or missing → `ui`. A label, not a trust boundary: the AI BFF uses the user's own token. |
+| `eventType` | Must be in `UsageEventTypes`. Unknown → dropped and counted; the recorder logs it at ERROR (throttled). Never an HTTP error. |
+| Batch size | At most 50 events per request; the rest are dropped and counted. |
+| `occurredAt` | ISO-8601 with `Z` or an offset, clamped to `[now − 24h, now + 5min]`. Missing or unparseable → now. |
+| `durationMs` | A non-negative number; anything else → null. |
+| `outcome` | `ok` or `error`; anything else → null. |
+| String fields | Must be JSON strings (a number is not coerced); clipped to their column width by the writer. |
+| `properties` | A flat object. String (clipped to 256 chars), number and boolean values are kept; a nested object, array, null or a key over 64 chars drops **that property**, not the event. Past 4 KB serialized the whole set is replaced by `{"_truncated":true}`. |
+| Rate limit | Two fixed one-minute windows, in memory and per instance (bounded maps); an event must pass **both**, the excess is dropped and counted. **Per session:** 600 events per client + user + `sessionKey`. **Per user:** 1200 events per client + user, whatever the `sessionKey` — the body names the session key, so the per-session limit alone can be evaded by rotating it; the per-user one is keyed only on the token. The per-session limit is checked first, so an event it refuses does not consume the user's budget. |
+| Opt-out | `usage.events.enabled=false` in `Openbravo.properties` — the endpoint still answers `202`, nothing is stored. |
+
+**Errors:** `400` only when the body is not a JSON object with an `events` array; `413` when the
+body exceeds 256 KB; `405` for any method other than `POST`; `401` without a valid token. Any
+unexpected failure after parsing answers `202` with the unprocessed events counted as dropped —
+never `500`, so an older or newer UI degrades to "not recorded" instead of failing.
+
+**Event types.** The accepted set is closed and lives in `UsageEventTypes` (D4); a type is added
+there, with its constant in `KNOWN`, before any caller may send it. Not every type comes through
+this endpoint — some are recorded by the backend itself through `UsageEventRecorder`, with
+`source = backend`:
+
+| Event type | Recorded by | When | Columns |
+|------------|-------------|------|---------|
+| `ai.agent.message` | AI BFF, through this endpoint (defined; no caller yet) | One completed AI agent chat turn | `properties`: model, token counts |
+| `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
+| `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+
+Recording is the last statement of the success path, after the response is written, and never
+throws; the INSERT happens on the recorder's writer thread, so a slow or locked
+`ETGO_USAGE_EVENT` does not slow a login.
 
 ## 5. Configuration
 
@@ -2854,7 +3223,11 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
 
   **QA-closed coverage gap (commit `758dbf75`).** The two pre-existing "composes exact message" pinning tests (`postComposesExactSpanishMessageForBpGroupAndProductScenario` and its English counterpart) never stub `OBMessageUtils.messageBD("InvalidAccount")` — with `OBMessageUtils` fully mocked, that unstubbed call falls through to Mockito's default `null`, and `errorMessageOf` silently keeps `result.getMessage()`, which those two tests had *already* seeded with the correct-language text. They therefore pinned the full composed message without ever exercising this new re-resolution branch — a regression that broke only this branch (wrong message key, a swallowed exception, the guard condition itself) would not have failed either test. QA added `postComposesFullSpanishMessageWithReResolvedBaseAndEnrichment` to close that gap: it deliberately seeds `acct.getMessageResult()` with the *wrong* (English) text — mimicking core's own bug — while stubbing `messageBD("InvalidAccount")` to return the correct Spanish base text, in the same BP-Group + Product enrichment scenario as the pre-existing test. Asserting the full composed string proves the re-resolved base and both enrichment addenda compose consistently end-to-end in one language, not just in isolation.
 
-**Real-world example — `DocumentPostingService` M_Inventory not-calculated-cost pre-check (ETP-5360):** unlike the `InvalidAccount` enrichment above, which reacts to a failed `acct.post()`, this is a GATE that runs **before** `acct.post()` is ever called: `post(adTableId, recordId, conn)` first calls `isUncalculatedCostInventory(adTableId, recordId)` and, if it returns `true`, short-circuits with `OBMessageUtils.messageBD("NotCalculatedCost")` (`AD_MESSAGE_ID = B6CDB7D04FD249579A48D26C0ED48F45` in core's `AD_MESSAGE.xml`) — a clean, correctly-localized, no-params message — without ever touching `AcctServer`. Scoped ONLY to `M_Inventory` (Physical Inventory) by table name, not generalized to other document types: core's `DocInventory#createFact` throws a bare, message-less `IllegalStateException` when a line's `MaterialTransaction.isCostCalculated()` is false, which falls into `AcctServer.createFacts`'s generic `catch (Exception e)` (only `OBException` is special-cased there), so the specific `STATUS_NotCalculatedCost` core would otherwise set — and the correctly-localized message that status implies — never survives to `errorMessageOf`. Rather than patch `AcctServer`'s status/message propagation (core, out of scope), the pre-check avoids the swallowed exception entirely by never calling `acct.post()` in the first place. **Fails open**, not closed: a lookup error (table/record not resolvable, or any exception while walking `InventoryCount → InventoryCountLine → MaterialTransaction`) is logged at `warn` and returns `false`, letting the post proceed to the normal `AcctServer` path — deliberate, so a lookup bug degrades to the pre-ETP-5360 generic error path instead of blocking a post that would otherwise have succeeded. Because this lives inside the shared `post()` method rather than in a window-specific handler, it transparently covers every caller of that method, not just the Physical Inventory window's own `post`/`unpost` action: `NotPostedDocumentsHandler`'s `post` and `bulk-post` actions (§ `not-posted-documents` above) call the same `postingService.post(tableId, recordId)` and so get the same clean message for an M_Inventory row surfaced there, with no extra wiring.
+**Real-world example — `DocumentPostingService` M_Inventory / M_Internal_Consumption not-calculated-cost pre-check (ETP-5360, ETP-5445):** unlike the `InvalidAccount` enrichment above, which reacts to a failed `acct.post()`, this is a GATE that runs **before** `acct.post()` is ever called: `post(adTableId, recordId, conn)` first calls `isUncalculatedCost(adTableId, recordId)` and, if it returns `true`, short-circuits with `OBMessageUtils.messageBD("NotCalculatedCost")` (`AD_MESSAGE_ID = B6CDB7D04FD249579A48D26C0ED48F45` in core's `AD_MESSAGE.xml`) — a clean, correctly-localized, no-params message — without ever touching `AcctServer`. Scoped ONLY to `M_Inventory` (Physical Inventory, ETP-5360) and `M_Internal_Consumption` (Internal Consumption, ETP-5445) by table name, not generalized to other document types. Why a gate is needed at all: core's `DocInventory#createFact` throws a bare, message-less `IllegalStateException` when a line's `MaterialTransaction.isCostCalculated()` is false, which falls into `AcctServer.createFacts`'s generic `catch (Exception e)` (only `OBException` is special-cased there), so the specific `STATUS_NotCalculatedCost` core would otherwise set — and the correctly-localized message that status implies — never survives to `errorMessageOf`. Core's `DocInternalConsumption#validateCostCalculation` has the identical set-status-then-throw shape, so ETP-5445 resolves `InternalConsumption → InternalConsumptionLine` and reuses the same per-line `MaterialTransaction` scan (the shared private helper `hasUncalculatedTransaction`). Rather than patch `AcctServer`'s status/message propagation (core, out of scope), the pre-check avoids the swallowed exception entirely by never calling `acct.post()` in the first place. **Fails open**, not closed: a lookup error (table/record not resolvable, or any exception while walking `InventoryCount → InventoryCountLine → MaterialTransaction` or `InternalConsumption → InternalConsumptionLine → MaterialTransaction`) is logged at `warn` and returns `false`, letting the post proceed to the normal `AcctServer` path — deliberate, so a lookup bug degrades to the pre-ETP-5360 generic error path instead of blocking a post that would otherwise have succeeded. Because this lives inside the shared `post()` method rather than in a window-specific handler, it transparently covers every caller of that method, not just the Physical Inventory window's own `post`/`unpost` action: `NotPostedDocumentsHandler`'s `post` and `bulk-post` actions (§ `not-posted-documents` above) call the same `postingService.post(tableId, recordId)` and so get the same clean message for an M_Inventory or M_Internal_Consumption row surfaced there, with no extra wiring. The SPA maps both the `en_US` and the `es_ES` text of `NotCalculatedCost` to its own actionable `backendError.costNotCalculated` copy (`tools/app-shell/src/lib/backendErrors.js` in `etendo_schema_forge`), so the user never sees the raw core sentence on either window.
+
+**Real-world example — `InternalConsumptionHeaderHandler` (post/unpost routing for a window with no AD posting button, ETP-5445):** `schemaforge/handlers/InternalConsumptionHeaderHandler.java` (`@Named("internal-consumption")`, wired through `JAVA_QUALIFIER = 'internal-consumption'` on the `internalConsumption` `ETGO_SF_ENTITY` record) exists only to delegate `handle()` to `DocumentPostingService#handleAction`, the same shape as the Physical Inventory header handler (ETP-5360). Without it, `POST /sws/neo/internal-consumption/internalConsumption/{id}/action/post` (or `/unpost`) falls through to NEO's generic AD-button-column lookup, finds no posting button on `M_Internal_Consumption`, and answers `Action not found: post`. Every non-posting request returns `null` from `handle()`, so default CRUD is unchanged; `afterHandle()` is a no-op. Two runtime prerequisites the handler cannot provide: the tenant's `c_acctschema_table` row for `AD_Table_ID 800168` must be active (the GOClient reference data ships it `ISACTIVE='Y'` since ETP-5445; existing tenants get it from the `etendo_schema_forge` data-fix R40, gap A4b), and every line transaction must have its cost calculated (the pre-check above). Voiding a posted Internal Consumption is not blocked by core (`M_INTERNAL_CONSUMPTION_POST1` exempts `VO` and never reads `Posted`); it creates a separate, unposted `VO: <name>` reversal document that must be posted on its own. Unposting a never-posted document is not rejected server-side — it returns `200` as a no-op — the SPA only offers Unpost when `posted` is true.
+
+**`DocumentPostingService` failure messages are translated and carry `messageKeys` (ETP-5360 reject cycle):** the `post()` and `unpost()` catch blocks used to return `e.getMessage()` verbatim. Core accounting code raises raw AD_Message tokens there, most visibly `ResetAccounting`'s `new OBException("@PeriodClosedForUnPosting@")` on every unpost in a closed period, so the SPA toast showed the literal `@PeriodClosedForUnPosting@`. Both catches now go through the private `translatedFailure(raw)`, which extracts the keys with `NeoMessageTranslator.extractMessageKeys` BEFORE translating the text with `NeoMessageTranslator.safeParseTranslation` (session language, degrades to the raw text when no OBContext is available). `PostResult` gained a third component, `messageKeys` (never `null`; the two-argument constructor defaults it to an empty list, so existing callers compile unchanged), and the M_Inventory pre-check above sets it to `["NotCalculatedCost"]`. `handleAction` adds a top-level `messageKeys` array (`NeoProcessService.MESSAGE_KEYS`) to the flat `{success, message}` body only when the list is non-empty, the same wire field `NeoProcessService` already sends, which the SPA reads through `extractBackendMessageKeys` and maps by identity in `translateBackendError`.
 
 **Real-world example — `ChartOfAccountsHandler` GL Item auto-management (ETP-5020):** `schemaforge/handlers/ChartOfAccountsHandler.java` (`@Named("chart-of-accounts")`, wired on the chart-of-accounts spec) keeps Etendo Classic's `C_Glitem` plumbing invisible behind the `C_ElementValue` subaccount UI.
 
@@ -2954,6 +3327,8 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   The display flip runs on **every response that carries a line**, not just on GET (ETP-5336). `NeoHandlerUtils.extractResponseDataArray` is the method-agnostic twin of `extractGetDataArray` used for that: a `PATCH` echoes the persisted record back and the frontend renders it optimistically (`DetailView.jsx`'s `buildInlineRowUpdateHandler`), so a GET-only flip made the line flash its stored NEGATIVE quantity until the next refetch. The rule of thumb: enrichment that *describes the record* (a sign convention, an identifier label) belongs on every response; enrichment that is a read-only aggregate or a batch SQL lookup for the grid — like the `orderQuantity`/`productCode` injection in both return line handlers — stays GET-only so it does not add a query to every save. Those `afterHandle`s mutate the body in place and return `null` on a write, so the original response and its status code are preserved.
 
   Both line handlers also override `afterCallout` to call `NeoHandlerUtils.stripStockDerivedMovementQuantity` (ETP-5336), the same protection `GoodsReceiptLineHandler` (ETP-4671) and `GoodsShipmentLineHandler` (ETP-5062) already had: the classic `SL_InOutLine_Product` callout echoes the product's **on-hand stock** back as `movementQuantity` on every product selection, which on a return line is meaningless — the quantity is what is being sent back — and silently overwrote what the user typed. Note that `ReturnToVendorShipmentLineHandler`'s `body.remove("product")` on `PUT`/`PATCH` is **not** that protection: the NEO CRUD callout cascade only runs on create (`NeoCrudHandler#executePostCreate`), never on an update, so that line only makes the product of an existing RTV line immutable.
+
+  `InternalConsumptionLineHandler` (ETP-5445) reuses the same helper for core's `SL_Internal_Consumption_Product`, which copies the product's on-hand stock (`inpmProductId_QTY`) into `inpmovementqty` — but **gated to the product trigger only** (`isProductTrigger` accepts the request's `field` as the DAL property `product`, the column `M_Product_ID`, or its `inp` name, case-insensitive, mirroring `NeoCalloutService#resolveCallout`). Unlike the `M_InOutLine` windows, this line has a second callout that legitimately writes `movementQuantity`: `SL_Internal_Consumption_Conversion` on `M_Product_Uom_Id` / `QuantityOrder` converts the second-UOM quantity into the base-UOM movement quantity, and stripping it would silently drop the conversion. The shared helper is deliberately left ungated because its other callers have no such conversion callout — when adding a new caller, check the line's callout list for a legitimate `movementQuantity` writer first.
 
   Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnShipmentUtils.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
 
@@ -3188,7 +3563,7 @@ NEO Headless enforces security at multiple levels:
 
 5. **Process access control:** For process specs and button actions, the servlet checks `ADProcessAccess` for the current role before execution — binary, no read/write tiering: any active row grants full execute access. A request with no role assigned is denied the same as an unrecognized role. Denied requests return `403 Forbidden`.
 
-6. **OBUIAPP process access for report handlers:** two report-type specs (`not-posted-documents`, `aging-receivable`) have no `AD_Process` and no backing `AD_Window`, and previously had zero access control. Their `NeoHandler.handle()` now gates access via `NeoAccessHelper.hasObuiappProcessAccess(processId)` against the real OBUIAPP process, resolved through the `AD_Menu.em_obuiapp_process_id` FK (never by name-matching).
+6. **OBUIAPP process access for report handlers:** report-type specs with no `AD_Process` and no backing `AD_Window` (`not-posted-documents`, `aging-receivable`, and — since ETP-5483 gave the payables side its own spec/handler — `aging-payable`) previously had zero access control. Their `NeoHandler.handle()` now gates access via `NeoAccessHelper.hasObuiappProcessAccess(processId)` against the real OBUIAPP process, resolved through the `AD_Menu.em_obuiapp_process_id` FK (never by name-matching).
 
 7. **Aging report prerequisites:** before `aging-receivable` delegates to Core's `AgingDao`, its NEO handler validates the resolved organization, organization tree, accounting schema/currency, and confirmed-payment-status reference. A missing derived prerequisite returns an actionable `400` or `422`; it does not surface as a generic `500` from the Core DAO.
 
@@ -3265,7 +3640,8 @@ NEO Headless enforces security at multiple levels:
    entity's `Java_Qualifier` handler and is **fail-open**: a missing qualifier aside, an
    unregistered handler or a CDI failure keeps the spec visible. **Any handler serving ACTION
    requests should override `servesActions()`** — it is only consulted for tab-less specs today,
-   but the declaration keeps the catalog honest if the spec ever loses its tabs.
+   but the declaration keeps the catalog honest if the spec ever loses its tabs. A handler that
+   declares `actionContracts()` (§4.12.1.1, ETP-5468) gets `servesActions() == true` by default.
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 
@@ -3588,8 +3964,11 @@ this section**, which wrongly included 6 rows tied to `ETGO_SF_ENTITY.ad_tab_id`
 "Financial Account" window (`bank-statements`, `bank-reconciliation`, `cash-close`, `financial-
 account-transactions`, `financial-account-bank-connection`, `financial-accounts-page`) — none of
 which is an actual gallery card — while missing 5 real ones (`balance-sheet`, `profit-loss`,
-`report-general-ledger`, `report-journal-entries`, `report-trial-balance`) that have no
-`ETGO_SF_SPEC` row of their own at all. None of the 9 real rows is a candidate for the
+`report-general-ledger`, `report-journal-entries`, `report-trial-balance`) that, AT THE TIME,
+had no `ETGO_SF_SPEC` row of their own at all — all five (`report-trial-balance`,
+`report-journal-entries`, `balance-sheet`, `profit-loss`, `report-general-ledger`) have since
+gained one as their own MCP report tool was added (ETP-5483 slices 2/3/4/5/6; see the table
+below). None of the 9 real rows is a candidate for the
 `SPEC_TYPE = 'W'` window resolution above (windowless by construction), so each row's access is
 resolved via whichever mechanism its own NEO handler actually gates on:
 
@@ -3597,8 +3976,113 @@ resolved via whichever mechanism its own NEO handler actually gates on:
 |---|---|---|
 | `tax-report` | Classic `AD_Process_Access` (`TaxReportHandler` → `NeoAccessHelper#hasProcessAccess`) | `8C1331B9EC14CED7E040007F010119A0` |
 | `aging-receivable` / `aging-payable` | OBUIAPP `ProcessAccess` (`AgingReportHandler`, receivable/payable tiers) | `0D37A9F6109549DEB058373EF2DAEB6A` / `EB4C4053F3B94A17A08D1DD7E89CEB7E` |
-| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`, `report-trial-balance` (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
+| `balance-sheet`*, `profit-loss`*, `report-journal-entries`*, `report-trial-balance`*, `report-general-ledger`* (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance — resolved via each handler's own `isAccessibleForCurrentRole()` rather than the shared spec gate (see below) | `D647D118F5014D00AF47A636B2CD0DD3` |
 | `inventory-stock-report` | `AD_Window_Access` on a tab-less pseudo-window | `6346B88619F948F9A42224BDB0B239FA` |
+
+\* `report-trial-balance` (ETP-5483 slice 2), `report-journal-entries` (ETP-5483 slice 3),
+`balance-sheet` (ETP-5483 slice 4), `profit-loss` (ETP-5483 slice 5) and `report-general-ledger`
+(ETP-5483 slice 6, the last one) are the five rows that ALSO have their own `ETGO_SF_SPEC`/
+`ETGO_SF_ENTITY` row and their own MCP report tool —
+`generate_report_trial_balance` (`TrialBalanceReportHandler`, `@Named(
+"trialBalanceReportHandler")`), `generate_report_journal_entries` (`JournalEntriesReportHandler`,
+`@Named("journalEntriesReportHandler")`), `generate_balance_sheet` (`BalanceSheetReportHandler`,
+`@Named("balanceSheetReportHandler")`), `generate_profit_loss` (`ProfitLossReportHandler`,
+`@Named("profitLossReportHandler")`) and `generate_report_general_ledger`
+(`GeneralLedgerReportHandler`, `@Named("generalLedgerReportHandler")`) — each a faithful Java port
+of the SAME `artifacts/report-trial-balance/report-contract.json` / `artifacts/report-journal-
+entries/report-contract.json` / `artifacts/balance-sheet/report-contract.json` /
+`artifacts/profit-loss/report-contract.json` / `artifacts/report-general-ledger/
+report-contract.json` SQL the two Node report engines (`schema_forge`'s Vite dev plugin and
+`schema_forge_core`'s production `report-server`) already run for the SPA. All five handlers'
+`isAccessibleForCurrentRole()` gate on the exact same `FINANCIAL_REPORTS_WINDOW_ID` anchor this
+table already uses — adding a spec/entity row did not change that report's access boundary, only
+added a second, MCP-reachable way to run it. **Drift risk:** each is now a dual implementation
+(Node/SQL-placeholder for the SPA, Java/bind-parameter for MCP) of the same query.
+`report-trial-balance` additionally ports `report-grouping.js`'s row-folding post-processing (as
+`TrialBalanceFolding`); `report-journal-entries` nests its own flat SQL result into one object per
+journal entry via `JournalEntriesGrouping` — a shape this handler defines for the MCP response
+(the SPA's own nesting for this report's `grouped-listing` contract type lives entirely in the
+report templates, not in a shared JS module, so there is nothing to port there); `report-general-
+ledger` ports `report-grouping.js`'s `buildNestedGroups`/`foldOpeningBalance` — the SAME function
+BOTH Node report engines actually call for this report (unlike `report-trial-balance`'s
+`resolveGrouping`, `buildNestedGroups` is NOT gated off for a `grouped-listing` contract type) —
+as `GeneralLedgerGrouping`; `balance-sheet` and `profit-loss` BOTH port `report-grouping.js`'s
+`buildAccountReportTree` (the same roll-up/formula-node engine both reports use) as the SAME
+shared class, `AccountReportTree` — `ProfitLossReportHandler` calls `AccountReportTree.build`
+unchanged, exactly as that class's own javadoc anticipated; only the SQL that PRODUCES its input
+rows differs (period-activity `BETWEEN` vs Balance Sheet's cumulative `<=`, `reporttype = 'N'` vs
+`'Y'`, no `income_summary`/`net_income` synthetic row). No Java class here is structurally linked
+to its Node counterpart — see each handler's own class javadoc for what must be mirrored by hand
+on either side.
+
+`generate_balance_sheet`'s and `generate_profit_loss`'s responses share the exact same shape — a
+flattened, document-ordered list of account-tree rows (`node_id`, `value`, `name`, `element`
+(`"<value> - <name>"`), `elementLevel`, `level` (indent depth), `amount`, `amount_ref` when
+`compareTo` is true, `isHeading`, `isFormula`, `group`, `isGroupStart`), mirroring the indented
+tree the SPA's Handlebars template renders. They differ in what `yearId`/`dateFrom`/`dateTo` bound:
+for `generate_balance_sheet`, `yearId` bounds the snapshot to that fiscal year's last period end
+(further narrowed by `dateTo`), and `dateFrom`/`fromReferenceDate` are accepted for parameter
+symmetry with the report contract but have NO EFFECT — Balance Sheet is a cumulative snapshot, not
+a period-activity report (see that handler's own class javadoc for the placeholder-extraction
+evidence). For `generate_profit_loss`, `yearId` bounds a RANGE — that fiscal year's own period
+start through its period end — further narrowed by BOTH `dateFrom` and `dateTo`, which DO have a
+real effect (the opposite of Balance Sheet): P&L is a period-activity total of postings within the
+year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
+(`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
+
+`generate_report_journal_entries`'s response nests one object per journal entry
+(`fact_acct_group_id`) with header fields (`entry_no`, `dateacct` as `yyyy-MM-dd`,
+`document_type`, `docbasetype`, `isreturn`, `doc_window`, `doc_record_id`, `doc_query_key`,
+`doc_query_value`, `record_id`, `ad_table_id`, and `entry_description` when `showEntryDescription`
+is true) and a `lines` array (`account_no`, `account_name`, `amtacctdr`, `amtacctcr`, plus
+`bpname`/`productname`/`projectname`/`costcentername` when `showDimensions` is true). `doc_window`
+is the NEO spec name of the entry's source document, so an MCP caller reads it with
+`neo_get(spec: doc_window, id: doc_record_id)`.
+
+`document_type` is Etendo's own `ad_ref_list` (reference 183) name for `docbasetype`, translated to
+the session language — NOT the SPA's printed "Detail" label. The SPA relabels a few docbasetypes
+and the MMR/MMS return variants through a hand-maintained dictionary in
+`schema_forge_core/cli/src/report-i18n.js` (`DOC_TYPE_LABEL_OVERRIDES`, `RETURN_LABELS`); that
+dictionary is deliberately not copied into Java. A caller that needs the distinction reads
+`docbasetype` plus `isreturn` instead (`MMR` + `isreturn` is a vendor return, `MMS` + `isreturn` a
+customer return).
+Because a full period can carry far more lines than are safe to return in one call, the entries
+(never lines) are capped via `limit` (default 200, hard max 1000) applied AT THE SQL LEVEL against
+the query's own `DENSE_RANK()`-based `entry_no`, so a cap never splits an entry across a
+truncation boundary; `meta.truncated`/`meta.totalEntries`/`meta.hint` tell the caller when to
+narrow the request. See `JournalEntriesReportHandler`'s own class javadoc for the full parameter
+list, the entry-type toggle fallback (all five `show*Entries` toggles false falls back to regular
+entries only, matching the report contract's own SQL), and the multi-value id parameters
+(`bPartnerId`/`productId`/`projectId`/`costCenterId`), which — unlike an early assumption — the
+live Node `applyPlaceholders` genuinely supports via its own comma-to-`IN` rewrite, so this Java
+port needed no deviation from a faithful multi-id port.
+
+`generate_report_general_ledger`'s response nests one object per dimension GROUP (`dimensionValue`
+present only when `groupBy` was set), each with a nested `accounts` array — one object per account
+(`account_id`, `value`, `name`, `opening` (an `{amtacctdr, amtacctcr, total}` triple, present only
+when `showOpenBalances` is true — default), a `lines` array (`dateacct` as `yyyy-MM-dd`,
+`fact_acct_group_id`, `groupbyname`, `amtacctdr`, `amtacctcr`, `runningBalance`, plus
+`bpname`/`productname`/`projectname`/`costcentername` when `showDimensions` is true), `subtotal`
+(the same triple, period movements only), `total` (the same triple, `opening + subtotal`),
+`totalLines` and `linesTruncated`). Unlike
+`report-journal-entries`'s single entries cap, this report enforces TWO independent SQL-level
+caps at once — `accountLimit` (default 100, hard max 500; DISTINCT accounts, never cuts one in
+half) and `linesPerAccountLimit` (default 500, hard max 2000; lines within a single account, so
+one extremely active account like a bank account cannot alone blow up the response even when
+`accountLimit` is small) — both via window functions (`DENSE_RANK()`/`ROW_NUMBER()`) on the same
+CTE, never by pulling every row into the JVM first. Critically, `opening`/`subtotal`/`total` are
+ALWAYS computed from a SEPARATE, uncapped SQL aggregate query (never by summing the — possibly
+line-capped — `lines` array), so those numbers stay numerically correct even when
+`linesPerAccountLimit` cut a very active account's line list short; `meta.truncatedAccounts`/
+`meta.totalAccounts`/`meta.accountsReturned` cover the account-level cap, and each account's own
+`totalLines`/`linesTruncated` covers the per-account line cap independently. `groupBy` accepts
+`bpartner`/`product`/`project`/`costcenter` (mirroring the contract's `groupByValue`/
+`groupByField` parameter pairs) and nests accounts inside each dimension group exactly like
+`report-grouping.js`'s `buildNestedGroups` does for the SPA. See `GeneralLedgerReportHandler`'s
+own class javadoc for the full parameter list, the `factaccttype NOT IN ('R', 'C')` scope (the
+contract's own main-query filter — its `openingQuery` deliberately carries NO `factaccttype`
+filter at all, exactly reproduced here), and the org-filter semantics (exact-match, same as
+`report-trial-balance`/`report-journal-entries`).
 
 This resolution logic lives in `com.etendoerp.go.schemaforge.util.ReportAccessCatalog` — a shared
 utility, NOT duplicated per-webhook, because `SFSystemRoleTemplates` (§8f) needs the exact same

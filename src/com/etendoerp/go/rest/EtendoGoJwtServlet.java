@@ -82,7 +82,6 @@ import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
-import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -90,7 +89,6 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
-import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -117,7 +115,9 @@ import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
+import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.usageevents.SessionLoginUsage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -324,8 +324,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
-  OnboardingDataTransferService onboardingDataTransferService =
-      new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingCompanyProfileTransferService onboardingCompanyProfileTransferService =
       new OnboardingCompanyProfileTransferService();
@@ -371,6 +369,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   StripeCustomerPortalService stripeCustomerPortalService = new StripeCustomerPortalService();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
+  com.etendoerp.go.schemaforge.email.InternalAlertService internalAlertService =
+      new com.etendoerp.go.schemaforge.email.InternalAlertService();
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
   private final GoSessionService goSessionService;
   // Package-visible so tests can swap the database-backed role lookups for a fake.
@@ -444,7 +444,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetFirstSteps(request, response);
     } else if (isPath(path, PATH_ONBOARDING_COMPANY_DATA)) {
       handleGetCompanyData(request, response);
-    } else if (isPath(path, "/demo-data-transfer") && DemoDataTransferFlag.isEnabled()) {
+    } else if (isPath(path, "/demo-data-transfer")) {
       handleDemoDataTransferStatus(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
@@ -646,7 +646,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
-    } else if (isPath(path, "/demo-data-transfer/retry") && DemoDataTransferFlag.isEnabled()) {
+    } else if (isPath(path, "/demo-data-transfer/retry")) {
       handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
@@ -2220,8 +2220,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleRemoveAuthMethod(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
+    if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
@@ -2242,14 +2241,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      // ETP-5455 — through the account surface's single resolver: it used to read the Bearer
+      // header inline, so the SPA's cookie session got 401 here (and the frontend logs out on a
+      // 401), and the legacy kill switch did not apply.
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
-      removeAuthMethod(account, method, currentPassword, response);
+      removeAuthMethod(authenticated.account, method, currentPassword, response);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("remove auth method", e, log);
       log.error("Database error removing an authentication method", e);
@@ -2405,35 +2404,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolve the platform account under the system admin context. Always enters admin mode (so
-   * callers can restore it in their finally block) and writes the error response, returning null,
-   * when the request is not authenticated.
+   * Resolve the platform account for a billing / checkout / upgrade endpoint. Always enters admin
+   * mode (so callers can restore it in their finally block) and writes the error response,
+   * returning null, when the request is not authenticated.
    *
-   * <p>A request carrying the {@code __Host-go_session} cookie (ADR-0001, the only credential the
-   * SPA sends) is resolved by {@link #resolveAuthenticatedAccountContext}, the same resolver the
-   * already-migrated endpoints use — so an unsafe method without a valid {@code X-Go-CSRF} proof
-   * answers 403 there, and a dead session 401. A request without the cookie keeps the legacy
-   * narrow bearer lookup unchanged.
+   * <p>ETP-5455 — the account surface's single resolver under
+   * {@link AccountRequirement#PLATFORM_CREDENTIAL_ONLY}. It used to carry its own Bearer branch,
+   * which skipped the legacy kill switch and the use counter, and branched on the mere PRESENCE
+   * of a session cookie: a blank {@code __Host-go_session} value sent billing down the cookie
+   * resolver's wide lookup, where an environment JWT got past the platform-token-only rule.
    */
   private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if (hasSessionCookie(request)) {
-      return resolveAuthenticatedAccount(request, response);
-    }
-    OBContext.setOBContext("0", "0", "0", "0");
-    OBContext.setAdminMode(true);
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
-      return null;
-    }
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
-    if (account == null) writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
-    return account;
-  }
-
-  private Account resolveAuthenticatedAccount(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+    AuthenticatedAccount authenticated =
+        resolveAccount(request, response, AccountRequirement.PLATFORM_CREDENTIAL_ONLY);
     return authenticated == null ? null : authenticated.account;
   }
 
@@ -2461,6 +2444,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private AuthenticatedAccount resolveAuthenticatedAccountContext(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
+    return resolveAccount(request, response, AccountRequirement.ANY_ACCOUNT_CREDENTIAL);
+  }
+
+  /**
+   * Which Bearer an account endpoint accepts when no session cookie is present (ETP-5455). The
+   * ONLY thing that may differ between account endpoints: the cookie, CSRF, kill-switch and
+   * counting rules are the same for all of them.
+   */
+  enum AccountRequirement {
+    /** An account session token or an environment JWT (the wide lookup). */
+    ANY_ACCOUNT_CREDENTIAL,
+    /** The account session (platform) token only: environment JWTs are refused for billing. */
+    PLATFORM_CREDENTIAL_ONLY
+  }
+
+  /**
+   * The account surface's single resolver (ETP-5455). Enters admin mode unconditionally, so the
+   * callers' {@code finally} can always restore it, and writes the error response itself.
+   *
+   * <p>The cookie session wins whenever it is present and valid; a dead one is final (401, no
+   * fallback to a Bearer sent alongside). Only without a session does a Bearer count — gated by
+   * the legacy kill switch, counted as a legacy use, and looked up as the requirement says.
+   */
+  private AuthenticatedAccount resolveAccount(HttpServletRequest request,
+      HttpServletResponse response, AccountRequirement requirement) throws IOException {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
@@ -2488,13 +2496,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     GoLegacyBearer.recordUse();
-    // The wide lookup, not findActiveAccountByToken: the legacy path has to keep
-    // accepting Etendo's JWTs, and only this one falls back to decoding the token and
+    // The wide lookup, not findActiveAccountByToken, for ANY_ACCOUNT_CREDENTIAL: the legacy path
+    // has to keep accepting Etendo's JWTs, and only this one falls back to decoding the token and
     // resolving the account from its `user` claim when no opaque sessionToken matches.
-    // Centralising the resolution here narrowed it by accident, which answered 401 to
-    // every JWT-bearing client on /me, /environments, the onboarding draft and the
-    // invitation endpoints — the exact callers GoLegacyBearer stays enabled for.
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+    // Centralising the resolution here narrowed it by accident once, which answered 401 to every
+    // JWT-bearing client on /me, /environments, the onboarding draft and the invitation
+    // endpoints — the exact callers GoLegacyBearer stays enabled for.
+    Account account = requirement == AccountRequirement.PLATFORM_CREDENTIAL_ONLY
+        ? EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token)
+        : EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     if (account == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
       return null;
@@ -2848,11 +2858,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /**
-   * Persists checkout selection before the hosted-provider redirect loses browser state. A no-op
-   * with flag {@code demo-data-transfer} off, where the body's selection is ignored as it was
-   * before ETP-5364.
-   */
+  /** Persists checkout selection before the hosted-provider redirect loses browser state. */
   void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult,
       CheckoutSelection selection) {
     recordDemoDataTransferSelection(body, checkoutResult.optString(FIELD_REQUEST_ID, ""),
@@ -2862,8 +2868,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** A purchase without a demo source never records a transfer selection. */
   private void recordDemoDataTransferSelection(JSONObject body, String requestId,
       CheckoutSelection selection) {
-    if (!DemoDataTransferFlag.isEnabled() || selection == null
-        || StringUtils.isBlank(selection.demoClientId)) return;
+    if (selection == null || StringUtils.isBlank(selection.demoClientId)) return;
     JSONObject transferSelection = body.optJSONObject(FIELD_DATA_TRANSFER);
     if (transferSelection == null) return;
     demoDataTransferService.recordSelection(requestId,
@@ -2910,13 +2915,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String clientId = authenticated.sessionRecord == null ? null
         : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
     if (authenticated.sessionRecord == null) {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) clientId = StringUtils.trimToNull(
-            jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
-      } catch (Exception e) {
-        log.debug("Bearer token carries no environment context for checkout", e);
-      }
+      DecodedJWT jwt = bearerTenantClaims(request);
+      if (jwt != null) clientId = StringUtils.trimToNull(
+          jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
     }
     if (clientId == null) return "";
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
@@ -2989,9 +2990,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void addDemoDataTransferSelection(JSONObject result, String requestId, String demoClientId)
       throws JSONException {
     if (StringUtils.isBlank(demoClientId)) return;
-    boolean enabled = DemoDataTransferFlag.isEnabled();
-    result.put("dataTransferEnabled", enabled);
-    if (!enabled) return;
+    // Always true since ETP-5480 retired the flag; kept because the upgrade page still reads it.
+    result.put("dataTransferEnabled", true);
     JSONObject selection = demoDataTransferService.selection(requestId);
     if (selection != null) result.put(FIELD_DATA_TRANSFER, selection);
   }
@@ -3024,6 +3024,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * The tenant claims of a legacy bearer caller that has no cookie session: the single place this
+   * servlet decodes an inbound bearer to read its environment ({@code resolveTenantSession} and the
+   * checkout's {@code currentSessionClientId} both go through here, so the credential is read in
+   * one spot — see {@code AuthenticationEntryPointGuardTest}). {@code null} when there is no bearer
+   * or it does not decode.
+   */
+  private DecodedJWT bearerTenantClaims(HttpServletRequest request) {
+    try {
+      return SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+    } catch (Exception e) {
+      log.debug("Bearer token carries no environment claims", e);
+      return null;
+    }
+  }
+
+  /**
    * The tenant behind the presented credential.
    *
    * The onboarding endpoints authenticate an ACCOUNT, which on its own does not say which
@@ -3051,14 +3067,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       clientId = authenticated.sessionRecord.getCtxClientId();
       orgId = authenticated.sessionRecord.getCtxOrgId();
     } else {
-      try {
-        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-        if (jwt != null) {
-          clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
-          orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
-        }
-      } catch (Exception e) {
-        log.debug("Bearer token carries no NEO session claims", e);
+      DecodedJWT jwt = bearerTenantClaims(request);
+      if (jwt != null) {
+        clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
+        orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
       }
     }
     // ETP-4576 — under the cookie session there is no bearer JWT to read claims from, so the
@@ -3083,6 +3095,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, account.getEmail())) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
           "The session client is not owned by this account");
+      return null;
+    }
+    // ETP-5455 (decision 2) — a commercially blocked environment's data is fully inaccessible,
+    // not only through NEO: every account endpoint that acts on the session's tenant is refused
+    // with the same 402 NEO answers. The account itself (billing, upgrade, /me) stays reachable so
+    // the owner can pay. null = a tenant that predates lifecycle metadata, the legacy transition.
+    EnvironmentAccessPolicy.Decision access =
+        tenantEnvironmentLifecycleService.evaluateAccess(clientId, true, Instant.now());
+    if (access != null && access != EnvironmentAccessPolicy.Decision.ALLOWED) {
+      writeError(response, SC_PAYMENT_REQUIRED,
+          "Environment access is not available: " + access.name());
       return null;
     }
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
@@ -3213,6 +3236,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleEnvironmentLogin(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    long startNanos = System.nanoTime();
     String token = extractBearerToken(request);
     if (token == null || !GoLegacyBearer.isEnabled()) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
@@ -3245,7 +3269,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoJwtSupport.RoleListData roleListData =
           EtendoGoJwtSupport.loadRoleListData(userId);
-      writeEnvironmentLoginResponse(response, userId, roleListData);
+      writeEnvironmentLoginResponse(response, userId, roleListData, startNanos);
 
     } catch (RuntimeException e) {
       log.error("Database error in /login", e);
@@ -3294,7 +3318,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // `return` after writing a result line rather than throwing, so the catch block alone would
     // miss most real failures — the dataset step is the common one.
     boolean provisioningCompleted = false;
+    boolean rollbackConfirmed = false;
     String failureReason = null;
+    ProvisioningAlertAttempt alertAttempt = new ProvisioningAlertAttempt(paidUpgrade);
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -3312,7 +3338,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
 
     try {
-      provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword);
+      provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword, alertAttempt);
       if (!provisioningCompleted) {
         // Boolean failure exits are promoted to the same exception path as thrown failures. This
         // is especially important for a pooled tenant: claim and personalization must be rolled
@@ -3322,14 +3348,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
-      EtendoGoDalHelper.rollbackDalChanges("onboarding", e, log);
+      rollbackConfirmed = EtendoGoDalHelper.rollbackDalChangesAndConfirm("onboarding", e, log);
+      if (!rollbackConfirmed) {
+        // The request catches this failure, so the outer DAL cleaner cannot infer an error.
+        org.openbravo.dal.core.SessionHandler.getInstance().setDoRollback(true);
+      }
+      if (rollbackConfirmed && !alertAttempt.committed) {
+        notifyProvisioningAlert(alertAttempt,
+            com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.ERROR,
+            e.getClass().getSimpleName());
+      } else if (!rollbackConfirmed && !alertAttempt.committed) {
+        log.warn("Internal provisioning alert suppressed because rollback did not complete attempt={}",
+            alertAttempt.attemptId);
+      }
       sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
       failureReason = e.getMessage();
     } finally {
-      recordProvisioningFailureReason(paidUpgrade, provisioningCompleted, onboardingRequest,
-          failureReason);
+      if (provisioningCompleted || rollbackConfirmed) {
+        recordProvisioningFailureReason(paidUpgrade, provisioningCompleted, onboardingRequest,
+            failureReason);
+      } else if (paidUpgrade) {
+        // The diagnostic store commits its transaction. Never let it commit unresolved tenant
+        // changes when rollback failed, even if the original provisioning already committed.
+        log.warn("Provisioning failure diagnostic suppressed because rollback did not complete "
+            + "attempt={} stage={}", alertAttempt.attemptId, alertAttempt.stage);
+      }
       // Stop the keepalive before the final flush so no heartbeat races the result line.
       heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
@@ -3339,26 +3384,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private boolean executeOnboardingProvisioning(PrintWriter writer,
-      OnboardingPreparation preparation, String adminPassword) throws Exception {
+      OnboardingPreparation preparation, String adminPassword,
+      ProvisioningAlertAttempt alertAttempt) throws Exception {
     long onboardingStartedAt = System.nanoTime();
-    String correlationId = UUID.randomUUID().toString();
+    String correlationId = alertAttempt.attemptId;
     OnboardingRequestData onboardingRequest = preparation.request;
     String accountId = preparation.accountId;
     String accountEmail = preparation.accountEmail;
     String currencyId = preparation.currencyId;
     boolean paidUpgrade = preparation.paidUpgrade;
+    alertAttempt.stage = "admin_context";
     VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
     // ETP-5389: a pre-provisioned tenant when the pool can serve this request, otherwise null and
     // everything below is the classic path, unchanged.
+    alertAttempt.stage = "tenant_selection";
     String pooledClientId = claimPooledTenant(writer, accountId, accountEmail, onboardingRequest,
         adminPassword, correlationId);
     boolean pooled = pooledClientId != null;
+    alertAttempt.path = pooled ? "POOL" : "CLASSIC";
     String clientId = pooled ? pooledClientId
         : resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
             adminPassword);
     log.info("[ONBOARDING-PERF] phase=tenant_selection mode={} correlationId={} clientId={} "
         + "elapsedMs={}", pooled ? "pool" : "classic", correlationId, clientId,
         elapsedMillis(onboardingStartedAt));
+    alertAttempt.clientId = clientId;
+    alertAttempt.stage = pooled ? "pooled_admin" : "classic_admin";
     if (clientId == null) return false;
     long residualStartedAt = System.nanoTime();
     String demoSourceClientId = resolveDemoSourceClientId(paidUpgrade, onboardingRequest);
@@ -3366,9 +3417,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         resolveAdminContextData(clientId, writer);
     if (adminContext == null) return false;
     if (paidUpgrade) {
+      alertAttempt.stage = "productive_metadata";
       applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
           accountEmail);
     }
+    alertAttempt.stage = "organization";
     if (!pooled && ensureOrganization(writer, onboardingRequest.clientName, clientId,
         adminContext, currencyId) == null) return false;
     String orgId = resolveOrganizationId(clientId);
@@ -3378,20 +3431,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, "Organization not found after onboarding");
       return false;
     }
+    alertAttempt.stage = pooled ? "pooled_dataset" : "classic_dataset";
     boolean provisioned = pooled
         ? finishPooledTenant(writer, clientId, orgId, adminContext, onboardingRequest)
         : ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
             adminContext.adminRoleId, onboardingRequest);
     if (!provisioned) return false;
+    alertAttempt.stage = "lifecycle";
     if (paidUpgrade) {
       transferDemoCompanyProfile(accountEmail, demoSourceClientId, clientId, orgId);
     }
-    transferSelectedData(writer, onboardingRequest, paidUpgrade, demoSourceClientId, clientId,
-        orgId);
     if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
+    alertAttempt.stage = "commit";
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
+    alertAttempt.committed = true;
+    alertAttempt.stage = "committed";
+    notifyProvisioningAlert(alertAttempt,
+        com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK, null);
     log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
         + "elapsedMs={}", pooled ? "pool" : "classic", correlationId, clientId,
         elapsedMillis(residualStartedAt));
@@ -3473,28 +3531,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return paidUpgrade ? StringUtils.trimToNull(onboardingRequest.demoClientId) : null;
   }
 
-  private void transferSelectedData(PrintWriter writer, OnboardingRequestData onboardingRequest,
-      boolean paidUpgrade, String demoSourceClientId, String clientId, String orgId) {
-    if (!shouldRunSynchronousDataTransfer(paidUpgrade, onboardingRequest.transferProducts,
-        onboardingRequest.transferContacts)) return;
-    sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
-    OnboardingDataTransferService.TransferResult result = onboardingDataTransferService.transfer(
-        demoSourceClientId, clientId, orgId, onboardingRequest.transferProducts,
-        onboardingRequest.transferContacts);
-    if (result.failures() > 0) {
-      throw new IllegalStateException("Demo data transfer failed: "
-          + StringUtils.defaultIfBlank(result.failureReason(), "unknown reason"));
-    }
-    sendProgress(writer, "data-transfer", "done",
-        "Selected demo data transferred (products=" + result.productsCopied()
-            + ", contacts=" + result.contactsCopied() + ")");
-  }
-
-  static boolean shouldRunSynchronousDataTransfer(boolean paidUpgrade, boolean products,
-      boolean contacts) {
-    return paidUpgrade && !DemoDataTransferFlag.isEnabled() && (products || contacts);
-  }
-
   private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     // ETP-4575 — the credential is whatever the active scheme holds, not a bearer. develop's
@@ -3560,8 +3596,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Legacy paid requests never saved a source or transfer intent. Resume them as a new
       // productive environment without inferring a demo or copying/revoking any tenant.
       onboardingRequest.demoClientId = null;
-      onboardingRequest.transferProducts = false;
-      onboardingRequest.transferContacts = false;
       return true;
     }
 
@@ -3576,12 +3610,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           e.getMessage(), e.getMessage());
       return false;
     }
-    CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
-        .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
-    onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
-        && transferSelection != null && transferSelection.isProducts();
-    onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
-        && transferSelection != null && transferSelection.isContacts();
     return true;
   }
 
@@ -3708,9 +3736,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing with
-   * flag {@code demo-data-transfer} off. Best-effort in its own right: a failure here is logged as
-   * a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
+   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing
+   * when the purchase has no demo source. Best-effort in its own right: a failure here is logged
+   * as a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
@@ -3718,7 +3746,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   void startDemoDataTransferBestEffort(String paymentToken, String demoClientId, String clientId,
       String accountId, String accountEmail) {
-    if (!DemoDataTransferFlag.isEnabled() || StringUtils.isBlank(demoClientId)) return;
+    if (StringUtils.isBlank(demoClientId)) return;
     try {
       CheckoutRequestStore.TransferSelection selection = checkoutRequestStore
           .findTransferSelection(paymentToken, accountId, accountEmail);
@@ -3740,8 +3768,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * left it so {@code DERIVED_STATUS} reports {@code STALLED}, rather than being marked terminal
    * by a path that may itself be failing. {@code recordFailureReason} swallows its own errors for
    * the same reason — a failed annotation must not turn one problem into two. Called from the
-   * onboarding {@code finally}, so it runs on every exit including the graceful ones that return
-   * after writing a result line.
+   * onboarding {@code finally} only after successful completion or confirmed rollback. Unsafe
+   * rollback failures skip annotation because its store commits the current DAL transaction.
    *
    * @param paidUpgrade whether this environment was bought rather than free
    * @param provisioningCompleted whether provisioning reached its final result line
@@ -3921,7 +3949,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
-      EtendoGoJwtSupport.RoleListData roleListData) throws Exception {
+      EtendoGoJwtSupport.RoleListData roleListData, long startNanos) throws Exception {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     try {
@@ -3939,8 +3967,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_TOKEN, jwtToken);
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
+      recordLegacyEnvironmentLogin(jwtToken, startNanos);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5462: {@code session.login} for the cookie-session path, from the ids the rotated session
+   * now stores. Last on the success path and never throws: a failure here must not reach the
+   * caller's catch blocks, which would write an error over the answer already sent.
+   */
+  private static void recordCookieEnvironmentLogin(GoSessionRecord entered, long startNanos) {
+    try {
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
+          entered.getCtxOrgId(), entered.getUserId(), entered.getRoleId(),
+          entered.getAuthMethod(), startNanos);
+    } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
+      log.debug("Could not record the cookie environment login usage event.", e);
+    }
+  }
+
+  /**
+   * ETP-5462: {@code session.login} for the legacy bearer path. The ids come from the claims of the
+   * environment JWT just issued (decoded, not re-verified: it is ours and a microsecond old), the
+   * same source the cookie path stores in its session. Runs after the response is written and never
+   * throws, so it cannot turn a successful login into an error.
+   */
+  private static void recordLegacyEnvironmentLogin(String jwtToken, long startNanos) {
+    try {
+      DecodedJWT claims = JWT.decode(jwtToken);
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN,
+          claims.getClaim(PROGRESS_CLIENT).asString(),
+          claims.getClaim(PROGRESS_ORGANIZATION).asString(),
+          claims.getClaim("user").asString(),
+          claims.getClaim("role").asString(),
+          null, startNanos);
+    } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
+      log.debug("Could not record the legacy environment login usage event.", e);
     }
   }
 
@@ -3970,9 +4034,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
-      JSONObject transfer = body.optJSONObject(FIELD_DATA_TRANSFER);
-      data.transferProducts = transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false);
-      data.transferContacts = transfer != null && transfer.optBoolean(FIELD_CONTACTS, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -4670,6 +4731,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    long startNanos = System.nanoTime();
     JSONObject body;
     try {
       body = readJsonBody(request);
@@ -4750,6 +4812,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
+      recordCookieEnvironmentLogin(rotated.getRecord(), startNanos);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);
@@ -5141,6 +5204,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  private void notifyProvisioningAlert(ProvisioningAlertAttempt attempt,
+      com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status status, String failureCategory) {
+    try {
+      internalAlertService.sendAfterTransaction(new com.etendoerp.go.schemaforge.email.InternalAlertEvent(
+          "environment-provisioning", status, attempt.attemptId,
+          attempt.paid ? "PRODUCTIVE" : "DEMO", attempt.clientId, attempt.path, attempt.stage,
+          StringUtils.defaultIfBlank(failureCategory, null)));
+    } catch (RuntimeException e) {
+      // Even a substituted alert sender must never change a committed provisioning outcome.
+      log.warn("Internal provisioning alert failed attempt={} category={}", attempt.attemptId,
+          e.getClass().getSimpleName());
+    }
+  }
+
+  private static final class ProvisioningAlertAttempt {
+    private final String attemptId = UUID.randomUUID().toString();
+    private final boolean paid;
+    private String clientId;
+    private String path = "UNKNOWN";
+    private String stage = "started";
+    private boolean committed;
+    private ProvisioningAlertAttempt(boolean paid) { this.paid = paid; }
+  }
+
   private static final class OnboardingPreparation {
     private final String accountId;
     private final String accountEmail;
@@ -5178,8 +5265,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Resolved only from the account-scoped checkout row; onboarding never trusts a browser value.
     private String demoClientId;
     private String upgradeAction;
-    private boolean transferProducts;
-    private boolean transferContacts;
   }
 
 }

@@ -34,6 +34,7 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
@@ -65,6 +66,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.invoice.Invoice;
@@ -1187,13 +1189,14 @@ public class Fiscal349BoxesHandlerTest {
     }
   }
 
-  // ── guardNotAlreadySubmitted / dispatch 409 (ETP-5438) ───────────────
+  // ── guardNotAlreadySubmitted (generate only, ETP-5438) ────────────────
   //
   // "Block re-presentation once already submitted... stop recalculating invoices" — these cover
-  // the backend defense-in-depth half of that: /fiscal349/operators and /fiscal349/generate take
-  // no declaration id (only org/year/period) and, before this fix, had no notion of any
-  // declaration's status at all, so a direct/raw call could silently recompute or regenerate an
-  // already-presented declaration even with the frontend button hidden.
+  // the backend defense-in-depth half of that: /fiscal349/generate takes no declaration id (only
+  // org/year/period) and, before this fix, had no notion of any declaration's status at all, so
+  // a direct/raw call could silently regenerate an already-presented declaration even with the
+  // frontend button hidden. The /fiscal349/operators read is intentionally NOT gated — the
+  // frontend freezes a submitted declaration from a once-per-session compute that needs it.
 
   @SuppressWarnings("unchecked")
   @Test
@@ -1300,13 +1303,22 @@ public class Fiscal349BoxesHandlerTest {
     }
   }
 
-  // ── dispatch() 409 wiring (ETP-5438) ──────────────────────────────────
+  // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
 
+  /**
+   * ETP-5438 — {@code operators} stays available for a submitted declaration. A legacy submitted
+   * declaration without a snapshot keeps the live compute (no data-fix, product decision).
+   */
   @SuppressWarnings("unchecked")
   @Test
-  public void testDispatchOperatorsReturns409WhenAlreadySubmitted() throws Exception {
-    HttpServletRequest req = mock(HttpServletRequest.class);
+  public void testDispatchOperatorsComputesLiveWhenSubmittedWithoutSnapshot() throws Exception {
+    Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
     HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(body));
+    JSONObject computed = new JSONObject();
+    computed.put("operators", new JSONArray());
+    org.mockito.Mockito.doReturn(computed).when(h).computeOperators("org1", 2026, "T1");
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
@@ -1315,10 +1327,42 @@ public class Fiscal349BoxesHandlerTest {
       BaseOBObject decl = declWithSeqAndStatus(0L, "submitted_ack");
       when(query.list()).thenReturn(Collections.singletonList(decl));
 
-      handler.dispatch("operators", "org1", 2026, "T1", req, resp);
+      h.dispatch("operators", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
     }
 
-    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    verify(servlet, org.mockito.Mockito.never())
+        .sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    verify(h).computeOperators("org1", 2026, "T1");
+    org.junit.Assert.assertEquals(computed.toString(), body.toString());
+  }
+
+  /**
+   * ETP-5438 — a submitted declaration WITH a snapshot is served from it and the live compute is
+   * never reached.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchOperatorsServesSnapshotWithoutComputingWhenSubmitted() throws Exception {
+    Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(body));
+    String snapshot = "{\"operators\":[{\"nif\":\"FR1\",\"base\":\"10.00\"}],\"summary\":{}}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("operators", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h, org.mockito.Mockito.never())
+        .computeOperators(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
   }
 
   @SuppressWarnings("unchecked")
@@ -1343,14 +1387,54 @@ public class Fiscal349BoxesHandlerTest {
         .setHeader(eq("Content-Disposition"), anyString());
   }
 
+  /**
+   * ETP-5438 review W1 — a {@code *} session (org {@code "0"}): the snapshot lookup queries the
+   * org the declaration is stored under, not the effective leaf org the compute uses.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchOperatorsLooksSnapshotUpWithSessionOrgNotEffectiveOrg() throws Exception {
+    Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(body));
+    String snapshot = "{\"operators\":[],\"summary\":{}}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1", "0");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("operators", "leaf-org", 2026, "T1", mock(HttpServletRequest.class), resp);
+
+      verify(query).setNamedParameter("orgId", "0");
+    }
+    verify(h, org.mockito.Mockito.never())
+        .computeOperators(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
   // ── test helpers (ETP-5438) ───────────────────────────────────────────
 
   private static void mockClient(MockedStatic<OBContext> ctxMock, String clientId) {
+    mockClient(ctxMock, clientId, "org1");
+  }
+
+  /** Same, with an explicit SESSION org (the org declarations are stored under). */
+  private static void mockClient(MockedStatic<OBContext> ctxMock, String clientId,
+      String sessionOrgId) {
     OBContext ctx = mock(OBContext.class);
     ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
     Client client = mock(Client.class);
     when(client.getId()).thenReturn(clientId);
     when(ctx.getCurrentClient()).thenReturn(client);
+    org.openbravo.model.common.enterprise.Organization org =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(org.getId()).thenReturn(sessionOrgId);
+    when(ctx.getCurrentOrganization()).thenReturn(org);
   }
 
   @SuppressWarnings("unchecked")
@@ -1368,5 +1452,59 @@ public class Fiscal349BoxesHandlerTest {
     when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(declSeq);
     when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(status);
     return decl;
+  }
+
+  // ── resolveCurrentUserContactName (ETP-5456) ───────────────────────────
+  //
+  // Extracted so Fiscal349GenerateSupport#applyContactParams (generation time, existing) and
+  // computeOperators's new read-only contactFallback (frontend pre-generation validation) resolve
+  // the "contact" fallback through the EXACT same one-liner instead of each repeating
+  // `OBContext.getOBContext().getUser().getName()`. Since the ETP-5456 java:S1448 follow-up moved
+  // this method (with its whole file-name/contact/org-data resolution cluster) out of
+  // Fiscal349BoxesHandler into Fiscal349GenerateSupport, it now lives there as a package-private
+  // `static` method — still invoked via reflection here for consistency with this file's other
+  // setAccessible-based access, even though the new class no longer requires `private`.
+
+  @Test
+  public void testResolveCurrentUserContactNameReturnsTheLoggedInUsersName() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      User user = mock(User.class);
+      when(user.getName()).thenReturn("Ada Lovelace");
+      when(ctx.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      String result = invokeResolveCurrentUserContactName();
+
+      assertEquals("Ada Lovelace", result);
+    }
+  }
+
+  @Test
+  public void testResolveCurrentUserContactNamePropagatesANullUserName() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      User user = mock(User.class);
+      when(user.getName()).thenReturn(null);
+      when(ctx.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      assertNull(invokeResolveCurrentUserContactName());
+    }
+  }
+
+  /**
+   * Reflection helper for {@link Fiscal349GenerateSupport}'s {@code static}
+   * {@code resolveCurrentUserContactName()}. Kept local to this test class — nothing else needs
+   * to call it directly, since {@code computeOperators}'s use of it is covered structurally (this
+   * same helper is what {@code computeOperators} calls to fill {@code contactFallback} — see the
+   * class-level Javadoc on {@code resolveCurrentUserContactName} in {@link
+   * Fiscal349GenerateSupport}), and {@code computeOperators} as a whole remains DB-integration-
+   * tested separately per this file's own top comment.
+   */
+  private static String invokeResolveCurrentUserContactName() throws Exception {
+    Method m = Fiscal349GenerateSupport.class.getDeclaredMethod("resolveCurrentUserContactName");
+    m.setAccessible(true);
+    return (String) m.invoke(null);
   }
 }

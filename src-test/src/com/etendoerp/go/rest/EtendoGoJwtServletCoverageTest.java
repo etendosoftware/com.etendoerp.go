@@ -63,6 +63,8 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.junit.Before;
+import org.junit.After;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -86,7 +88,6 @@ import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
-import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
@@ -106,7 +107,23 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  */
 public class EtendoGoJwtServletCoverageTest {
 
-  private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
+  private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(mock(TransactionalAuthEmailSender.class));
+
+  private MockedStatic<org.openbravo.dal.core.SessionHandler> requestSession;
+  private org.openbravo.dal.core.SessionHandler unitSession;
+
+  @Before
+  public void isolateInternalAlertDelivery() {
+    unitSession = mock(org.openbravo.dal.core.SessionHandler.class);
+    requestSession = mockStatic(org.openbravo.dal.core.SessionHandler.class);
+    requestSession.when(org.openbravo.dal.core.SessionHandler::getInstance).thenReturn(unitSession);
+    servlet.internalAlertService = mock(com.etendoerp.go.schemaforge.email.InternalAlertService.class);
+  }
+
+  @After
+  public void closeUnitSession() {
+    requestSession.close();
+  }
 
   @Test
   public void paidRetryUsesThePersistedDemoEvenWhenSeveralFreeDemosExist() {
@@ -145,7 +162,7 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   @Test
-  public void paidOnboardingUsesPersistedDemoAndTransferSelectionAndLegacySkipsTransfers()
+  public void paidOnboardingUsesPersistedDemoAndLegacySkipsTransfers()
       throws Exception {
     CheckoutRequestStore store = mock(CheckoutRequestStore.class);
     servlet.checkoutRequestStore = store;
@@ -157,56 +174,34 @@ public class EtendoGoJwtServletCoverageTest {
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     OnboardingCompanyProfileTransferService profileTransfer =
         mock(OnboardingCompanyProfileTransferService.class);
-    OnboardingDataTransferService dataTransfer = mock(OnboardingDataTransferService.class);
     servlet.tenantEnvironmentLifecycleService = lifecycle;
     servlet.onboardingCompanyProfileTransferService = profileTransfer;
-    servlet.onboardingDataTransferService = dataTransfer;
     when(lifecycle.associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE")).thenReturn(true);
-    when(dataTransfer.transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false, true))
-        .thenReturn(new OnboardingDataTransferService.TransferResult(0, 1, 0, null));
     when(store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
         .thenReturn(true, false);
     when(store.findDemoClientId("purchase-1", "account-1", "user@test.com"))
         .thenReturn("STORED-DEMO");
-    CheckoutRequestStore.TransferSelection selection = mock(CheckoutRequestStore.TransferSelection.class);
-    when(selection.isProducts()).thenReturn(false);
-    when(selection.isContacts()).thenReturn(true);
-    when(store.findTransferSelection("purchase-1", "account-1", "user@test.com"))
-        .thenReturn(selection);
     when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com"))
         .thenReturn(true);
     when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com"))
         .thenReturn(7L);
 
-    try (MockedStatic<com.etendoerp.go.payment.DemoDataTransferFlag> transferFlag =
-        mockStatic(com.etendoerp.go.payment.DemoDataTransferFlag.class)) {
-      transferFlag.when(com.etendoerp.go.payment.DemoDataTransferFlag::isEnabled)
-          .thenReturn(false);
-      Object recorded = prepareOnboardingForPersistedSelection();
-      Object recordedRequest = getField(recorded, "request");
-      assertEquals("STORED-DEMO", getField(recordedRequest, "demoClientId"));
-      assertFalse((boolean) getField(recordedRequest, "transferProducts"));
-      assertTrue((boolean) getField(recordedRequest, "transferContacts"));
-      invokeProfileAndSelectedDataTransfer(recordedRequest, "STORED-DEMO", "NEW-PRODUCTIVE");
+    Object recorded = prepareOnboardingForPersistedSelection();
+    Object recordedRequest = getField(recorded, "request");
+    assertEquals("STORED-DEMO", getField(recordedRequest, "demoClientId"));
+    invokeProfileTransfer("STORED-DEMO", "NEW-PRODUCTIVE");
 
-      Object legacy = prepareOnboardingForPersistedSelection();
-      Object legacyRequest = getField(legacy, "request");
-      assertNull(getField(legacyRequest, "demoClientId"));
-      assertFalse((boolean) getField(legacyRequest, "transferProducts"));
-      assertFalse((boolean) getField(legacyRequest, "transferContacts"));
-      invokeProfileAndSelectedDataTransfer(legacyRequest, null, "LEGACY-PRODUCTIVE");
-      servlet.startDemoDataTransferBestEffort("purchase-1", null, "LEGACY-PRODUCTIVE",
-          "account-1", "user@test.com");
-    }
+    Object legacy = prepareOnboardingForPersistedSelection();
+    Object legacyRequest = getField(legacy, "request");
+    assertNull(getField(legacyRequest, "demoClientId"));
+    invokeProfileTransfer(null, "LEGACY-PRODUCTIVE");
+    servlet.startDemoDataTransferBestEffort("purchase-1", null, "LEGACY-PRODUCTIVE",
+        "account-1", "user@test.com");
     verify(lifecycle, times(1)).associateDemoWithProductive("STORED-DEMO", "NEW-PRODUCTIVE");
     verifyNoMoreInteractions(lifecycle);
     verify(profileTransfer, times(1)).copy("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1");
     verifyNoMoreInteractions(profileTransfer);
-    verify(dataTransfer, times(1)).transfer("STORED-DEMO", "NEW-PRODUCTIVE", "ORG-1", false,
-        true);
-    verifyNoMoreInteractions(dataTransfer);
     verify(store, times(1)).findDemoClientId("purchase-1", "account-1", "user@test.com");
-    verify(store, times(1)).findTransferSelection("purchase-1", "account-1", "user@test.com");
   }
 
   private Object prepareOnboardingForPersistedSelection() throws Exception {
@@ -251,18 +246,12 @@ public class EtendoGoJwtServletCoverageTest {
     }
   }
 
-  private void invokeProfileAndSelectedDataTransfer(Object requestData, String sourceClientId,
-      String targetClientId) throws Exception {
+  private void invokeProfileTransfer(String sourceClientId, String targetClientId)
+      throws Exception {
     Method transferProfile = EtendoGoJwtServlet.class.getDeclaredMethod(
         "transferDemoCompanyProfile", String.class, String.class, String.class, String.class);
     transferProfile.setAccessible(true);
     transferProfile.invoke(servlet, "user@test.com", sourceClientId, targetClientId, "ORG-1");
-    Method transferData = EtendoGoJwtServlet.class.getDeclaredMethod("transferSelectedData",
-        PrintWriter.class, requestData.getClass(), boolean.class, String.class, String.class,
-        String.class);
-    transferData.setAccessible(true);
-    transferData.invoke(servlet, new PrintWriter(new StringWriter()), requestData,
-        true, sourceClientId, targetClientId, "ORG-1");
   }
 
   private static Object getField(Object target, String fieldName) throws Exception {
@@ -1863,6 +1852,132 @@ public class EtendoGoJwtServletCoverageTest {
         () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
             "paid@example.test"));
     verify(forceTestMode).revertTestModeForProductiveTenant("CLIENT-PAID");
+  }
+
+  @Test
+  public void paidPoolBooleanFailureAlertsErrorOnlyAfterConfirmedRollback() throws Exception {
+    assertProvisioningAlertOutcome(true, false, true, false, false);
+  }
+
+  @Test
+  public void failedRollbackSuppressesAlertAndItsIndependentCommit() throws Exception {
+    assertProvisioningAlertOutcome(true, false, false, false, false);
+  }
+
+  @Test
+  public void alertDeliveryFailureDoesNotChangePaidProvisioningFailure() throws Exception {
+    assertProvisioningAlertOutcome(true, false, true, true, false);
+  }
+
+  @Test
+  public void paidPoolCommitAlertsOkAndStillClosesCheckoutWhenDeliveryThrows() throws Exception {
+    assertProvisioningAlertOutcome(true, true, true, true, false);
+  }
+
+  @Test
+  public void committedProvisioningFollowupFailureNeverEmitsFalseErrorAlert() throws Exception {
+    assertProvisioningAlertOutcome(true, true, true, false, true);
+  }
+
+  @Test
+  public void failedRollbackAfterCommitAlsoSuppressesDirtyDiagnosticCommit() throws Exception {
+    assertProvisioningAlertOutcome(true, true, false, false, true);
+  }
+
+  @Test
+  public void classicBooleanFailureAlsoProducesOneSettledErrorAlert() throws Exception {
+    assertProvisioningAlertOutcome(false, false, true, false, false);
+  }
+
+  private void assertProvisioningAlertOutcome(boolean pooled, boolean complete,
+      boolean rollbackConfirmed, boolean deliveryThrows, boolean failAfterCommit) throws Exception {
+    ResponseCapture response = mockResponse();
+    HttpServletRequest request = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\","
+            + "\"paymentToken\":\"purchase-1\"}");
+    when(request.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com")).thenReturn(true);
+    when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com")).thenReturn(1L);
+    TenantPaywallService paywall = new TenantPaywallService();
+    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
+    confirmation.setAccessible(true);
+    confirmation.set(paywall, (TenantPaywallService.PaymentConfirmation) (token, email, name) -> true);
+    servlet.tenantPaywallService = paywall;
+    servlet.pooledTenantClaimService = mock(PooledTenantClaimService.class);
+    when(servlet.pooledTenantClaimService.claim(any(), any(), anyString()))
+        .thenReturn(pooled ? "client-1" : null);
+    servlet.devProvisioningFailureFixtureService = mock(
+        DevProvisioningFailureFixtureService.class);
+    servlet.tenantPlanService = mock(TenantPlanService.class);
+    when(servlet.tenantPlanService.markProductive("client-1", "star-org")).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
+    when(servlet.tenantEnvironmentLifecycleService.markProductive("client-1")).thenReturn(true);
+    servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
+    servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
+    servlet.onboardingWarehouseAddressService = mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
+    servlet.onboardingCostingScheduleService = mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    if (failAfterCommit) doThrow(new RuntimeException("post-commit scheduler failure"))
+        .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
+    Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");
+    UserRoles admin = mock(UserRoles.class); Role role = mock(Role.class); User user = mock(User.class);
+    when(role.getId()).thenReturn("role-1"); when(user.getId()).thenReturn("user-1");
+    when(admin.getRole()).thenReturn(role); when(admin.getUserContact()).thenReturn(user);
+    Organization org = mock(Organization.class); when(org.getId()).thenReturn("org-1");
+    java.util.concurrent.atomic.AtomicBoolean settled = new java.util.concurrent.atomic.AtomicBoolean();
+    java.util.List<com.etendoerp.go.schemaforge.email.InternalAlertEvent> events = new java.util.ArrayList<>();
+    doAnswer(invocation -> {
+      assertTrue("Alert must follow the business transaction boundary", settled.get());
+      events.add(invocation.getArgument(0));
+      if (deliveryThrows) throw new RuntimeException("fake provider unavailable");
+      return null;
+    }).when(servlet.internalAlertService).sendAfterTransaction(any());
+    try (var context = mockStatic(OBContext.class);
+         var support = mockStatic(EtendoGoJwtSupport.class);
+         var dal = mockStatic(EtendoGoJwtDalHelper.class);
+         var transactions = mockStatic(EtendoGoDalHelper.class)) {
+      Account authenticated = stubAuthenticatedAccount(dal);
+      when(authenticated.getId()).thenReturn("account-1");
+      dal.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR")).thenReturn(currency);
+      dal.when(() -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com")).thenReturn(1);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com")).thenReturn(true);
+      support.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme")).thenReturn(pooled ? null : "client-1");
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1")).thenReturn(complete ? admin : null);
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
+      dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
+      transactions.when(() -> EtendoGoDalHelper.commitDalChanges(eq("onboarding"), any()))
+          .thenAnswer(i -> { settled.set(true); return null; });
+      transactions.when(() -> EtendoGoDalHelper.rollbackDalChangesAndConfirm(eq("onboarding"), any(), any()))
+          .thenAnswer(i -> { settled.set(rollbackConfirmed); return rollbackConfirmed; });
+      servlet.doPost(request, response.response);
+      if (complete) {
+        transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq("onboarding"), any()));
+        verify(store).recordProvisioned("purchase-1", "client-1", 1L);
+        if (!rollbackConfirmed && failAfterCommit)
+          verify(store, never()).recordFailureReason(anyString(), anyString());
+      } else {
+        transactions.verify(() -> EtendoGoDalHelper.rollbackDalChangesAndConfirm(eq("onboarding"), any(), any()));
+        verify(store, never()).recordProvisioned(anyString(), anyString(), any());
+        if (rollbackConfirmed) verify(store).recordFailureReason(eq("purchase-1"), anyString());
+        else verify(store, never()).recordFailureReason(anyString(), anyString());
+      }
+    }
+    if (!rollbackConfirmed) verify(unitSession).setDoRollback(true);
+    if (!complete && !rollbackConfirmed) {
+      assertTrue(events.isEmpty()); verifyNoMoreInteractions(servlet.internalAlertService);
+    } else {
+      assertEquals(1, events.size());
+      com.etendoerp.go.schemaforge.email.InternalAlertEvent event = events.get(0);
+      assertEquals(complete ? com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK
+          : com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.ERROR, event.getStatus());
+      assertEquals("PRODUCTIVE", event.getEnvironmentType());
+      assertEquals(pooled ? "POOL" : "CLASSIC", event.getPath());
+      assertEquals("client-1", event.getClientId());
+      assertFalse(event.getAttemptId().equals("purchase-1"));
+    }
+    assertTrue(response.body().contains(complete && !failAfterCommit ? "\"success\":true" : "\"success\":false"));
   }
 
   private static HttpServletRequest mockRequest(String pathInfo) {
