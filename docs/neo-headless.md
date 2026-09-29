@@ -2160,8 +2160,8 @@ than keeping two in step. ETP-5415 closed enough of that gap to turn it back on 
 | `McpLinePriceInjector` | idem — the unit price derived from the parent's price list |
 | `McpBillToInjector` | idem — added by ETP-5335 while the tool was off, live since |
 | `resolveFkSentinels` | idem — the `"0"` sentinel cleanup |
+| **the read-only / excluded field gates** | idem, and FIRST, before any injection. `neo_create` applies them inside `mapFieldsToDalProperties`; batch never calls that method, so it accepted a value for a field the spec publishes as read-only that `neo_create` refuses with 422. Batch now calls `McpWriteRequestSupport.applyWriteGatesToDalBody`, which refuses without remapping keys |
 | the spec **name** in `NeoContext` | `BatchService.createRecord` passed the spec's UUID where every other path passes its name, so a customization branching on `getSpecName()` saw a different value here (D10) |
-| the entity pre-hook | already true before ETP-5415, and the previous version of this section was wrong to list it as missing: `BatchService` does call `handleWithHooks` when a qualifier exists |
 
 **These transforms run per operation, from inside the batch loop** — `BatchService` calls back into
 `McpToolRouter.preprocessBatchOperation` through the `OperationPreprocessor` hook, after
@@ -2172,19 +2172,32 @@ record that does not exist. Every parent-dependent injection therefore abstained
 batched order line persisted at price 0 while the identical single create priced correctly. **Do not
 move these back to an up-front pass.**
 
+##### Measured, not assumed
+
+Every row below was verified against a running instance on 2026-09-28 by writing through both verbs
+and reading back what persisted. **The previous version of this table was wrong in four of them**,
+in both directions, because it was carried forward by reading rather than by measuring. Before
+acting on this table again, re-measure: it is the definition of "converged", and a wrong list either
+blocks work already done or hides a real gap.
+
+| step | `neo_create` | `neo_batch` | evidence |
+|---|---|---|---|
+| `validateMandatoryFields` | yes | **yes** | a batch omitting `businessPartner` on `sales-order/header` is refused 422 with `missingFields:["businessPartner"]` and rolled back. The shared `NeoCrudHandler.executePostCreate` validates after the full resolution chain, so batch is not more permissive here |
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | yes | **yes** | runs in `executePostCreate`, which both paths reach. (`grossUnitPrice` still persists as 0 on both — a separate, undiagnosed defect, not a divergence) |
+| `stripContactsPreCreateBillingDefaults` | yes | **yes** | idem — `executePostCreate` |
+| `handler.protectedCreateCalloutFields` | yes | **yes** | idem — `executePostCreate`, resolved statically so a null-servlet batch reaches it |
+| the entity pre-hook | yes | **yes** | `BatchService` calls `handleWithHooks` when a qualifier exists |
+
 ##### Still divergent
 
 | step | in `neo_create` | in `neo_batch` | consequence |
 |---|---|---|---|
-| `validateMandatoryFields` | yes | **no** | a batch can persist a document missing a mandatory AD column the agent never mentioned — the shared `NeoMandatoryFieldValidator` only checks keys the caller submitted. Same shape as the bill-to defect ETP-5335 fixed |
-| `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`, §3.x) |
-| `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** | no | neither path runs it, so `grossUnitPrice` and `lineGrossAmount` persist as 0 on both. Reached only via `executePostCreate` |
-| `stripContactsPreCreateBillingDefaults` | no | yes | |
-| `handler.protectedCreateCalloutFields` | no | yes | the fields each handler shields from the callout cascade |
+| `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
+| the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
 
-These are **declared** divergences, not unknown ones: the point of listing them is that the next
-person to touch either path can see what is deliberately unequal. Closing a row means adding the
-step to `preprocessBatchOperation` (for the first two) and updating this table in the same change.
+This is a **declared** list, not an unknown one: the point is that the next person to touch either
+path can see what is deliberately unequal. Closing a row means adding the step to
+`preprocessBatchOperation` and re-measuring this table in the same change.
 
 ##### REST `/sws/neo/batch` is unaffected
 

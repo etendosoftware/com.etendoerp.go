@@ -276,6 +276,55 @@ final class McpWriteRequestSupport {
   }
 
   /**
+   * Apply the curation gates to a body that is ALREADY keyed by DAL property name (ETP-5415).
+   *
+   * <p><b>Why a second entry point, and why it does not map.</b> {@link #mapFieldsToDalProperties}
+   * does two jobs — it translates the caller's spelling into DAL property names, and it applies
+   * these gates on the way. {@code neo_batch} needs only the second: its operation bodies reach
+   * {@code BatchService} in whatever spelling the agent sent and are resolved downstream, so
+   * running the mapping here as well would rewrite keys a path that works today does not expect.
+   * This method therefore refuses, and changes nothing.
+   *
+   * <p><b>The gap it closes.</b> The read-only gate lived only where the mapping lived, so
+   * {@code neo_create} refused a value sent for a field the spec publishes as read-only while
+   * {@code neo_batch} accepted and persisted it — measured live on {@code sales-order/lines}:
+   * {@code salesOrder} was refused by one verb with {@code 422 read_only_field} and written by the
+   * other. A batch being more permissive than a single create is the divergence class ETP-5415
+   * exists to remove, and it only became reachable when {@code neo_batch} was re-enabled.
+   *
+   * <p>Keys that resolve to no property are left alone, exactly as the mapping leaves them: that
+   * is IMP-18 and it is not decided here. The server's own injectors run after this, on the body
+   * it inspected, so a derived read-only value is unaffected.
+   *
+   * @param body      the operation body, keyed by DAL property name; never modified
+   * @param adTab     the tab whose table the fields belong to
+   * @param sfEntity  the SchemaForge entity; {@code null} skips the check, since with no spec in
+   *                  hand there is no curation to enforce
+   * @param dalEntity the DAL entity being written to
+   * @throws McpRoutingException 422 {@code field_not_allowed} or {@code read_only_field}
+   */
+  static void applyWriteGatesToDalBody(JSONObject body, Tab adTab, SFEntity sfEntity,
+      Entity dalEntity) {
+    if (body == null || sfEntity == null || dalEntity == null || adTab == null) {
+      return;
+    }
+    McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (McpConstants.PARAM_PARENT_ID.equals(key)) {
+        continue;
+      }
+      Property prop = resolveProperty(dalEntity, key);
+      if (prop == null) {
+        continue;
+      }
+      applyWriteGates(gate, key, mappedKeyFor(dalEntity, key, prop), body.opt(key), sfEntity,
+          dalEntity);
+    }
+  }
+
+  /**
    * Apply the two curation gates to one key that resolved to a property.
    *
    * <p>IMP-39 / IMP-48: two gates, two answers. The unresolved case is not handled here - it is

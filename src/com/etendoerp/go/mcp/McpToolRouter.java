@@ -116,6 +116,8 @@ public class McpToolRouter {
   private static final String HTTP_METHOD_PUT = "PUT";
   private static final String HTTP_METHOD_DELETE = "DELETE";
   /** DAL property names the line-policy injection keys off (IMP-15). */
+  /** The batch tool's own name, used by the router switch and in its refusal envelopes. */
+  private static final String TOOL_NEO_BATCH = "neo_batch";
   private static final String FIELD_PRODUCT = "product";
   private static final String FIELD_UOM = "uOM";
 
@@ -171,7 +173,7 @@ public class McpToolRouter {
             return handleDefaults(specName, arguments);
           case "neo_schema":
             return handleSchema(specName, arguments);
-          case "neo_batch":
+          case TOOL_NEO_BATCH:
             // Withdrawing it from tools/list is not enough: an agent that learned the name
             // elsewhere would still reach the handler, and a silent success on a path we chose
             // not to maintain is worse than the refusal.
@@ -1661,6 +1663,23 @@ public class McpToolRouter {
           op.entityName(), e.getMessage());
       return null;
     }
+    // ETP-5415: the curation gates, FIRST — before any injection, so they judge only what the
+    // agent sent. neo_create applies them inside mapFieldsToDalProperties; neo_batch never calls
+    // that method, so until now a batch could write a field the spec publishes as read-only that
+    // neo_create refuses with 422 (measured live on sales-order/lines: salesOrder). A batch more
+    // permissive than a single create is the divergence class this ticket removes, and it only
+    // became reachable when the tool was re-enabled. Refusals surface through the same batch
+    // envelope as every other pre-write rejection.
+    try {
+      McpWriteRequestSupport.applyWriteGatesToDalBody(body, adTab, sfEntity, dalEntity);
+    } catch (McpRoutingException e) {
+      // toEnvelope(), not buildRoutingErrorBody(): the latter serialises to a String for a
+      // single-tool response, and the batch envelope needs the object to nest under 'error'.
+      JSONObject gateError = e.toEnvelope();
+      gateError.put(McpConstants.KEY_TOOL, TOOL_NEO_BATCH);
+      return McpToolRouterSupport.toMcpBatchPreflightFailure(gateError, op.index(), op.opId());
+    }
+
     // This runs before any defaults pass has touched the body, so here a present uOM really is
     // the caller's own.
     injectLineUomIfApplicable(body, dalEntity, body.has(FIELD_UOM));
