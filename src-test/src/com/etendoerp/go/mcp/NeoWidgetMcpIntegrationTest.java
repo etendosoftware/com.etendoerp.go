@@ -206,7 +206,7 @@ public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
   @Test
   public void testRangeParamIsForwardedToHandler() throws Exception {
     JSONObject params = new JSONObject();
-    params.put("range", "30d");
+    params.put("range", "last30d");
 
     JSONObject result = invokeWidget("revenue-trend", params);
 
