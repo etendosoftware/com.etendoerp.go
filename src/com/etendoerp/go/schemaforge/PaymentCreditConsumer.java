@@ -59,6 +59,30 @@ final class PaymentCreditConsumer {
     return totalFunded;
   }
 
+  /**
+   * The total {@link #consume} would fund, computed WITHOUT touching anything — for checks that
+   * must run before the payment exists (the write-off limit, see
+   * {@link PaymentWriteoffLimitGuard}). Mirrors {@link #consumeOne}'s skip rules: a missing entry,
+   * a non-positive {@code use} or a blank source id funds nothing. A source id that does not
+   * resolve is still counted here; {@link #consume} rejects it later anyway.
+   */
+  static BigDecimal requestedFunding(JSONArray creditSources) {
+    BigDecimal total = BigDecimal.ZERO;
+    if (creditSources == null) {
+      return total;
+    }
+    for (int i = 0; i < creditSources.length(); i++) {
+      JSONObject src = creditSources.optJSONObject(i);
+      BigDecimal use = src == null ? null : parsePositiveAmount(src.optString("use", "0"));
+      String sourceId = src == null ? null
+          : src.optString("credit".equals(src.optString("kind", "")) ? "paymentId" : "psdId", null);
+      if (use != null && StringUtils.isNotBlank(sourceId)) {
+        total = total.add(use);
+      }
+    }
+    return total;
+  }
+
   /** Consumes a single funding source, returning the amount it funded (0 when skipped). */
   private static BigDecimal consumeOne(FIN_Payment payment, JSONObject src) {
     if (src == null) {

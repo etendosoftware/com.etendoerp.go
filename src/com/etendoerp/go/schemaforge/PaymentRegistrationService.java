@@ -626,6 +626,15 @@ public final class PaymentRegistrationService {
     }
     BigDecimal conversionRate = rr.rate();
 
+    // ETP-5558: the account's write-off limit, enforced here and not only in the SPA. Checked before
+    // anything is written — the draft, consumed credit, and above all a PIS transfer, which would
+    // otherwise move money for a payment its replay then refuses.
+    NeoResponse writeoffLimitError = PaymentWriteoffLimitGuard.check(body, account, cash,
+        scheduleId);
+    if (writeoffLimitError != null) {
+      return writeoffLimitError;
+    }
+
     Organization org = invoice.getOrganization();
     FIN_PaymentMethod paymentMethod = resolveRequestedMethod(
         account, invoice, isReceipt, body.optString("fin_paymentmethod_id", null));

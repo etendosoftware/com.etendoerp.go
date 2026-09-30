@@ -71,6 +71,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
@@ -755,6 +756,74 @@ class PaymentRegistrationServiceAdvancedTest {
         any(), any(), eq("P"), eq(newPayment), eq("")), times(1));
     finAddPaymentMock.verify(
         () -> FIN_AddPayment.createRefundPayment(any(), any(), any(), any(), any()), never());
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - write-off limit (ETP-5558)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * ETP-5558 repro, with the numbers seen live: a 121.00 invoice paid with 100.00 and
+   * {@code writeoffDifference:true} on an account whose write-off limit is 5.00. Only the SPA knew
+   * about the limit, so an MCP / REST caller had the 21.00 written off and the invoice fully paid.
+   * The request must now be refused before ANY payment is built.
+   */
+  @Test
+  @DisplayName("ETP-5558: a write-off above the account limit is refused and nothing is written")
+  void testAdvancedWriteoffAboveLimitIsRefused() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("121.00"));
+    when(account.getWriteofflimit()).thenReturn(new BigDecimal("5.00"));
+    JSONObject body = advancedBody("100.00", CONFIRM).put("writeoffDifference", true);
+
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD("ETGO_WriteoffLimitExceeded"))
+          .thenReturn("Write-off @difference@ over limit @limit@");
+      response = PaymentRegistrationService.doRegisterPaymentAdvanced(INVOICE_ID, body, true);
+    }
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("Write-off 21.00 over limit 5.00"),
+        "the refusal must name the difference and the limit: " + response.getBody());
+    assertTrue(daoConstruction.constructed().isEmpty(), "no draft payment may be created");
+    finAddPaymentMock.verify(
+        () -> FIN_AddPayment.updatePaymentDetail(any(), any(), any(), anyBoolean()), never());
+    finAddPaymentMock.verify(
+        () -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(), anyString()),
+        never());
+  }
+
+  @Test
+  @DisplayName("ETP-5558: a write-off within the account limit still reaches Core with the flag on")
+  void testAdvancedWriteoffWithinLimitProceeds() throws Exception {
+    stubAdvancedBasics();
+    FIN_PaymentScheduleDetail psd = stubPendingPSDs(new BigDecimal("121.00"));
+    when(account.getWriteofflimit()).thenReturn(new BigDecimal("5.00"));
+    JSONObject body = advancedBody("118.00", CONFIRM).put("writeoffDifference", true);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(psd), eq(newPayment), eq(new BigDecimal("118.00")), eq(true)));
+  }
+
+  @Test
+  @DisplayName("ETP-5558: an account with no write-off limit (null) accepts any write-off")
+  void testAdvancedWriteoffWithoutLimitProceeds() throws Exception {
+    stubAdvancedBasics();
+    FIN_PaymentScheduleDetail psd = stubPendingPSDs(new BigDecimal("121.00"));
+    when(account.getWriteofflimit()).thenReturn(null);
+    JSONObject body = advancedBody("100.00", CONFIRM).put("writeoffDifference", true);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(psd), eq(newPayment), eq(new BigDecimal("100.00")), eq(true)));
   }
 
   // ════════════════════════════════════════════════════════════════════════
