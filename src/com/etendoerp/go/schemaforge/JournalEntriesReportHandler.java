@@ -360,6 +360,9 @@ public class JournalEntriesReportHandler extends AbstractSqlReportHandler {
           + "WHEN 'FIN_FINACC_TRANSACTION' THEN 'FAT' "
           + "WHEN 'M_MATCHINV' THEN 'MXI' "
           + "WHEN 'M_INVENTORY' THEN 'MMI' "
+          // ETP-5273: movements and internal consumptions carry no c_doctype_id
+          + "WHEN 'M_MOVEMENT' THEN 'MMM' "
+          + "WHEN 'M_INTERNAL_CONSUMPTION' THEN 'MIC' "
           + "WHEN 'A_AMORTIZATION' THEN 'AMZ' "
           + "ELSE NULL END";
 
@@ -375,6 +378,8 @@ public class JournalEntriesReportHandler extends AbstractSqlReportHandler {
           + "    CASE WHEN dt.issotrx = 'Y' THEN 'goods-shipment' ELSE 'goods-receipt' END "
           + "  END "
           + "WHEN UPPER(adt.tablename) = 'M_INVENTORY' THEN 'physical-inventory' "
+          + "WHEN UPPER(adt.tablename) = 'M_MOVEMENT' THEN 'goods-movements' "
+          + "WHEN UPPER(adt.tablename) = 'M_INTERNAL_CONSUMPTION' THEN 'internal-consumption' "
           + "WHEN UPPER(adt.tablename) = 'M_MATCHINV' THEN 'matched-purchase-invoices' "
           + "WHEN UPPER(adt.tablename) = 'A_AMORTIZATION' THEN 'amortization' "
           + "WHEN UPPER(adt.tablename) = 'FIN_FINACC_TRANSACTION' THEN 'financial-account' "
