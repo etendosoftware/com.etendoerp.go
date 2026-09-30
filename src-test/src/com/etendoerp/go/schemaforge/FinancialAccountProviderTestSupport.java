@@ -41,6 +41,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.geography.Country;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
@@ -50,7 +51,7 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  * ({@link FinancialAccountHandlerProviderTest}, {@link FinancialAccountHandlerProviderLogoTest}).
  *
  * <p>Strategy: spy the handler and stub its DAL-bound seams ({@code loadCurrency},
- * {@code nameExists}, {@code listMatchingAlgorithms}); wire a spied
+ * {@code nameExists}, {@code loadCountry}, {@code listMatchingAlgorithms}); wire a spied
  * {@link FinancialAccountProviderEnricher} into {@code handler.providerEnricher} and stub the
  * fill-only {@code findExistingProvider} seam on that enricher spy; statically mock
  * {@link ProviderCatalogUtils} / {@link OBDal} so no database or live OBContext is needed.
@@ -61,6 +62,7 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 abstract class FinancialAccountProviderTestSupport {
 
   static final String EUR_ID = "102";
+  static final String ES_COUNTRY_ID = "106";
   static final String PROVIDER_CODE = "providerCode";
   static final String PROVIDER_NAME = "providerName";
   static final String PSD2_PROVIDER = "psd2Provider";
@@ -164,13 +166,15 @@ abstract class FinancialAccountProviderTestSupport {
     verify(enricher, never()).findExistingProvider(anyString());
   }
 
+  /** Country is mandatory on create for every account type (ETP-5473), so the fixture carries one. */
   JSONObject validCreateBody() throws Exception {
-    return new JSONObject().put("name", "BBVA").put("currency", EUR_ID);
+    return new JSONObject().put("name", "BBVA").put("currency", EUR_ID).put("country", ES_COUNTRY_ID);
   }
 
   void stubValidCreate() {
     doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
     doReturn(false).when(handler).nameExists("BBVA", null);
     doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
+    doReturn(mock(Country.class)).when(handler).loadCountry(ES_COUNTRY_ID);
   }
 }

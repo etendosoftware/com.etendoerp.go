@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_GET_ORDER_INVOICE_STATUS">
+    <function name="ETGO_GET_ORDER_INVOICE_STATUS" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_c_order_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_cancelled character varying;
+  v_cancelledorder_id character varying;
+  v_qty_ordered numeric;
+  v_qty_invoiced numeric;
+BEGIN
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction,
+  -- so ANY exception raised here rolls back the order/line save itself. Every
+  -- edge case below must therefore resolve to a value, never to an error.
+  --
+  -- Reproduces, exactly, the classic core SQLLOGIC of AD_Column InvoiceStatus
+  -- (AD_COLUMN_ID B5B203AE8D674B8DABC6669419815CA7 on C_Order), with ONE
+  -- addition: it also excludes the Total Discount line (dummy product
+  -- ETGO_DTO, TotalDiscountService.DISCOUNT_PRODUCT_ID). The classic SQLLOGIC
+  -- already excludes ol.c_order_discount_id IS NULL (a different, unrelated
+  -- legacy pricing-schema discount FK that TotalDiscountService never sets),
+  -- but never excludes the ETGO_DTO line itself, inflating the denominator
+  -- (and sometimes the numerator) whenever a header-level total discount is
+  -- applied. See ETP-5317.
+
+  -- Edge case 1 - null/blank target id.
+  IF p_c_order_id IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Edge case 2 - the order row is gone (deleted between enqueue and
+  -- recompute). SELECT ... INTO (not INTO STRICT) assigns NULL for zero rows
+  -- and does not raise.
+  SELECT o.iscancelled, o.cancelledorder_id
+    INTO v_cancelled, v_cancelledorder_id
+    FROM c_order o
+   WHERE o.c_order_id = p_c_order_id;
+
+  IF v_cancelled IS NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Same short-circuit as the classic SQLLOGIC: a cancelled order (or one that
+  -- itself cancels another) always reports 0.
+  IF v_cancelled = 'Y' OR v_cancelledorder_id IS NOT NULL THEN
+    RETURN 0;
+  END IF;
+
+  -- Edge case 3 - an order with zero lines (or only a discount line) yields
+  -- NULL sums from SUM() over zero rows; COALESCE(...,0) makes that total.
+  SELECT COALESCE(SUM(ABS(ol.qtyordered)), 0), COALESCE(SUM(ABS(ol.qtyinvoiced)), 0)
+    INTO v_qty_ordered, v_qty_invoiced
+    FROM c_orderline ol
+   WHERE ol.c_order_id = p_c_order_id
+     AND ol.c_order_discount_id IS NULL
+     AND ol.m_product_id <> 'E4BC94E71D664E73A066DAF78BF39DB3';
+
+  -- Edge case 4 - zero ordered quantity (division guard, matches classic).
+  IF v_qty_ordered = 0 THEN
+    RETURN 0;
+  END IF;
+
+  RETURN ROUND(v_qty_invoiced / v_qty_ordered * 100);
+
+-- Belt and braces. Nothing above should be able to raise, but an unforeseen
+-- runtime error must not take the order save down with it.
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN 0;
+END ETGO_GET_ORDER_INVOICE_STATUS
+]]></body>
+    </function>
+  </database>

@@ -57,6 +57,7 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  *   <li>Cash create + providerCode/logo → no upsert / no FK; keys still stripped.</li>
  *   <li>Bank or card create without providerCode → no upsert / no FK; keys still stripped.</li>
  *   <li>Update → the three provider keys are always stripped (create-only).</li>
+ *   <li>Bank create + providerCode but no country → 400 before any upsert (ETP-5473).</li>
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
@@ -296,6 +297,29 @@ public class FinancialAccountHandlerProviderTest extends FinancialAccountProvide
       assertFalse("no provider FK injected without a provider code", body.has(PSD2_PROVIDER));
       assertFalse("transient providerName stripped", body.has(PROVIDER_NAME));
       assertFalse("transient providerLogoUrl stripped", body.has(PROVIDER_LOGO_URL));
+      utils.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5473: validation runs before the provider upsert. A bank create carrying a
+   * {@code providerCode} but no {@code country} is rejected with "Country is required" and never
+   * reaches {@code upsertProvider} — which flushes, so reaching it would leave an orphan provider
+   * row behind a rejected create.
+   */
+  @Test
+  public void testCreateBankWithProviderCodeWithoutCountryRejectsBeforeUpsert() throws Exception {
+    JSONObject body = validCreateBody().put(PROVIDER_CODE, SANTANDER_CODE);
+    body.remove("country");
+    stubValidCreate();
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      NeoResponse response = handler.validateAndEnrichCreate(body);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("Country is required",
+          response.getBody().getJSONObject("error").getString("message"));
+      assertFalse("no provider FK injected for a rejected create", body.has(PSD2_PROVIDER));
       utils.verifyNoInteractions();
     }
   }
