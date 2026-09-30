@@ -16,6 +16,17 @@ The module owns runtime execution: contract lookup, authorization, recipient res
 
 4. Reject any design that accepts arbitrary `to`, `template`, `data`, `subject`, sender, Reply-To, provider URL, API key, or provider metadata from the browser.
 
+## Authorization: window write tier (ETP-5205)
+
+`POST /sws/neo/email-contracts/*` is dispatched **before** the spec router, so the router's
+window-access check never runs for it. `DefaultDocumentSendEmailContract.authorize()` therefore
+checks it itself, after command validation and before resolving the document:
+`NeoAccessHelper.canWriteSpec(getSpecName())` — write access to the contract's own window
+(`<spec>-send` → `<spec>`). A Solo-Lectura or no-access role gets `403`, which
+`TransactionalEmailService` reports as `UNAUTHORIZED` (SPA: `sendModalUnauthorized`). A spec
+name that resolves no active spec is denied (fail closed). Subclasses inherit it; unit tests
+override the protected `canWriteSpec()` hook instead of touching the DAL.
+
 ## Contract Shape
 
 Document-send contracts should extend `DefaultDocumentSendEmailContract` when the default document behavior is enough.
