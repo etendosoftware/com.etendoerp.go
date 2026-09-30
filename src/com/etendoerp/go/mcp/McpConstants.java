@@ -162,6 +162,14 @@ final class McpConstants {
    */
   static final String ERROR_PARENT_REQUIRED = "parent_required";
   /**
+   * Machine-detectable error code for a child write that named a parent the entity cannot be
+   * linked to (ETP-5558). Distinct from {@link #ERROR_PARENT_REQUIRED}: the agent did pass
+   * {@code parentId}, but no field of the entity points at the parent record, so the id has
+   * nowhere to go. Writing on without it is what attached a {@code payment-out} line to an
+   * unrelated collection.
+   */
+  static final String ERROR_PARENT_UNRESOLVABLE = "parent_unresolvable";
+  /**
    * Machine-detectable error code for a tool that exists in this build but is switched off
    * (ETP-5335). Distinct from {@link #ERROR_NOT_FOUND}: the agent did not misspell anything and
    * will not find a working variant by retrying — the capability is deliberately unavailable, and

@@ -480,6 +480,37 @@ class McpRoutingException extends OBException {
         McpConstants.SEE_ALSO_READING).withExtras(extras);
   }
 
+  /**
+   * A child write named its parent, but the entity has no field that links it to that parent
+   * (ETP-5558).
+   *
+   * <p>The write is refused rather than carried on without the parent: with the id dropped, the
+   * mandatory-defaults pass fills the link on its own and the record lands under a parent the
+   * caller never chose — a {@code payment-out} line ended up on an unrelated, processed collection
+   * that way. {@code problem} is {@link McpParentScope}'s own explanation, which names the tab and
+   * the columns it looked at, so the refusal says what is wrong with the entity and not only that
+   * something is.</p>
+   *
+   * @param specName   the spec being written
+   * @param entityName the child entity
+   * @param problem    why the parent cannot be mapped, or {@code null} when the scope gives none
+   * @return the exception to throw
+   */
+  static McpRoutingException parentUnresolvable(String specName, String entityName,
+      String problem) {
+    String why = problem == null ? "the entity declares no field that links it to its parent"
+        : problem;
+    return new McpRoutingException(
+        "Cannot apply parentId to '" + entityName + "' of '" + specName + "': " + why
+            + ". Nothing was written.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_UNRESOLVABLE,
+        McpConstants.PARAM_PARENT_ID, List.of(),
+        "Do not retry with another parentId. Call neo_schema(spec:'" + specName + "', entity:'"
+            + entityName + "') and look for the action or entity that creates this record, or "
+            + "set its link field explicitly in 'fields'.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
   static McpRoutingException missingArgument(String detail, String field) {
     return new McpRoutingException(detail, McpConstants.STATUS_UNPROCESSABLE,
         McpConstants.ERROR_VALIDATION, field, List.of(),

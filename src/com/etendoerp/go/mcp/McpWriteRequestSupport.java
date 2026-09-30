@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -38,6 +39,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
@@ -649,9 +651,14 @@ final class McpWriteRequestSupport {
    * ({@code product} and {@code referencedInventory}), so the write landed in the neighbouring
    * field.</p>
    *
-   * <p>A scope that cannot identify the parent writes nothing, exactly as before: the caller's
-   * gate is what refuses such an entity, and silently guessing a column here is what caused the
-   * defect in the first place.</p>
+   * <p><b>ETP-5558:</b> a scope that cannot identify the parent now <b>refuses</b> the write
+   * through {@link #requireApplicableParent}. It used to log a WARN and return, on the promise that
+   * "the caller's gate is what refuses such an entity" — there was no such gate, so the create went
+   * on without its parent and the mandatory-defaults pass filled the link by itself:
+   * {@code payment-out/lines} ({@code FIN_Payment_ScheduleDetail}, whose parent-link columns point
+   * at {@code FIN_Payment_Detail} and {@code FIN_Payment_Schedule}, never at {@code FIN_Payment})
+   * was attached to an unrelated, processed customer collection. Only a same-record tab still
+   * ignores the id, because there the parent is the record itself.</p>
    *
    * @param adTab         the child tab
    * @param body          the write payload, mutated in place
@@ -659,19 +666,54 @@ final class McpWriteRequestSupport {
    * @param log           caller's logger
    * @param sfEntity      the SchemaForge entity, needed to read its {@code MCP_CONFIG}
    * @throws JSONException if the payload cannot be written to
+   * @throws McpRoutingException {@code parent_unresolvable} when the id cannot be mapped
    */
   static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log,
       SFEntity sfEntity) throws JSONException {
     if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
       return;
     }
-    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    McpParentScope.Scope scope = requireApplicableParent(sfEntity, parentIdValue);
     if (scope.getParentField() == null) {
-      log.warn("No parent field resolved for tab '{}' — parentId not applied ({})",
-          adTab.getName(), scope.getProblem());
+      // Only a same-record tab gets here: the parent is the record itself, so there is no link
+      // to write. Every other scope without a parent field was refused above.
+      log.debug("Tab '{}' is the parent's own record — parentId not applied", adTab.getName());
       return;
     }
     body.put(scope.getParentField(), parentIdValue);
+  }
+
+  /**
+   * Refuse a child write whose {@code parentId} has no field to go into (ETP-5558).
+   *
+   * <p>Shared by {@code neo_create} (through {@link #resolveParentFK}) and {@code neo_batch}'s
+   * per-operation preprocessor, which never reaches {@code resolveParentFK} because
+   * {@code BatchService} maps the parent itself. One predicate for both, so a batch cannot write
+   * what a single create refuses.</p>
+   *
+   * <p>Refused: {@link McpParentScope.Kind#UNRESOLVABLE} (the link field cannot be identified) and
+   * {@link McpParentScope.Kind#UNPARENTED} (the entity declares it has none). Not refused: a header,
+   * a same-record tab — its parent is the record itself — and a resolved child. A blank
+   * {@code parentId} is not judged here: the gate only answers for a parent the caller asked
+   * for.</p>
+   *
+   * @param sfEntity the SchemaForge entity being written
+   * @param parentId the parent id the caller supplied, may be blank
+   * @return the entity's parent scope, so the caller does not resolve it twice
+   * @throws McpRoutingException {@code parent_unresolvable} (422) when the id cannot be mapped
+   */
+  static McpParentScope.Scope requireApplicableParent(SFEntity sfEntity, String parentId) {
+    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    if (StringUtils.isBlank(parentId)) {
+      return scope;
+    }
+    McpParentScope.Kind kind = scope.getKind();
+    if (kind == McpParentScope.Kind.UNRESOLVABLE || kind == McpParentScope.Kind.UNPARENTED) {
+      SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();
+      throw McpRoutingException.parentUnresolvable(spec == null ? null : spec.getName(),
+          sfEntity == null ? null : sfEntity.getName(), scope.getProblem());
+    }
+    return scope;
   }
 
   /**

@@ -752,7 +752,9 @@ public class McpToolRouter {
     // to sentinel "0" even when the user explicitly provided valid values.
     JSONObject userProvided = new JSONObject(filteredBody.toString());
 
-    // Resolve parentId if present
+    // Resolve parentId if present. ETP-5558: a parentId the entity cannot be linked to is refused
+    // here (parent_unresolvable) — before the mandatory defaults, which would otherwise fill the
+    // parent link on their own and attach the record to a parent the caller never chose.
     String parentIdValue = null;
     if (filteredBody.has(McpConstants.PARAM_PARENT_ID)) {
       parentIdValue = filteredBody.getString(McpConstants.PARAM_PARENT_ID);
@@ -1674,7 +1676,12 @@ public class McpToolRouter {
     // permissive than a single create is the divergence class this ticket removes, and it only
     // became reachable when the tool was re-enabled. Refusals surface through the same batch
     // envelope as every other pre-write rejection.
+    //
+    // ETP-5558: the parent gate first of all. BatchService maps parentId/parentRef on its own and
+    // never reaches resolveParentFK, so without this a batched child whose parent cannot be mapped
+    // is written without it — the payment-out/lines corruption, through the other door.
     try {
+      McpWriteRequestSupport.requireApplicableParent(sfEntity, op.parentId());
       McpWriteRequestSupport.applyWriteGatesToDalBody(body, adTab, sfEntity, dalEntity);
     } catch (McpRoutingException e) {
       // toEnvelope(), not buildRoutingErrorBody(): the latter serialises to a String for a
