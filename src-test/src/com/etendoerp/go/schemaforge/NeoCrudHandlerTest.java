@@ -411,6 +411,60 @@ class NeoCrudHandlerTest {
       }
     }
 
+    /**
+     * ETP-5556 regression: the line grid autosave PATCHes the whole row, so the body carries
+     * read-only computed columns (amounts, audit fields) next to the one field the user edited.
+     * The write must still reach the handler instead of failing the whole save with a 422.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "PUT", "PATCH" })
+    @DisplayName("ETP-5556: a full-row write carrying read-only fields still reaches the handler")
+    void fullRowWriteWithReadOnlyFieldsReachesHandler(String method) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      SFEntity entity = createMockEntity(false, false, true, true, true, false);
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+      when(entity.getADTab()).thenReturn(adTab);
+      when(entity.getJavaQualifier()).thenReturn("linesHook");
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("OrderLine");
+      when(servlet.findEntity("SPEC-1", "lines")).thenReturn(entity);
+      when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
+      when(request.getInputStream()).thenReturn(toServletInputStream(
+          "{\"orderedQuantity\":\"3\",\"lineNetAmount\":\"30.00\",\"grossAmount\":\"36.30\"}"));
+      NeoResponse hookResponse = NeoResponse.ok(new JSONObject());
+      when(servlet.handleWithHooks(eq("linesHook"), any(), eq(request), eq(response)))
+          .thenReturn(hookResponse);
+      NeoFieldFilter filter = buildLineFilter();
+
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+        fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "OrderLine")).thenReturn(filter);
+
+        handler.handleWindowEntityCrud(spec,
+            new NeoServlet.NeoPathInfo("testSpec", "lines", "LINE-1"), method, request, response);
+      }
+
+      verify(servlet).handleWithHooks(eq("linesHook"), any(), eq(request), eq(response));
+      verify(servlet).writeResponse(response, hookResponse);
+    }
+
+    /**
+     * Real filter for a sales order line: {@code orderedQuantity} is writable, the computed
+     * amounts are included but read-only.
+     */
+    private NeoFieldFilter buildLineFilter() throws Exception {
+      Constructor<NeoFieldFilter> ctor = NeoFieldFilter.class.getDeclaredConstructor(
+          Set.class, Set.class, Set.class, Map.class, Map.class, boolean.class);
+      ctor.setAccessible(true);
+      return ctor.newInstance(
+          new HashSet<>(Set.of("id", "orderedQuantity", "lineNetAmount", "grossAmount")),
+          new HashSet<>(Set.of("id", "orderedQuantity")),
+          Collections.emptySet(), Collections.emptyMap(), Collections.emptyMap(), true);
+    }
+
     @Test
     @DisplayName("Returns 404 when entity is not found in spec")
     void entityNotFoundSends404() throws Exception {
