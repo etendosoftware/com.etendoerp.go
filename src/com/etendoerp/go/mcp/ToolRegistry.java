@@ -553,7 +553,7 @@ public class ToolRegistry {
   /**
    * Build the {@code neo_widget} tool: a single enum tool wrapping the 9 handler-backed
    * business widgets (gap G4, ETP-4284). The enum value selects the widget; {@code params}
-   * is a free-form object forwarded to the handler (e.g. {@code {"range": "30d"}}).
+   * is a free-form object forwarded to the handler (e.g. {@code {"range": "last30d"}}).
    */
   private McpToolDefinition buildWidgetTool() {
     StringBuilder enumDesc = new StringBuilder(
@@ -567,8 +567,11 @@ public class ToolRegistry {
         enumProp(enumDesc.toString(), new ArrayList<>(WIDGET_ENTITY_BY_NAME.keySet())));
     props.put(McpConstants.PARAM_PARAMS, objectProp(
         "Optional parameters forwarded to the widget. Most widgets accept "
-            + "'range' (e.g. '7d', '30d', '90d', '12m') to scope the period; "
-            + "omit for the widget's default window."));
+            + "'range' to scope the period. Valid values: 'ytd', 'mtd', 'last30d', "
+            + "'last90d', 'lastYear'. Omit for the widget's default window "
+            + "(for 'kpis', an omitted range means 'ytd'; for 'revenue-trend' it means "
+            + "the rolling last 12 months, bucketed by month); any other value falls back "
+            + "to the rolling last 12 months."));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_WIDGET,
