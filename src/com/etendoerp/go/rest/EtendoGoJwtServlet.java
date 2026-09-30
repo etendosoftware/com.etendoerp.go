@@ -197,7 +197,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String HEADER_CACHE_CONTROL = "Cache-Control";
   private static final String VALUE_NO_STORE = "no-store";
   private static final String HEADER_SET_COOKIE = "Set-Cookie";
-  private static final String MSG_CSRF_VALIDATION_FAILED = "CSRF validation failed";
   private static final String PATH_SESSION = "/session";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
@@ -2427,7 +2426,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     OBContext.setAdminMode(true);
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-      writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, sessionAuth.getRefusalMessage());
       return null;
     }
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.UNAUTHENTICATED) {
@@ -4596,7 +4595,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
       if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, auth.getRefusalMessage());
         return;
       }
       if (auth.isAuthenticated()) {
@@ -4649,7 +4648,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
       if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, auth.getRefusalMessage());
         return;
       }
       if (!auth.isAuthenticated()) {
@@ -4951,7 +4950,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       if (!GoSessionSecurity.isOriginAllowed(request)) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            GoSessionSecurity.MSG_ORIGIN_NOT_ALLOWED);
         return;
       }
       String rawRefresh = extractRefreshToken(request);

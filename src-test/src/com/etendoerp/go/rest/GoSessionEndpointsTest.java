@@ -215,7 +215,27 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(403, resp.status);
+    assertEquals("CSRF validation failed", errorMessage(resp));
     verify(goSessionService, never()).revoke(any());
+  }
+
+  @Test
+  public void environmentFromAForeignOriginIsForbiddenForItsOrigin() throws Exception {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    HttpServletRequest req = postEnv(new JSONObject().put("userId", "U1").toString(), "tok", CSRF);
+    when(req.getHeader("Origin")).thenReturn("https://evil.example.test");
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(403, resp.status);
+    assertEquals("Origin not allowed", errorMessage(resp));
+    verify(goSessionService, never()).rotate(any());
   }
 
   @Test
@@ -635,6 +655,10 @@ public class GoSessionEndpointsTest {
     assertEquals("csrf-sso", body.getString("csrfToken"));
   }
 
+  private static String errorMessage(CapturedResponse resp) throws Exception {
+    return new JSONObject(resp.body.toString()).getJSONObject("error").getString("message");
+  }
+
   private static Claim claim(String value) {
     Claim c = mock(Claim.class);
     when(c.asString()).thenReturn(value);
@@ -719,6 +743,7 @@ public class GoSessionEndpointsTest {
     }
 
     assertEquals(403, resp.status);
+    assertEquals("Origin not allowed", errorMessage(resp));
     verify(goSessionService, never()).refresh(anyString());
   }
 
