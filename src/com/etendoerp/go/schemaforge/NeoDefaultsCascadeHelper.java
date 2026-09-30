@@ -197,8 +197,9 @@ public class NeoDefaultsCascadeHelper {
           fieldsWithCallouts.size(), fieldsWithCallouts);
 
       JSONObject formState = new JSONObject(defaults.toString());
-      runCascadeLoop(ctx, adTab, formState, defaults, seqFields,
-          new LinkedHashSet<>(fieldsWithCallouts), protectedFields, suppressedFields, result);
+      CascadeTargets targets = new CascadeTargets(formState, defaults, seqFields,
+          protectedFields, suppressedFields);
+      runCascadeLoop(ctx, adTab, targets, new LinkedHashSet<>(fieldsWithCallouts), result);
     } catch (Exception e) {
       log.error("[NEO-DEFAULTS] Error in callout cascade: {}", e.getMessage(), e);
     }
@@ -261,8 +262,16 @@ public class NeoDefaultsCascadeHelper {
    *
    * <p>Generic: the caller names the fields; nothing here knows any entity.
    *
+   * @param ctx              the NEO request context the callouts run under
+   * @param adTab            the tab whose callouts are resolved
+   * @param formState        the values the callouts read; mutated with each callout's updates
+   * @param body             the write payload the updates are merged into; mutated in place
+   * @param triggerFields    DAL property names whose callouts start the chain
+   * @param protectedFields  keys the caller submitted, whose value in {@code body} must not be
+   *                         overwritten by a callout
    * @param suppressedFields DAL property names no callout of the chain may write, present in
    *                         {@code body} or not; {@code null} means none
+   * @return the aggregated cascade result (updates, combos, messages)
    */
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutsForTriggerFields(
       NeoContext ctx, Tab adTab, JSONObject formState, JSONObject body,
@@ -286,10 +295,10 @@ public class NeoDefaultsCascadeHelper {
         return result;
       }
       log.info("[NEO-DEFAULTS] Re-firing callouts for trigger fields: {}", pendingFields);
-      runCascadeLoop(ctx, adTab, formState, body, java.util.Collections.<String>emptySet(),
-          pendingFields, protectedFields,
-          suppressedFields != null ? suppressedFields : java.util.Collections.<String>emptySet(),
-          result);
+      CascadeTargets targets = new CascadeTargets(formState, body,
+          java.util.Collections.<String>emptySet(), protectedFields,
+          suppressedFields != null ? suppressedFields : java.util.Collections.<String>emptySet());
+      runCascadeLoop(ctx, adTab, targets, pendingFields, result);
     } catch (Exception e) {
       log.warn("[NEO-DEFAULTS] Trigger-field callout re-fire failed (non-fatal): {}",
           e.getMessage(), e);
@@ -303,19 +312,18 @@ public class NeoDefaultsCascadeHelper {
    * every field their updates changed that has a callout of its own, and repeats until nothing is
    * pending or {@link #MAX_CALLOUT_CHAIN_DEPTH} is reached.
    */
-  private static void runCascadeLoop(NeoContext ctx, Tab adTab, JSONObject formState,
-      JSONObject defaults, Set<String> seqFields, Set<String> pendingFields,
-      Set<String> protectedFields, Set<String> suppressedFields,
-      NeoDefaultsService.CalloutCascadeResult result) {
+  private static void runCascadeLoop(NeoContext ctx, Tab adTab, CascadeTargets targets,
+      Set<String> pendingFields, NeoDefaultsService.CalloutCascadeResult result) {
     int depth = 0;
     Set<String> pending = pendingFields;
     while (!pending.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
       depth++;
       Set<String> nextPending = new LinkedHashSet<>();
-      CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults, seqFields,
-          result, nextPending, protectedFields, suppressedFields);
+      CalloutFieldContext cCtx = new CalloutFieldContext(targets.formState, targets.defaults,
+          targets.seqFields, result, nextPending, targets.protectedFields,
+          targets.suppressedFields);
       for (String fieldName : pending) {
-        Object value = formState.opt(fieldName);
+        Object value = targets.formState.opt(fieldName);
         if (value != null && !JSONObject.NULL.equals(value)) {
           processCalloutForField(ctx, adTab, fieldName, value, cCtx);
         }
@@ -696,6 +704,29 @@ public class NeoDefaultsCascadeHelper {
       return true;
     }
     return !oldValue.toString().equals(newValue.toString());
+  }
+
+  /**
+   * The values {@link #runCascadeLoop} threads unchanged through every depth of the loop: what the
+   * callouts read ({@code formState}), where their updates land ({@code defaults}), and the three
+   * field sets that restrict those writes. Immutable references; the JSON objects themselves are
+   * mutated by the loop.
+   */
+  private static final class CascadeTargets {
+    final JSONObject formState;
+    final JSONObject defaults;
+    final Set<String> seqFields;
+    final Set<String> protectedFields;
+    final Set<String> suppressedFields;
+
+    CascadeTargets(JSONObject formState, JSONObject defaults, Set<String> seqFields,
+        Set<String> protectedFields, Set<String> suppressedFields) {
+      this.formState = formState;
+      this.defaults = defaults;
+      this.seqFields = seqFields;
+      this.protectedFields = protectedFields;
+      this.suppressedFields = suppressedFields;
+    }
   }
 
   private static class CalloutFieldContext {
