@@ -71,7 +71,6 @@ class PaymentWriteoffLimitGuardTest {
   private FIN_FinancialAccount account;
 
   @BeforeEach
-  @SuppressWarnings("unchecked")
   void setUp() {
     dal = mock(OBDal.class);
     obDalMock = mockStatic(OBDal.class);
@@ -82,13 +81,7 @@ class PaymentWriteoffLimitGuardTest {
         .thenReturn("diff=@difference@ limit=@limit@");
 
     // One pending installment detail of 121.00 — the live repro.
-    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
-    when(psd.getAmount()).thenReturn(new BigDecimal("121.00"));
-    OBCriteria<FIN_PaymentScheduleDetail> crit = mock(OBCriteria.class);
-    when(dal.createCriteria(FIN_PaymentScheduleDetail.class)).thenReturn(crit);
-    when(crit.add(any(Criterion.class))).thenReturn(crit);
-    when(crit.addOrderBy(anyString(), anyBoolean())).thenReturn(crit);
-    when(crit.list()).thenReturn(Collections.singletonList(psd));
+    stubPending("121.00");
 
     account = mock(FIN_FinancialAccount.class);
     when(account.getWriteofflimit()).thenReturn(new BigDecimal("5.00"));
@@ -98,6 +91,17 @@ class PaymentWriteoffLimitGuardTest {
   void tearDown() {
     messagesMock.close();
     obDalMock.close();
+  }
+
+  @SuppressWarnings("unchecked")
+  private void stubPending(String amount) {
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getAmount()).thenReturn(new BigDecimal(amount));
+    OBCriteria<FIN_PaymentScheduleDetail> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_PaymentScheduleDetail.class)).thenReturn(crit);
+    when(crit.add(any(Criterion.class))).thenReturn(crit);
+    when(crit.addOrderBy(anyString(), anyBoolean())).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(psd));
   }
 
   private NeoResponse check(JSONObject body, String cash) {
@@ -119,6 +123,35 @@ class PaymentWriteoffLimitGuardTest {
   @DisplayName("Allows a shortfall exactly equal to the limit")
   void allowsEqualToLimit() throws Exception {
     assertNull(check(new JSONObject().put(WRITEOFF, true), "116.00"));
+  }
+
+  /**
+   * The SPA rounds to cents before comparing ({@code usePaymentBalance}: {@code round2} of the
+   * invoice total and of the funds), so a sub-cent residue never reaches the limit check there. A
+   * cash of 115.996 is 116.00 to the SPA, a 5.00 shortfall, allowed at a 5.00 limit; compared
+   * exactly it is 5.004 and was refused — the two sides must not disagree on the same numbers.
+   */
+  @Test
+  @DisplayName("Rounds the funds to cents like the SPA: 5.004 at a 5.00 limit is allowed")
+  void roundsFundsToCentsLikeTheSpa() throws Exception {
+    assertNull(check(new JSONObject().put(WRITEOFF, true), "115.996"));
+  }
+
+  @Test
+  @DisplayName("Rounds the pending total to cents like the SPA")
+  void roundsPendingToCentsLikeTheSpa() throws Exception {
+    stubPending("121.004");
+    assertNull(check(new JSONObject().put(WRITEOFF, true), "116.00"));
+  }
+
+  @Test
+  @DisplayName("Reports the rounded difference in the refusal")
+  void reportsTheRoundedDifference() throws Exception {
+    NeoResponse response = check(new JSONObject().put(WRITEOFF, true), "115.994");
+
+    assertNotNull(response, "115.994 is 115.99 to the SPA: a 5.01 shortfall over a 5.00 limit");
+    assertEquals("diff=5.01 limit=5.00",
+        response.getBody().getJSONObject("error").getString("message"));
   }
 
   @Test

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 
 import javax.servlet.http.HttpServletResponse;
@@ -40,8 +41,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  *
  * <p>Same rule as the SPA and as the reconciliation path
  * ({@link ReconciliationWriteoffSupport}): an unset or zero limit means "no limit", and the
- * difference is compared as-is against the limit — no currency conversion, exactly like
- * {@code writeoffState}, which compares the invoice-currency shortfall with the raw limit.
+ * difference is rounded to cents like the SPA's balance and then compared against the limit — no
+ * currency conversion, exactly like {@code writeoffState}, which compares the invoice-currency
+ * shortfall with the raw limit.
  */
 final class PaymentWriteoffLimitGuard {
 
@@ -77,10 +79,15 @@ final class PaymentWriteoffLimitGuard {
     if (limit == null || limit.signum() <= 0) {
       return null;
     }
-    BigDecimal funds = cash.add(
-        PaymentCreditConsumer.requestedFunding(body.optJSONArray("creditSources")));
+    // Both sides rounded to cents BEFORE subtracting, exactly as the SPA does (usePaymentBalance:
+    // applied = round2(total), funds = round2(amount + usedCredit)); otherwise a sub-cent residue
+    // (115.996 paid → 5.004 short) passes the SPA's check at a 5.00 limit and fails this one.
+    // HALF_UP matches Math.round on these positive amounts.
+    BigDecimal funds = cents(cash.add(
+        PaymentCreditConsumer.requestedFunding(body.optJSONArray("creditSources"))));
     BigDecimal difference =
-        pendingTotal(PaymentRegistrationService.findPendingPSDs(scheduleId)).subtract(funds);
+        cents(pendingTotal(PaymentRegistrationService.findPendingPSDs(scheduleId)))
+            .subtract(funds);
     if (difference.compareTo(limit) <= 0) {
       return null;
     }
@@ -88,6 +95,10 @@ final class PaymentWriteoffLimitGuard {
         .replace("@difference@", difference.toPlainString())
         .replace("@limit@", limit.toPlainString());
     return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, message);
+  }
+
+  private static BigDecimal cents(BigDecimal amount) {
+    return amount.setScale(2, RoundingMode.HALF_UP);
   }
 
   private static BigDecimal pendingTotal(List<FIN_PaymentScheduleDetail> psds) {

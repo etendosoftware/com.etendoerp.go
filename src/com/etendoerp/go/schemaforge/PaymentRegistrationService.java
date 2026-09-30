@@ -627,8 +627,11 @@ public final class PaymentRegistrationService {
     BigDecimal conversionRate = rr.rate();
 
     // ETP-5558: the account's write-off limit, enforced here and not only in the SPA. Checked before
-    // anything is written — the draft, consumed credit, and above all a PIS transfer, which would
-    // otherwise move money for a payment its replay then refuses.
+    // anything is written — the draft, consumed credit, and a PIS transfer, so an over-limit PIS
+    // request is refused before the bank is instructed. Known gap, not closed: the deferred replay
+    // (PisDeferredPaymentService) runs this same method, so the guard runs AGAIN after the bank has
+    // moved the money. Identical inputs pass again, but if the account's limit was lowered or the
+    // pending amount changed in between, the replay is refused with the transfer already made.
     NeoResponse writeoffLimitError = PaymentWriteoffLimitGuard.check(body, account, cash,
         scheduleId);
     if (writeoffLimitError != null) {
