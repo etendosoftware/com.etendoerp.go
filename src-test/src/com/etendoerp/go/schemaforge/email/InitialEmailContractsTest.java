@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -37,6 +38,7 @@ import java.util.Properties;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.session.OBPropertiesProvider;
@@ -52,6 +54,7 @@ import com.etendoerp.go.schemaforge.email.contracts.ReturnToVendorShipmentSendEm
 import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesOrderSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Tests the built-in transactional email contracts.
@@ -64,6 +67,24 @@ public class InitialEmailContractsTest {
    */
   private static final List<String> GATEWAY_TEMPLATE_ALLOWLIST =
       Arrays.asList("reset-password", "login-alert", "invoice", "custom");
+
+  /**
+   * ETP-5205 — {@code DefaultDocumentSendEmailContract.authorize} now requires the window write
+   * tier, read from the DAL. These tests drive real contracts end to end past authorization, so
+   * the tier is granted here; {@code DocumentSendAuthorizeTierTest} pins the check itself.
+   */
+  private MockedStatic<NeoAccessHelper> writeTierGranted;
+
+  @Before
+  public void grantWriteTier() {
+    writeTierGranted = mockStatic(NeoAccessHelper.class);
+    writeTierGranted.when(() -> NeoAccessHelper.canWriteSpec(any())).thenReturn(true);
+  }
+
+  @After
+  public void releaseWriteTier() {
+    writeTierGranted.close();
+  }
 
   @After
   public void clearProperties() {
