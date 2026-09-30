@@ -16,8 +16,15 @@
  */
 package com.etendoerp.go.schemaforge.webhooks;
 
+import java.util.Map;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.roles.RoleWriteConflicts;
 
 /**
  * Shared {@code {"success": false, "message": "..."}} response builder — extracted from the
@@ -33,8 +40,11 @@ import org.codehaus.jettison.json.JSONObject;
  */
 final class WebhookFailureResponses {
 
+  private static final Logger log = LogManager.getLogger(WebhookFailureResponses.class);
+
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_CODE = "code";
 
   private WebhookFailureResponses() {
     // static utility
@@ -54,6 +64,46 @@ final class WebhookFailureResponses {
     } catch (JSONException e) {
       throw new IllegalStateException("Unable to build failure result", e);
     }
+  }
+
+  /**
+   * ETP-5278 — same shape as {@link #failure(String)} plus a machine-readable {@code code}, so the
+   * frontend can pick a translated message instead of showing raw backend text (ETP-5206).
+   */
+  static JSONObject failure(String message, String code) {
+    try {
+      return failure(message).put(FIELD_CODE, code);
+    } catch (JSONException e) {
+      throw new IllegalStateException("Unable to build failure result", e);
+    }
+  }
+
+  /**
+   * ETP-5278 — the failure body for a role-composition write that lost a race against another
+   * write on the same user (see {@code RoleWriteConflicts}).
+   */
+  static JSONObject concurrentModification() {
+    return failure("The user's roles were changed by another request at the same time",
+        RoleWriteConflicts.CODE);
+  }
+
+  /**
+   * ETP-5278 — shared failure handling for the role-composition write webhooks ({@code
+   * SFAssignUserRoles}, {@code SFPromoteUserRole}): when {@code error} is a write that lost a
+   * race against another write on the same user ({@link RoleWriteConflicts}), rolls the
+   * transaction back and answers {@link #concurrentModification()} under {@code resultVar}.
+   *
+   * @return {@code true} if {@code error} was handled here; {@code false} leaves it to the caller
+   */
+  static boolean rejectConcurrentRoleWrite(Throwable error, Map<String, String> responseVars,
+      String resultVar, String webhookName, String userId) {
+    if (!RoleWriteConflicts.isConcurrencyFailure(error)) {
+      return false;
+    }
+    log.warn("Concurrent role write rejected in {} for user {}", webhookName, userId, error);
+    OBDal.getInstance().rollbackAndClose();
+    responseVars.put(resultVar, concurrentModification().toString());
+    return true;
   }
 
   /**

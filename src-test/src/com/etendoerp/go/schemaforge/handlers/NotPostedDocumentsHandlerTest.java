@@ -30,6 +30,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
@@ -201,6 +202,76 @@ public class NotPostedDocumentsHandlerTest {
       // message must be a flat top-level field, not re-wrapped/escaped inside error.message.
       assertEquals("Posting failed", resp.getBody().getString("message"));
     }
+  }
+
+  /**
+   * ETP-5175 pasada 1: the single post must forward the Invalid-Account identity
+   * ({@code messageKeys} + {@code messageParams}) exactly like {@code
+   * DocumentPostingService#handleAction}, so Documentos no contabilizados renders the same
+   * localized sentence as the document windows.
+   */
+  @Test
+  public void handleSinglePostForwardsMessageKeysAndParamsOnFailure() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+
+      when(service.post("318", "REC-1")).thenReturn(invalidAccountResult());
+
+      JSONObject body = new JSONObject();
+      body.put("tableId", "318");
+      body.put("recordId", "REC-1");
+
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("post");
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      assertEquals(422, resp.getHttpStatus());
+      assertEquals("ETGO_InvalidAccountBpOnly", resp.getBody().getJSONArray("messageKeys").getString(1));
+      assertEquals("Acme", resp.getBody().getJSONObject("messageParams").getString("bpName"));
+    }
+  }
+
+  /**
+   * ETP-5175 pasada 1: each bulk-post row carries the same identity as a single post (the SPA
+   * shows only counts today, but a row result must not lose information the single post has).
+   */
+  @Test
+  public void handleBulkPostForwardsMessageKeysAndParamsPerRow() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+
+      when(service.post("318", "REC-1")).thenReturn(invalidAccountResult());
+
+      JSONObject row = new JSONObject();
+      row.put("tableId", "318");
+      row.put("recordId", "REC-1");
+      JSONObject body = new JSONObject();
+      body.put("rows", new JSONArray().put(row));
+
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      JSONObject rowResult = resp.getBody().getJSONArray("results").getJSONObject(0);
+      assertEquals("InvalidAccount", rowResult.getJSONArray("messageKeys").getString(0));
+      assertEquals("Acme", rowResult.getJSONObject("messageParams").getString("bpName"));
+    }
+  }
+
+  /** A BP-only Invalid-Account failure with its identity. */
+  private static DocumentPostingService.PostResult invalidAccountResult() {
+    return new DocumentPostingService.PostResult(false, "Account could not be found. (Contact: Acme)",
+        List.of("InvalidAccount", "ETGO_InvalidAccountBpOnly"), Map.of("bpName", "Acme"));
   }
 
   @Test

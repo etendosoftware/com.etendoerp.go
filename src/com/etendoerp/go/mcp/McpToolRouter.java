@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import static com.etendoerp.go.mcp.McpToolResponses.buildRoutingErrorBody;
 import static com.etendoerp.go.mcp.McpToolResponses.buildUnexpectedErrorBody;
+import static com.etendoerp.go.mcp.McpToolResponses.deleteConfirmation;
 import static com.etendoerp.go.mcp.McpToolResponses.imageToolResult;
 
 import java.util.Collections;
@@ -1005,7 +1006,9 @@ public class McpToolRouter {
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
-    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    // ETP-5474: DELETE-specific runner, so a handler answering 204 No Content gets the same
+    // confirmation as the generic path below instead of an empty `{}`.
+    JSONObject preHookResult = McpHookExecutor.runDeletePreHook(handler, hookCtx, recordId);
     if (preHookResult != null) {
       return preHookResult;
     }
@@ -1018,10 +1021,7 @@ public class McpToolRouter {
       return wrapAsErrorContent(error);
     }
 
-    JSONObject deleteResult = new JSONObject();
-    deleteResult.put("deleted", true);
-    deleteResult.put("id", recordId);
-    return wrapAsTextContent(deleteResult);
+    return deleteConfirmation(recordId);
   }
 
   // ── neo_selectors ─────────────────────────────────────────────────────
