@@ -196,11 +196,7 @@ class NeoCrudHandler {
       if (neoContext == null) {
         return;
       }
-      NeoResponse validationError = validateClientWriteRequest(neoContext);
-      if (validationError != null) {
-        servlet.writeResponse(response, validationError);
-        return;
-      }
+      warnOnClientReadOnlyFields(neoContext);
     }
     NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
@@ -245,29 +241,32 @@ class NeoCrudHandler {
   }
 
   /**
-   * Validates the original REST write body before a handler can enrich it with server-owned
-   * values. Filtering later in the CRUD path remains responsible only for the persistence body.
+   * Checks the original REST write body, before a handler can enrich it with server-owned
+   * values, for curated read-only fields the client should not have sent, and logs them.
    *
-   * <p>Passes the HTTP method through to {@link NeoFieldFilter#validateClientWriteRequest(
-   * JSONObject, String)} so a POST (create) can honor the same "entity has a {@code NeoHandler}
-   * that may legitimately supply this value" exemption {@code rejectableOnCreateFields} already
-   * grants later, at {@code filterCreateRequest} (IMP-28 clause 2 / ETP-5537). Without the method,
-   * this earlier check ran before any handler had a chance to run and rejected such a value
-   * unconditionally, pre-empting the exemption the rest of the write path already implements.
-   * PUT/PATCH are unaffected — they never carried that exemption.
+   * <p><b>Temporary (ETP-5556):</b> ETP-5347 rejected such a body with a 422
+   * {@code read_only_field} here, but the UI line grids still send the whole row on every save,
+   * so every line edit failed. Until the UI sends only writable fields, this logs a warning and
+   * lets the write continue: the persistence filters later in the CRUD path
+   * ({@code filterWriteRequest}) drop those fields exactly as they did before ETP-5347. Restore
+   * the 422 by rejecting with {@link NeoReadOnlyFieldResponse} once the clients are fixed.</p>
+   *
+   * <p>The HTTP method is passed through so a POST honors the create-time exemption of
+   * {@code rejectableOnCreateFields} (IMP-28 clause 2 / ETP-5537), which PUT/PATCH never carry.</p>
    */
-  NeoResponse validateClientWriteRequest(NeoContext context) {
-    try {
-      Tab adTab = context.getAdTab();
-      if (adTab == null || adTab.getTable() == null) {
-        return null;
-      }
-      NeoFieldFilter filter = NeoFieldFilter.forEntity(context.getSfEntity(),
-          adTab.getTable().getName());
-      filter.validateClientWriteRequest(context.getRequestBody(), context.getHttpMethod());
-      return null;
-    } catch (ReadOnlyFieldRejectedException e) {
-      return NeoReadOnlyFieldResponse.build(e);
+  void warnOnClientReadOnlyFields(NeoContext context) {
+    Tab adTab = context.getAdTab();
+    if (adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    NeoFieldFilter filter = NeoFieldFilter.forEntity(context.getSfEntity(),
+        adTab.getTable().getName());
+    List<String> readOnlyFields = filter.findClientReadOnlyFields(
+        context.getRequestBody(), context.getHttpMethod());
+    if (!readOnlyFields.isEmpty()) {
+      log.warn("ETP-5556: {} {}/{} sent read-only fields {}; ignoring them instead of rejecting"
+              + " the write",
+          context.getHttpMethod(), context.getSpecName(), context.getEntityName(), readOnlyFields);
     }
   }
 
