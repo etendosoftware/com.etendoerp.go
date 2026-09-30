@@ -144,9 +144,18 @@ public class ReconciliationHandlerTest {
 
   private ReconciliationHandler handler;
 
+  /**
+   * ETP-5472: a CONFIRMED reconciliation. A line whose transaction carries none (or only a draft)
+   * is a "stuck" line that reconcileGroup / applySuggestions now heal instead of refusing, so the
+   * already-reconciled tests must say explicitly that the line's reconciliation is processed.
+   */
+  @Mock
+  private FIN_Reconciliation processedReconciliation;
+
   @Before
   public void setUp() {
     handler = spy(new ReconciliationHandler());
+    when(processedReconciliation.isProcessed()).thenReturn(Boolean.TRUE);
     doNothing().when(handler).doRollbackAndClose();
     // loadTolerances uses a raw JDBC connection unavailable in unit tests.
     // Stub it to return the default values (3 days, 0%) so every test that
@@ -924,6 +933,8 @@ public class ReconciliationHandlerTest {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction alreadyMatched = mock(FIN_FinaccTransaction.class);
+    // ETP-5472: without a processed reconciliation the line would be a stuck line (healed).
+    when(alreadyMatched.getReconciliation()).thenReturn(processedReconciliation);
     FIN_BankStatementLine line =
         lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, alreadyMatched);
 
@@ -933,6 +944,9 @@ public class ReconciliationHandlerTest {
     NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
 
     assertEquals(409, response.getHttpStatus());
+    // The refusal text is unchanged: the frontend matches it verbatim.
+    assertEquals(ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED,
+        response.getBody().getJSONObject("error").getString("message"));
   }
 
   /**
@@ -1908,6 +1922,8 @@ public class ReconciliationHandlerTest {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction already = mock(FIN_FinaccTransaction.class);
+    // ETP-5472: without a processed reconciliation the line would be a stuck line (healed).
+    when(already.getReconciliation()).thenReturn(processedReconciliation);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("10.00"), BigDecimal.ZERO, already);
 
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -1934,6 +1950,9 @@ public class ReconciliationHandlerTest {
     // The single result records the 409 line-already-reconciled error.
     JSONObject result = data.getJSONArray("results").getJSONObject(0);
     assertTrue(result.getJSONObject("error").getString("message").contains("already reconciled"));
+    // prepareGroup keeps its ": <id>" wording (ETP-5472 must not change the text).
+    assertEquals(ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED + ": " + LINE_ID,
+        result.getJSONObject("error").getString("message"));
   }
 
   /** A group with no statementLineId records a 400 error in the results. */
@@ -2641,6 +2660,10 @@ public class ReconciliationHandlerTest {
     when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line1 = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_BankStatementLine line2 = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    // ETP-5472: applySuggestions refuses a second group landing on an already-taken line id, so two
+    // distinct lines must carry distinct ids (an unstubbed getId() is null for both).
+    when(line1.getId()).thenReturn("line-1a");
+    when(line2.getId()).thenReturn("line-1b");
     FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
@@ -3121,29 +3144,46 @@ public class ReconciliationHandlerTest {
   }
 
   /**
-   * Regression: the line IS reconciled (carries a transaction) but that transaction has no
-   * reconciliation. This is exactly the second-attempt error: the first reactivate left the line
-   * pointing at a transaction whose reconciliation was already undone. The handler returns a 409 and
-   * never runs the undo seam.
+   * The line carries a transaction but that transaction has no reconciliation — the second-attempt
+   * state: a first reactivate left the line pointing at a transaction whose reconciliation was
+   * already undone. It used to answer a 409 and leave the line stuck for good; since ETP-5472 the
+   * line is just freed (200, {@code healed:true}) and the undo seam still never runs, because there
+   * is nothing to undo. The transaction is kept.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
-  public void testReactivateLineNotLinkedToReconciliationReturns409() throws Exception {
+  public void testReactivateLineNotLinkedToReconciliationHealsTheLine() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(ACC_ID);
     // trx != null but trx.getReconciliation() == null.
     FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
     when(trx.getReconciliation()).thenReturn(null);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
+    when(line.getId()).thenReturn(LINE_ID);
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(line).when(handler).normalizeReactivatedMatchGroup(line);
 
-    NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+    NeoResponse response;
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
 
-    assertEquals(409, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("not linked to a reconciliation"));
+      response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+
+      verify(dal, never()).remove(trx);
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("reactivated"));
+    assertTrue(data.getBoolean("healed"));
+    assertEquals(LINE_ID, data.getString("statementLineId"));
+    verify(line).setFinancialAccountTransaction(null);
     verify(handler, never()).undoReconciliation(any(), any(), any());
   }
 
@@ -4717,20 +4757,28 @@ public class ReconciliationHandlerTest {
   // to its plain form: any linked transaction (draft or processed, doesn't matter) is rejected.
 
   /**
-   * A line whose transaction hangs off an UNPROCESSED (draft) reconciliation is rejected with the
-   * SAME plain 409 as one hanging off a processed one — {@code reconcileGroup}'s guard is simply
-   * {@code line.getFinancialAccountTransaction() != null}, unconditional on {@code isProcessed()}.
+   * A line whose transaction hangs off an UNPROCESSED (draft) reconciliation that ALSO holds
+   * movements of other lines is refused with a 409 naming that draft.
+   *
+   * <p>ETP-5472: any draft-held line — whether the draft holds only this line or, as here, other
+   * movements too — is refused with {@code draftHoldsLineMessage}, before anything is written. The
+   * draft is unconfirmed work and is never emptied or removed by a reconcile request.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
-  public void testReconcileGroupStillRejectsUnprocessedDraftLinkedLineWith409() throws Exception {
+  public void testReconcileGroupRejectsLineStuckOnForeignDraftWith409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation draft = mock(FIN_Reconciliation.class);
     when(draft.isProcessed()).thenReturn(false);
+    when(draft.getDocumentNo()).thenReturn("REC-FOREIGN");
     FIN_FinaccTransaction matched = mock(FIN_FinaccTransaction.class);
+    when(matched.getId()).thenReturn("t-own");
     when(matched.getReconciliation()).thenReturn(draft);
+    FIN_FinaccTransaction foreign = mock(FIN_FinaccTransaction.class);
+    when(foreign.getId()).thenReturn("t-foreign");
+    when(draft.getFINFinaccTransactionList()).thenReturn(new ArrayList<>(List.of(matched, foreign)));
     FIN_BankStatementLine line =
         lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, matched);
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -4739,9 +4787,12 @@ public class ReconciliationHandlerTest {
     NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
 
     assertEquals(409, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("already reconciled"));
+    assertEquals(ReconciliationLineTargetSupport.draftHoldsLineMessage("REC-FOREIGN"),
+        response.getBody().getJSONObject("error").getString("message"));
+    verify(draft, never()).getFINFinaccTransactionList();
     verify(handler, never()).addNewDraftReconciliation(any());
+    verify(line, never()).setFinancialAccountTransaction(any());
+    verify(matched, never()).setReconciliation(any());
   }
 
   /**
@@ -5667,8 +5718,9 @@ public class ReconciliationHandlerTest {
   public void testApplySuggestionsPlainRejectionCarriesItsStatementLineId() throws Exception {
     FIN_FinancialAccount account = accountWithDifferenceGlItem();
     // Already matched to a transaction → prepareGroup rejects it with a 409 and a bare error body.
+    // ETP-5472: a PROCESSED reconciliation, or the line is a stuck one and gets healed instead.
     FIN_FinaccTransaction alreadyMatched =
-        trxFor(ACC_ID, new BigDecimal("30.00"), BigDecimal.ZERO, null);
+        trxFor(ACC_ID, new BigDecimal("30.00"), BigDecimal.ZERO, processedReconciliation);
     FIN_BankStatementLine staleLine =
         lineFor(ACC_ID, new BigDecimal("30.00"), BigDecimal.ZERO, alreadyMatched);
     when(staleLine.getId()).thenReturn("line-stale");
@@ -6017,8 +6069,10 @@ public class ReconciliationHandlerTest {
   public void testReconcileGroupPrefersAlreadyReconciledOverDraft() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getId()).thenReturn(ACC_ID);
+    // ETP-5472: "already reconciled" means a PROCESSED reconciliation; an unprocessed one is a
+    // stuck line, which now answers the draft-statement 409 instead.
     FIN_FinaccTransaction matched =
-        trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, mock(FIN_Reconciliation.class));
+        trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, processedReconciliation);
     FIN_BankStatementLine line =
         lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, matched);
     when(line.getBankStatement().isProcessed()).thenReturn(Boolean.FALSE);

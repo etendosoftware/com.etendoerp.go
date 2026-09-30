@@ -39,8 +39,10 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -244,6 +246,24 @@ public final class BankStatementsSupport {
 
   private BankStatementsSupport() {
     // utility class — no instances
+  }
+
+  /**
+   * Whether the account is connected to its bank through PSD2 / Salt Edge, i.e. its statements are
+   * owned by the bank feed and must not be created, imported or deleted by hand (ETP-5471).
+   *
+   * <p>Same predicate as every other PSD2 connection check in this module
+   * ({@link BankIntegrationConstants#FA_CONNECTION_STATUS_CONNECTED} against
+   * {@code EM_PSD2_Connection_Status}); the copies in the payment-registration, PIS-payment and
+   * bank-connection handlers have to stay in lockstep with it.</p>
+   *
+   * @param account the financial account, may be {@code null}
+   * @return {@code true} only for a non-null account whose status is "connected"
+   */
+  static boolean isBankConnected(FIN_FinancialAccount account) {
+    return account != null
+        && BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+            .equals(account.getPSD2ConnectionStatus());
   }
 
   /**

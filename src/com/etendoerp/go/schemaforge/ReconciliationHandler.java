@@ -881,6 +881,13 @@ public class ReconciliationHandler implements NeoHandler {
    * {@link ReconciliationDifferenceSupport}'s header javadoc). The helper therefore rolls back
    * explicitly before returning that 400, the same way {@link ReconciliationFlowSupport#compose}
    * does when Core rejects the reconciliation.
+   *
+   * <p><b>ETP-5472.</b> {@code runPostAction} now rolls back every returned error, so no refusal
+   * here can leave a payment behind; the client-supplied operation ids are still checked before
+   * any invoice is paid, so the common mistake is refused without writing at all. The requested
+   * line goes through {@link ReconciliationLineTargetSupport#resolveForMatch} (partial-group head
+   * redirected to its remainder, stuck line freed, draft-held line refused), and the 201 reports
+   * {@code partial}, {@code pendingAmount} and {@code remainderLineId}.
    */
   NeoResponse reconcileGroup(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
@@ -913,33 +920,41 @@ public class ReconciliationHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           MSG_LINE_NOT_IN_ACCOUNT);
     }
-    if (line.getFinancialAccountTransaction() != null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ALREADY_RECONCILED);
+    // ETP-5472: the reconciled head of a partial group is redirected to its pending remainder, a
+    // line stuck on a movement with no reconciliation at all is freed (its movement is kept), a
+    // line whose movement sits in a draft reconciliation is refused (409, the draft is never
+    // discarded here), a fully reconciled line is refused with the 409 as before. See
+    // ReconciliationLineTargetSupport.
+    ReconciliationLineTargetSupport.Target target =
+        ReconciliationLineTargetSupport.resolveForMatch(this, line, MSG_LINE_ALREADY_RECONCILED);
+    if (target.error() != null) {
+      return target.error();
     }
+    line = target.line();
     // ETP-5121: a statement returned to Borrador is not reconcilable. Deliberately AFTER the
     // already-reconciled check - a reconciled line of a reactivated statement is a real state
     // (reactivating a statement does not undo its reconciliations) and deserves that more specific
-    // answer. Everything above is read-only, so this rejection cannot flush a half-built write.
+    // answer. The only write above is the stuck-line heal, which runs its own draft-statement check
+    // first, so this rejection cannot follow a write.
     if (isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ON_DRAFT_STATEMENT);
     }
+    // ETP-5472: the client-supplied operations are checked BEFORE any invoice is paid, so an
+    // unknown, foreign or already-reconciled id is refused before a payment exists. Only the
+    // per-operation half: the sum/sign check below needs the invoice transactions.
+    NeoResponse refError = ReconciliationFlowSupport.validateOperationRefs(
+        operationIds, accountId, this::loadTransaction);
+    if (refError != null) {
+      return refError;
+    }
 
-    // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
-    // transaction ids join operationIds so the standard reconcile below matches them to the line.
-    // paymentMethodId is the single method chosen in the reconciliation modal, applied to every
-    // invoice payment created here — an already-existing transaction (operationIds) keeps its own.
-    if (hasInvoices) {
-      String paymentMethodId = body.optString("paymentMethodId", null);
-      // ETP-4797: opt-in, off by default. Writes off the shortfall when the line settles the
-      // invoice for less than its outstanding amount, so the invoice is fully paid instead of
-      // keeping a residual balance. The UI only offers it for a single selected invoice.
-      boolean writeoffDifference = body.optBoolean("writeoffDifference", false);
-      NeoResponse payError = ReconciliationWriteoffSupport.payInvoices(
-          account, line, invoiceSpecs, operationIds, TOLERANCE, paymentMethodId,
-          writeoffDifference);
-      if (payError != null) {
-        return payError;
-      }
+    // Pay each selected unpaid invoice; the new transaction ids join operationIds so the standard
+    // reconcile below matches them to the line (method choice and ETP-4797 write-off: see
+    // payInvoicesFromBody).
+    NeoResponse payError = ReconciliationWriteoffSupport.payInvoicesFromBody(
+        account, line, invoiceSpecs, body, operationIds, TOLERANCE);
+    if (payError != null) {
+      return payError;
     }
 
     NeoResponse opError = ReconciliationFlowSupport.validateOperations(
@@ -1164,7 +1179,8 @@ public class ReconciliationHandler implements NeoHandler {
    * <ol>
    *   <li>validate inputs + load account/line + ownership check;</li>
    *   <li>resolve the line's transaction and its reconciliation (409 when the line is not
-   *       reconciled);</li>
+   *       reconciled; a transaction with NO reconciliation is a stuck line, freed and answered as
+   *       a success via {@link ReconciliationLineTargetSupport#reactivateStuckLine}, ETP-5472);</li>
    *   <li>accounting-period guard via
    *       {@link Utilities#checkPeriod(String, String, String, java.util.Date)} on the
    *       reconciliation's accounting date (409 when the period is closed);</li>
@@ -1205,8 +1221,10 @@ public class ReconciliationHandler implements NeoHandler {
     }
     FIN_Reconciliation rec = trx.getReconciliation();
     if (rec == null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "Statement line transaction is not linked to a reconciliation");
+      // ETP-5472: a line linked to a movement that has no reconciliation is listed as pending but
+      // used to be refused here (409) and by reconcileGroup alike — stuck for good. There is nothing
+      // to undo, so the line is just freed and the call succeeds; the movement is kept.
+      return ReconciliationLineTargetSupport.reactivateStuckLine(this, account, line);
     }
 
     // Accounting-period guard: refuse to undo into a closed period. checkPeriod throws an
