@@ -427,7 +427,13 @@ class NeoAuditTokenRefreshTest {
     private static final Set<String> EXEMPT = Set.of(
         // The MCP DEFAULTS endpoint: a GET that resolves field defaults. Not a write, and there is
         // no record whose token could be corrected.
-        "com/etendoerp/go/mcp/McpToolRouter.java");
+        "com/etendoerp/go/mcp/McpToolRouter.java",
+        // ETP-5415: the single point that actually calls afterHandle, and deliberately NOT a
+        // refresh site. It does not own the response — the two channels correct different things
+        // (REST patches the NeoResponse object, MCP patches the body in place when the handler
+        // declines), and only the caller knows which. Consolidating the invocation here is what
+        // makes the three callers below the complete inventory rather than a sample.
+        "com/etendoerp/go/schemaforge/NeoExtensionDispatcher.java");
 
     /** The sites that DO carry a write whose new token must reach the response. */
     private static final Set<String> MUST_REFRESH = Set.of(
@@ -459,7 +465,15 @@ class NeoAuditTokenRefreshTest {
         String source = codeOf(file);
         // The INVOCATION, not the `@Override public NeoResponse afterHandle(...)` declarations the
         // handlers carry: a handler implements the hook, a dispatcher calls it.
-        if (!source.contains(".afterHandle(")) {
+        //
+        // ETP-5415 added the second shape. The literal call now lives in exactly one place
+        // (NeoExtensionDispatcher#invoke); a caller asks for the post phase by deriving the
+        // request with `.post(...)` and dispatching it. Scanning only for the literal would have
+        // quietly emptied this inventory down to one exempt file — the invariant would still have
+        // been green while checking nothing, which is the failure mode this class exists to
+        // prevent.
+        boolean invokesDirectly = source.contains(".afterHandle(");
+        if (!invokesDirectly && !dispatchesPostPhase(source)) {
           continue;
         }
         String relative = relativeUnixPath(sourceRoot, file);
@@ -484,10 +498,23 @@ class NeoAuditTokenRefreshTest {
               + " cannot carry a CRUD write (ETP-5262). Sites found: " + dispatchSites);
     }
 
+    /**
+     * The second shape of a dispatch site (ETP-5415): the file asks for the post phase by deriving
+     * the request with {@code .post(...)} and dispatching it through
+     * {@code NeoExtensionDispatcher}, so no literal {@code .afterHandle(} appears in it.
+     */
+    private static boolean dispatchesPostPhase(String source) {
+      return source.contains("NeoExtensionDispatcher") && source.contains(".post(");
+    }
+
     private static boolean isSuperDelegationOnly(String relativePath) {
       Path sourceRoot = moduleSourceRoot();
       String source = codeOf(sourceRoot.resolve(relativePath));
-      return !source.replace("super.afterHandle(", "").contains(".afterHandle(");
+      // A file that dispatches the post phase through the dispatcher has no literal `.afterHandle(`
+      // either, and must not be mistaken for a handler merely delegating up its own chain: that
+      // mistake dropped NeoServletSupport and NeoHookDispatcher from the inventory.
+      return !dispatchesPostPhase(source)
+          && !source.replace("super.afterHandle(", "").contains(".afterHandle(");
     }
   }
 

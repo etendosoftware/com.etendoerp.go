@@ -24,6 +24,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -38,8 +39,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -973,5 +976,118 @@ public class OrderPendingDocsAnnotationTest {
             value instanceof Boolean);
       }
     }
+  }
+
+  // ══ Total Discount line exclusion (ETP-5525) ══════════════════════════════
+
+  /**
+   * ETP-5525 — THE regression. {@code TotalDiscountService} materializes a total discount as a
+   * dummy line (product {@link TotalDiscountService#DISCOUNT_PRODUCT_ID}, ordered 1) that can never
+   * be shipped or received. Summed into {@code qtyPending} it left pending at 1 forever, so a 100 %
+   * delivered order kept offering "Gestionar envío/recepción".
+   *
+   * <p>The other tests in this file hand the handler pre-aggregated sums, so they cannot see which
+   * lines the query counts. Here the ordered-vs-delivered statement is answered by a fake that
+   * aggregates raw line fixtures honouring what the handler actually sends: the lines of the ids
+   * bound into the {@code IN}, minus the product bound to {@code M_Product_ID <> ?} (the LAST
+   * parameter). Without the clause the discount line is summed (order-1 reads pending); with the
+   * product bound at the wrong position an order id becomes the "excluded product" and the ids
+   * shift. A multi-order page pins "after ALL ids", not just "second". order-2 keeps real goods
+   * pending, so the exclusion is proven not to mask a genuine remainder. order-3 is delivered
+   * except for a PRODUCT-LESS line: it must still count, which only the {@code IS NULL} arm
+   * guarantees — under SQL three-valued logic a bare {@code M_Product_ID <> ?} evaluates NULL for
+   * it and drops the row, and the fake below models exactly that. Shared
+   * {@code AbstractOrderHeaderHandler} code — sales and purchase run the same method, so it is
+   * exercised once.
+   */
+  @Test
+  public void testTotalDiscountLineDoesNotKeepFullyDeliveredOrderPending() throws Exception {
+    Map<String, Object[][]> linesByOrder = new HashMap<>();
+    //                               product                                      ordered delivered
+    linesByOrder.put("order-1", new Object[][] {
+        { "goods-A", "5", "5" },
+        { "goods-B", "3", "3" },
+        { TotalDiscountService.DISCOUNT_PRODUCT_ID, "1", "0" } });
+    linesByOrder.put("order-2", new Object[][] {
+        { "goods-A", "5", "2" },
+        { TotalDiscountService.DISCOUNT_PRODUCT_ID, "1", "0" } });
+    linesByOrder.put("order-3", new Object[][] {
+        { "goods-A", "4", "4" },
+        { null, "2", "0" },
+        { TotalDiscountService.DISCOUNT_PRODUCT_ID, "1", "0" } });
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      stubDbWithOrderLines(obDalMock, linesByOrder);
+
+      NeoContext ctx = getCtx(null, orderRecord("order-1", 100.0), orderRecord("order-2", 100.0),
+          orderRecord("order-3", 100.0));
+      JSONArray data = dataOf(new SalesOrderHeaderHandler().afterHandle(ctx));
+
+      assertFalse("order-1: goods fully delivered — the discount line must not count as pending",
+          data.getJSONObject(0).getBoolean(NEEDS_PRIMARY));
+      assertTrue("order-2: real goods still pending despite the discount line",
+          data.getJSONObject(1).getBoolean(NEEDS_PRIMARY));
+      assertTrue("order-3: an undelivered product-less line still counts (the IS NULL arm)",
+          data.getJSONObject(2).getBoolean(NEEDS_PRIMARY));
+    }
+  }
+
+  /**
+   * Like {@link #stubDb}, but gives every statement its own {@link PreparedStatement} and answers
+   * the ordered-vs-delivered one (recognised by its {@code SUM(ol.QtyDelivered)}) by aggregating
+   * {@code linesByOrder} rows {@code (product, ordered, delivered)} per the bound parameters: when
+   * the SQL carries {@code M_Product_ID <> ?} the last bound value is the excluded product and the
+   * rest are the {@code IN} ids; otherwise every bound value is an id. SQL NULL semantics are kept:
+   * under a {@code <> ?} predicate a NULL product is UNKNOWN, so it survives only if the SQL also
+   * carries the {@code M_Product_ID IS NULL OR} arm. Every other statement reads an empty cursor.
+   */
+  private static void stubDbWithOrderLines(MockedStatic<OBDal> obDalMock,
+      Map<String, Object[][]> linesByOrder) throws SQLException {
+    OBDal dal = mock(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(dal);
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenAnswer(prep -> {
+      String sql = prep.getArgument(0);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      Map<Integer, String> bound = new HashMap<>();
+      doAnswer(inv -> bound.put(inv.getArgument(0), inv.getArgument(1)))
+          .when(ps).setString(anyInt(), anyString());
+      if (!sql.contains("SUM(ol.QtyDelivered)")) {
+        when(ps.executeQuery()).thenAnswer(inv -> noRows());
+        return ps;
+      }
+      when(ps.executeQuery()).thenAnswer(inv -> {
+        int params = (int) sql.chars().filter(c -> c == '?').count();
+        String normalized = sql.replaceAll("\\s+", " ");
+        boolean excludes = normalized.contains("M_Product_ID <> ?");
+        boolean keepsNullProduct = normalized.contains("M_Product_ID IS NULL OR");
+        String excluded = excludes ? bound.get(params) : null;
+        int idCount = excludes ? params - 1 : params;
+        List<Object[]> rows = new ArrayList<>();
+        for (int i = 1; i <= idCount; i++) {
+          String orderId = bound.get(i);
+          BigDecimal ordered = BigDecimal.ZERO;
+          BigDecimal delivered = BigDecimal.ZERO;
+          boolean any = false;
+          for (Object[] line : linesByOrder.getOrDefault(orderId, new Object[0][])) {
+            Object product = line[0];
+            boolean passes = !excludes
+                || (product == null ? keepsNullProduct : !product.equals(excluded));
+            if (!passes) {
+              continue;
+            }
+            ordered = ordered.add(new BigDecimal((String) line[1]));
+            delivered = delivered.add(new BigDecimal((String) line[2]));
+            any = true;
+          }
+          if (any) {
+            rows.add(qtyRow(orderId, ordered.toPlainString(), delivered.toPlainString()));
+          }
+        }
+        return resultSet(rows.toArray(new Object[0][]));
+      });
+      return ps;
+    });
   }
 }

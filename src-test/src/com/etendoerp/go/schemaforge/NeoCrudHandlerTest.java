@@ -1119,6 +1119,26 @@ class NeoCrudHandlerTest {
     }
 
     @Test
+    @DisplayName("Resolves the parent placeholder of the tab where clause (rule shared with MCP)")
+    void resolvesParentPlaceholderInTabWhere() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getHqlwhereclause()).thenReturn("e.storageBin.id=@Locator.id@");
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      // With no parent tab, each token falls back to the parent id (see resolveTokenFromParent).
+      try (MockedStatic<KernelUtils> kernelMock = Mockito.mockStatic(KernelUtils.class)) {
+        KernelUtils kernelUtils = mock(KernelUtils.class);
+        kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+        when(kernelUtils.getParentTab(adTab)).thenReturn(null);
+
+        Map<String, String> params = new HashMap<>();
+        invokeApplyWhereClause(params, adTab, "BIN-1");
+
+        assertEquals("(e.storageBin.id='BIN-1')", params.get("whereAndFilterClause"));
+      }
+    }
+
+    @Test
     @DisplayName("Adds parent filter for child tab with parentId")
     void addsParentFilterForChildTab() throws Exception {
       Tab adTab = mock(Tab.class);

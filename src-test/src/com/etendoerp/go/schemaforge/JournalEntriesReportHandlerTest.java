@@ -643,4 +643,33 @@ class JournalEntriesReportHandlerTest {
 
     assertEquals("Some description", entry.getString("entry_description"));
   }
+
+  // -------------------------------------------------------------------------
+  // ETP-5273 — movement / internal consumption doc type and window mapping
+  // -------------------------------------------------------------------------
+
+  private static String sqlConstant(String name) throws Exception {
+    java.lang.reflect.Field field = JournalEntriesReportHandler.class.getDeclaredField(name);
+    field.setAccessible(true);
+    return (String) field.get(null);
+  }
+
+  @Test
+  @DisplayName("docbasetype fallback maps M_MOVEMENT to MMM and M_INTERNAL_CONSUMPTION to MIC")
+  void docbasetypeFallbackMapsMovementAndInternalConsumption() throws Exception {
+    String sql = sqlConstant("DOCBASETYPE_FALLBACK_CASE");
+
+    assertTrue(sql.contains("WHEN 'M_MOVEMENT' THEN 'MMM'"));
+    assertTrue(sql.contains("WHEN 'M_INTERNAL_CONSUMPTION' THEN 'MIC'"));
+  }
+
+  @Test
+  @DisplayName("doc_window maps M_MOVEMENT to goods-movements and M_INTERNAL_CONSUMPTION to internal-consumption")
+  void docWindowMapsMovementAndInternalConsumption() throws Exception {
+    String sql = sqlConstant("DOC_WINDOW_CASE");
+
+    assertTrue(sql.contains("WHEN UPPER(adt.tablename) = 'M_MOVEMENT' THEN 'goods-movements'"));
+    assertTrue(sql.contains(
+        "WHEN UPPER(adt.tablename) = 'M_INTERNAL_CONSUMPTION' THEN 'internal-consumption'"));
+  }
 }
