@@ -684,31 +684,37 @@ final class McpWriteRequestSupport {
   }
 
   /**
-   * Refuse a child write whose {@code parentId} has no field to go into (ETP-5558).
+   * Refuse a child create that cannot be attached to the parent the caller means (ETP-5558).
    *
-   * <p>Shared by {@code neo_create} (through {@link #resolveParentFK}) and {@code neo_batch}'s
-   * per-operation preprocessor, which never reaches {@code resolveParentFK} because
-   * {@code BatchService} maps the parent itself. One predicate for both, so a batch cannot write
-   * what a single create refuses.</p>
+   * <p>Shared by {@code neo_create} and {@code neo_batch}'s per-operation preprocessor, which never
+   * reaches {@link #resolveParentFK} because {@code BatchService} maps the parent itself. One
+   * predicate for both, so a batch cannot write what a single create refuses.</p>
    *
-   * <p>Refused: {@link McpParentScope.Kind#UNRESOLVABLE} (the link field cannot be identified) and
-   * {@link McpParentScope.Kind#UNPARENTED} (the entity declares it has none). Not refused: a header,
-   * a same-record tab — its parent is the record itself — and a resolved child. A blank
-   * {@code parentId} is not judged here: the gate only answers for a parent the caller asked
-   * for.</p>
+   * <p>Refused:</p>
+   * <ul>
+   *   <li>{@link McpParentScope.Kind#UNRESOLVABLE} — <b>always</b>, with or without
+   *       {@code parentId}. Without one the create still reaches the mandatory-defaults pass, which
+   *       fills the unmappable link on its own; omitting the id must not be a way around the
+   *       refusal. This is what makes the scope's "not publishable" true on the write path.</li>
+   *   <li>{@link McpParentScope.Kind#UNPARENTED} — only when a {@code parentId} is sent, since the
+   *       entity declares it has no field to put it in. (Such an entity advertises no write
+   *       method, so {@code requireMethodEnabled} normally refuses first.)</li>
+   * </ul>
+   * <p>Not refused: a header, a same-record tab — its parent is the record itself — and a resolved
+   * child. The update and delete verbs do not call this: neither runs the defaults pass, so neither
+   * can pick a parent on the caller's behalf.</p>
    *
-   * @param sfEntity the SchemaForge entity being written
+   * @param sfEntity the SchemaForge entity being created
    * @param parentId the parent id the caller supplied, may be blank
    * @return the entity's parent scope, so the caller does not resolve it twice
-   * @throws McpRoutingException {@code parent_unresolvable} (422) when the id cannot be mapped
+   * @throws McpRoutingException {@code parent_unresolvable} (422) when the create must not proceed
    */
   static McpParentScope.Scope requireApplicableParent(SFEntity sfEntity, String parentId) {
     McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
-    if (StringUtils.isBlank(parentId)) {
-      return scope;
-    }
     McpParentScope.Kind kind = scope.getKind();
-    if (kind == McpParentScope.Kind.UNRESOLVABLE || kind == McpParentScope.Kind.UNPARENTED) {
+    boolean refuse = kind == McpParentScope.Kind.UNRESOLVABLE
+        || (kind == McpParentScope.Kind.UNPARENTED && StringUtils.isNotBlank(parentId));
+    if (refuse) {
       SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();
       throw McpRoutingException.parentUnresolvable(spec == null ? null : spec.getName(),
           sfEntity == null ? null : sfEntity.getName(), scope.getProblem());

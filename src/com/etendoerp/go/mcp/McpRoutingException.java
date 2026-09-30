@@ -481,15 +481,18 @@ class McpRoutingException extends OBException {
   }
 
   /**
-   * A child write named its parent, but the entity has no field that links it to that parent
-   * (ETP-5558).
+   * A child create on an entity whose parent cannot be identified (ETP-5558).
    *
-   * <p>The write is refused rather than carried on without the parent: with the id dropped, the
-   * mandatory-defaults pass fills the link on its own and the record lands under a parent the
-   * caller never chose — a {@code payment-out} line ended up on an unrelated, processed collection
-   * that way. {@code problem} is {@link McpParentScope}'s own explanation, which names the tab and
-   * the columns it looked at, so the refusal says what is wrong with the entity and not only that
+   * <p>Raised whether or not the caller sent {@code parentId}: with the parent unmappable, the
+   * mandatory-defaults pass fills the link on its own and the record lands under a parent the caller
+   * never chose — a {@code payment-out} line ended up on an unrelated, processed collection that
+   * way. {@code problem} is {@link McpParentScope}'s own explanation, which names the tab and the
+   * columns it looked at, so the refusal says what is wrong with the entity and not only that
    * something is.</p>
+   *
+   * <p>The hint deliberately does not suggest setting the link field by hand: on these entities it
+   * points at an intermediate record (a payment detail, a payment schedule) the agent has no safe
+   * way to choose, so that advice would lead straight back to a wrong parent.</p>
    *
    * @param specName   the spec being written
    * @param entityName the child entity
@@ -501,13 +504,13 @@ class McpRoutingException extends OBException {
     String why = problem == null ? "the entity declares no field that links it to its parent"
         : problem;
     return new McpRoutingException(
-        "Cannot apply parentId to '" + entityName + "' of '" + specName + "': " + why
-            + ". Nothing was written.",
+        "Cannot create '" + entityName + "' of '" + specName + "' through MCP: its parent cannot "
+            + "be identified (" + why + "), so the record would be attached to a parent nobody "
+            + "chose. Nothing was written.",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_UNRESOLVABLE,
         McpConstants.PARAM_PARENT_ID, List.of(),
-        "Do not retry with another parentId. Call neo_schema(spec:'" + specName + "', entity:'"
-            + entityName + "') and look for the action or entity that creates this record, or "
-            + "set its link field explicitly in 'fields'.",
+        "Do not retry this create. Call neo_schema(spec:'" + specName + "', entity:'<the parent "
+            + "entity>', view:'actions') and use the action that creates this record.",
         McpConstants.SEE_ALSO_WRITING);
   }
 

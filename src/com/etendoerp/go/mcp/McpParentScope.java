@@ -84,9 +84,20 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * 5. anything else                  -&gt; UNRESOLVABLE: not publishable until declared
  * </pre>
  *
- * <p>Step 5 is what keeps the gate from having a permissive default. An entity whose parent cannot
- * be identified is not served with the check skipped — it is withheld, and {@code neo_discover}
- * says why, the same way a report spec with no contract is withheld today.</p>
+ * <p>Step 5 is what keeps the gate from having a permissive default. What "not publishable" means
+ * in practice, verb by verb:</p>
+ * <ul>
+ *   <li><b>create</b> ({@code neo_create}, {@code neo_batch}) — refused with
+ *       {@code parent_unresolvable}, with or without {@code parentId}, by
+ *       {@code McpWriteRequestSupport#requireApplicableParent} (ETP-5558). Letting it through is
+ *       what attached a {@code payment-out} line to an unrelated collection: the mandatory-defaults
+ *       pass fills the unmappable link on its own.</li>
+ *   <li><b>discovery</b> — {@code neo_discover} and {@code neo_schema} still list the entity, with
+ *       {@code configError} and {@code parentProblem} saying why.</li>
+ *   <li><b>read, update, delete</b> — served, without a parent gate (there is no field to gate
+ *       on). None of them runs the defaults pass, so none can choose a parent for the caller.</li>
+ * </ul>
+ * <p>It is therefore withheld where it can do damage, not hidden from the catalogue.</p>
  *
  * <h2>The one place {@code MCP_CONFIG} is read on this path</h2>
  * <p>This class is the single consumer of the column for parent purposes, and it is also what
@@ -118,7 +129,7 @@ final class McpParentScope {
      * rather than merely undiscovered.
      */
     UNPARENTED,
-    /** A child whose link field cannot be identified: not publishable. */
+    /** A child whose link field cannot be identified: not publishable — creates are refused. */
     UNRESOLVABLE
   }
 

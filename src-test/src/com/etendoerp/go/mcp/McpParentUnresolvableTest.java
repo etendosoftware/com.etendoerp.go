@@ -178,17 +178,38 @@ class McpParentUnresolvableTest {
     assertEquals("parent_unresolvable", refusal.toEnvelope().getString(McpConstants.KEY_ERROR));
   }
 
+  /**
+   * WARN-1 of the review: the corruption does not need a parentId. Without one the create reaches
+   * the mandatory-defaults pass all the same, which fills the unmappable link on its own. An
+   * unresolvable scope therefore refuses every create, whatever the caller sent.
+   */
   @Test
-  @DisplayName("no parentId, no refusal — the gate judges only a parent the caller asked for")
-  void blankParentIdIsNotJudged() throws Exception {
+  @DisplayName("an unresolvable scope refuses the create even when no parentId is sent")
+  void unresolvableIsRefusedWithoutParentId() throws Exception {
     withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, PROBLEM));
 
+    for (String absent : new String[] { null, "", "  " }) {
+      McpRoutingException refusal = assertThrows(McpRoutingException.class,
+          () -> McpWriteRequestSupport.requireApplicableParent(sfEntity, absent),
+          "omitting parentId must not be a way around the refusal");
+      JSONObject envelope = refusal.toEnvelope();
+      assertEquals("parent_unresolvable", envelope.getString(McpConstants.KEY_ERROR));
+      assertTrue(envelope.getString(McpConstants.KEY_DETAIL).contains("Nothing was written"));
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE" }, mode =
+      EnumSource.Mode.EXCLUDE)
+  @DisplayName("without parentId, every other scope kind is left alone")
+  void blankParentIdIsOnlyJudgedForUnresolvable(McpParentScope.Kind kind) throws Exception {
+    withScope(scope(kind, kind == McpParentScope.Kind.RESOLVED ? PARENT_FIELD : null, null));
+
     assertDoesNotThrow(() -> McpWriteRequestSupport.requireApplicableParent(sfEntity, null));
-    assertDoesNotThrow(() -> McpWriteRequestSupport.requireApplicableParent(sfEntity, "  "));
   }
 
   @Test
-  @DisplayName("the refusal is an unconditioned 422 even when the scope carries no problem text")
+  @DisplayName("with no reason from the scope, the refusal still names the spec and entity")
   void refusalWithoutProblemTextStillNamesTheEntity() throws Exception {
     withScope(scope(McpParentScope.Kind.UNPARENTED, null, null));
 
@@ -197,6 +218,52 @@ class McpParentUnresolvableTest {
     String detail = refusal.toEnvelope().getString(McpConstants.KEY_DETAIL);
     assertTrue(detail.contains(ENTITY_NAME) && detail.contains(SPEC_NAME), detail);
     assertFalse(detail.contains("null"), "a missing reason must not print as 'null': " + detail);
+  }
+
+  /**
+   * WARN-2 of the review: the hint must not invite the agent to fill the link field by hand. On
+   * these entities that field points at an intermediate record (a payment detail, a schedule) the
+   * agent has no safe way to pick, so the invitation leads straight back to a wrong parent.
+   */
+  @Test
+  @DisplayName("the hint points to the action that creates the record, never to a hand-set link")
+  void hintDoesNotInviteAHandSetLink() throws Exception {
+    withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, PROBLEM));
+
+    McpRoutingException refusal = assertThrows(McpRoutingException.class,
+        () -> McpWriteRequestSupport.requireApplicableParent(sfEntity, PARENT_ID));
+    String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
+    assertFalse(hint.contains("fields"), "the hint must not suggest setting the link: " + hint);
+    assertTrue(hint.contains("action"), "the hint must name the way forward: " + hint);
+  }
+
+  // ── neo_create applies the gate before the defaults ───────────────────
+
+  /**
+   * NIT-3 of the review: the refusal is only worth anything if it runs before
+   * {@code injectMandatoryDefaults}, the step that fills the link on its own. Called outside the
+   * {@code parentId} branch, so a create without one is judged too.
+   */
+  @Test
+  @DisplayName("neo_create runs the parent gate before injectMandatoryDefaults, for every create")
+  void createPathAppliesTheGateBeforeDefaults() {
+    String body = McpSourceScanner.methodBody(
+        McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate");
+
+    Matcher gate = Pattern.compile("McpWriteRequestSupport\\s*\\.\\s*requireApplicableParent"
+        + "\\s*\\(\\s*sfEntity\\s*,").matcher(body);
+    assertTrue(gate.find(), "handleCreate must call "
+        + "McpWriteRequestSupport.requireApplicableParent(sfEntity, ...) unconditionally — inside "
+        + "resolveParentFK alone it only runs when a parentId was sent");
+    Matcher defaults = Pattern.compile("injectMandatoryDefaults\\s*\\(").matcher(body);
+    assertTrue(defaults.find(), "anchor injectMandatoryDefaults moved; update this guard");
+    assertTrue(gate.start() < defaults.start(),
+        "the parent gate must run before injectMandatoryDefaults fills the link on its own");
+    Matcher parentBranch = Pattern.compile("if\\s*\\(\\s*filteredBody\\s*\\.\\s*has\\s*"
+        + "\\(\\s*McpConstants\\s*\\.\\s*PARAM_PARENT_ID").matcher(body);
+    assertTrue(parentBranch.find(), "anchor 'if (filteredBody.has(PARAM_PARENT_ID))' moved");
+    assertTrue(gate.start() < parentBranch.start(),
+        "the gate must not live only inside the parentId branch");
   }
 
   // ── neo_batch applies the same gate ───────────────────────────────────

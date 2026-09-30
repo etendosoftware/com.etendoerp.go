@@ -705,6 +705,11 @@ public class McpToolRouter {
     // to an entity configured read-only (which neo_discover already reports as readOnly).
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+    // ETP-5558: a child whose parent cannot be identified is refused here, before any body
+    // transform — with or without parentId. Past this point injectMandatoryDefaults would fill the
+    // unmappable link on its own and attach the record to a parent nobody chose.
+    McpWriteRequestSupport.requireApplicableParent(sfEntity,
+        fields.optString(McpConstants.PARAM_PARENT_ID, null));
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
@@ -752,9 +757,7 @@ public class McpToolRouter {
     // to sentinel "0" even when the user explicitly provided valid values.
     JSONObject userProvided = new JSONObject(filteredBody.toString());
 
-    // Resolve parentId if present. ETP-5558: a parentId the entity cannot be linked to is refused
-    // here (parent_unresolvable) — before the mandatory defaults, which would otherwise fill the
-    // parent link on their own and attach the record to a parent the caller never chose.
+    // Resolve parentId if present. An unmappable parent was already refused above (ETP-5558).
     String parentIdValue = null;
     if (filteredBody.has(McpConstants.PARAM_PARENT_ID)) {
       parentIdValue = filteredBody.getString(McpConstants.PARAM_PARENT_ID);
@@ -1678,8 +1681,9 @@ public class McpToolRouter {
     // envelope as every other pre-write rejection.
     //
     // ETP-5558: the parent gate first of all. BatchService maps parentId/parentRef on its own and
-    // never reaches resolveParentFK, so without this a batched child whose parent cannot be mapped
-    // is written without it — the payment-out/lines corruption, through the other door.
+    // never reaches resolveParentFK, so without this a batched child whose parent cannot be
+    // identified — with or without a parentRef — is written with a link the defaults picked: the
+    // payment-out/lines corruption, through the other door.
     try {
       McpWriteRequestSupport.requireApplicableParent(sfEntity, op.parentId());
       McpWriteRequestSupport.applyWriteGatesToDalBody(body, adTab, sfEntity, dalEntity);

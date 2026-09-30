@@ -2349,45 +2349,58 @@ Making the schema itself tell the truth is the deeper fix and is proposed, not i
 `MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
 was deferred to its own cycle.
 
-##### A `parentId` that cannot be mapped is refused, not dropped (ETP-5558)
+##### A child whose parent cannot be identified is not created (ETP-5558)
 
 `McpParentScope` classifies every child entity as `RESOLVED` (a link field points at the parent
 tab's table, or `parent.field` declares one), `SAME_RECORD`, `UNPARENTED` (declared by
-`parent.mode`) or `UNRESOLVABLE`. On the write path the last two have no field to put a `parentId`
-into, and until ETP-5558 `McpWriteRequestSupport.resolveParentFK` only logged a WARN and let the
-write continue without the parent. The mandatory-defaults pass then filled the link by itself:
+`parent.mode`) or `UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
+`configError` in `neo_discover`, and every write verb still served it:
+`McpWriteRequestSupport.resolveParentFK` logged a WARN, dropped the `parentId` and let the create
+continue, and the mandatory-defaults pass then filled the link by itself.
 `neo_create(spec:"payment-out", entity:"lines", parentId:<FIN_Payment>)` — `FIN_Payment_ScheduleDetail`,
 whose parent-link columns point at `FIN_Payment_Detail` and `FIN_Payment_Schedule`, never at
 `FIN_Payment` — produced a line attached to an unrelated, already processed customer collection.
+Sending no `parentId` reached the same defaults pass, so omitting it was no protection.
 
-Now the write is refused before anything is persisted:
+Now the create is refused before any body transform, and nothing is persisted:
 
 ```json
 { "status": 422, "error": "parent_unresolvable", "field": "parentId",
-  "detail": "Cannot apply parentId to 'lines' of 'payment-out': cannot determine the parent of tab 'Lines': none of its parent-link fields [paymentDetails, invoicePaymentSchedule] points at the parent tab table 'FIN_Payment'. ... Nothing was written.",
-  "hint": "Do not retry with another parentId. ...", "seeAlso": "..." }
+  "detail": "Cannot create 'lines' of 'payment-out' through MCP: its parent cannot be identified (cannot determine the parent of tab 'Lines': none of its parent-link fields [paymentDetails, invoicePaymentSchedule] points at the parent tab table 'FIN_Payment'. ...), so the record would be attached to a parent nobody chose. Nothing was written.",
+  "hint": "Do not retry this create. Call neo_schema(spec:'payment-out', entity:'<the parent entity>', view:'actions') and use the action that creates this record.",
+  "seeAlso": "..." }
 ```
 
-| Scope kind | `parentId` supplied | Result |
-|---|---|---|
-| `RESOLVED` | yes | written into the link field (unchanged) |
-| `SAME_RECORD` | yes | ignored — the parent is the record itself (unchanged) |
-| `UNRESOLVABLE`, `UNPARENTED` | yes | **422 `parent_unresolvable`**, nothing written |
-| any | no | not judged by this gate (unchanged); a header entity is never judged |
+The hint deliberately does not suggest setting the link field by hand: on these entities it points
+at an intermediate record (a payment detail, a payment schedule) the agent has no safe way to pick.
 
-The predicate is `McpWriteRequestSupport.requireApplicableParent`, and both write verbs call it:
-`neo_create` through `resolveParentFK`, and `neo_batch` from `preprocessBatchOperation` (on
-`op.parentId()`, i.e. an explicit `parentId` or a resolved `parentRef`) before any other gate — see
-§4.12.9. It is MCP-only: REST writes are unchanged.
+| Scope kind | create with `parentId` | create without `parentId` |
+|---|---|---|
+| `RESOLVED` | written into the link field (unchanged) | unchanged |
+| `SAME_RECORD` | ignored — the parent is the record itself (unchanged) | unchanged |
+| `UNPARENTED` | **422 `parent_unresolvable`** | unchanged (such an entity advertises no write method anyway) |
+| `UNRESOLVABLE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
+| header (`NOT_CHILD`) | `parentId` ignored (unchanged) | unchanged |
+
+The predicate is `McpWriteRequestSupport.requireApplicableParent`, called from `handleCreate` right
+after the entity is resolved (so before `injectMandatoryDefaults`), from `resolveParentFK`, and first
+of all in `neo_batch`'s `preprocessBatchOperation` — see §4.12.9. `neo_update` and `neo_delete` do
+not call it: neither runs the defaults pass, so neither can choose a parent on the caller's behalf.
+Reads and discovery keep serving the entity, flagged with `configError`/`parentProblem`. It is
+MCP-only: REST writes are unchanged.
+
+No legitimate MCP flow is lost. The UI and the agent create payment lines through the invoice
+actions (`registerPayment` and siblings → `PaymentRegistrationService`), which run inside
+`neo_action`, not through the write verbs; the entities' only handler
+(`PaymentScheduleDetailHandler`) is a read post-hook.
 
 **What is unresolvable today** (sweep of the included, active child entities, 2026-09-30; the same
 three carry `configError` in `neo_discover`): `payment-in/finPaymentScheduleDetail` and
 `payment-out/lines` (`FIN_Payment_ScheduleDetail` under `FIN_Payment`), and
 `product/transactionAdjustments` (`M_Transaction_Cost` under `M_Costing_Transactions_HQL`, whose
-only link column `M_Transaction_ID` points elsewhere). All three advertise every write method. The
-fix for each is an entity decision — a `parent.field` that is genuinely the link, or hiding the
-write verbs — not a change to this gate. A write on them **without** `parentId` is not refused by
-this gate.
+only link column `M_Transaction_ID` points elsewhere). All three advertise every write method; with
+this change none of them can be created through MCP. Making any of them creatable again is an
+entity decision — a `parent.field` that is genuinely the link — not a change to this gate.
 
 #### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
 
@@ -2516,7 +2529,7 @@ than keeping two in step. ETP-5415 closed enough of that gap to turn it back on 
 | `McpBillToInjector` | idem — added by ETP-5335 while the tool was off, live since |
 | `resolveFkSentinels` | idem — the `"0"` sentinel cleanup |
 | **the read-only / excluded field gates** | idem, and FIRST, before any injection. `neo_create` applies them inside `mapFieldsToDalProperties`; batch never calls that method, so it accepted a value for a field the spec publishes as read-only that `neo_create` refuses with 422. Batch now calls `McpWriteRequestSupport.applyWriteGatesToDalBody`, which refuses without remapping keys |
-| **the parent gate** (ETP-5558) | `requireApplicableParent(sfEntity, op.parentId())`, first of all in `preprocessBatchOperation`. `BatchService` maps the parent itself and never reaches `resolveParentFK`, so without it a batched child whose parent cannot be mapped was written without it. Same 422 `parent_unresolvable` as `neo_create` (§4.12.6), inside the batch failure envelope |
+| **the parent gate** (ETP-5558) | `requireApplicableParent(sfEntity, op.parentId())`, first of all in `preprocessBatchOperation`. `BatchService` maps the parent itself and never reaches `resolveParentFK`, so without it a batched child whose parent cannot be identified — with or without a `parentRef` — was written with a link the defaults picked. Same 422 `parent_unresolvable` as `neo_create` (§4.12.6), inside the batch failure envelope |
 | the spec **name** in `NeoContext` | `BatchService.createRecord` passed the spec's UUID where every other path passes its name, so a customization branching on `getSpecName()` saw a different value here (D10) |
 
 **These transforms run per operation, from inside the batch loop** — `BatchService` calls back into
@@ -2563,9 +2576,10 @@ React frontend also uses, and changing what the frontend persists is out of scop
 itself holds no knowledge of who supplies a preprocessor or what it does.
 
 **Declared REST ↔ MCP divergence (ETP-5558):** the `parent_unresolvable` refusal of §4.12.6 is
-MCP-only. REST `POST /sws/neo/{spec}/{entity}?parentId=…` and REST `/sws/neo/batch` resolve the
-parent through their own path (§6) and were deliberately left unchanged; whether they have the same
-exposure on the three unresolvable entities has not been measured. The React UI does not write
+MCP-only. On the three unresolvable entities a create is refused by `neo_create` and `neo_batch`
+but still accepted by REST `POST /sws/neo/{spec}/{entity}` and REST `/sws/neo/batch`, which resolve
+the parent through their own path (§6) and were deliberately left unchanged; whether they have the
+same exposure has not been measured. The React UI does not write
 those entities directly (payments are created through the invoice actions).
 
 ##### Atomicity
