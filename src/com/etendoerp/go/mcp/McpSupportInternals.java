@@ -38,7 +38,6 @@ import com.etendoerp.go.schemaforge.MissingRequiredFieldsException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
-import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * Private implementation details of {@link McpToolRouterSupport}, extracted so that class stays
@@ -193,11 +192,12 @@ final class McpSupportInternals {
 
   /**
    * Returns whether an entity declares at least one read method and no supported mutation
-   * method. Delegates to {@link NeoMethodPolicy#isReadOnly(SFEntity)} — the single source of
+   * method. Delegates to {@link McpMethodPolicy#isReadOnly(SFEntity)} (ETP-5558: the flags minus the
+   * verbs {@code MCP_CONFIG.verbs} hides) — the single source of
    * truth for the {@code ETGO_SF_ENTITY} method flags (ETP-4254).
    */
   static boolean isReadOnlyEntity(SFEntity entity) {
-    return NeoMethodPolicy.isReadOnly(entity);
+    return McpMethodPolicy.isReadOnly(entity);
   }
 
   /**

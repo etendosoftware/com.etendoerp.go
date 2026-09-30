@@ -1389,6 +1389,9 @@ public class McpToolRouter {
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
     // are the agent's to decide — the full response exceeds the client's token limit outright.
     if (McpSchemaCreateView.isCreateView(view)) {
+      // ETP-5558: a create the MCP hides has no create contract to publish — answering with one
+      // would draw the agent into the write it is about to be refused.
+      McpToolRouterSupport.requireVerbNotHidden(spec, sfEntity, HTTP_METHOD_POST);
       // ETP-5184: ask the scope, not the tab level. tabLevel > 0 also catches the entities that
       // share their parent's record (contacts/customer and friends are all C_BPartner, 1:1), where
       // telling the agent to pass a parentId would send it looking for an argument that does not
@@ -1448,13 +1451,15 @@ public class McpToolRouter {
     // (and, post clause 2, gets rejected) before the agent learns anything. Gate POST/PUT on
     // "at least one field the agent may actually set", in addition to the raw entity flag.
     // DELETE is untouched — deleting a record never requires any field to be writable.
-    if (Boolean.TRUE.equals(sfEntity.isPost()) && entityHasWritableField) {
+    // ETP-5558: through McpMethodPolicy, so a verb MCP_CONFIG.verbs hides is not advertised here
+    // while the write verbs refuse it.
+    if (McpMethodPolicy.isMethodEnabled(sfEntity, HTTP_METHOD_POST) && entityHasWritableField) {
       methods.put(HTTP_METHOD_POST);
     }
-    if (Boolean.TRUE.equals(sfEntity.isPut()) && entityHasWritableField) {
+    if (McpMethodPolicy.isMethodEnabled(sfEntity, HTTP_METHOD_PUT) && entityHasWritableField) {
       methods.put(HTTP_METHOD_PUT);
     }
-    if (Boolean.TRUE.equals(sfEntity.isDelete())) {
+    if (McpMethodPolicy.isMethodEnabled(sfEntity, HTTP_METHOD_DELETE)) {
       methods.put(HTTP_METHOD_DELETE);
     }
     entitySchema.put("methods", methods);
@@ -1662,8 +1667,9 @@ public class McpToolRouter {
     Tab adTab;
     Entity dalEntity;
     SFEntity sfEntity;
+    SFSpec spec;
     try {
-      SFSpec spec = McpToolRouterSupport.findActiveSpecByName(op.specName());
+      spec = McpToolRouterSupport.findActiveSpecByName(op.specName());
       sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), op.entityName());
       adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, op.entityName());
       dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
@@ -1684,7 +1690,11 @@ public class McpToolRouter {
     // never reaches resolveParentFK, so without this a batched child whose parent cannot be
     // identified — with or without a parentRef — is written with a link the defaults picked: the
     // payment-out/lines corruption, through the other door.
+    //
+    // ETP-5558: and the method gate before it — a create MCP_CONFIG.verbs hides is refused here
+    // with the same 405 neo_create returns (BatchService's own check reads only the raw flag).
     try {
+      McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
       McpWriteRequestSupport.requireApplicableParent(sfEntity, op.parentId());
       McpWriteRequestSupport.applyWriteGatesToDalBody(body, adTab, sfEntity, dalEntity);
     } catch (McpRoutingException e) {

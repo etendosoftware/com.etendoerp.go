@@ -203,7 +203,7 @@ final class McpToolRouterSupport {
 
   static JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
-    for (String method : NeoMethodPolicy.enabledMethods(entity)) {
+    for (String method : McpMethodPolicy.enabledMethods(entity)) {
       methods.put(method);
     }
     return methods;
@@ -233,13 +233,37 @@ final class McpToolRouterSupport {
    * @throws OBException when the method is not enabled on the entity
    */
   static void requireMethodEnabled(SFSpec spec, SFEntity entity, String method) {
-    if (NeoMethodPolicy.isMethodEnabled(entity, method)) {
-      return;
-    }
     String specName = spec != null ? spec.getName() : null;
     String entityName = entity != null ? entity.getName() : null;
-    throw McpRoutingException.methodNotAllowed(
-        NeoMethodPolicy.buildMcpNotEnabledMessage(specName, entityName, method, entity));
+    // A flag that is off keeps its historical refusal; neither REST nor MCP may use the method.
+    if (!McpMethodPolicy.isFlagEnabled(entity, method)) {
+      throw McpRoutingException.methodNotAllowed(
+          NeoMethodPolicy.buildMcpNotEnabledMessage(specName, entityName, method, entity));
+    }
+    requireVerbNotHidden(spec, entity, method);
+  }
+
+  /**
+   * Refuse a method {@code MCP_CONFIG.verbs} hides from the MCP (ETP-5558), whatever the
+   * {@code ETGO_SF_ENTITY} flag says.
+   *
+   * <p>Split from {@link #requireMethodEnabled} for {@code neo_schema view:"create"}, which must
+   * refuse a hidden create without starting to refuse entities whose {@code ISPOST} is merely off
+   * (its long-standing behaviour).</p>
+   *
+   * @param spec   the resolved spec (used for the message only)
+   * @param entity the resolved included entity
+   * @param method the HTTP-method equivalent of the MCP operation
+   * @throws McpRoutingException {@code method_not_allowed} (405) when the verb is hidden
+   */
+  static void requireVerbNotHidden(SFSpec spec, SFEntity entity, String method) {
+    McpVerbsSection.Hidden hidden = McpVerbsSection.hiddenFor(entity, method);
+    if (hidden == null) {
+      return;
+    }
+    throw McpRoutingException.verbHidden(spec != null ? spec.getName() : null,
+        entity != null ? entity.getName() : null, method, hidden.getReason(),
+        hidden.getInstead());
   }
 
   /**
@@ -327,7 +351,7 @@ final class McpToolRouterSupport {
     try {
       List<SFEntity> entities = listIncludedEntities(spec.getId());
       return entities == null || entities.isEmpty() || entities.stream()
-          .anyMatch(entity -> NeoMethodPolicy.isMethodEnabled(entity, method));
+          .anyMatch(entity -> McpMethodPolicy.isMethodEnabled(entity, method));
     } catch (Exception e) {
       log.warn("Could not inspect method {} for spec '{}': {}", method, spec.getName(),
           e.getMessage());
@@ -348,7 +372,7 @@ final class McpToolRouterSupport {
     if (entities == null || entities.isEmpty()) {
       return false;
     }
-    return entities.stream().noneMatch(NeoMethodPolicy::hasMutableMethod);
+    return entities.stream().noneMatch(McpMethodPolicy::hasMutableMethod);
   }
 
   /**

@@ -54,6 +54,7 @@ final class McpConfigSections {
     }
     McpEntityConfig.register(McpParentSection.declaration());
     McpEntityConfig.register(McpFieldsSection.declaration());
+    McpEntityConfig.register(McpVerbsSection.declaration());
     REGISTERED.set(true);
   }
 

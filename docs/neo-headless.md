@@ -2233,6 +2233,7 @@ metadata.
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
 | `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
+| `verbs` | entity (spec applies to every entity without its own) | Hides MCP write verbs the `ETGO_SF_ENTITY` flags still enable for REST and the SPA — `create`, `update`, `delete`, `reason`, `instead` (ETP-5558). |
 
 ##### The `fields` section
 
@@ -2304,6 +2305,75 @@ reader that queried `ISINCLUDED` in its own criteria would honour the override i
 ignore it in the other two — reproducing exactly the three-way disagreement §4.12.10 exists to end.
 `McpQuerySupport.excludedPropertyNames` and `filterablePropertyNames` therefore load the rows and
 resolve through `McpFieldView`, never through a `Restrictions.eq` on the column.
+
+##### The `verbs` section (ETP-5558)
+
+```json
+{
+  "verbs": {
+    "create": false,
+    "update": false,
+    "delete": false,
+    "reason": "why the agent must not use these verbs here",
+    "instead": "neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"
+  }
+}
+```
+
+**Why it exists.** The MCP surface must equal the UI surface both ways: what the UI does not offer,
+an agent must not be drawn into. The payment windows create payments only through the invoice
+actions (`registerPayment` and siblings), yet every payment entity has every method flag on, so the
+MCP advertised and executed a hand-built payment route that nothing validates — the route BUG-1
+corrupted data through. The flags cannot be turned off: REST and the SPA read them too. This section
+hides the verb for the MCP only.
+
+- `create` / `update` / `delete` — JSON booleans. `false` hides the verb; `true` or absence leaves
+  the `ETGO_SF_ENTITY` flag in charge. It **never widens**: `true` cannot enable a verb whose flag is
+  off. `update` covers `PUT` and `PATCH`. At least one verb key is required; a string (`"false"`) is
+  a validation error, not a value.
+- `reason` — **mandatory**, non-blank. It reaches the agent in the refusal.
+- `instead` — optional: the call that does the job, quoted as the refusal's hint. Without it the
+  hint is `neo_schema(spec, entity, view:'actions')` on the same entity.
+- `REPLACE`. Written at entity level; a spec-level body applies to every entity of that spec that
+  declares none.
+- **Fails closed.** An entity whose `MCP_CONFIG` is unusable (bad JSON, unknown section or key, a
+  failing validator in any section) has every MCP write verb hidden; reads stay. A restriction that
+  failed validation must not switch itself off.
+
+**One policy, every surface.** `McpMethodPolicy` = the flags (`NeoMethodPolicy`) minus the hidden
+verbs, and it is the only MCP-side answer to "may the MCP use this method": the tool catalogue
+(`ToolRegistry` — a spec whose every entity hides `create` drops out of `neo_create`'s enum),
+`neo_discover` (`methods`, `readOnly`), the MCP resources, `neo_schema` (`methods`; and
+`view:"create"` on a hidden create is refused rather than publishing a create contract),
+`neo_create` / `neo_update` / `neo_delete` (`requireMethodEnabled`) and `neo_batch`
+(`preprocessBatchOperation`, before any other gate). `McpVerbsSectionTest` fails the build if an MCP
+class reads `NeoMethodPolicy`'s predicates directly. REST keeps reading `NeoMethodPolicy` and is
+unchanged.
+
+The refusal:
+
+```json
+{ "status": 405, "error": "method_not_allowed",
+  "detail": "'finPayment' of 'payment-in' does not accept create through MCP: The UI never creates a collection by hand (window.hideCreate): it is created from the invoice, which also allocates it to the invoice schedule. Nothing was written.",
+  "hint": "Do not retry this call. Use neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') instead.",
+  "seeAlso": "docs(topic:\"creating records\")" }
+```
+
+A verb whose flag is off keeps its historical refusal (same 405 and code, the "Enabled methods: …"
+wording).
+
+**Applied today (ETP-5558):**
+
+| Entity | Hidden | Why |
+|---|---|---|
+| `payment-in/finPayment` | create | the UI never creates a collection by hand (`hideCreate`); use `registerPayment` on `sales-invoice/header` |
+| `payment-out/header` | create | idem for payments; `registerPayment` on `purchase-invoice/header` |
+| `payment-in/finPaymentScheduleDetail`, `payment-out/lines` | create, update, delete | the allocation of a payment to invoice schedules; the UI only writes it through the invoice actions |
+| `payment-out/bankPayments` | create, update, delete | PIS needs a person to authorize at the bank (SCA) and is excluded from MCP |
+| `product/transactionAdjustments` | create | its parent cannot be identified, so creates were already refused (`parent_unresolvable`); declared here so `neo_discover` and `neo_schema` stop advertising a `POST` that always fails |
+
+Update and delete of the two payment headers are **not** hidden yet: pending a check of what the
+*Cobro* / *Pago* windows allow on a draft.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -2537,6 +2607,7 @@ than keeping two in step. ETP-5415 closed enough of that gap to turn it back on 
 | `McpBillToInjector` | idem — added by ETP-5335 while the tool was off, live since |
 | `resolveFkSentinels` | idem — the `"0"` sentinel cleanup |
 | **the read-only / excluded field gates** | idem, and FIRST, before any injection. `neo_create` applies them inside `mapFieldsToDalProperties`; batch never calls that method, so it accepted a value for a field the spec publishes as read-only that `neo_create` refuses with 422. Batch now calls `McpWriteRequestSupport.applyWriteGatesToDalBody`, which refuses without remapping keys |
+| **the method gate** (ETP-5558) | `requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST)` in `preprocessBatchOperation`, before the parent gate, so a create `MCP_CONFIG.verbs` hides answers the same 405 `method_not_allowed` as `neo_create` |
 | **the parent gate** (ETP-5558) | `requireApplicableParent(sfEntity, op.parentId())`, first of all in `preprocessBatchOperation`. `BatchService` maps the parent itself and never reaches `resolveParentFK`, so without it a batched child whose parent cannot be identified — with or without a `parentRef` — was written with a link the defaults picked. Same 422 `parent_unresolvable` as `neo_create` (§4.12.6), inside the batch failure envelope. Every preprocessor rejection keeps its IMP-5 `status`/`error`/`detail`/`hint` in the batch `error`: `toMcpBatchFailure` passes an error that already carries a string `error` code through unchanged, instead of flattening it by status to `validation_error` / "Batch operation failed" |
 | the spec **name** in `NeoContext` | `BatchService.createRecord` passed the spec's UUID where every other path passes its name, so a customization branching on `getSpecName()` saw a different value here (D10) |
 
@@ -2582,6 +2653,13 @@ It shares `BatchService` and passes **no** preprocessor, so none of the MCP comp
 apply to it. That is by decision — the underlying defects live in the shared selector-aux path the
 React frontend also uses, and changing what the frontend persists is out of scope. `BatchService`
 itself holds no knowledge of who supplies a preprocessor or what it does.
+
+**Declared REST ↔ MCP divergence (ETP-5558), `MCP_CONFIG.verbs`:** the verbs §4.12.6 hides are
+refused by `neo_create` / `neo_update` / `neo_delete` / `neo_batch` and absent from every MCP
+catalogue, while REST (`/sws/neo/{spec}/{entity}` and `/sws/neo/batch`) still serves them from the
+unchanged `ETGO_SF_ENTITY` flags — that is the point: the SPA and REST callers keep their surface.
+On `neo_batch` the MCP gate runs in `preprocessBatchOperation`; `BatchService#createRecord` reads
+only the raw flag.
 
 **Declared REST ↔ MCP divergence (ETP-5558):** the `parent_unresolvable` refusal of §4.12.6 is
 MCP-only. On the three unresolvable entities a create is refused by `neo_create` and `neo_batch`

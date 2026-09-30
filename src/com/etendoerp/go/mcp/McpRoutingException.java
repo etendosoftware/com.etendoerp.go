@@ -205,6 +205,46 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * A write verb {@code MCP_CONFIG.verbs} hides from the MCP (ETP-5558).
+   *
+   * <p>Same status and code as a method the {@code ETGO_SF_ENTITY} flags disable — to the agent both
+   * mean "this tool cannot do this here" — but the answer carries the operator's {@code reason} and
+   * the way to get the job done, because a hidden verb is never a dead end: the UI does the same
+   * thing through an action, and the agent is pointed at it.</p>
+   *
+   * @param specName   the spec being written
+   * @param entityName the entity
+   * @param method     the HTTP-method equivalent of the refused operation
+   * @param reason     the declared reason, never blank
+   * @param instead    the declared replacement call, or {@code null} to point at the entity's
+   *                   actions
+   * @return the exception to throw
+   */
+  static McpRoutingException verbHidden(String specName, String entityName, String method,
+      String reason, String instead) {
+    return new McpRoutingException(
+        "'" + entityName + "' of '" + specName + "' does not accept " + verbName(method)
+            + " through MCP: " + reason + ". Nothing was written.",
+        McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+        List.of(),
+        instead != null
+            ? "Do not retry this call. Use " + instead + " instead."
+            : "Do not retry this call. Call neo_schema(spec:'" + specName + "', entity:'"
+                + entityName + "', view:'actions') and use the action that does this.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  private static String verbName(String method) {
+    if ("POST".equals(method)) {
+      return "create";
+    }
+    if ("DELETE".equals(method)) {
+      return "delete";
+    }
+    return "update";
+  }
+
+  /**
    * The {@code status} filter names a business state the entity does not declare (ETP-4793 / IMP-17,
    * evidence C14).
    *
