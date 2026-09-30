@@ -26,6 +26,7 @@ import javax.annotation.Priority;
 import javax.enterprise.event.Observes;
 
 import org.apache.logging.log4j.Logger;
+import org.hibernate.Hibernate;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.Query;
 import org.openbravo.base.model.Entity;
@@ -46,6 +47,7 @@ import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.roles.overlap.ActiveTemplateInheritance;
 import com.etendoerp.go.roles.overlap.GrantCandidate;
+import com.etendoerp.go.roles.overlap.HigherPrecedenceSkip;
 import com.etendoerp.go.roles.overlap.OverlapReconciliationCore;
 import com.etendoerp.go.roles.overlap.OverlapWinner;
 import com.etendoerp.go.roles.overlap.PropagationTrigger;
@@ -90,9 +92,12 @@ import com.etendoerp.go.roles.overlap.TemplateRemovalTracker;
  *   #guardDependentsOf(BaseOBObject, PropagationTrigger)}/{@link
  *   #guardNewInheritance(RoleInheritance)} with {@link PropagationTrigger#NEW_GRANT} — safe to
  *   delete a dependent's conflicting row unconditionally, because core's {@code
- *   propagateNewAccess} always falls back to a CREATE. For a freshly-created inherited row on a
- *   non-template role, {@link #correctInheritedOwnership(EntityNewEvent, BaseOBObject)} pins
- *   {@code client}/{@code organization} back to the owning role's own, and {@link
+ *   propagateNewAccess} always falls back to a CREATE. One exception (ETP-5507, {@code
+ *   guardNewInheritance} only): a row core will leave unchanged because a higher-precedence
+ *   template of the same call already sources it is kept, see {@link HigherPrecedenceSkip}. For
+ *   a freshly-created inherited row on a non-template role, {@link
+ *   #correctInheritedOwnership(EntityNewEvent, BaseOBObject)} pins {@code client}/{@code
+ *   organization} back to the owning role's own, and {@link
  *   #widenInheritedAccessLevelIfNeeded(EntityNewEvent, BaseOBObject)} applies most-permissive-wins
  *   across every OTHER actively-inherited template.</li>
  *   <li>{@link #onUpdate(EntityUpdateEvent)} — a template's OWN existing grant changing level is
@@ -201,11 +206,12 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    *  comparisons the original 3 classes used, unchanged. */
   protected abstract Boolean getEditableField(A access);
 
-  /** Removes {@code access} from {@code owner}'s own in-memory collection ({@code
-   *  owner.getADWindowAccessList()}/{@code getADProcessAccessList()}/{@code
-   *  getOBUIAPPProcessAccessList()}) — see {@link #deleteForcingCreatePath}'s own javadoc for why
-   *  this must happen alongside the bulk delete. */
-  protected abstract void removeFromOwnerCollection(Role owner, A access);
+  /** {@code owner}'s own access collection property ({@code owner.getADWindowAccessList()}/{@code
+   *  getADProcessAccessList()}/{@code getOBUIAPPProcessAccessList()}), returned as-is — possibly
+   *  an uninitialized lazy bag. Only {@link #removeFromOwnerCollectionIfLoaded} touches its
+   *  contents, and only once it is already loaded; see {@link #deleteForcingCreatePath}'s own
+   *  javadoc for why the removal must happen alongside the bulk delete. */
+  protected abstract List<A> ownerAccessList(Role owner);
 
   /** Display name for log messages (e.g. {@code "AD_Window_Access"}). */
   protected abstract String entityLogLabel();
@@ -255,11 +261,16 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
       if (role != null && Boolean.TRUE.equals(role.isTemplate())) {
         guardDependentsOf(access, PropagationTrigger.NEW_GRANT);
       } else {
+        if (getInheritedFrom(access) != null) {
+          RoleCompositionMetrics.addCopied();
+        }
         correctInheritedOwnership(event, access);
         widenInheritedAccessLevelIfNeeded(event, access);
       }
     } else if (target instanceof RoleInheritance) {
+      long guardStart = System.nanoTime();
       guardNewInheritance((RoleInheritance) target);
+      RoleCompositionMetrics.addStageTime("guard", System.nanoTime() - guardStart);
     }
   }
 
@@ -377,7 +388,9 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
       event.setCurrentState(organizationProperty, owner.getOrganization());
     }
     G item = getGrantedItem(access);
-    log().info(
+    // DEBUG, not INFO (ETP-5503): a system-level template's rows all carry client "0", so this
+    // fires for EVERY copied row — counted in RoleCompositionMetrics' summary line instead.
+    log().debug(
         "Corrected {} ownership on role {} {} {}: pinned client/organization back to the role's "
             + "own (template-derived row, inherited from {})",
         entityLogLabel(), owner.getId(), itemLogLabel(), item != null ? item.getId() : null,
@@ -419,7 +432,8 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
     Property inheritedFromProperty = entity.getProperty(PROPERTY_INHERITEDFROM);
     Role originalSource = getInheritedFrom(access);
     event.setCurrentState(inheritedFromProperty, justifyingTemplate);
-    log().info(
+    RoleCompositionMetrics.addWidened();
+    log().debug(
         "Widened {} on role {} {} {} to full and repointed InheritedFrom from {} to {}: another "
             + "currently-inherited template already grants this {} full access",
         entityLogLabel(), owner.getId(), itemLogLabel(), item.getId(), originalSource.getId(),
@@ -481,6 +495,23 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    * If {@code inheritance} points a role at a template, proactively clears that role's OWN
    * conflicting active access for every item the NEW template also grants. See the class
    * javadoc's bullet list.
+   *
+   * <p><b>Batched (ETP-5503).</b> The same unconditional delete {@link
+   * #clearConflictingAccessUnconditionally} applies per item (see its javadoc for why "already
+   * correct" is not a reason to skip), but for every item at once: ONE query loads the dependent's
+   * active rows, the conflicts are matched in memory, and ONE {@link #deleteForcingCreatePath}
+   * call clears them all. Clearing them one by one cost a lookup plus a {@code refresh(dependent)}
+   * per row, and that refresh cascades into every loaded access collection of the role — about
+   * 27 statements per row, the bulk of a slow {@code SFAssignUserRoles} save.
+   *
+   * <p><b>Precedence skip (ETP-5507), this path only.</b> A row is left in place when {@link
+   * HigherPrecedenceSkip} says core will resolve it to {@code ACCESS_NOT_CHANGED}: it is sourced
+   * from an active template that precedes the new one, it is at least as permissive as the
+   * incoming grant, and core can see it (see that class for the rules and why they close the
+   * seventh-trigger case). That happens when several templates are added in one call, in
+   * descending precedence ({@code RoleInheritanceReconciliationService}): without it, every item
+   * 2+ of them share was copied, deleted and copied again. {@link #guardDependentsOf} (a template
+   * gaining one grant) keeps the unconditional {@link #clearConflictingAccessUnconditionally}.
    */
   private void guardNewInheritance(RoleInheritance inheritance) {
     Role dependent = inheritance.getRole();
@@ -488,13 +519,59 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
     if (dependent == null || template == null || !Boolean.TRUE.equals(template.isTemplate())) {
       return;
     }
-    for (A templateGrant : findActiveAccessList(template)) {
-      G item = getGrantedItem(templateGrant);
-      if (item == null) {
+    List<A> templateGrants = findActiveAccessList(template);
+    if (templateGrants.isEmpty()) {
+      return;
+    }
+    Map<String, A> dependentAccessByItemId = activeAccessByItemId(dependent);
+    // Built on the first overlapping row only: its lookup is pointless when nothing overlaps.
+    HigherPrecedenceSkip skip = null;
+    List<A> conflicting = new ArrayList<>();
+    int kept = 0;
+    for (A templateGrant : templateGrants) {
+      A existing = takeOverlappingRow(dependentAccessByItemId, templateGrant);
+      if (existing == null) {
         continue;
       }
-      clearConflictingAccessUnconditionally(dependent, item, template);
+      if (skip == null) {
+        skip = HigherPrecedenceSkip.forNewInheritance(dependent, inheritance.getSequenceNumber());
+      }
+      if (skip.keepsExisting(existing, getInheritedFrom(existing), getEditableField(existing),
+          getEditableField(templateGrant))) {
+        kept++;
+      } else {
+        conflicting.add(existing);
+      }
     }
+    RoleCompositionMetrics.addSkipped(kept);
+    if (kept > 0) {
+      log().debug("Kept {} {} row(s) on role {} for template {}: already sourced from a "
+          + "higher-precedence template, core leaves them unchanged", kept, entityLogLabel(),
+          dependent.getId(), template.getId());
+    }
+    deleteForcingCreatePath(conflicting, dependent, template);
+  }
+
+  /** {@code role}'s active rows of this guard's type, keyed by granted item id (first row wins). */
+  private Map<String, A> activeAccessByItemId(Role role) {
+    Map<String, A> accessByItemId = new LinkedHashMap<>();
+    for (A access : findActiveAccessList(role)) {
+      G item = getGrantedItem(access);
+      if (item != null) {
+        accessByItemId.putIfAbsent((String) item.getId(), access);
+      }
+    }
+    return accessByItemId;
+  }
+
+  /**
+   * The dependent's row for the item {@code templateGrant} grants, or {@code null} if it has none.
+   * Uses {@code remove()}, not {@code get()}: a template never grants the same item twice (unique
+   * key), but taking the row out of the map also guarantees it is never queued for deletion twice.
+   */
+  private A takeOverlappingRow(Map<String, A> dependentAccessByItemId, A templateGrant) {
+    G item = getGrantedItem(templateGrant);
+    return item == null ? null : dependentAccessByItemId.remove((String) item.getId());
   }
 
   /**
@@ -594,9 +671,10 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
   }
 
   /**
-   * Shared by both {@code NEW_GRANT}-safe ADD-side triggers ({@link
-   * #guardDependentsOf(BaseOBObject, PropagationTrigger)}'s {@code NEW_GRANT} case and {@link
-   * #guardNewInheritance(RoleInheritance)}) — NOT called for {@link
+   * The single-item {@code NEW_GRANT}-safe ADD-side trigger ({@link
+   * #guardDependentsOf(BaseOBObject, PropagationTrigger)}'s {@code NEW_GRANT} case — a template
+   * gaining ONE grant, cleared on each dependent); {@link #guardNewInheritance(RoleInheritance)}
+   * applies the same rule to every item of a new inheritance in one batch — NOT called for {@link
    * #guardDependentsOf(BaseOBObject, PropagationTrigger)}'s {@code UPDATED_GRANT} case, which uses
    * {@link #repointIfAlreadySourcedFromTemplate} instead (see that method's own javadoc and {@link
    * PropagationTrigger}'s javadoc for why). If {@code dependent} has an active access row for
@@ -653,6 +731,12 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    * recreated row is corrected right back to the exact same values by {@link
    * #correctInheritedOwnership}/{@link #widenInheritedAccessLevelIfNeeded}, which already run on
    * EVERY freshly-created inherited row regardless of how it was triggered.
+   *
+   * <p><b>The one exception (ETP-5507), on {@link #guardNewInheritance} only.</b> "Already
+   * correct" is still no reason to skip here, but "already sourced from a template that precedes
+   * the new one, at least as permissive, and visible to core" is: the visibility check is exactly
+   * the condition this rule exists for, and with it core's {@code isPrecedent} resolves to {@code
+   * ACCESS_NOT_CHANGED}. See {@link HigherPrecedenceSkip}. This method never applies it.
    */
   private void clearConflictingAccessUnconditionally(Role dependent, G item, Role grantingTemplate) {
     A existing = findActiveAccess(dependent, item);
@@ -660,13 +744,17 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
       // No conflicting row at all — core will safely CREATE one, nothing to prevent.
       return;
     }
-    deleteForcingCreatePath(existing, dependent, item, grantingTemplate, getInheritedFrom(existing));
+    deleteForcingCreatePath(List.of(existing), dependent, grantingTemplate);
   }
 
   /**
-   * Removes {@code existing} — the dependent role's OWN conflicting row — so core's subsequent
-   * {@code handleAccess}/{@code findInheritedAccess} lookup for (role={@code dependent}, item=
-   * {@code item}) finds nothing and takes the CREATE path instead of the corrupting UPDATE path.
+   * Removes every row in {@code conflicting} — the dependent role's OWN conflicting rows, one per
+   * item — so core's subsequent {@code handleAccess}/{@code findInheritedAccess} lookup for
+   * (role={@code dependent}, item) finds nothing and takes the CREATE path instead of the
+   * corrupting UPDATE path. One bulk {@code DELETE ... where id in (:ids)} and ONE {@code
+   * refresh(dependent)} for the whole list (ETP-5503): all of it still runs before this guard
+   * returns, so before core's own propagation for the new inheritance starts, exactly like the
+   * former one-row-at-a-time version — the refresh guarantees below hold unchanged.
    * Same GOAL as {@code UserRoleCompositionService#preventWindowAccessOverlapCorruption}, but a
    * DIFFERENT mechanism was required to reach it from this nested position — see below.
    *
@@ -709,7 +797,7 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    *
    * <p><b>Also refreshes {@code dependent} (the OWNING role) — {@code OBDal.refresh}, NOT {@code
    * evict}.</b> {@code dependent}'s own access collection (see {@link
-   * #removeFromOwnerCollection(Role, BaseOBObject)}, e.g. {@code getADWindowAccessList()} for the
+   * #removeFromOwnerCollectionIfLoaded(Role, List)}, e.g. {@code getADWindowAccessList()} for the
    * {@code WindowAccess} case) is frequently ALREADY loaded and cached in this session by the time
    * this method runs — typically because an EARLIER, separate top-level flush already
    * force-initialized it (core's own access-injector equivalent, e.g. {@code
@@ -727,7 +815,7 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    *   StaleStateException} ("actual row count: 0") once the row's absence surfaces at SQL
    *   execution time.</li>
    *   <li>Remove {@code existing} from the collection explicitly ({@link
-   *   #removeFromOwnerCollection(Role, BaseOBObject)}): Hibernate's own orphan-removal cascade
+   *   #removeFromOwnerCollectionIfLoaded(Role, List)}): Hibernate's own orphan-removal cascade
    *   (this collection mapping cascades deletes) detects the missing element against its loaded
    *   snapshot and schedules its OWN {@code session.delete()} for it — which DOES run through
    *   {@code OBInterceptor.onDelete}/{@code SecurityChecker.checkDeleteAllowed}, reproduced live
@@ -740,6 +828,9 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    *   fully detached) collection cannot lazily re-initialize itself at all, reproduced live as
    *   {@code LazyInitializationException}: "could not initialize proxy - no Session".</li>
    * </ol>
+   * The removal from the collection is skipped when the collection is not loaded yet (see {@link
+   * #removeFromOwnerCollectionIfLoaded}): a lazy bag holds no stale reference, and loading it just
+   * to remove from it would be pure cost.
    * {@code OBDal.refresh(dependent)} is the one operation that does what is actually needed:
    * {@code dependent} stays ATTACHED/managed (so a subsequent lazy collection access still has a
    * live session to reload through — no {@code LazyInitializationException}), while its cached
@@ -753,27 +844,62 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
    * keeping the in-memory list accurate for the REST of this same request, not what actually
    * persists the row.
    */
-  private void deleteForcingCreatePath(A existing, Role dependent, G item, Role template,
-      Role previousSource) {
+  private void deleteForcingCreatePath(List<A> conflicting, Role dependent, Role template) {
+    if (conflicting.isEmpty()) {
+      return;
+    }
+    List<String> ids = new ArrayList<>(conflicting.size());
+    for (A existing : conflicting) {
+      ids.add((String) existing.getId());
+      if (log().isDebugEnabled()) {
+        G item = getGrantedItem(existing);
+        Role previousSource = getInheritedFrom(existing);
+        log().debug(
+            "Prevented cross-template {} overlap corruption: clearing role {} {} {} access "
+                + "(previously {}) before template {}'s own grant propagates",
+            entityLogLabel(), dependent.getId(), itemLogLabel(), item != null ? item.getId() : null,
+            previousSource != null ? "inherited from " + previousSource.getId()
+                : "manually granted",
+            template.getId());
+      }
+    }
     OBContext.setAdminMode(false);
     try {
       OBDal.getInstance().getSession()
-          .createQuery("delete from " + accessEntityName() + " where id = :id")
-          .setParameter("id", existing.getId())
+          .createQuery("delete from " + accessEntityName() + " where id in (:ids)")
+          .setParameterList("ids", ids)
           .executeUpdate();
     } finally {
       OBContext.restorePreviousMode();
     }
-    removeFromOwnerCollection(dependent, existing);
+    removeFromOwnerCollectionIfLoaded(dependent, conflicting);
     OBDal.getInstance().refresh(dependent);
-    OBDal.getInstance().getSession().evict(existing);
-    log().info(
-        "Prevented cross-template {} overlap corruption: cleared role {} {} {} access "
-            + "(previously {}) before template {}'s own grant propagates, forcing core onto the "
-            + "safe CREATE path",
-        entityLogLabel(), dependent.getId(), itemLogLabel(), item.getId(),
-        previousSource != null ? "inherited from " + previousSource.getId() : "manually granted",
-        template.getId());
+    for (A existing : conflicting) {
+      OBDal.getInstance().getSession().evict(existing);
+    }
+    RoleCompositionMetrics.addPrevented(conflicting.size());
+    // DEBUG, not INFO (ETP-5503): on a template edit this fires once per dependent role; the
+    // count is already in RoleCompositionMetrics' summary line for SFAssignUserRoles saves.
+    log().debug(
+        "Prevented cross-template {} overlap corruption: cleared {} row(s) on role {} before "
+            + "template {}'s own grants propagate, forcing core onto the safe CREATE path",
+        entityLogLabel(), conflicting.size(), dependent.getId(), template.getId());
+  }
+
+  /**
+   * Takes {@code removed} out of {@code owner}'s own access collection — but only when that
+   * collection is ALREADY loaded in this session. An uninitialized lazy bag holds no stale
+   * reference to any of them (it will be fetched fresh from the DB, after the bulk delete, on
+   * first access), so loading it here just to remove elements from it would be pure cost — one
+   * SELECT for the bag plus one entity load per row, which {@link #deleteForcingCreatePath}'s
+   * {@code refresh(owner)} then discards again.
+   */
+  private void removeFromOwnerCollectionIfLoaded(Role owner, List<A> removed) {
+    List<A> ownerAccesses = ownerAccessList(owner);
+    if (!Hibernate.isInitialized(ownerAccesses)) {
+      return;
+    }
+    ownerAccesses.removeAll(removed);
   }
 
   // ---------------------------------------------------------------------
@@ -991,8 +1117,9 @@ public abstract class AbstractAccessOverlapCorruptionGuard<A extends BaseOBObjec
       OBContext.restorePreviousMode();
     }
     OBDal.getInstance().refresh(existing);
+    RoleCompositionMetrics.addRepointed();
     Role existingRole = getRole(existing);
-    log().info(
+    log().debug(
         "Prevented cross-template {} overlap corruption (multi-remaining-template removal case): "
             + "repointed role {} {} {} in place from {} to {} (editableField={}) without deleting "
             + "the row — avoids core's own calculateAccesses independently re-creating this item "

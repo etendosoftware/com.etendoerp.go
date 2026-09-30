@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -40,6 +41,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -81,7 +83,9 @@ class UserRoleCompositionServiceTest {
     obDalMock = mockStatic(OBDal.class);
     mockDal = mock(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
-    service = new UserRoleCompositionService();
+    // ETP-5278 — the real UserRoleWriteLock needs a Hibernate session, which this mocked OBDal
+    // does not have; the lock's own ordering contract is covered by the tests at the bottom.
+    service = new UserRoleCompositionService(UserRoleWriteLock.NO_OP);
   }
 
   @AfterEach
@@ -607,6 +611,7 @@ class UserRoleCompositionServiceTest {
     when(existingPersonalRole.isTemplate()).thenReturn(false);
     when(existingPersonalRole.isClientAdmin()).thenReturn(false);
     when(existingPersonalRole.getClient()).thenReturn(userClient);
+    when(existingPersonalRole.getETGOPersonalOwner()).thenReturn(user);
     when(user.getDefaultRole()).thenReturn(existingPersonalRole);
 
     // Not an AD_Role_Inheritance InheritFrom target of anything else.
@@ -628,6 +633,90 @@ class UserRoleCompositionServiceTest {
       verify(mockDal, never()).save(any(Role.class));
       obContextMock.verify(() -> OBContext.setAdminMode(true));
       obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * ETP-5502 — a legacy personal role (no owner yet) that passes the identity check is reused AND
+   * claimed for the user, so demote can later find it by owner.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void ensurePersonalRoleClaimsOwnershipOfALegacyRole() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+
+    Role legacyRole = mock(Role.class);
+    when(legacyRole.isActive()).thenReturn(true);
+    when(legacyRole.isTemplate()).thenReturn(false);
+    when(legacyRole.isClientAdmin()).thenReturn(false);
+    when(legacyRole.getClient()).thenReturn(userClient);
+    when(legacyRole.getETGOPersonalOwner()).thenReturn(null);
+    when(user.getDefaultRole()).thenReturn(legacyRole);
+
+    OBCriteria<RoleInheritance> roleInheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(RoleInheritance.class)).thenReturn(roleInheritanceCriteria);
+    when(roleInheritanceCriteria.list()).thenReturn(Collections.emptyList());
+    UserRoles ownRow = mock(UserRoles.class);
+    when(ownRow.getUserContact()).thenReturn(user);
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(List.of(ownRow));
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      assertSame(legacyRole, service.ensurePersonalRole(user));
+      verify(legacyRole).setETGOPersonalOwner(user);
+      verify(mockDal).save(legacyRole);
+    }
+  }
+
+  /**
+   * ETP-5502 — a default role owned by ANOTHER user is never reused, even when nothing else
+   * disqualifies it (zero {@code AD_User_Roles} rows used to pass as "this user's own").
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void ensurePersonalRoleNeverReusesARoleOwnedBySomeoneElse() {
+    Client userClient = mock(Client.class);
+    when(userClient.getId()).thenReturn("client-A");
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("user-1");
+    when(user.getClient()).thenReturn(userClient);
+
+    Role foreignRole = mock(Role.class);
+    when(foreignRole.isActive()).thenReturn(true);
+    when(foreignRole.isTemplate()).thenReturn(false);
+    when(foreignRole.isClientAdmin()).thenReturn(false);
+    when(foreignRole.getClient()).thenReturn(userClient);
+    User someoneElse = mock(User.class);
+    when(someoneElse.getId()).thenReturn("someone-else");
+    when(foreignRole.getETGOPersonalOwner()).thenReturn(someoneElse);
+    when(user.getDefaultRole()).thenReturn(foreignRole);
+
+    OBCriteria<RoleInheritance> roleInheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(RoleInheritance.class)).thenReturn(roleInheritanceCriteria);
+    when(roleInheritanceCriteria.list()).thenReturn(Collections.emptyList());
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+    OBCriteria<Role> nameUniquenessCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(nameUniquenessCriteria);
+    when(nameUniquenessCriteria.uniqueResult()).thenReturn(null);
+    when(mockDal.get(Organization.class, "0")).thenReturn(mock(Organization.class));
+    Role newRole = mock(Role.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Role.class)).thenReturn(newRole);
+      when(obProvider.get(RoleOrganization.class)).thenAnswer(inv -> mock(RoleOrganization.class));
+
+      assertSame(newRole, service.ensurePersonalRole(user));
+      verify(foreignRole, never()).setETGOPersonalOwner(any());
     }
   }
 
@@ -858,6 +947,8 @@ class UserRoleCompositionServiceTest {
       verify(newRole).setManual(true);
       verify(newRole).setTemplate(false);
       verify(newRole).setClientAdmin(false);
+      // ETP-5502 — the owner link demote restores by.
+      verify(newRole).setETGOPersonalOwner(user);
       verify(mockDal).save(newRole);
     }
   }
@@ -1251,6 +1342,7 @@ class UserRoleCompositionServiceTest {
     when(priorPersonalRole.isClientAdmin()).thenReturn(false);
     when(priorPersonalRole.getClient()).thenReturn(client);
     when(priorPersonalRole.getId()).thenReturn("role-prior-b");
+    when(priorPersonalRole.getETGOPersonalOwner()).thenReturn(target);
 
     OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
     when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
@@ -1286,8 +1378,15 @@ class UserRoleCompositionServiceTest {
     }
   }
 
+  /**
+   * ETP-5502 — demote restores the role the user OWNS, found by {@code
+   * EM_ETGO_Personal_Owner_ID} (replaces the ETP-5019 name-only lookup, which could hand a
+   * deleted namesake's orphan role to this user). The real-DB scenarios live in {@link
+   * PersonalRoleOwnerIntegrationTest}.
+   */
   @Test
-  void demoteFromAdminRestoresPriorPersonalRoleByName() {
+  @SuppressWarnings("unchecked")
+  void demoteFromAdminRestoresTheOwnedPersonalRole() {
     Role callerRole = mock(Role.class);
     when(callerRole.isClientAdmin()).thenReturn(true);
 
@@ -1309,24 +1408,17 @@ class UserRoleCompositionServiceTest {
     when(priorPersonalRole.isClientAdmin()).thenReturn(false);
     when(priorPersonalRole.getClient()).thenReturn(client);
     when(priorPersonalRole.getId()).thenReturn("role-prior");
+    when(priorPersonalRole.getETGOPersonalOwner()).thenReturn(target);
 
     when(mockDal.get(User.class, "target-1")).thenReturn(target);
 
     OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
     when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
     when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
-    // ETP-5019 C1 regression guard: the dormant role ALREADY occupies the base name, so a
-    // uniqueResult() lookup against that same name (what buildPersonalRoleName's roleNameExists
-    // would run) must "see" it as a collision on the FIRST check. If the fix ever regresses back
-    // to calling buildPersonalRoleName(user) here, that collision drives its suffix loop —
-    // bounded to a second call returning null so the loop terminates after one suffix attempt
-    // instead of spinning forever, turning a regression into a fast, clear test failure (a wrong
-    // role restored) rather than a hung test run / CI timeout.
-    when(roleCriteria.uniqueResult()).thenReturn(priorPersonalRole).thenReturn(null);
-    when(roleCriteria.setMaxResults(1)).thenReturn(roleCriteria);
     when(roleCriteria.setFilterOnReadableClients(false)).thenReturn(roleCriteria);
     when(roleCriteria.setFilterOnReadableOrganization(false)).thenReturn(roleCriteria);
     when(roleCriteria.add(any())).thenReturn(roleCriteria);
+    when(roleCriteria.addOrder(any())).thenReturn(roleCriteria);
 
     OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
     when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
@@ -1352,38 +1444,14 @@ class UserRoleCompositionServiceTest {
       // on restore too, otherwise the user's next JWT mint could still resolve the dormant role.
       verify(target).setSmfswsDefaultWsRole(priorPersonalRole);
 
-      // ETP-5019 C1: the lookup must use personalRoleBaseName (the UNSUFFIXED base name) — NOT
-      // buildPersonalRoleName, which would suffix this name away since the dormant role already
-      // occupies it (see UserRoleCompositionService#findDormantPersonalRoleByName's javadoc).
-      // Capture EVERY add() call on this shared criteria mock — under a C1 regression,
-      // buildPersonalRoleName's own internal roleNameExists() collision check ALSO runs a
-      // Restrictions.eq(Role.PROPERTY_NAME, ...) against this same mock (createCriteria(Role.class)
-      // always returns this one instance), using the exact unsuffixed base name first before
-      // suffixing it away — so an earlier round's "does any captured criterion CONTAIN the base
-      // name" check passed under both the correct fix AND a regression: the regressed final
-      // query's own name is "Personal – Jane Doe (2)", which still contains the substring
-      // "Personal – Jane Doe". Confirmed empirically (Criterion#toString() format is exactly
-      // "name=<value>", verified by temporarily printing it): only the LAST name-restriction
-      // value, checked for EXACT equality (not containment), distinguishes the two cases —
-      // findDormantPersonalRoleByName's own query always adds its Restrictions AFTER any
-      // roleNameExists() sub-calls a regression would trigger, so the last one is always the
-      // value actually used for the real, outer lookup.
+      // The first lookup is by owner, not by name.
       ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
       verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
-      String expectedName = "Personal – Jane Doe";
-      String namePrefix = org.openbravo.model.ad.access.Role.PROPERTY_NAME + "=";
-      String lastNameRestrictionValue = null;
-      for (Criterion criterion : criterionCaptor.getAllValues()) {
-        String criterionStr = criterion.toString();
-        if (criterionStr.startsWith(namePrefix)) {
-          lastNameRestrictionValue = criterionStr.substring(namePrefix.length());
-        }
-      }
-      boolean foundNameRestriction = expectedName.equals(lastNameRestrictionValue);
-      assertTrue(foundNameRestriction,
-          "Expected the FINAL name-based restriction to be exactly Restrictions.eq(Role.PROPERTY_NAME, '"
-              + expectedName + "'), but it was '" + lastNameRestrictionValue
-              + "'. All captured criteria: " + criterionCaptor.getAllValues());
+      assertTrue(criterionCaptor.getAllValues().stream().anyMatch(c -> c.toString()
+          .equals(Role.PROPERTY_ETGOPERSONALOWNER + ".id=target-1")), criterionCaptor.getAllValues()
+          .toString());
+      assertFalse(criterionCaptor.getAllValues().stream().anyMatch(c -> c.toString()
+          .startsWith(Role.PROPERTY_NAME + "=")), "demote must not look the role up by exact name");
     }
   }
 
@@ -1438,5 +1506,72 @@ class UserRoleCompositionServiceTest {
       userRoleSyncMock.verify(() -> com.etendoerp.go.schemaforge.util.UserRoleSyncSupport
           .syncSingleActiveUserRole(target, adminRole));
     }
+  }
+
+  // ── ETP-5278: per-user write lock is taken BEFORE any read of the target user ──────────
+  // Anything read before the lock stays in Hibernate's first-level cache with its pre-lock
+  // state, so a request that waited behind a concurrent write would reconcile against a stale
+  // snapshot — exactly the overlap that produced the CP-6 HTTP 500s.
+
+  @Test
+  void assignTemplateRolesAcquiresTheWriteLockBeforeReadingTheUser() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+    when(mockDal.get(User.class, "user-1")).thenReturn(null);
+
+    assertThrows(OBException.class,
+        () -> lockedService.assignTemplateRoles("user-1", Collections.emptyList(), null, null));
+
+    InOrder order = inOrder(lock, mockDal);
+    order.verify(lock).acquire("user-1");
+    order.verify(mockDal).get(User.class, "user-1");
+  }
+
+  @Test
+  void assignTemplateRolesDoesNotLockWhenArgumentsAreInvalid() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    assertThrows(OBException.class, () -> lockedService.assignTemplateRoles(" ", List.of()));
+    assertThrows(OBException.class, () -> lockedService.assignTemplateRoles("user-1", null));
+
+    verify(lock, never()).acquire(any());
+  }
+
+  @Test
+  void promoteToAdminAcquiresTheWriteLockBeforeAnyRead() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    // callerIsOwnerOrAdmin fails on the unstubbed mock DAL — irrelevant here, the lock must
+    // already have been taken by then.
+    assertThrows(RuntimeException.class,
+        () -> lockedService.promoteToAdmin("caller-1", null, "target-1"));
+
+    verify(lock).acquire("target-1");
+    verify(mockDal, never()).get(User.class, "target-1");
+  }
+
+  @Test
+  void demoteFromAdminAcquiresTheWriteLockBeforeAnyRead() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    assertThrows(RuntimeException.class,
+        () -> lockedService.demoteFromAdmin("caller-1", null, "target-1"));
+
+    verify(lock).acquire("target-1");
+    verify(mockDal, never()).get(User.class, "target-1");
+  }
+
+  @Test
+  void promoteAndDemoteDoNotLockWithoutATargetUserId() {
+    UserRoleWriteLock lock = mock(UserRoleWriteLock.class);
+    UserRoleCompositionService lockedService = new UserRoleCompositionService(lock);
+
+    assertThrows(OBException.class, () -> lockedService.promoteToAdmin("caller-1", null, " "));
+    assertThrows(OBException.class, () -> lockedService.demoteFromAdmin("caller-1", null, null));
+
+    verify(lock, never()).acquire(any());
   }
 }

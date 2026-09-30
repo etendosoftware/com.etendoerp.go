@@ -26,13 +26,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Projections;
-import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.ad.access.Role;
 
 /**
@@ -60,6 +56,10 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private static final String FILTER_COLLECTIONS_DUE_TODAY = "collectionsDueToday";
   private static final String FILTER_PAYMENTS_DUE_TODAY = "paymentsDueToday";
   private static final String FILTER_PAYMENTS_DUE = "paymentsDue";
+  private static final String FILTER_PENDING_RECEPTION = "pendingReception";
+  private static final String FILTER_PENDING_DELIVERY = "pendingDelivery";
+  private static final String COL_QTY_RESERVED = "qtyreserved";
+  private static final String COL_QTY_DELIVERED = "qtydelivered";
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -73,9 +73,13 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     Role role = WidgetAccessPolicy.currentRole();
     boolean canSeeSalesInvoices = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_SALES_INVOICE);
     boolean canSeePurchaseInvoices = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_PURCHASE_INVOICE);
-    boolean canSeeReceipts = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_GOODS_RECEIPT);
-    boolean canSeeShipments = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_GOODS_SHIPMENT);
     boolean canSeeStock = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_PHYSICAL_INVENTORY);
+    // ETP-5487 — the source moved from goods-receipt/goods-shipment (M_InOut) to
+    // purchase-order/sales-order (C_Order), so the widget must now gate on access to those
+    // windows instead: a role without purchase-order access must not see (or pay the cost of
+    // querying) the pending-reception count, even if it can still see goods receipts.
+    boolean canSeePurchaseOrders = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_PURCHASE_ORDER);
+    boolean canSeeSalesOrders = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_SALES_ORDER);
 
     try {
       OBContext.setAdminMode(true);
@@ -90,11 +94,11 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         if (canSeePurchaseInvoices) {
           addPaymentsDue(data, clientId);
         }
-        if (canSeeReceipts) {
-          addPendingReceptions(data);
+        if (canSeePurchaseOrders) {
+          addPendingReceptions(data, clientId);
         }
-        if (canSeeShipments) {
-          addPendingSalesDeliveries(data);
+        if (canSeeSalesOrders) {
+          addPendingSalesDeliveries(data, clientId);
         }
         if (canSeeStock) {
           addLowStockAlerts(data, clientId);
@@ -281,65 +285,89 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Pending sales deliveries: goods shipments (M_InOut) in Draft status awaiting processing.
-   * Uses OBDal criteria so organization and client security filters are applied automatically.
+   * Pending sales deliveries: completed sales orders ({@code C_Order}, {@code issotrx='Y'},
+   * {@code docstatus='CO'}) not yet fully delivered.
+   *
+   * <p>ETP-5487 — this used to count sales shipments (M_InOut) in Draft status, which did not
+   * match the "Envios" filter used in the real Sales Orders window ("Estado doc. = Completado" AND
+   * "Estado de entrega &lt; 100"). The correct source is {@code C_Order}, filtered on the exact
+   * same criterion as the {@code DeliveryStatus} virtual AD column ({@code Computation_Mode='V'}
+   * on {@code C_Order}), reproduced below as native SQL: HQL/OBDal criteria cannot resolve a
+   * virtual computed column, so only re-running its own SQLLOGIC keeps the counter and the
+   * drill-down list (see {@code sales-order} custom {@code index.jsx}, {@code filter=pendingDelivery})
+   * from ever disagreeing.
    */
-  private void addPendingSalesDeliveries(JSONArray data) throws Exception {
-    OBCriteria<ShipmentInOut> crit = OBDal.getInstance().createCriteria(ShipmentInOut.class);
-    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_SALESTRANSACTION, true));
-    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_DOCUMENTSTATUS, "DR"));
-    long count = ((Number) crit.setProjection(Projections.rowCount()).uniqueResult()).longValue();
-
+  private void addPendingSalesDeliveries(JSONArray data, String clientId) throws Exception {
+    long count = countOrdersPendingDelivery(clientId, "Y", COL_QTY_DELIVERED);
     if (count == 0) {
       return;
     }
 
-    JSONObject params = new JSONObject();
-    params.put("DocStatus", "DR");
-    data.put(buildTaskWithParams(TYPE_INFO,
-        count + " goods shipment" + (count != 1 ? "s" : "") + " pending",
-        "goods-shipment",
-        params,
-        "/goods-shipment?DocStatus=DR",
+    data.put(buildTask(TYPE_INFO,
+        count + " sales order" + (count != 1 ? "s" : "") + " pending delivery",
+        "sales-order",
+        FILTER_PENDING_DELIVERY,
+        "/sales-order?filter=" + FILTER_PENDING_DELIVERY,
         count,
         count > 1 ? "pendingSalesDeliveries_plural" : "pendingSalesDeliveries"));
   }
 
   /**
-   * Pending receptions: goods receipts (M_InOut) in Draft status awaiting processing.
-   * Uses OBDal criteria so organization and client security filters are applied automatically.
+   * Pending receptions: completed purchase orders ({@code C_Order}, {@code issotrx='N'},
+   * {@code docstatus='CO'}) not yet fully received.
+   *
+   * <p>ETP-5487 — this used to count purchase shipments (M_InOut) in Draft status, which did not
+   * match the "Recepciones" filter used in the real Purchase Orders window ("Estado doc. =
+   * Completado" AND "Estado de recepcion &lt; 100"). The correct source is {@code C_Order},
+   * filtered on the exact same criterion as the {@code DeliveryStatusPurchase} virtual AD column
+   * ({@code Computation_Mode='V'} on {@code C_Order}), reproduced below as native SQL — see
+   * {@link #addPendingSalesDeliveries} for why this cannot be an HQL/OBDal criteria query.
    */
-  private void addPendingReceptions(JSONArray data) throws Exception {
-    OBCriteria<ShipmentInOut> crit = OBDal.getInstance().createCriteria(ShipmentInOut.class);
-    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_SALESTRANSACTION, false));
-    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_DOCUMENTSTATUS, "DR"));
-    long count = ((Number) crit.setProjection(Projections.rowCount()).uniqueResult()).longValue();
-
+  private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
+    long count = countOrdersPendingDelivery(clientId, "N", COL_QTY_RESERVED);
     if (count == 0) {
       return;
     }
 
-    JSONObject params = new JSONObject();
-    params.put("DocStatus", "DR");
-    data.put(buildTaskWithParams(TYPE_INFO,
-        count + " goods receipt" + (count != 1 ? "s" : "") + " pending",
-        "goods-receipt",
-        params,
-        "/goods-receipt?DocStatus=DR",
+    data.put(buildTask(TYPE_INFO,
+        count + " purchase order" + (count != 1 ? "s" : "") + " pending reception",
+        "purchase-order",
+        FILTER_PENDING_RECEPTION,
+        "/purchase-order?filter=" + FILTER_PENDING_RECEPTION,
         count,
         count > 1 ? "pendingReceptions_plural" : "pendingReceptions"));
   }
 
-  private JSONObject buildTaskWithParams(String type, String text, String window,
-      JSONObject params, String link, long count, String taskKey) throws Exception {
-    JSONObject task = new JSONObject();
-    task.put(JSON_TYPE, type);
-    task.put(JSON_TEXT, text);
-    task.put(JSON_NAVIGATION, navigationParams(window, params));
-    task.put(JSON_LINK, link);
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, taskKey);
-    return task;
+  /**
+   * Counts completed ({@code docstatus='CO'}) {@code C_Order} rows whose delivery percentage is
+   * below 100, reproducing the exact SQLLOGIC of the core {@code DeliveryStatus} /
+   * {@code DeliveryStatusPurchase} virtual columns (id {@code 9E82E728716246B393C40D2CDCA0133A} /
+   * {@code 9B350DD4248848A7ACC12061D151E92D}) so this counter and the {@code AD_Column}'s own
+   * displayed value can never disagree. {@code deliveredQtyColumn} is always one of the two
+   * hardcoded literals in {@link #COL_QTY_DELIVERED}/{@link #COL_QTY_RESERVED} — never
+   * caller-supplied input — so string-building the column name here carries no injection risk.
+   */
+  private long countOrdersPendingDelivery(String clientId, String isSalesTransaction,
+      String deliveredQtyColumn) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_order co"
+        + " WHERE co.issotrx = :isSalesTransaction"
+        + "   AND co.docstatus = 'CO'"
+        + "   AND co.ad_client_id = :clientId"
+        + "   AND (coalesce((SELECT CASE"
+        + "                           WHEN sum(abs(ol.qtyordered)) = 0 OR co.iscancelled = 'Y'"
+        + "                                OR co.cancelledorder_id IS NOT NULL THEN 0"
+        + "                           ELSE round(coalesce(sum(abs(ol." + deliveredQtyColumn + ")), 0)"
+        + "                                 / sum(abs(ol.qtyordered)) * 100, 0)"
+        + "                         END"
+        + "                    FROM c_orderline ol"
+        + "                    WHERE ol.c_order_id = co.c_order_id"
+        + "                      AND ol.c_order_discount_id IS NULL), 0)) < 100";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    query.setParameter("isSalesTransaction", isSalesTransaction);
+    return ((Number) query.uniqueResult()).longValue();
   }
 
   private JSONObject buildTask(String type, String text, String window, String filter, String link,
@@ -361,14 +389,6 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     navigation.put(JSON_TYPE, NAVIGATION_TYPE_LIST);
     navigation.put("window", window);
     navigation.put("filter", filter);
-    return navigation;
-  }
-
-  private JSONObject navigationParams(String window, JSONObject params) throws Exception {
-    JSONObject navigation = new JSONObject();
-    navigation.put(JSON_TYPE, NAVIGATION_TYPE_LIST);
-    navigation.put("window", window);
-    navigation.put("params", params);
     return navigation;
   }
 }
