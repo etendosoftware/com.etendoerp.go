@@ -45,6 +45,12 @@ final class JdbcSavepoints {
   /** A unit of JDBC work that {@link #run} protects. */
   @FunctionalInterface
   interface Work<E extends Exception> {
+    /**
+     * Performs the JDBC work. Any exception it throws makes {@link JdbcSavepoints#run} roll the
+     * connection back to the savepoint before rethrowing it.
+     *
+     * @throws E when the work fails
+     */
     void run() throws E;
   }
 
