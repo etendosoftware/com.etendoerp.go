@@ -239,6 +239,62 @@ overwritten by a re-cascaded callout.
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
 
+#### 4.3.5 Curated read-only fields are refused before a REST write (ETP-5347)
+
+`POST`, `PUT`, and `PATCH` reject a value submitted for an included field that the NEO
+curation marks read-only. The rejection happens at the REST boundary, before a
+`NeoHandler` or the generic persistence path sees the request, so PUT and PATCH always
+answer the same for the same field — and POST does too, *unless* the field is exempted at
+create time (see below).
+
+```json
+{
+  "status": 422,
+  "error": "read_only_field",
+  "field": "documentNo",
+  "detail": "...",
+  "hint": "..."
+}
+```
+
+The field name is the API key the caller sent, including a configured alias. The check uses
+the same `ETGO_SF_FIELD` metadata that the REST filter already uses: an included field is
+writable only when it is in that filter's writable set. Explicit grants for identifiers,
+`active`, and link-to-parent columns therefore keep their existing behavior.
+
+Edge cases:
+
+- **API-key alias.** The rejected `field` is the key the caller actually sent (e.g.
+  `documentNumber`), not the DAL property it resolves to (`documentNo`), so the error points at
+  something the caller recognizes.
+- **Server-authored values added after the check.** Mandatory defaults, callouts, and
+  `NeoHandler` hooks may still add a derived read-only value once this boundary has passed;
+  that is a server-authored value, not an attempted client write, and is not rejected.
+- **`client` / `organization` are not read-only-field rejections.** They are a separate
+  session-ownership policy: REST strips any caller-supplied value and resolves both from the
+  authenticated context instead of rejecting the request.
+
+##### POST-only exemption for entities with a `NeoHandler` (ETP-5537)
+
+On `POST` (create) only, a field is exempted from this check when it is already exempted from
+`NeoFieldFilter#rejectableOnCreateFields` — i.e. when the entity has a `Java_Qualifier`
+(a `NeoHandler` that might legitimately be the one supplying the value, IMP-28 clause 2) or the
+AD column has a configured default. `filterCreateRequest` already granted this exemption later
+in the same request, inside `handleDefault`; before ETP-5537 this earlier, pre-dispatch check
+used a stricter, unconditional predicate and rejected the value first, so the later exemption
+was never reached.
+
+This matters for a genuine, client-authored, **create-once** value: the entity's own
+config panel intentionally submits it in the create body, and the field is locked
+(`readOnly: true`) for every write after that. `assets` / `AssetsHandler` is the first case:
+`AssetsConfigPanel.jsx` sends `currency` once, at asset creation, so it is not lost; every
+`PUT`/`PATCH` on an existing asset still rejects a `currency` value with the same 422, because
+this exemption never applies outside `POST`.
+
+This is a property of the shared `NeoFieldFilter`/`NeoCrudHandler` policy, not a per-entity
+carve-out: any entity with a `Java_Qualifier` gets the same create-time exemption for its
+read-only fields, and none of them get it on `PUT`/`PATCH`.
+
 **DELETE** -- `DELETE /{specName}/{entityName}/{recordId}`
 
 Delegated to DataSourceServlet's DELETE handler.
@@ -1708,6 +1764,61 @@ The role gate, the SPA-shaped derived context and the flush-to-clean after a suc
 (ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
 keeps only its contracts and its routing.
 
+**Line targeting, partial results and rollback (ETP-5472).** These rules hold for the SPA routes
+and for `neo_action` alike — both enter the same `ReconciliationHandlerSupport` wrappers.
+
+- **A refused write rolls back.** `runPostAction` rolls back whenever the action RETURNS a status
+  `>= 400`, not only when it throws. Before, a returned `NeoResponse.error` was committed by the
+  request filter: `reconcileGroup` with invoices and an unknown operation id answered 400 and kept
+  the invoice payment and its movement. In addition, `reconcileGroup` checks the client-supplied
+  `operationIds` (exists, belongs to the account, not already reconciled —
+  `ReconciliationFlowSupport.validateOperationRefs`) **before** paying any invoice; the sum/sign
+  check still runs after, since it needs the invoice movements. No routed action persists anything
+  on purpose alongside an error: `removeOperation`/`reactivateSelected` report partial failures in
+  a 200 and `applySuggestions` reports rejected groups in `results[]` of a 201. **The rollback only
+  covers what is still pending in the request's session:** work Core commits mid-flow (e.g.
+  `SessionHandler#commitAndStart` inside its removal utilities) is already committed when the
+  refusal is returned and survives it, as before. Likewise, an `applySuggestions` group rejected
+  after its line was healed keeps the heal, since that call answers 201.
+- **Partial result is explicit.** `reconcileGroup`'s 201 (and so `reconcileDifference`'s) carries
+  `partial` (boolean), `pendingAmount` and, when partial, `remainderLineId` — the pending sub-line
+  the split left. The outcome is read from Core's real state after processing, not predicted from
+  the request: `partial` is `true` **only when a pending remainder row actually exists** in the
+  line's match group, and `pendingAmount` is that row's own signed `cramount - dramount`. Otherwise
+  `partial:false`, `pendingAmount: 0` and no `remainderLineId` — including an overpay within the
+  tolerance `validateOperations` accepts, which leaves no remainder. `partial:true` means the line
+  is NOT complete; continue with `remainderLineId`.
+- **Partial-group head → remainder.** `pendingLines` lists a partial group by its head id, whose own
+  row is already matched. `reconcileGroup`, `applySuggestions` and `candidates` redirect a head whose
+  reconciliation is processed to the group's pending remainder (first active, unmatched row sharing
+  `EM_ETGO_Match_Group_ID`). `candidates` then also returns `remainderLineId` in its `data`. With no
+  remainder (fully reconciled) the 409 `Statement line is already reconciled` stays;
+  `reconcileDifference` still requires the remainder itself and names it in its 409.
+- **Stuck lines are healed — only when the movement has no reconciliation at all.** A line linked
+  to a movement with **no** reconciliation is listed as pending by `PENDING_LINES_SQL` but used to
+  be refused by every write. `reconcileGroup` and `applySuggestions` now free it first — the line
+  (and any match-group sibling whose movement has no reconciliation either) is unlinked and its
+  match fields reset, then `normalizeReactivatedMatchGroup` collapses the group — and continue
+  normally in the same transaction. The movement and its payment are **kept** and become ordinary
+  candidates again: a movement left in `RPPC` is put back to "not cleared" by direction
+  (`ReactivationSupport.restoreNotClearedStatus`), since the candidates query excludes `RPPC`.
+  `undoReconciliation` on such a line frees it the same way and answers
+  `{reactivated:true, healed:true}` instead of the old 409. `candidates` is a GET and never heals.
+  Each heal is logged at info level (line id, transaction id).
+- **A draft-held line is refused, never healed.** When the line's movement sits in ANY unprocessed
+  (draft) reconciliation — created by Classic's Match Statement or by Etendo GO, holding only this
+  line or other movements too — `reconcileGroup` and `applySuggestions` answer **409** before any
+  write, with `Reconciliation <documentNo> is an unconfirmed draft that already holds this line.
+  Review it before reconciling the line again.` (`ReconciliationLineTargetSupport.MSG_DRAFT_HOLDS_LINE_PREFIX`
+  / `_SUFFIX`; matched by `matchDraftHoldsLine` in schema_forge `tools/app-shell/src/lib/backendErrors.js`).
+  Same policy as `ReconciliationDraftGuard`: a draft is unconfirmed work and is never emptied,
+  removed or discarded without a human decision. `undoReconciliation` on a draft-held line keeps its
+  existing path.
+- **Duplicate groups in one `applySuggestions` call are rejected.** Two groups can resolve to the
+  same effective line (e.g. a partial head redirected to its remainder plus the remainder itself).
+  The first accepted group keeps it; any later one is reported in `results[]` as a 409
+  `Statement line is already reconciled: <requested id>`, before anything is matched.
+
 ##### 4.12.1.2 Bank statement agent actions (ETP-5447, ETP-5469)
 
 The second spec on this mechanism is **`bank-statements`** (`BankStatementsHandler`,
@@ -2471,7 +2582,8 @@ disagreement this section exists to end, reintroduced by the fix for it.
 
 ##### Scope and what is not fixed
 
-- **MCP only.** The REST layer keeps its own `NeoFieldFilter` and is untouched.
+- **The excluded-field gate is MCP only.** REST has its own `NeoFieldFilter`; its separate
+  read-only REST gate is documented in §4.3.5 (ETP-5347).
 - **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
   write path in silence. The set refused here is only the explicitly excluded one.
 - **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
@@ -2742,6 +2854,38 @@ belongs to (`OBContext` language — MCP carries no client locale). Only the tit
 A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key in **both** catalogs
 and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
 humanized name, so a cosmetic field can never drop a tool from the list.
+
+#### 4.12.17 `neo_delete` always confirms a successful delete (ETP-5474)
+
+A successful `neo_delete` answers `{"deleted": true, "id": "<recordId>"}` whichever path removed
+the row — the generic removal, or an entity `NeoHandler` whose pre-hook resolved the DELETE itself
+and returned `204 No Content` (e.g. `FinancialAccountHandler#deleteAccount` on
+`financial-account/account`). Before ETP-5474 that 204 went through `neoResponseToMcpResult` with a
+null body and was rendered as `{}`, which an agent read as a failed delete although the row was gone.
+
+`McpToolRouter.handleDelete` calls `McpHookExecutor.runDeletePreHook` instead of the generic
+`runPreHook`:
+
+| Pre-hook returns | MCP answer |
+|---|---|
+| `null` | generic removal, then the confirmation |
+| status &ge; 400 | the normalized error, unchanged (`neoResponseToMcpResult`) |
+| 2xx other than 202, with a null or empty body | the confirmation (`McpToolResponses.deleteConfirmation`) |
+| 2xx with a non-empty body | that body, unchanged (e.g. a future handler that answers with its own payload) |
+| `202 Accepted`, or any other non-error code (1xx, 3xx) | passed through unchanged (`neoResponseToMcpResult`) |
+
+Only a completed-success 2xx with no body counts as a confirmation. A `202 Accepted` means the
+delete was queued and has not happened yet, so an asynchronous handler is never reported to the
+agent as a completed delete.
+
+Both confirmation sites build it through `McpToolResponses.deleteConfirmation`, so they cannot drift.
+The rule lives in the router, not in each handler: any future handler that resolves DELETE with 204
+is covered. `runPreHook` itself is untouched — on the process, report and widget paths a 204 does
+not mean "deleted".
+
+A `financial-account/account` delete for an id that resolves to no account answers `404`
+(`Account not found`), not `400`: the call is well formed, the record just does not exist. A blank
+id is still `400`.
 
 ---
 
@@ -3172,12 +3316,12 @@ standard nested envelope built for you.
 
 Responses support custom headers via `withHeader(name, value)`.
 
-**Real-world example — `DocumentPostingService` invalid-account message enrichment (ETP-4706 baseline + ETP-5175 addenda):** `schemaforge/handlers/DocumentPostingService.java` is deliberately **not** a `NeoHandler` — it's a plain injectable bean reused by `handleAction` in every document-window handler (and the shared `DocumentActionHandler`) for the `post`/`unpost` actions covered in this pitfall note above. Its `errorMessageOf` → `enrichWithFailingEntity` chain enriches one specific, otherwise-generic core Etendo failure.
+**Real-world example — `DocumentPostingService` invalid-account message enrichment (ETP-4706 baseline + ETP-5175 addenda):** `schemaforge/handlers/DocumentPostingService.java` is deliberately **not** a `NeoHandler` — it's a plain injectable bean reused by `handleAction` in every document-window handler (and the shared `DocumentActionHandler`) for the `post`/`unpost` actions covered in this pitfall note above. Its `failureOf` → `errorMessageOf` + `resolveInvalidAccountDetail` chain enriches one specific, otherwise-generic core Etendo failure.
 
-Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity caused an "account could not be found" failure: several `Doc*` subclasses can leave an account null and fall through to `AcctServer#post`'s parameterless fallback, which resolves to the bare `@InvalidAccount@` message ("Account could not be found.") — no account type, no owning entity, nothing to grep server logs for. `enrichWithFailingEntity` only fires when `acct.getStatus()` equals `AcctServer.STATUS_InvalidAccount`; every other status already carries its own detailed message from core Etendo and is left untouched.
+Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity caused an "account could not be found" failure: several `Doc*` subclasses can leave an account null and fall through to `AcctServer#post`'s parameterless fallback, which resolves to the bare `@InvalidAccount@` message ("Account could not be found.") — no account type, no owning entity, nothing to grep server logs for. The enrichment only fires when `acct.getStatus()` equals `AcctServer.STATUS_InvalidAccount`; every other status already carries its own detailed message from core Etendo and is left untouched.
 
-- **BP + BP Group detail (ETP-4706 baseline).** `resolveBusinessPartnerDetail` resolves the transaction's Business Partner from the public `C_BPartner_ID` `AcctServer` sets for every document type it posts (not specific to Goods Receipts or to any one account type — any document/account-type combination that hits this same fallback benefits). If the BP resolves but has no BP Group, the message is suffixed via `AD_MESSAGE` key `ETGO_InvalidAccountBpOnly` (`@bpName@` only); if it has a BP Group, `ETGO_InvalidAccountBpAndGroup` is used instead (`@bpName@` + `@bpGroup@`). Both keys are English-only by design — no `AD_MESSAGE_TRL` exists for this catalog.
-- **Missing-accounts addendum (ETP-5175).** When a BP Group resolves, `resolveMissingAccountsDetail` goes one step further and names *which* `C_BP_Group_Acct` account(s) are unconfigured (null) for that BP Group + accounting schema — the actual root cause behind most `InvalidAccount` failures triggered by BP-Group-derived accounts. It checks a curated, fixed subset of six columns on the `CategoryAccounts` OBDal entity (`BP_GROUP_ACCOUNT_COLUMNS`), tied to the document types this app supports today — **not** exhaustive of every nullable column on `C_BP_Group_Acct`:
+- **BP + BP Group detail (ETP-4706 baseline).** `resolveInvalidAccountDetail` resolves the transaction's Business Partner from the public `C_BPartner_ID` `AcctServer` sets for every document type it posts (not specific to Goods Receipts or to any one account type — any document/account-type combination that hits this same fallback benefits). If the BP resolves but has no BP Group, the message is suffixed via `AD_MESSAGE` key `ETGO_InvalidAccountBpOnly` (`@bpName@` only); if it has a BP Group, `ETGO_InvalidAccountBpAndGroup` is used instead (`@bpName@` + `@bpGroup@`). Both keys are English-only by design — no `AD_MESSAGE_TRL` exists for this catalog.
+- **Missing-accounts addendum (ETP-5175).** When a BP Group resolves, `resolveMissingBpGroupAccounts` goes one step further and names *which* `C_BP_Group_Acct` account(s) are unconfigured (null) for that BP Group + accounting schema — the actual root cause behind most `InvalidAccount` failures triggered by BP-Group-derived accounts. It checks a curated, fixed subset of six columns on the `CategoryAccounts` OBDal entity (`BP_GROUP_ACCOUNT_COLUMNS`), tied to the document types this app supports today — **not** exhaustive of every nullable column on `C_BP_Group_Acct`:
 
   | Label (English, `@missingAccounts@`) | `CategoryAccounts` getter |
   |---|---|
@@ -3189,9 +3333,9 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
   | Vendor Prepayment | `getVendorPrepayment()` |
 
   When configured, the addendum is appended via `AD_MESSAGE` key `ETGO_InvalidAccountMissingBpGroupAccounts`, listing every missing label (comma-joined). When no `CategoryAccounts` row exists at all for that BP Group + schema, every curated column is reported missing — itself a useful signal ("no configuration whatsoever"). **`Vendor Liability` can never actually appear in that list**: `V_Liability_Acct` is a DB `NOT NULL` column on `C_BP_Group_Acct`, so its null-check is structurally dead — kept in the curated list only for completeness/future-proofing, not because it's reachable today.
-- **Fails closed, independently of the BP+Group detail.** If the accounting schema can't be resolved (`resolveAcctSchemaId` returns `null`), the addendum is skipped and the message is left unchanged. If the missing-accounts lookup itself throws (transient DB error, mapping issue), the exception is caught **inside `resolveMissingAccountsDetail`**, not let bubble up to `resolveBusinessPartnerDetail` — an earlier revision let a lookup failure there discard the already-built BP + BP Group detail along with it, a QA regression caught during ETP-5175 review.
+- **Fails closed, independently of the BP+Group detail.** If the accounting schema can't be resolved (`resolveAcctSchemaId` returns `null`), the addendum is skipped and the message is left unchanged. If the missing-accounts lookup itself throws (transient DB error, mapping issue), the exception is caught **inside `resolveMissingBpGroupAccounts`**, not let bubble up to `resolveInvalidAccountDetail` — an earlier revision let a lookup failure there discard the already-built BP + BP Group detail along with it, a QA regression caught during ETP-5175 review.
 - **Known limitation — accounting schema resolution (ETP-5214, filed as a follow-up, not fixed here):** `resolveAcctSchemaId` reads `acct.m_as[0]` — the *first* accounting schema on the `AcctServer` instance, resolved the same way the rest of `AcctServer` does — not necessarily the schema whose account actually failed in a multi-GL (multiple active accounting schemas per client) setup. Low impact today: Etendo GO is effectively single-schema-per-client in practice, so `m_as[0]` and the failing schema coincide in the overwhelming majority of real tenants.
-- **Matched-Purchase-Invoice product-accounts addendum (ETP-5175, second increment on this same fix).** Core Etendo's `DocMatchInv#createFact` — the accounting engine subclass that posts a Matched Purchase Invoice — resolves **three** accounts, not one: Non-Invoiced Receipts from `C_BP_Group_Acct` (the BP-Group check documented above) plus two more from `M_Product_Acct`, keyed by the invoice line's **product**, not the Business Partner's group: Product Expense and Invoice Price Variance. A failure on the BP-Group account short-circuits `createFact` before the product-level ones are even reached; a failure on either product account is independent of the BP-Group one and is what this addendum diagnoses. Because these two account types only exist in the Matched-Purchase-Invoice posting flow, `resolveMissingProductAccountsDetail` is gated to run **only** when `AcctServer.DocumentType` equals `AcctServer.DOCTYPE_MatMatchInv` (`"MXI"`) — unlike the BP-Group check, which is generic across every document type this app posts.
+- **Matched-Purchase-Invoice product-accounts addendum (ETP-5175, second increment on this same fix).** Core Etendo's `DocMatchInv#createFact` — the accounting engine subclass that posts a Matched Purchase Invoice — resolves **three** accounts, not one: Non-Invoiced Receipts from `C_BP_Group_Acct` (the BP-Group check documented above) plus two more from `M_Product_Acct`, keyed by the invoice line's **product**, not the Business Partner's group: Product Expense and Invoice Price Variance. A failure on the BP-Group account short-circuits `createFact` before the product-level ones are even reached; a failure on either product account is independent of the BP-Group one and is what this addendum diagnoses. Because these two account types only exist in the Matched-Purchase-Invoice posting flow, `resolveMissingProductAccounts` is gated to run **only** when `AcctServer.DocumentType` equals `AcctServer.DOCTYPE_MatMatchInv` (`"MXI"`) — unlike the BP-Group check, which is generic across every document type this app posts.
 
   The product is resolved from `acct.Record_ID` — the `M_MatchInv_ID` on a Matched Purchase Invoice failure — via the OBDal entity `org.openbravo.model.procurement.ReceiptInvoiceMatch`: `OBDal.getInstance().get(ReceiptInvoiceMatch.class, acct.Record_ID).getProduct()`. The resolved product plus the accounting schema (reusing the same `resolveAcctSchemaId(acct)` helper) key the lookup into `org.openbravo.model.common.plm.ProductAccounts` (the `M_Product_Acct` table), checking two curated columns:
 
@@ -3202,7 +3346,7 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
 
   When configured, the addendum is appended via the new `AD_MESSAGE` key `ETGO_InvalidAccountMissingProductAccounts` — distinct from the BP-Group addendum's `ETGO_InvalidAccountMissingBpGroupAccounts`; the two are independent and both can appear in the same enriched message when both are missing. When no `ProductAccounts` row exists at all for that product + schema, every curated column is reported missing (same "no configuration whatsoever" signal as the BP-Group lookup's "no row" case).
 
-  Same fail-closed isolation as the BP-Group addendum, built in from the start on this increment (learned directly from the BP-Group check's own reject-cycle bug, where an unguarded lookup failure discarded the already-built BP + BP Group detail): `resolveMissingProductAccountsDetail` wraps its own lookup in a local try/catch, logs at `debug`, and returns `null` on failure rather than letting the exception unwind into `resolveBusinessPartnerDetail`.
+  Same fail-closed isolation as the BP-Group addendum, built in from the start on this increment (learned directly from the BP-Group check's own reject-cycle bug, where an unguarded lookup failure discarded the already-built BP + BP Group detail): `resolveMissingProductAccounts` wraps its own lookup in a local try/catch, logs at `debug`, and returns `null` on failure rather than letting the exception unwind into `resolveInvalidAccountDetail`.
 
   This addendum was scoped after empirically tracing it as the likely actual cause of the original bug report, not speculatively: both the local dev DB and the experimental server's `Valeria Garcia 2` tenant show several products (including one named "Fernet") with `P_InvoicePriceVariance_Acct` null while their BP Group's own accounts are fully configured — exactly the case the BP-Group-only check (ETP-4706/base ETP-5175) could not have diagnosed.
 - **i18n + wording refinement (ETP-5175, third increment — prompted by the user's own live end-to-end repro, not a hypothesis).** Three problems surfaced by that repro, all fixed together:
@@ -3222,6 +3366,17 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
   **The fix.** `errorMessageOf(AcctServer acct)` now re-resolves the base message itself, via `OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BASE)` (`MSG_INVALID_ACCOUNT_BASE = "InvalidAccount"`, the same `AD_MESSAGE.VALUE` as core's `@InvalidAccount@`, confirmed against `AD_MESSAGE_ID = FF8080812EA11CED012EA1CCB28700F0` in core's `AD_MESSAGE.xml`), but **only** when `acct.getStatus()` equals `AcctServer.STATUS_InvalidAccount` — every other status keeps using `result.getMessage()` unchanged, exactly as before. `OBMessageUtils.messageBD` DOES correctly follow `OBContext`'s language (the same primitive the addendum messages above already rely on); it also internally catches its own lookup exceptions and falls back to base-language text when no translation row exists for the requested language, so this call is fail-closed by construction — verified against `OBMessageUtils.java` source, not assumed. No core change was needed.
 
   **QA-closed coverage gap (commit `758dbf75`).** The two pre-existing "composes exact message" pinning tests (`postComposesExactSpanishMessageForBpGroupAndProductScenario` and its English counterpart) never stub `OBMessageUtils.messageBD("InvalidAccount")` — with `OBMessageUtils` fully mocked, that unstubbed call falls through to Mockito's default `null`, and `errorMessageOf` silently keeps `result.getMessage()`, which those two tests had *already* seeded with the correct-language text. They therefore pinned the full composed message without ever exercising this new re-resolution branch — a regression that broke only this branch (wrong message key, a swallowed exception, the guard condition itself) would not have failed either test. QA added `postComposesFullSpanishMessageWithReResolvedBaseAndEnrichment` to close that gap: it deliberately seeds `acct.getMessageResult()` with the *wrong* (English) text — mimicking core's own bug — while stubbing `messageBD("InvalidAccount")` to return the correct Spanish base text, in the same BP-Group + Product enrichment scenario as the pre-existing test. Asserting the full composed string proves the re-resolved base and both enrichment addenda compose consistently end-to-end in one language, not just in isolation.
+
+- **Structured identity instead of Spanish `AD_MESSAGE_TRL` (ETP-5175 pasada 1 — QA reject cycle).** Production QA rejected the Spanish wording "**Grupo de Terceros**": Etendo GO calls a BP Group a **Categoría de contacto**. The root cause was bigger than a wording slip — the Spanish text had **no versioned home any more**. `com.etendoerp.go` is not a translation module, so `export.database` never exports `AD_MESSAGE_TRL` for it; the hand-written `AD_MESSAGE_TRL.xml` described in the third increment was deleted in ETP-5329, and every environment kept whatever rows it had been given (the local DB had English text in two of the four `es_ES` rows while production had "Grupo de Terceros"). The Spanish-TRL approach was therefore **abandoned**, following the `docs/i18n-guide.md` rule "prefer a structured code" (ETP-5179/ETP-5316): the backend sends the identity, the SPA owns the wording.
+  - **Wire contract.** On a `STATUS_InvalidAccount` failure, `PostResult` now carries `messageKeys` **and** `messageParams` (new field, constant `NeoProcessService.MESSAGE_PARAMS = "messageParams"`), serialized by the single helper `DocumentPostingService.putMessageIdentity` — used by `handleAction` and by `NotPostedDocumentsHandler` (single `post` and every `bulk-post` row). Each field is written only when non-empty, so every other failure and every success body is unchanged.
+    ```json
+    { "success": false,
+      "message": "Account could not be found. (Contact: Piensos del Ebro S.L., Contact Category: Proveedores) Please review the following accounts of the Product: Invoice Price Variance.",
+      "messageKeys": ["InvalidAccount", "ETGO_InvalidAccountBpAndGroup", "ETGO_InvalidAccountMissingProductAccounts"],
+      "messageParams": { "bpName": "Piensos del Ebro S.L.", "bpGroup": "Proveedores", "missingProductAccounts": ["invoicePriceVariance"] } }
+    ```
+    `messageKeys` follow composition order: `InvalidAccount`, then `ETGO_InvalidAccountBpAndGroup` **or** `ETGO_InvalidAccountBpOnly`, then `ETGO_InvalidAccountMissingBpGroupAccounts` and/or `ETGO_InvalidAccountMissingProductAccounts` when those addenda fire. `messageParams` holds `bpName`, `bpGroup` (absent for BP-only), `missingBpGroupAccounts` / `missingProductAccounts` (present only when non-empty). Accounts are **stable codes, never labels**: `nonInvoicedReceipts`, `customerReceivablesNo`, `vendorLiability`, `customerPrepayment`, `vendorPrepayment`, `productExpense`, `invoicePriceVariance` (the `code` of each `BP_GROUP_ACCOUNT_COLUMNS` / `PRODUCT_ACCOUNT_COLUMNS` entry). When the Business Partner cannot be resolved, `messageKeys = ["InvalidAccount"]` and there are no params — the SPA composer is gated on params and falls back to the prose.
+  - **The prose stays** (same composition, backend-localized) for clients that do not render from the identity: MCP, older SPA builds. Its English `AD_MESSAGE` text moved to GO terminology: `(Contact: @bpName@, Contact Category: @bpGroup@)`, `(Contact: @bpName@)`, `Please review the following accounts of the Contact Category: @missingAccounts@.`, `Please review the following accounts of the Product: @missingAccounts@.` The `es_ES` `AD_MESSAGE_TRL` rows already in production are `ISTRANSLATED='Y'`, so `update.database` does not refresh them: in a Spanish session the backend prose may still say "Grupo de Terceros". Accepted on purpose (no data-fix): every SPA path QA exercises renders from the identity. The rendering side is documented in `etendo_schema_forge/docs/i18n-guide.md` (Backend Error Translation, mechanism 3).
 
 **Real-world example — `DocumentPostingService` M_Inventory / M_Internal_Consumption not-calculated-cost pre-check (ETP-5360, ETP-5445):** unlike the `InvalidAccount` enrichment above, which reacts to a failed `acct.post()`, this is a GATE that runs **before** `acct.post()` is ever called: `post(adTableId, recordId, conn)` first calls `isUncalculatedCost(adTableId, recordId)` and, if it returns `true`, short-circuits with `OBMessageUtils.messageBD("NotCalculatedCost")` (`AD_MESSAGE_ID = B6CDB7D04FD249579A48D26C0ED48F45` in core's `AD_MESSAGE.xml`) — a clean, correctly-localized, no-params message — without ever touching `AcctServer`. Scoped ONLY to `M_Inventory` (Physical Inventory, ETP-5360) and `M_Internal_Consumption` (Internal Consumption, ETP-5445) by table name, not generalized to other document types. Why a gate is needed at all: core's `DocInventory#createFact` throws a bare, message-less `IllegalStateException` when a line's `MaterialTransaction.isCostCalculated()` is false, which falls into `AcctServer.createFacts`'s generic `catch (Exception e)` (only `OBException` is special-cased there), so the specific `STATUS_NotCalculatedCost` core would otherwise set — and the correctly-localized message that status implies — never survives to `errorMessageOf`. Core's `DocInternalConsumption#validateCostCalculation` has the identical set-status-then-throw shape, so ETP-5445 resolves `InternalConsumption → InternalConsumptionLine` and reuses the same per-line `MaterialTransaction` scan (the shared private helper `hasUncalculatedTransaction`). Rather than patch `AcctServer`'s status/message propagation (core, out of scope), the pre-check avoids the swallowed exception entirely by never calling `acct.post()` in the first place. **Fails open**, not closed: a lookup error (table/record not resolvable, or any exception while walking `InventoryCount → InventoryCountLine → MaterialTransaction` or `InternalConsumption → InternalConsumptionLine → MaterialTransaction`) is logged at `warn` and returns `false`, letting the post proceed to the normal `AcctServer` path — deliberate, so a lookup bug degrades to the pre-ETP-5360 generic error path instead of blocking a post that would otherwise have succeeded. Because this lives inside the shared `post()` method rather than in a window-specific handler, it transparently covers every caller of that method, not just the Physical Inventory window's own `post`/`unpost` action: `NotPostedDocumentsHandler`'s `post` and `bulk-post` actions (§ `not-posted-documents` above) call the same `postingService.post(tableId, recordId)` and so get the same clean message for an M_Inventory or M_Internal_Consumption row surfaced there, with no extra wiring. The SPA maps both the `en_US` and the `es_ES` text of `NotCalculatedCost` to its own actionable `backendError.costNotCalculated` copy (`tools/app-shell/src/lib/backendErrors.js` in `etendo_schema_forge`), so the user never sees the raw core sentence on either window.
 
@@ -3665,6 +3820,8 @@ NEO Headless enforces security at multiple levels:
   `StarOrgWriteScope#withWritableStarOrg` (`schemaforge/StarOrgWriteScope.java`) grants org `*` write access for the duration of one document-number expression, flushes the counter while the grant is open, and restores the organization lists in a `finally` — mirroring core's own `InitialOrgSetup`, which does the same for the same kind of write. Five call sites use it: `ReconciliationHandler#addNewDraftReconciliation`, `PaymentRegistrationService#createDraftPayment` (the choke point for all three of its callers, including `ReconciliationPaymentService#registerReconciliationPayment`), `AddPaymentService#doAddPayment`, `AddPaymentService#processAndRefund` (the refund) and `CashCloseHandler#createDraft`.
 
   Three rules when touching it. **(a)** `OBContext.setAdminMode(false)` is not an alternative and fails silently — `doOrgClientAccessCheck` reads the *innermost* admin frame, and core pushes its own `setAdminMode(true)` inside `APRM_MatchingUtility#addNewDraftReconciliation`, so an outer frame is never the one consulted. The grant has to change the writable-organization *set*. **(b)** The flush belongs inside the scope, because the check fires on flush, not on save; at the cash-close site nothing flushes in the enclosing method at all. **(c)** Never widen a scope to enclose a `TenantOwnership.loadOwned` call — that guard consults the readable-organization list, so it would be transiently relaxed for org `"0"`. Resolve request-supplied ids before entering.
+
+**Bank statements on a PSD2-connected account (ETP-5471):** on an account whose `EM_PSD2_Connection_Status` is connected (`BankStatementsSupport#isBankConnected`, i.e. `BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED`), statements belong to the bank sync, and creating or importing one by hand is refused with `409`. `BankStatementsHandler` checks it in `handleCreate` and, through `parseUploadInput`, in `handleImport`/`handlePreview`; `handleDelete` already refused deleting one. Those methods are the single write path: the REST actions (`?action=create|import|preview|delete`) and the MCP named actions of the `bank-statements` spec (`createStatement`, `importStatement`, `previewStatement`, `deleteStatement`, `BankStatementAgentActions`) dispatch to them, and the generic `financial-account` entities `importedBankStatements`/`bankStatementLines` refuse every write with `405` (`BankStatementEntityHandler`, ETP-5447), so there is no way around the check. The sync itself is not affected: it writes through OBDal (`BankStatementHelper#createBankStatement` in the PSD2 module) and never reaches a NEO handler, which is also why the check is not an entity observer.
 
 ---
 
@@ -4191,6 +4348,39 @@ inheritance → confirm `AD_Window_Access` appears on the personal role with the
 {"success": false, "message": "Role is not a template, cannot be composed: ..."}
 ```
 
+**Concurrent writes on the same user (ETP-5278).** Every role-composition WRITE (this webhook
+and `SFPromoteUserRole`, §8i) is serialized per target user by `UserRoleWriteLock`.
+- **The lock.** It is a PostgreSQL transaction-scoped advisory lock,
+  `pg_advisory_xact_lock(5278, hashtext(userId))`, taken through the current Hibernate session.
+  It is released automatically at the end-of-request commit or rollback, because every NEO
+  webhook request is one transaction.
+- **Where it's taken.** It runs first thing in `assignTemplateRoles`/`promoteToAdmin`/
+  `demoteFromAdmin`, right after argument validation and **before any read of the target user**.
+  Anything loaded earlier would stay in Hibernate's first-level cache with its pre-lock state.
+- **What a second request does.** It waits, then reconciles against the first one's committed
+  state (READ COMMITTED). Last writer wins.
+- **Why an advisory lock.** A `SELECT … FOR UPDATE` on `AD_User` would also block unrelated
+  writers of that row, such as the form's own NEO PATCH.
+- **Timeout.** The wait is bounded by `lock_timeout = 30s`, set only for the lock statement and
+  then restored.
+
+Before ETP-5278 two overlapping writes for the same user were possible from the Users form. It
+re-enabled Save mid-write, and a write takes 11–21 s in production (ETP-5503). Both writes diffed
+the same `AD_Role_Inheritance` snapshot, and the loser failed with `StaleStateException`,
+`EntityNotFoundException` or a duplicate key → the generic `500`.
+
+Any remaining race failure (a lock timeout, deadlock, stale state or unique violation, classified
+by `RoleWriteConflicts#isConcurrencyFailure`) is rolled back and answered with a machine-readable
+code instead of the `500`:
+
+```json
+{"success": false, "message": "The user's roles were changed by another request at the same time",
+ "code": "CONCURRENT_MODIFICATION"}
+```
+
+The frontend maps `code` to a translated message (`ROLE_WRITE_CONFLICT_CODE` in
+`userRoleAssignmentsApi.js`). The raw `message` is never shown (ETP-5206).
+
 **Access gate:** admin/client-admin only (`NeoAccessHelper.isAdminOrClientAdmin`), captured
 before entering admin mode — same convention as `SFRolesOverview`. No role, or a restricted
 role, gets `{"success": false, "message": "Not authorized"}` without touching the database.
@@ -4621,6 +4811,58 @@ Ventas only the Receivables schedule; Compras only the Payables one).
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
 fallback).
 
+**Performance (ETP-5503).** Adding a template that overlaps templates the user already has used to
+be the slow save (5–13 s in production for +1 template): the overlap guards cleared each
+conflicting process / OBUIAPP process row on its own, and each one paid a `refresh(role)` that
+cascades into every loaded access collection of the role (~27 statements per row).
+`AbstractAccessOverlapCorruptionGuard#guardNewInheritance` now finds every conflict with one query
+and clears them all with one bulk `DELETE` and one `refresh(role)`. Locally, +Finance onto
+Sales+Purchasing (43 cleared rows) went from ~1500 to ~235 statements, close to the ~220 of a
+non-overlapping add. The resulting access set is unchanged.
+
+Each `reconcileInheritances` call logs one INFO summary line
+(`RoleCompositionMetrics`). The overlap guards themselves log only at DEBUG: the per-row
+`Corrected` / `Widened` / repoint lines and the per-batch `Prevented` line:
+
+```
+Reconciled template inheritances of role <id> (+1 / -0): prevented=43 skipped=0 copied=122
+widened=3 repointed=0 stagesMs={windowPreclear=8, guard=13, save=120, flush=46, reconcile=7}
+totalMs=183
+```
+
+`guard` is part of `save`, so core's own propagation time is `save − guard`. Use this line, or the
+ALB latency of `/sws/neo/assignuserroles`, to measure a save in production.
+
+**Several templates in one save (ETP-5507).** Templates were added in request order, and the
+add-path clear deleted every row the new template also granted, even a row created a moment earlier
+in the same save by another new template. So an item 3 of the new templates share was copied 3
+times and deleted twice. For 0→4 locally, that is 304 rows created for 161 distinct items.
+
+Now the new templates keep their `SeqNo` in request order (same precedence as before), but are
+saved from the highest `SeqNo` down. When a lower template reaches an item a higher one already
+created, `HigherPrecedenceSkip` leaves that row in place, and core resolves the item to
+`ACCESS_NOT_CHANGED` (its `isPrecedent` check sees the current source has the higher `SeqNo`). A row
+is kept only when all of these hold:
+
+1. it is sourced from an active template inheritance of the role;
+2. that inheritance has a higher `SeqNo` than the new one;
+3. it is at least as permissive as the incoming grant (a read-only row facing a full grant is still
+   deleted and recreated at full level);
+4. core can see it: the row's and that inheritance's client and organization are readable by the
+   caller. When core is blind it would INSERT a duplicate (the ETP-4906 "seventh trigger").
+
+The skip applies to the guards' `guardNewInheritance` (window, process, OBUIAPP process) and to the
+service's window pre-clear. It never applies to a template gaining a single grant
+(`guardDependentsOf`). When the caller cannot see the personal role at all (for example a System
+Administrator context), nothing could be kept, so the templates are saved in request order exactly
+as before: saving them in descending order with nothing kept would leave each shared item sourced
+from the lowest template.
+
+Result locally, 0→4: 132/96/76 → 67/52/46 OBUIAPP process / process / window rows created, which is
+the distinct items plus 4 window rows where a lower template grants full access over a read-only
+higher one. The access set is identical to assigning the templates one per call, `InheritedFrom`
+included. The summary line counts the kept rows as `skipped`.
+
 ---
 
 ## 8e. Read User Role Assignments (SFUserRoleAssignments Webhook, ETP-4906)
@@ -4920,10 +5162,41 @@ service" convention `SFAssignUserRoles` uses for a missing `UserId`.
 **Promote replaces, never deletes.** Promoting sets the target's `Default_Ad_Role_ID` to the
 client's Admin role and syncs `AD_User_Roles` (`UserRoleSyncSupport#syncSingleActiveUserRole`) —
 the personal role's own `AD_Role` row and its `AD_Role_Inheritance` composition are left completely
-intact, only unassigned, so a later demote can find and restore it by name
-(`findDormantPersonalRoleByName`, scoped to the user's client) rather than starting from an empty
-role again. If no dormant personal role is found (e.g. the user never had one), demote falls back to
+intact, only unassigned, so a later demote can restore it rather than starting from an empty role
+again. If no dormant personal role is found (e.g. the user never had one), demote falls back to
 creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersonalRole` already uses.
+
+**Demote restores the role the user owns (ETP-5502).** Every personal role records its owner in
+`AD_Role.EM_ETGO_Personal_Owner_ID` (DAL `Role#getETGOPersonalOwner()`), set once by
+`createPersonalRole`. It is a foreign key to `AD_User` with `ON DELETE SET NULL`
+(`EM_ETGO_ROLE_PERSOWNER_FK`): deleting a user leaves their role behind with no owner, and the
+fallback below rejects it for any namesake created later because it is older than them. Demote
+(`findDormantPersonalRole`, scoped to the user's client) looks for:
+
+1. **The role owned by the user** — active, not a template, not client-admin, passing
+   `isReusablePersonalRole`. Earliest created if (unexpectedly) several.
+2. **Fallback for legacy roles** (owner still `NULL`: created before ETP-5502 and not backfilled
+   by the `R41-personal-role-owner-backfill` data-fix). The name must be one
+   `PersonalRoleAccessProvisioningService` builds for the user — `"Personal – <name>"` or a
+   `" (n)"` variant — and the role must **not be older than the user** (a deleted namesake's orphan
+   is). The earliest survivor wins and is **claimed** (its owner is set in the same transaction),
+   so the next demote takes path 1.
+
+The name-only lookup it replaces (ETP-5019) restored the first role called
+`"Personal – <name>"` and accepted it when it had zero `AD_User_Roles` rows — exactly what a
+deleted user's orphan looks like. A second user with the same name got the deleted user's
+permissions; a user whose role had a `" (2)"` suffix, or who was renamed, got a new empty role.
+
+`isReusablePersonalRole` also rejects a role whose owner is someone else, on every path
+(composition included), and the composition write path claims a legacy role it reuses. Known limit:
+a renamed user whose legacy role was never backfilled gets a fresh role on demote (no owner, and
+the name no longer matches).
+
+**Personal role names (ETP-5502).** `buildPersonalRoleName` appends the `" (n)"` collision suffix
+after truncating the base, so it always fits `AD_Role.Name`'s 60 characters. It used to append then
+truncate, which for a user name of 47+ characters cut every suffix off to the same string and looped
+forever on the first collision; attempts are now capped (`MAX_NAME_ATTEMPTS`) and throw an
+`OBException`.
 
 ```json
 // success (personalRoleId reused as the field name for whichever role id is now active —
@@ -4934,6 +5207,13 @@ creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersona
 // "don't 500 a validation rejection" convention, §8d):
 {"success": false, "message": "..."}
 ```
+
+**Serialized with role composition (ETP-5278).** Promote and demote take the same per-user
+`UserRoleWriteLock` as `SFAssignUserRoles`, so a promote can never interleave with an in-flight
+role assignment for the same user. Before this, an assign running alongside a promote could leave
+`Default_Ad_Role_ID` = Admin while `AD_User_Roles` still pointed at the personal role. A race
+failure is answered with the same `{"success": false, "code": "CONCURRENT_MODIFICATION"}` body
+(§8d).
 
 **Frontend counterpart:** Task 4 of this plan (`etendo_schema_forge`) — a thin client calling this
 endpoint with the same `UserId`/`Mode` params, wired to the `user` window's detail-header actions.

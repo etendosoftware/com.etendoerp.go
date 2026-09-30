@@ -36,7 +36,9 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
@@ -174,7 +176,7 @@ public class DocumentPostingServiceTest {
   /**
    * ETP-4706: when {@code AcctServer} fails with {@code STATUS_InvalidAccount} and no entity
    * detail (core Etendo's own generic fallback — see {@link DocumentPostingService}'s
-   * {@code enrichWithFailingEntity} javadoc), the message must be enriched with the Business
+   * {@code failureOf} javadoc), the message must be enriched with the Business
    * Partner / BP Group resolved from {@code AcctServer.C_BPartner_ID} so a person diagnosing an
    * "account not configured" gap does not have to grep server logs to find them.
    */
@@ -214,7 +216,7 @@ public class DocumentPostingServiceTest {
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       // Real AD_MESSAGE (ETGO_InvalidAccountBpAndGroup) catalog text — see AD_MESSAGE.xml.
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
@@ -223,7 +225,11 @@ public class DocumentPostingServiceTest {
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
       assertTrue(r.message()
-          .contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+          .contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      // ETP-5175 pasada 1: the same detail also travels as identity, so the SPA can render it.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup"), r.messageKeys());
+      assertEquals(Map.of("bpName", "Fernet Branca S.A.", "bpGroup", "Proveedores Generales"),
+          r.messageParams());
     }
   }
 
@@ -353,6 +359,8 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertEquals("Period is closed.", r.message());
+      assertTrue(r.messageKeys().isEmpty());
+      assertTrue(r.messageParams().isEmpty());
     }
   }
 
@@ -839,6 +847,103 @@ public class DocumentPostingServiceTest {
     assertEquals("Account could not be found.", resp.getBody().getString("message"));
   }
 
+  /**
+   * ETP-5175 pasada 1: {@code handleAction} must send the Invalid-Account identity on the flat
+   * failure body — {@code messageKeys} as an array and {@code messageParams} as an object whose
+   * account lists are JSON arrays (not a {@code List.toString()} string), so the SPA can render
+   * the sentence in its own locale.
+   */
+  @Test
+  public void handleActionSendsMessageKeysAndParamsWhenPostFailsWithInvalidAccount() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(false, "Account could not be found. (Contact: X, Contact Category: Y)",
+            List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup", "ETGO_InvalidAccountMissingProductAccounts"),
+            Map.of("bpName", "X", "bpGroup", "Y", "missingProductAccounts", List.of("invoicePriceVariance")));
+      }
+    };
+    NeoContext ctx = mockPostActionContext();
+
+    NeoResponse resp = svc.handleAction(ctx);
+
+    assertEquals(422, resp.getHttpStatus());
+    JSONObject body = resp.getBody();
+    assertEquals("ETGO_InvalidAccountBpAndGroup", body.getJSONArray("messageKeys").getString(1));
+    JSONObject params = body.getJSONObject("messageParams");
+    assertEquals("X", params.getString("bpName"));
+    assertEquals("Y", params.getString("bpGroup"));
+    assertEquals("invoicePriceVariance", params.getJSONArray("missingProductAccounts").getString(0));
+  }
+
+  /**
+   * ETP-5175 pasada 1: a failure with no identity keeps the flat body exactly as before — neither
+   * {@code messageKeys} nor {@code messageParams} is written.
+   */
+  @Test
+  public void handleActionOmitsMessageIdentityWhenPostResultHasNone() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(false, "Period is closed.");
+      }
+    };
+
+    NeoResponse resp = svc.handleAction(mockPostActionContext());
+
+    assertFalse(resp.getBody().has("messageKeys"));
+    assertFalse(resp.getBody().has("messageParams"));
+  }
+
+  /** A {@code post} ACTION context on table {@code 318}, record {@code rec-1}. */
+  private static NeoContext mockPostActionContext() {
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("318");
+    when(tab.getTable()).thenReturn(table);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("post");
+    when(ctx.getAdTab()).thenReturn(tab);
+    when(ctx.getRecordId()).thenReturn("rec-1");
+    return ctx;
+  }
+
+  /**
+   * ETP-5175 pasada 1: when the Business Partner cannot be resolved, the failure still names its
+   * identity ({@code InvalidAccount}) but carries NO params — the SPA composer is gated on params,
+   * so it falls back to the backend's (bare) prose instead of rendering an empty sentence.
+   */
+  @Test
+  public void postSendsOnlyInvalidAccountKeyWithoutParamsWhenBusinessPartnerDoesNotResolve() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    OBDal obDal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Account could not be found.", r.message());
+      assertEquals(List.of("InvalidAccount"), r.messageKeys());
+      assertTrue(r.messageParams().isEmpty());
+    }
+  }
+
   /** Builds an {@code AcctServer} mock ready for the InvalidAccount + BP + BP Group enrichment path. */
   private static AcctServer stubAcctServerForBpGroupEnrichment() throws Exception {
     AcctServer acct = mock(AcctServer.class);
@@ -876,9 +981,9 @@ public class DocumentPostingServiceTest {
   /** Stubs the two message-catalog keys used by the BP+Group and missing-accounts enrichment. */
   private static void stubBpGroupAndMissingAccountsMessages(MockedStatic<OBMessageUtils> msgMock) {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-        .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+        .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingBpGroupAccounts"))
-        .thenReturn("Please review the BP Group's accounting setup: @missingAccounts@.");
+        .thenReturn("Please review the following accounts of the Contact Category: @missingAccounts@.");
   }
 
   /** Mocks {@code OBDal.getInstance().createCriteria(CategoryAccounts.class)} to return {@code row}. */
@@ -940,8 +1045,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
     }
   }
 
@@ -983,7 +1088,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+          .contains("Please review the following accounts of the Contact Category: Non-Invoiced Receipts."));
     }
   }
 
@@ -1026,7 +1131,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains(
-          "Please review the BP Group's accounting setup: Non-Invoiced Receipts, Vendor Prepayment."));
+          "Please review the following accounts of the Contact Category: Non-Invoiced Receipts, Vendor Prepayment."));
     }
   }
 
@@ -1068,7 +1173,7 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("Please review the BP Group's accounting setup: "
+      assertTrue(r.message().contains("Please review the following accounts of the Contact Category: "
           + "Non-Invoiced Receipts, Customer Receivables No., "
           + "Vendor Liability, Customer Prepayment, Vendor Prepayment."));
     }
@@ -1103,13 +1208,13 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
@@ -1144,13 +1249,13 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
@@ -1189,7 +1294,7 @@ public class DocumentPostingServiceTest {
   /** Stubs the {@code M_Product_Acct} missing-accounts message-catalog key (ETP-5175). */
   private static void stubMissingProductAccountsMessage(MockedStatic<OBMessageUtils> msgMock) {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-        .thenReturn("Please review the Product's accounting setup: @missingAccounts@.");
+        .thenReturn("Please review the following accounts of the Product: @missingAccounts@.");
   }
 
   /**
@@ -1234,8 +1339,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
     }
   }
 
@@ -1282,7 +1387,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
+          .contains("Please review the following accounts of the Product: Invoice Price Variance."));
     }
   }
 
@@ -1328,7 +1433,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Product Expense, Invoice Price Variance."));
+          .contains("Please review the following accounts of the Product: Product Expense, Invoice Price Variance."));
     }
   }
 
@@ -1374,8 +1479,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
       verify(obDal, never()).get(ReceiptInvoiceMatch.class, "invoice-1");
       verify(obDal, never()).createCriteria(ProductAccounts.class);
     }
@@ -1384,8 +1489,8 @@ public class DocumentPostingServiceTest {
   /**
    * ETP-5175 fail-closed: same regression class as {@code
    * postKeepsBpGroupDetailWhenMissingAccountsLookupThrows}, mirrored on the product-lookup side.
-   * {@code resolveMissingProductAccountsDetail} runs UNCONDITIONALLY before the BP-Group branching
-   * inside {@code resolveBusinessPartnerDetail}'s outer try — if it were not caught locally, a
+   * {@code resolveMissingProductAccounts} runs UNCONDITIONALLY before the BP-Group branching
+   * inside {@code resolveInvalidAccountDetail}'s outer try — if it were not caught locally, a
    * thrown {@code M_MatchInv} lookup would discard the already-resolved BP + BP Group detail along
    * with it. Proves the outer detail survives and only the product addendum is skipped.
    */
@@ -1429,19 +1534,19 @@ public class DocumentPostingServiceTest {
       // closed on its own instead of unwinding the outer try block.
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
     }
   }
 
   /**
-   * ETP-5175 BUG FIX (QA finding, see QA report / BUG-1): {@code resolveMissingAccountsDetail}
-   * used to run INSIDE the same outer {@code try} block in {@code resolveBusinessPartnerDetail}
+   * ETP-5175 BUG FIX (QA finding, see QA report / BUG-1): {@code resolveMissingBpGroupAccounts}
+   * used to run INSIDE the same outer {@code try} block in {@code resolveInvalidAccountDetail}
    * that already built the BP+Group {@code detail} string, so a thrown {@code CategoryAccounts}
    * criteria query (e.g. a transient DB error, an OBDal/Hibernate mapping issue) discarded the
    * ALREADY-SUCCESSFULLY-BUILT BP+Group detail along with it — degrading the pre-existing,
    * working ETP-4706 enrichment (Business Partner name + BP Group name) down to the bare
    * accounting-engine message, solely because of a failure in the optional missing-accounts
-   * lookup. {@code resolveMissingAccountsDetail} now fails closed on its own (catches locally and
+   * lookup. {@code resolveMissingBpGroupAccounts} now fails closed on its own (catches locally and
    * returns {@code null}), so this proves the outer BP+Group detail survives and only the
    * missing-accounts addendum is skipped.
    */
@@ -1481,18 +1586,18 @@ public class DocumentPostingServiceTest {
       // try block.
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
     }
   }
 
   /**
    * ETP-5175 QA finding (Alex review W1): the {@code appendDetail(bpOnly, productAccountsDetail)}
-   * branch in {@code resolveBusinessPartnerDetail} — "BP has NO BP Group" composed with "MXI
+   * branch in {@code resolveInvalidAccountDetail} — "BP has NO BP Group" composed with "MXI
    * product accounts missing" — was a reachable code path with ZERO test coverage: every other
    * ETP-5175 test uses {@link #stubBusinessPartnerWithGroup}. Proves the two independent addenda
    * compose correctly even when the BP-Group one has nothing to contribute: the base message stays
    * the {@code ETGO_InvalidAccountBpOnly} template (no BP-Group text at all, since {@code
-   * resolveMissingAccountsDetail} is never reached when {@code bpGroup == null}), with the product
+   * resolveMissingBpGroupAccounts} is never reached when {@code bpGroup == null}), with the product
    * addendum appended after it.
    */
   @Test
@@ -1527,21 +1632,26 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpOnly"))
-          .thenReturn("(Business Partner: @bpName@)");
+          .thenReturn("(Contact: @bpName@)");
       stubMissingProductAccountsMessage(msgMock);
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      // BP-only baseline (no BP Group / no "Please review the BP Group's accounting setup" text at all)...
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A.)"));
+      // BP-only baseline (no BP Group / no "Please review the following accounts of the Contact Category" text at all)...
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A.)"));
       assertFalse(r.message().contains("BP Group"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
       // ...plus the independent product-accounts addendum, appended after it.
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
-      assertTrue(r.message().indexOf("(Business Partner: Fernet Branca S.A.)")
-          < r.message().indexOf("Please review the Product's accounting setup:"));
+          .contains("Please review the following accounts of the Product: Invoice Price Variance."));
+      assertTrue(r.message().indexOf("(Contact: Fernet Branca S.A.)")
+          < r.message().indexOf("Please review the following accounts of the Product:"));
+      // ETP-5175 pasada 1: BP-only identity — no bpGroup param, no BP-Group accounts key.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpOnly",
+          "ETGO_InvalidAccountMissingProductAccounts"), r.messageKeys());
+      assertEquals(Map.of("bpName", "Fernet Branca S.A.", "missingProductAccounts",
+          List.of("invoicePriceVariance")), r.messageParams());
     }
   }
 
@@ -1594,11 +1704,17 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+          .contains("Please review the following accounts of the Contact Category: Non-Invoiced Receipts."));
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
+          .contains("Please review the following accounts of the Product: Invoice Price Variance."));
+      // ETP-5175 pasada 1: both addenda as identity, in composition order.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup",
+          "ETGO_InvalidAccountMissingBpGroupAccounts", "ETGO_InvalidAccountMissingProductAccounts"),
+          r.messageKeys());
+      assertEquals(List.of("nonInvoicedReceipts"), r.messageParams().get("missingBpGroupAccounts"));
+      assertEquals(List.of("invoicePriceVariance"), r.messageParams().get("missingProductAccounts"));
     }
   }
 
@@ -1647,8 +1763,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
       verify(obDal, never()).createCriteria(ProductAccounts.class);
     }
   }
@@ -1695,7 +1811,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Recibos no facturados."));
+          .contains("Please review the following accounts of the Contact Category: Recibos no facturados."));
       assertFalse(r.message().contains("Non-Invoiced Receipts"));
     }
   }
@@ -1746,7 +1862,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Desviación Pr. Factura."));
+          .contains("Please review the following accounts of the Product: Desviación Pr. Factura."));
       assertFalse(r.message().contains("Invoice Price Variance"));
     }
   }
@@ -1794,7 +1910,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+          .contains("Please review the following accounts of the Contact Category: Non-Invoiced Receipts."));
       assertFalse(r.message().contains("Recibos no facturados"));
     }
   }
@@ -1843,7 +1959,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains(
-          "Please review the BP Group's accounting setup: Recibos no facturados, "
+          "Please review the following accounts of the Contact Category: Recibos no facturados, "
               + "Pagos por adelantado del proveedor."));
       assertFalse(r.message().contains("Non-Invoiced Receipts"));
       assertFalse(r.message().contains("Vendor Prepayment"));
@@ -1855,7 +1971,7 @@ public class DocumentPostingServiceTest {
    * (e.g. a background/scheduled process without a full session) must NOT crash the whole
    * {@code post()} call. {@code resolveMissingBpGroupAccounts}/{@code resolveMissingProductAccounts}
    * dereference {@code .getLanguage().getLanguage()} unguarded, but that call is wrapped by the
-   * caller's own try/catch ({@code resolveMissingAccountsDetail}, same fail-closed contract as
+   * caller's own try/catch ({@code resolveMissingBpGroupAccounts}, same fail-closed contract as
    * every other lookup failure in this class) — so the NPE is swallowed, the missing-accounts
    * addendum is silently omitted, and the already-built BP + BP Group detail is preserved.
    */
@@ -1903,8 +2019,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
     }
   }
 
@@ -1961,42 +2077,37 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
       stubMissingProductAccountsMessage(msgMock);
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Account could not be found. (Business Partner: Blanquiceleste S.A., "
-          + "BP Group: Proveedora) Please review the Product's accounting setup: "
+      assertEquals("Account could not be found. (Contact: Blanquiceleste S.A., "
+          + "Contact Category: Proveedora) Please review the following accounts of the Product: "
           + "Invoice Price Variance.", r.message());
+      // ETP-5175 pasada 1: keys in composition order; accounts as stable codes, never labels.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup",
+          "ETGO_InvalidAccountMissingProductAccounts"), r.messageKeys());
+      assertEquals(List.of("bpName", "bpGroup", "missingProductAccounts"),
+          new ArrayList<>(r.messageParams().keySet()));
+      assertEquals(List.of("invoicePriceVariance"), r.messageParams().get("missingProductAccounts"));
     }
   }
 
   /**
    * ETP-5175 QA follow-up: the Spanish counterpart of {@code
    * postComposesExactEnglishMessageForBpGroupAndProductScenario} — same scenario, {@code es_ES}
-   * session, pinning the exact composed message using the NEW {@code AD_MESSAGE_TRL} Spanish
-   * translations for {@code ETGO_InvalidAccountBpAndGroup} and {@code
-   * ETGO_InvalidAccountMissingProductAccounts} plus the Spanish {@code Desviación Pr. Factura}
-   * column label.
+   * session, pinning the exact composed message from Spanish {@code AD_MESSAGE_TRL} rows for
+   * {@code ETGO_InvalidAccountBpAndGroup} and {@code ETGO_InvalidAccountMissingProductAccounts}
+   * plus the Spanish {@code Desviación Pr. Factura} column label.
    *
-   * <p><b>QA BUG (HIGH, ETP-5175):</b> this pins the ACTUAL current output, which does NOT match
-   * the ticket's own target string. The English base {@code ETGO_InvalidAccountBpAndGroup}
-   * {@code MSGTEXT} is {@code "(Business Partner: @bpName@, BP Group: @bpGroup@)"} — wrapped in
-   * parentheses — but its new {@code AD_MESSAGE_TRL} Spanish translation
-   * ({@code src-db/database/sourcedata/AD_MESSAGE_TRL.xml}, id {@code 30005C8B...}) is
-   * {@code "Contacto: @bpName@, Grupo de Terceros: @bpGroup@"} with NO parentheses (same gap on
-   * the BP-only translation, id {@code 0DCEE0AA...}). {@link
-   * DocumentPostingService#resolveBusinessPartnerDetail} appends the next detail with a single
-   * space and no other punctuation, so losing the closing paren merges the BP+Group clause
-   * directly into the following sentence with no delimiter — e.g. {@code "...Grupo de Terceros:
-   * Proveedora Revise la configuración contable del Producto: ..."} — reintroducing, in Spanish
-   * only, exactly the kind of ambiguous run-on wording this ticket set out to fix. Once
-   * {@code AD_MESSAGE_TRL} is corrected to wrap the Spanish text in parentheses (matching the
-   * English structure), update this assertion to the ticket's target string:
-   * {@code "No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros:
-   * Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."}</p>
+   * <p>ETP-5175 pasada 1: those TRL rows are NOT versioned — {@code com.etendoerp.go} is not a
+   * translation module, so {@code export.database} never exports {@code AD_MESSAGE_TRL} for it
+   * (the hand-written {@code AD_MESSAGE_TRL.xml} was deleted in ETP-5329) and each environment
+   * holds whatever it was given. The Spanish text mocked here is illustrative; the backend just
+   * interpolates it. What the SPA shows comes from the {@code messageKeys} + {@code
+   * messageParams} identity, which is language-independent and pinned below.</p>
    */
   @Test
   public void postComposesExactSpanishMessageForBpGroupAndProductScenario() throws Exception {
@@ -2044,18 +2155,21 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("Contacto: @bpName@, Grupo de Terceros: @bpGroup@");
+          .thenReturn("(Contacto: @bpName@, Categoría de contacto: @bpGroup@)");
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-          .thenReturn("Revise la configuración contable del Producto: @missingAccounts@.");
+          .thenReturn("Revise las siguientes cuentas contables del Producto: @missingAccounts@.");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      // ACTUAL (buggy) output — see the QA BUG note above. Missing parentheses around the
-      // "Contacto: ..., Grupo de Terceros: ..." clause make it run into the next sentence.
-      assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
-          + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
-          + "Desviación Pr. Factura.", r.message());
+      assertEquals("No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., "
+          + "Categoría de contacto: Proveedora) Revise las siguientes cuentas contables del "
+          + "Producto: Desviación Pr. Factura.", r.message());
+      // The identity does not depend on the session language: codes, not Spanish labels.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup",
+          "ETGO_InvalidAccountMissingProductAccounts"), r.messageKeys());
+      assertEquals(Map.of("bpName", "Blanquiceleste S.A.", "bpGroup", "Proveedora",
+          "missingProductAccounts", List.of("invoicePriceVariance")), r.messageParams());
     }
   }
 
@@ -2132,9 +2246,9 @@ public class DocumentPostingServiceTest {
       msgMock.when(() -> OBMessageUtils.messageBD("InvalidAccount"))
           .thenReturn("No se pudo encontrar la cuenta.");
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("Contacto: @bpName@, Grupo de Terceros: @bpGroup@");
+          .thenReturn("(Contacto: @bpName@, Categoría de contacto: @bpGroup@)");
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-          .thenReturn("Revise la configuración contable del Producto: @missingAccounts@.");
+          .thenReturn("Revise las siguientes cuentas contables del Producto: @missingAccounts@.");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
@@ -2142,9 +2256,9 @@ public class DocumentPostingServiceTest {
       // Same composed shape as postComposesExactSpanishMessageForBpGroupAndProductScenario, but
       // this time the leading sentence is proven to come from re-resolution, not a lucky baked-in
       // value — and it must not have reverted to the English text seeded on the OBError above.
-      assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
-          + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
-          + "Desviación Pr. Factura.", r.message());
+      assertEquals("No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., "
+          + "Categoría de contacto: Proveedora) Revise las siguientes cuentas contables del "
+          + "Producto: Desviación Pr. Factura.", r.message());
     }
   }
 

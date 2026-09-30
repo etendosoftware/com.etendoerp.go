@@ -40,6 +40,9 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  */
 final class McpHookExecutor {
 
+  /** {@code 202 Accepted}: the handler queued the request; for DELETE, not yet deleted. */
+  private static final int HTTP_ACCEPTED = 202;
+
   private McpHookExecutor() {
   }
 
@@ -170,9 +173,9 @@ final class McpHookExecutor {
 
   /**
    * Run the entity hook's pre-phase. Returns an MCP result to short-circuit to
-   * write (a validation error, or a handler that fully handled the request such
-   * as a soft-archive on DELETE), or {@code null} to proceed with generic
-   * persistence. The handler may have mutated the request body in place.
+   * write (a validation error, or a handler that fully handled the request), or
+   * {@code null} to proceed with generic persistence. The handler may have mutated
+   * the request body in place. DELETE uses {@link #runDeletePreHook} instead.
    */
   static JSONObject runPreHook(NeoHandler handler, NeoContext ctx) throws JSONException {
     if (handler == null) {
@@ -180,6 +183,43 @@ final class McpHookExecutor {
     }
     NeoResponse pre = handler.handle(ctx);
     return pre != null ? neoResponseToMcpResult(pre) : null;
+  }
+
+  /**
+   * DELETE-specific variant of {@link #runPreHook}. Only a completed-success 2xx with no body (or
+   * an empty one) — a handler that resolved the delete itself, typically with
+   * {@code 204 No Content} — answers the same {@code {"deleted": true, "id"}} confirmation as the
+   * generic delete path. Everything else goes through {@link #neoResponseToMcpResult} unchanged:
+   * errors (status &ge; 400), 2xx responses carrying a real body, 1xx/3xx codes, and
+   * {@code 202 Accepted}, which means the delete was queued and has not happened yet, so it is not
+   * a confirmation.
+   *
+   * <p>ETP-5474: the 204 used to be rendered as {@code {}}, so {@code neo_delete} on a financial
+   * account that had just been removed read to the agent as a failed delete. Handled here rather
+   * than per handler so any future handler resolving DELETE with 204 is covered. Not folded into
+   * {@link #runPreHook}: on the process/report/widget paths a 204 does not mean "deleted".</p>
+   *
+   * @param handler  the entity handler, may be {@code null}
+   * @param ctx      the DELETE hook context
+   * @param recordId the id of the record being deleted, echoed in the confirmation
+   * @return an MCP result to short-circuit with, or {@code null} to proceed with generic removal
+   */
+  static JSONObject runDeletePreHook(NeoHandler handler, NeoContext ctx, String recordId)
+      throws JSONException {
+    if (handler == null) {
+      return null;
+    }
+    NeoResponse pre = handler.handle(ctx);
+    if (pre == null) {
+      return null;
+    }
+    int status = pre.getHttpStatus();
+    JSONObject body = pre.getBody();
+    if (status >= 200 && status < 300 && status != HTTP_ACCEPTED
+        && (body == null || body.length() == 0)) {
+      return McpToolResponses.deleteConfirmation(recordId);
+    }
+    return neoResponseToMcpResult(pre);
   }
 
   /**

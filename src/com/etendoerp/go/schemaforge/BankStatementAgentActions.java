@@ -130,6 +130,10 @@ final class BankStatementAgentActions {
           + "a CSV whose header row is `Transaction Date, Reference No., Business Partner Name, "
           + "Description, Amount OUT, Amount IN` (dates dd/MM/yyyy). Any other content, invalid "
           + "base64 or an empty file answers 400.";
+  /** ETP-5471 — create, import and preview are refused on a bank-connected account. */
+  private static final String BANK_CONNECTED_NOTE =
+      " Answers 409 when the account is connected to the bank (PSD2): its statements come from "
+          + "the bank feed and cannot be created or imported by hand.";
   private static final String UPLOAD_FILE_NAME_DESC =
       "The file name (used as the statement name), e.g. extracto-junio.csv.";
   private static final String CONTENT_DESC = "The file content as standard base64 (RFC 4648 "
@@ -244,7 +248,7 @@ final class BankStatementAgentActions {
             "Parses a bank statement file for the financial account and returns what "
                 + "importStatement would create — format, fileName, lineCount, totalIn, totalOut, "
                 + "periodFrom, periodTo, discardedLines and the lines — WITHOUT saving anything. "
-                + "Same parameters as importStatement." + UPLOAD_NOTE,
+                + "Same parameters as importStatement." + UPLOAD_NOTE + BANK_CONNECTED_NOTE,
             required(P_FILE_NAME, S, UPLOAD_FILE_NAME_DESC),
             required(P_CONTENT_BASE64, S, CONTENT_DESC))
             .withIdDescription(ACCOUNT_ID_DESC));
@@ -261,7 +265,7 @@ final class BankStatementAgentActions {
                 + "bank statement (BSF) type." + HEADER_DATES_NOTE + " Every line needs its date "
                 + "and an amount on exactly one side (in OR out, never both, never negative). "
                 + "Texts longer than their column are refused, not truncated. Returns 201 with "
-                + "{id, name, lineCount, processed}; id is the new statement.",
+                + "{id, name, lineCount, processed}; id is the new statement." + BANK_CONNECTED_NOTE,
             required(P_NAME, S, NAME_DESC),
             required(P_TRANSACTION_DATE, D, TRANSACTION_DATE_DESC),
             required(P_IMPORT_DATE, D, IMPORT_DATE_DESC),
@@ -278,7 +282,8 @@ final class BankStatementAgentActions {
                 + "date of the file (today when no line has a date) and importDate is now. "
                 + "Returns 201 with {id, fileName, lineCount, discardedLines}; a file with no "
                 + "valid line answers 400 with code NO_VALID_LINES and saves nothing. Run "
-                + "previewStatement first to check the content." + UPLOAD_NOTE,
+                + "previewStatement first to check the content." + UPLOAD_NOTE
+                + BANK_CONNECTED_NOTE,
             required(P_FILE_NAME, S, UPLOAD_FILE_NAME_DESC),
             required(P_CONTENT_BASE64, S, CONTENT_DESC))
             .withIdDescription(ACCOUNT_ID_DESC),

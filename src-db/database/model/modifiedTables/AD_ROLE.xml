@@ -5,6 +5,13 @@
         <default><![CDATA[N]]></default>
         <onCreateDefault><![CDATA['N']]></onCreateDefault>
       </column>
+      <column name="EM_ETGO_PERSONAL_OWNER_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_USER" name="EM_ETGO_ROLE_PERSOWNER_FK" onDelete="setnull">
+        <reference local="EM_ETGO_PERSONAL_OWNER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
       <check name="EM_ETGO_SHOW_ACCT_FIELDS_CHK"><![CDATA[EM_ETGO_SHOW_ACCT_FIELDS IN ('Y', 'N')]]></check>
     </table>
   </database>
