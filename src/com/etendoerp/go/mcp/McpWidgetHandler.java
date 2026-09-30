@@ -56,7 +56,7 @@ final class McpWidgetHandler {
    * {@link NeoContext}.
    *
    * @param arguments tool arguments: {@code widget} (enum, required) and optional
-   *                  {@code params} object (e.g. {@code {"range": "30d"}})
+   *                  {@code params} object (e.g. {@code {"range": "last30d"}})
    * @return MCP text content with the widget JSON payload, or error content
    */
   static JSONObject handle(JSONObject arguments) throws Exception {

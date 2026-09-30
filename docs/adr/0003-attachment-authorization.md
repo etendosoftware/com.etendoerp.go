@@ -94,6 +94,17 @@ and by OCR after a contextual list. Therefore:
 A single service — `NeoAttachmentAuthorizer` — is the only place attachment access is decided.
 Six call sites, one policy.
 
+> **Implementation status (ETP-5205, 2026-09-29):** a first slice of `NeoAttachmentAuthorizer`
+> exists and covers only the **window-access tier for WRITE** operations (upload, delete,
+> description, mark-main): the role needs editable access to at least one active window showing
+> the attachment's table. It is called from `NeoBuiltInEndpointHandler`. READ authorization,
+> parent-record org/client scoping (SEC-11b), the uniform `404`, D3's admin-mode narrowing and
+> D6 are still ETP-4570, which should extend this class rather than replace it. Known residual:
+> the rule is per table (`C_Order` is shown by both sales-order and purchase-order windows).
+> Proxy windows: `ETGO_Fiscal_Decl` is shown only by a technical support window no role grants,
+> so the authorizer also accepts the Tax Report proxy window (`PROXY_WINDOWS_BY_TABLE`). Hardcoded,
+> mirroring the ETP-5116 proxy; a data-driven replacement is ETP-5540.
+
 ```java
 // Conceptual shape. Returns the authorized attachment or throws/returns a uniform not-found.
 Attachment authorizeById(String attachmentId, Access access);          // bare-ID operations

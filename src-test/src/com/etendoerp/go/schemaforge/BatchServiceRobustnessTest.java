@@ -21,7 +21,6 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -123,7 +122,7 @@ public class BatchServiceRobustnessTest {
          MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
-      support.when(() -> NeoServletSupport.handleWithHooks(anyString(), any(NeoContext.class), any()))
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
           .thenReturn(created("bp-1"), created("loc-1"), created("ct-1"));
 
       JSONObject result = service.executeBatch(ops);
@@ -142,7 +141,7 @@ public class BatchServiceRobustnessTest {
 
       // Parent/child wiring actually reached the CRUD layer for the two child ops.
       ArgumentCaptor<NeoContext> ctxCaptor = ArgumentCaptor.forClass(NeoContext.class);
-      support.verify(() -> NeoServletSupport.handleWithHooks(anyString(), ctxCaptor.capture(), any()),
+      support.verify(() -> NeoServletSupport.handleWithHooks(any(), ctxCaptor.capture(), any(), any()),
           times(3));
       List<NeoContext> contexts = ctxCaptor.getAllValues();
 
@@ -231,7 +230,7 @@ public class BatchServiceRobustnessTest {
          MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
-      support.when(() -> NeoServletSupport.handleWithHooks(anyString(), any(NeoContext.class), any()))
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
           .thenReturn(created("bp-1"),
               NeoResponse.error(409, "duplicate key value violates unique constraint \"c_bpartner_key\""));
 
@@ -287,7 +286,7 @@ public class BatchServiceRobustnessTest {
          MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
-      support.when(() -> NeoServletSupport.handleWithHooks(anyString(), any(NeoContext.class), any()))
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
           .thenReturn(created("bp-1"),
               NeoResponse.error(409, "duplicate key value violates unique constraint \"c_bpartner_key\""));
 
@@ -352,7 +351,7 @@ public class BatchServiceRobustnessTest {
          MockedStatic<NeoServletSupport> support = mockStatic(NeoServletSupport.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       stubEntityResolution(support, obDal);
-      support.when(() -> NeoServletSupport.handleWithHooks(anyString(), any(NeoContext.class), any()))
+      support.when(() -> NeoServletSupport.handleWithHooks(any(), any(NeoContext.class), any(), any()))
           .thenReturn(subFailure);
 
       JSONObject result = service.executeBatch(ops);
@@ -375,6 +374,11 @@ public class BatchServiceRobustnessTest {
   private void stubEntityResolution(MockedStatic<NeoServletSupport> support, OBDal obDal) {
     SFSpec spec = mock(SFSpec.class);
     when(spec.getId()).thenReturn(SPEC_ID);
+    // ETP-5415 (D10): the hook context carries the spec's NAME, as every other dispatch path
+    // does — it used to carry the id here, so a customization branching on getSpecName() saw a
+    // different value depending on which caller reached it. Stubbed so the fixture exercises the
+    // value the dispatcher actually resolves on.
+    when(spec.getName()).thenReturn(SPEC);
     support.when(() -> NeoServletSupport.findSpec(SPEC)).thenReturn(spec);
 
     SFEntity entity = mock(SFEntity.class);

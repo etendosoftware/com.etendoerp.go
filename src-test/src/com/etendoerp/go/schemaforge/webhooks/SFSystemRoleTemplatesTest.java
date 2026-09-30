@@ -543,6 +543,205 @@ class SFSystemRoleTemplatesTest extends BaseWebhookTest {
         }
     }
 
+    // ── ETP-5485: opt-in shared matrix (includeMatrix=true) ─────────────
+
+    private static final String INCLUDE_MATRIX = "includeMatrix";
+    private static final String TAX_MODELS_PROXY_ID = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
+    private static final String NOT_POSTED_DOCS_PROXY_ID = "D6AB95CE52D34E1599590526115E26C6";
+    private static final String SII_MONITOR_ID = "FEF76C3E0F104F06A89AAD15A4A4A35C";
+    private static final String UI_EXCLUDED_WINDOW_ID = "6FEBA130CDE24CC09041FFA6117ADFA9";
+
+    /** Stubs the matrix's category native query to return {@code rows} (window id, category). */
+    private void stubCategoryQuery(List<Object[]> rows) {
+        org.hibernate.Session session = mock(org.hibernate.Session.class);
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.NativeQuery<Object[]> query = mock(org.hibernate.query.NativeQuery.class);
+        when(obDal.getSession()).thenReturn(session);
+        when(session.createNativeQuery(org.mockito.ArgumentMatchers.anyString())).thenReturn(query);
+        when(query.getResultList()).thenReturn(rows);
+    }
+
+    /** OBUIAPP {@code ProcessAccess} keyed by role, for the Not Posted Documents proxy row. */
+    private void stubObuiappProcessAccessKeyedByRole(
+            Map<String, List<org.openbravo.client.application.ProcessAccess>> rowsByRoleId) {
+        OBCriteria<org.openbravo.client.application.ProcessAccess> criteria =
+                mockCriteria(org.openbravo.client.application.ProcessAccess.class);
+        AtomicReference<String> currentRoleId = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Object restriction = invocation.getArgument(0);
+            if (restriction instanceof SimpleExpression) {
+                SimpleExpression expr = (SimpleExpression) restriction;
+                if ((org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE + ".id")
+                        .equals(expr.getPropertyName())) {
+                    currentRoleId.set((String) expr.getValue());
+                }
+            }
+            return criteria;
+        }).when(criteria).add(any());
+        when(criteria.list()).thenAnswer(invocation ->
+                rowsByRoleId.getOrDefault(currentRoleId.get(), Collections.emptyList()));
+    }
+
+    private org.openbravo.client.application.ProcessAccess mockObuiappProcessAccessRow(
+            String processId, boolean editable) {
+        org.openbravo.client.application.Process process =
+                mock(org.openbravo.client.application.Process.class);
+        when(process.getId()).thenReturn(processId);
+        org.openbravo.client.application.ProcessAccess row =
+                mock(org.openbravo.client.application.ProcessAccess.class);
+        when(row.getObuiappProcess()).thenReturn(process);
+        when(row.isEditableField()).thenReturn(editable);
+        return row;
+    }
+
+    private void stubGoWindowSpecs(List<Window> goWindows) {
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        List<SFSpec> specs = new java.util.ArrayList<>();
+        for (Window w : goWindows) {
+            specs.add(mockGoWindowSpec(w));
+        }
+        when(specCriteria.list()).thenReturn(specs);
+    }
+
+    /** Every matrix row (across categories), keyed by row id. */
+    private Map<String, JSONObject> matrixRowsById(JSONObject matrix, String rowsKey) throws Exception {
+        Map<String, JSONObject> rows = new java.util.LinkedHashMap<>();
+        JSONArray categories = matrix.getJSONArray("categories");
+        for (int c = 0; c < categories.length(); c++) {
+            JSONArray items = categories.getJSONObject(c).getJSONArray(rowsKey);
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject row = items.getJSONObject(i);
+                assertFalse(rows.containsKey(row.getString("id")), "duplicate row id " + row.getString("id"));
+                rows.put(row.getString("id"), row);
+            }
+        }
+        return rows;
+    }
+
+    @Test
+    @DisplayName("ETP-5485: without includeMatrix the response carries no matrix/reportsMatrix (backward compatible)")
+    void testNoMatrixWithoutIncludeMatrixParam() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        stubEmptyWindowAccess(Collections.emptyList());
+        stubCategoryQuery(Collections.emptyList());
+
+        webhook.get(parameters, responseVars);
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertFalse(result.has("matrix"));
+        assertFalse(result.has("reportsMatrix"));
+    }
+
+    @Test
+    @DisplayName("ETP-5485: includeMatrix=false is treated as absent")
+    void testNoMatrixWhenIncludeMatrixFalse() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        stubEmptyWindowAccess(Collections.emptyList());
+        stubCategoryQuery(Collections.emptyList());
+        parameters.put(INCLUDE_MATRIX, "false");
+
+        webhook.get(parameters, responseVars);
+
+        assertFalse(new JSONObject(responseVars.get(RESULT)).has("matrix"));
+    }
+
+    @Test
+    @DisplayName("ETP-5485: includeMatrix=true returns matrix + reportsMatrix keyed by template role id")
+    void testIncludeMatrixReturnsMatrixKeyedByTemplateIds() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        Window salesOrder = mockWindow("go-win-1", "Sales Order");
+        stubEmptyWindowAccess(List.of(salesOrder));
+        stubCategoryQuery(Collections.singletonList(new Object[] { "go-win-1", "Sales" }));
+        parameters.put(INCLUDE_MATRIX, "true");
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        Map<String, JSONObject> rows = matrixRowsById(result.getJSONObject("matrix"), "windows");
+        JSONObject access = rows.get("go-win-1").getJSONObject("access");
+        assertEquals(4, access.length());
+        for (String templateId : SystemRoleTemplates.byName().values()) {
+            assertEquals("none", access.getString(templateId));
+        }
+        Map<String, JSONObject> reportRows = matrixRowsById(result.getJSONObject("reportsMatrix"), "reports");
+        assertFalse(reportRows.isEmpty());
+        assertEquals(4, reportRows.values().iterator().next().getJSONObject("access").length());
+    }
+
+    /**
+     * The bug ETP-5485 closes: the 2 ETP-5071 proxy rows ("Modelos Fiscales" / "Documentos no
+     * contabilizados") must be in the templates matrix, with each template's REAL tier resolved
+     * through the proxy grant — not missing, and not a blanket "none".
+     */
+    @Test
+    @DisplayName("ETP-5485: includeMatrix=true carries the 2 proxy rows with each template's real tier")
+    void testIncludeMatrixCarriesProxyRowsWithRealTiers() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        stubGoWindowSpecs(Collections.emptyList());
+        stubCategoryQuery(Collections.emptyList());
+        Window taxReport = mockWindow(TAX_MODELS_PROXY_ID, "Tax Report");
+        stubWindowAccessCriteriaKeyedByRole(Map.of(
+                SystemRoleTemplates.FINANCE_ROLE_ID, List.of(mockWindowAccessRow(taxReport, true)),
+                SystemRoleTemplates.SALES_ROLE_ID, List.of(mockWindowAccessRow(taxReport, false))));
+        stubObuiappProcessAccessKeyedByRole(Map.of(
+                SystemRoleTemplates.FINANCE_ROLE_ID,
+                List.of(mockObuiappProcessAccessRow(NOT_POSTED_DOCS_PROXY_ID, true)),
+                SystemRoleTemplates.PURCHASING_ROLE_ID,
+                List.of(mockObuiappProcessAccessRow(NOT_POSTED_DOCS_PROXY_ID, false))));
+        parameters.put(INCLUDE_MATRIX, "true");
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        Map<String, JSONObject> rows = matrixRowsById(
+                new JSONObject(responseVars.get(RESULT)).getJSONObject("matrix"), "windows");
+
+        JSONObject taxModels = rows.get(TAX_MODELS_PROXY_ID).getJSONObject("access");
+        assertEquals("full", taxModels.getString(SystemRoleTemplates.FINANCE_ROLE_ID));
+        assertEquals("read-only", taxModels.getString(SystemRoleTemplates.SALES_ROLE_ID));
+        assertEquals("none", taxModels.getString(SystemRoleTemplates.PURCHASING_ROLE_ID));
+        assertEquals("none", taxModels.getString(SystemRoleTemplates.INVENTORY_ROLE_ID));
+
+        JSONObject notPosted = rows.get(NOT_POSTED_DOCS_PROXY_ID).getJSONObject("access");
+        assertEquals("full", notPosted.getString(SystemRoleTemplates.FINANCE_ROLE_ID));
+        assertEquals("none", notPosted.getString(SystemRoleTemplates.SALES_ROLE_ID));
+        assertEquals("read-only", notPosted.getString(SystemRoleTemplates.PURCHASING_ROLE_ID));
+    }
+
+    @Test
+    @DisplayName("ETP-5485: matrix skips UI-excluded windows and never duplicates SII Monitor; windows[] is unchanged")
+    void testIncludeMatrixExcludesUiHiddenAndDedupesSiiMonitor() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        Window siiMonitor = mockWindow(SII_MONITOR_ID, "SII Monitor");
+        Window hidden = mockWindow(UI_EXCLUDED_WINDOW_ID, "Conversion Rate Downloader Log");
+        stubGoWindowSpecs(List.of(siiMonitor, hidden));
+        stubCategoryQuery(Collections.emptyList());
+        stubWindowAccessCriteriaKeyedByRole(Map.of(
+                SystemRoleTemplates.FINANCE_ROLE_ID,
+                List.of(mockWindowAccessRow(siiMonitor, true), mockWindowAccessRow(hidden, false))));
+        parameters.put(INCLUDE_MATRIX, "true");
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        // matrixRowsById itself asserts no duplicate id.
+        Map<String, JSONObject> rows = matrixRowsById(result.getJSONObject("matrix"), "windows");
+        assertFalse(rows.containsKey(UI_EXCLUDED_WINDOW_ID));
+        assertEquals("full", rows.get(SII_MONITOR_ID).getJSONObject("access")
+                .getString(SystemRoleTemplates.FINANCE_ROLE_ID));
+
+        // The per-role windows[] keeps its pre-ETP-5485 (unexcluded) window set.
+        JSONArray financeWindows = result.getJSONArray("roles").getJSONObject(0).getJSONArray("windows");
+        assertEquals(2, financeWindows.length());
+    }
+
     // ── exception handling ───────────────────────────────────────────────
 
     @Test
