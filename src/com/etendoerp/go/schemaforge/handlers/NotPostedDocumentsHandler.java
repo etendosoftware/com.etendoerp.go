@@ -500,6 +500,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     JSONObject resp = new JSONObject();
     resp.put(KEY_SUCCESS, result.ok());
     resp.put("message", result.message());
+    // ETP-5175: same identity DocumentPostingService#handleAction sends, so this entry point
+    // renders the Invalid-Account detail in the SPA's locale too.
+    DocumentPostingService.putMessageIdentity(resp, result);
     // Pass the JSONObject itself (not resp.toString()) — the String overload of
     // NeoResponse.error wraps it as a nested error.message string instead of sending this flat
     // body, silently discarding the real message from any client reading a top-level `message`
@@ -526,6 +529,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       rowResult.put(KEY_TABLE_ID, tableId);
       rowResult.put(KEY_SUCCESS, result.ok());
       rowResult.put("message", result.message());
+      DocumentPostingService.putMessageIdentity(rowResult, result);
       results.put(rowResult);
     }
 

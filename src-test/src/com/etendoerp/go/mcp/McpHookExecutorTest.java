@@ -29,8 +29,12 @@ import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -56,6 +60,22 @@ public class McpHookExecutorTest {
   private static final String FIELD_IS_ERROR = "isError";
   private static final String FIELD_TYPE = "type";
   private static final String FIELD_TEXT = "text";
+  private static final String FIELD_STATUS = "status";
+  private static final String FIELD_DELETED = "deleted";
+  private static final String FIELD_ID = "id";
+  private static final String DELETE_RECORD_ID = "FA-DELETE-1";
+  private static final String DELETE_BLOCKED_REASON =
+      "Cannot delete this account. This account has registered transactions.";
+
+  /** Initialises the class-level {@code @Mock} fields used by the delete pre-hook tests. */
+  @Rule
+  public MockitoRule mockitoRule = MockitoJUnit.rule();
+
+  @Mock
+  private NeoHandler deleteHandler;
+
+  @Mock
+  private NeoContext deleteCtx;
 
   // ── neoResponseToMcpResult ────────────────────────────────────────────
 
@@ -161,7 +181,7 @@ public class McpHookExecutorTest {
     JSONObject envelope = new JSONObject(
         result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
     assertEquals("validation_error", envelope.getString("error"));
-    assertEquals(422, envelope.getInt("status"));
+    assertEquals(422, envelope.getInt(FIELD_STATUS));
     assertTrue(envelope.getString("detail").startsWith("No accounting schema"));
   }
 
@@ -212,6 +232,178 @@ public class McpHookExecutorTest {
 
     assertNotNull(result);
     assertTrue(result.getBoolean(FIELD_IS_ERROR));
+  }
+
+  // ── runDeletePreHook (ETP-5474) ───────────────────────────────────────
+
+  /**
+   * Parses the single text content item of an MCP result back into the JSON the agent reads.
+   */
+  private static JSONObject parseTextContent(JSONObject result) throws Exception {
+    return new JSONObject(result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+  }
+
+  /**
+   * The live bug: a handler that fully performs the delete answers {@code noContent()} (204, null
+   * body), and MCP used to forward that as the literal text {@code "{}"}. The delete pre-hook must
+   * turn it into the same confirmation the generic delete path returns.
+   */
+  @Test
+  public void testRunDeletePreHookNoContentReturnsDeleteConfirmation() throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(NeoResponse.noContent());
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertNotNull(result);
+    assertFalse("a successful delete must not be flagged as an error",
+        result.has(FIELD_IS_ERROR));
+    JSONObject payload = parseTextContent(result);
+    assertTrue(payload.getBoolean(FIELD_DELETED));
+    assertEquals(DELETE_RECORD_ID, payload.getString(FIELD_ID));
+  }
+
+  /** A 2xx with an empty JSON body carries no information either — same confirmation. */
+  @Test
+  public void testRunDeletePreHookOkWithEmptyBodyReturnsDeleteConfirmation() throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(NeoResponse.ok(new JSONObject()));
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertFalse(result.has(FIELD_IS_ERROR));
+    JSONObject payload = parseTextContent(result);
+    assertTrue(payload.getBoolean(FIELD_DELETED));
+    assertEquals(DELETE_RECORD_ID, payload.getString(FIELD_ID));
+  }
+
+  /**
+   * A hypothetical handler that answers a DELETE with its own payload keeps that body — the
+   * confirmation only replaces an empty 2xx answer.
+   */
+  @Test
+  public void testRunDeletePreHookOkWithOwnBodyKeepsBodyIntact() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("handled", true);
+    body.put(FIELD_ID, "HANDLER-PAYLOAD-1");
+    when(deleteHandler.handle(deleteCtx)).thenReturn(NeoResponse.ok(body));
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertFalse(result.has(FIELD_IS_ERROR));
+    JSONObject payload = parseTextContent(result);
+    assertTrue(payload.getBoolean("handled"));
+    assertEquals("HANDLER-PAYLOAD-1", payload.getString(FIELD_ID));
+    assertFalse("the handler's own body must not be replaced by a confirmation",
+        payload.has(FIELD_DELETED));
+  }
+
+  /**
+   * 202 Accepted means the delete was only queued, not performed: even with an empty body it must
+   * NOT become a {@code deleted: true} confirmation, and is rendered exactly as the shared funnel
+   * renders it.
+   */
+  @Test
+  public void testRunDeletePreHookAcceptedWithEmptyBodyIsNotDeleteConfirmation()
+      throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(new NeoResponse(202, null));
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertNotNull(result);
+    assertEquals(McpHookExecutor.neoResponseToMcpResult(new NeoResponse(202, null)).toString(),
+        result.toString());
+    assertFalse("a 202 must never read as a delete confirmation",
+        parseTextContent(result).has(FIELD_DELETED));
+  }
+
+  /**
+   * A 3xx (here 304 Not Modified) with an empty body is not a completed delete either: it goes
+   * through the shared funnel unchanged instead of becoming a confirmation.
+   */
+  @Test
+  public void testRunDeletePreHookRedirectionWithEmptyBodyIsNotDeleteConfirmation()
+      throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(new NeoResponse(304, null));
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertNotNull(result);
+    assertEquals(McpHookExecutor.neoResponseToMcpResult(new NeoResponse(304, null)).toString(),
+        result.toString());
+    assertFalse("a 3xx must never read as a delete confirmation",
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT)
+            .contains("\"" + FIELD_DELETED + "\""));
+  }
+
+  /**
+   * A blocked delete (CA3) stays an error: {@code isError} set and the normalized
+   * {@code {error,status,detail}} envelope carrying the handler's reason, so the agent can tell
+   * the user why the account was not deleted.
+   */
+  @Test
+  public void testRunDeletePreHookConflictReturnsNormalizedErrorWithReason() throws Exception {
+    when(deleteHandler.handle(deleteCtx))
+        .thenReturn(NeoResponse.error(409, DELETE_BLOCKED_REASON));
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    JSONObject envelope = parseTextContent(result);
+    assertTrue(envelope.has("error"));
+    assertEquals(409, envelope.getInt(FIELD_STATUS));
+    assertTrue(envelope.getString("detail").contains("registered transactions"));
+    assertFalse("an error must never read as a delete confirmation",
+        envelope.has(FIELD_DELETED));
+  }
+
+  /** A 404 from the handler (unknown record) is an error, not a confirmation. */
+  @Test
+  public void testRunDeletePreHookNotFoundReturnsError() throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(NeoResponse.error(404, "Account not found"));
+
+    JSONObject result = McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx,
+        DELETE_RECORD_ID);
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    assertEquals(404, parseTextContent(result).getInt(FIELD_STATUS));
+  }
+
+  /** No handler means no short-circuit: the caller proceeds with the generic delete. */
+  @Test
+  public void testRunDeletePreHookNullHandlerReturnsNull() throws Exception {
+    assertNull(McpHookExecutor.runDeletePreHook(null, deleteCtx, DELETE_RECORD_ID));
+  }
+
+  /** A handler that declines (returns null) also lets the generic delete run. */
+  @Test
+  public void testRunDeletePreHookHandlerReturnsNullReturnsNull() throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(null);
+
+    assertNull(McpHookExecutor.runDeletePreHook(deleteHandler, deleteCtx, DELETE_RECORD_ID));
+    verify(deleteHandler).handle(deleteCtx);
+  }
+
+  /**
+   * Guard: the delete confirmation is scoped to the delete pre-hook. The shared funnel used by
+   * every other hook path still renders a bare 204 as {@code "{}"}, so no non-delete write starts
+   * claiming {@code deleted: true}.
+   */
+  @Test
+  public void testRunPreHookNoContentIsNotTurnedIntoDeleteConfirmation() throws Exception {
+    when(deleteHandler.handle(deleteCtx)).thenReturn(NeoResponse.noContent());
+
+    JSONObject viaPreHook = McpHookExecutor.runPreHook(deleteHandler, deleteCtx);
+    JSONObject viaFunnel = McpHookExecutor.neoResponseToMcpResult(NeoResponse.noContent());
+
+    assertEquals("{}", viaPreHook.getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
+    assertEquals("{}", viaFunnel.getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString(FIELD_TEXT));
   }
 
   // ── runPostHook ───────────────────────────────────────────────────────

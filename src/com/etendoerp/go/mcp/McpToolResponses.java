@@ -105,4 +105,20 @@ final class McpToolResponses {
     return failed ? McpToolRouter.wrapAsErrorContent(body)
         : McpToolRouter.wrapAsTextContent(body);
   }
+
+  /**
+   * The single {@code neo_delete} success answer, {@code {"deleted": true, "id": recordId}}.
+   * Shared by the generic removal path ({@link McpToolRouter#handleDelete}) and
+   * {@link McpHookExecutor#runDeletePreHook} (a handler resolving the DELETE with 204 No Content)
+   * so the two cannot diverge (ETP-5474).
+   *
+   * @param recordId the id of the deleted record
+   * @return the MCP text-content result carrying the confirmation
+   */
+  static JSONObject deleteConfirmation(String recordId) throws JSONException {
+    JSONObject deleteResult = new JSONObject();
+    deleteResult.put("deleted", true);
+    deleteResult.put("id", recordId);
+    return McpToolRouter.wrapAsTextContent(deleteResult);
+  }
 }
