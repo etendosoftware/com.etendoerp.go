@@ -663,6 +663,65 @@ class NeoFieldFilterTest {
   }
 
   @Nested
+  @DisplayName("findClientReadOnlyFields (ETP-5556)")
+  class FindClientReadOnlyFields {
+    @Test
+    @DisplayName("lists every read-only field, skipping writable, metadata and server-owned keys")
+    void listsEveryReadOnlyField() throws Exception {
+      NeoFieldFilter filter = activeFilter(
+          new HashSet<>(Set.of("id", "orderedQuantity", "lineNetAmount", "grossAmount",
+              "organization")),
+          Set.of("id", "orderedQuantity"));
+
+      JSONObject body = new JSONObject()
+          .put("orderedQuantity", "3")
+          .put("lineNetAmount", "30.00")
+          .put("grossAmount", "36.30")
+          .put("organization", "other-org")
+          .put("recordTime", 1L)
+          .put("_identifier", "Line 10");
+
+      List<String> readOnly = filter.findClientReadOnlyFields(body, "PATCH");
+      assertEquals(Set.of("lineNetAmount", "grossAmount"), new HashSet<>(readOnly));
+      assertEquals(2, readOnly.size());
+    }
+
+    @Test
+    @DisplayName("reads the fields inside a data wrapper")
+    void readsDataWrapper() throws Exception {
+      NeoFieldFilter filter = activeFilter(
+          new HashSet<>(Set.of("id", "lineNetAmount")), Set.of("id"));
+
+      JSONObject body = new JSONObject()
+          .put("data", new JSONObject().put("lineNetAmount", "30.00"));
+
+      assertEquals(List.of("lineNetAmount"), filter.findClientReadOnlyFields(body, "PUT"));
+    }
+
+    @Test
+    @DisplayName("honors the create-time exemption on POST only")
+    void honorsCreateExemption() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "currency")), Set.of("id"), Collections.emptySet());
+      JSONObject body = new JSONObject().put("currency", "102");
+
+      assertTrue(filter.findClientReadOnlyFields(body, "POST").isEmpty());
+      assertEquals(List.of("currency"), filter.findClientReadOnlyFields(body, "PATCH"));
+    }
+
+    @Test
+    @DisplayName("returns an empty list for an inactive filter")
+    void emptyWhenInactive() throws Exception {
+      NeoFieldFilter filter = createFilter(
+          new HashSet<>(Set.of("id", "lineNetAmount")), Set.of("id"), Collections.emptySet(),
+          Collections.emptyMap(), Collections.emptyMap(), false);
+
+      assertTrue(filter.findClientReadOnlyFields(
+          new JSONObject().put("lineNetAmount", "30.00"), "PATCH").isEmpty());
+    }
+  }
+
+  @Nested
   @DisplayName("emittableResponseKeys (IMP-18)")
   class EmittableResponseKeys {
     @Test

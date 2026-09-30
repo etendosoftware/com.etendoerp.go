@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -544,8 +545,27 @@ public class NeoFieldFilter {
    *     is not exempted for this method
    */
   public void validateClientWriteRequest(JSONObject requestBody, String httpMethod) {
+    List<String> readOnlyFields = findClientReadOnlyFields(requestBody, httpMethod);
+    if (!readOnlyFields.isEmpty()) {
+      throw new ReadOnlyFieldRejectedException(readOnlyFields.get(0));
+    }
+  }
+
+  /**
+   * Lists every key of the original client body that {@link #validateClientWriteRequest} would
+   * reject, using the same predicate (metadata keys, server-owned fields and the
+   * create-time exemption are skipped). Lets a caller report all offending fields at once
+   * instead of only the first one (ETP-5556).
+   *
+   * @param requestBody the original request body, optionally wrapped in {@code data}
+   * @param httpMethod  the request's HTTP method; see {@link #validateClientWriteRequest}
+   * @return the offending API-level keys; empty when the body is acceptable or the filter is
+   *     inactive
+   */
+  public List<String> findClientReadOnlyFields(JSONObject requestBody, String httpMethod) {
+    List<String> readOnlyFields = new ArrayList<>();
     if (!active || requestBody == null || includedFields == null || writableFields == null) {
-      return;
+      return readOnlyFields;
     }
 
     boolean isCreate = "POST".equalsIgnoreCase(httpMethod);
@@ -556,11 +576,11 @@ public class NeoFieldFilter {
     Iterator<String> keys = body.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      if (isMetadataKey(key) || isWritableOrExemptOnCreate(key, isCreate)) {
-        continue;
+      if (!isMetadataKey(key) && !isWritableOrExemptOnCreate(key, isCreate)) {
+        readOnlyFields.add(key);
       }
-      throw new ReadOnlyFieldRejectedException(key);
     }
+    return readOnlyFields;
   }
 
   /**
