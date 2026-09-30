@@ -2498,15 +2498,18 @@ blocks work already done or hides a real gap.
 | step | `neo_create` | `neo_batch` | evidence |
 |---|---|---|---|
 | `validateMandatoryFields` | yes | **yes** | a batch omitting `businessPartner` on `sales-order/header` is refused 422 with `missingFields:["businessPartner"]` and rolled back. The shared `NeoCrudHandler.executePostCreate` validates after the full resolution chain, so batch is not more permissive here |
-| `NeoCommercialLinePolicy.injectCommercialAmounts` | yes | **yes** | runs in `executePostCreate`, which both paths reach. (`grossUnitPrice` still persists as 0 on both — a separate, undiagnosed defect, not a divergence) |
 | `stripContactsPreCreateBillingDefaults` | yes | **yes** | idem — `executePostCreate` |
 | `handler.protectedCreateCalloutFields` | yes | **yes** | idem — `executePostCreate`, resolved statically so a null-servlet batch reaches it |
 | the entity pre-hook | yes | **yes** | `BatchService` calls `handleWithHooks` when a qualifier exists |
+
+`NeoCommercialLinePolicy.injectCommercialAmounts` used to be listed here as run by both verbs. It is
+not: `neo_create` does not run it in shared code, so it is in the table below.
 
 ##### Still divergent
 
 | step | in `neo_create` | in `neo_batch` | consequence |
 |---|---|---|---|
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation and sales invoice lines (ETP-5528, §4.12.20) | yes | `neo_batch` runs it in `NeoCrudHandler.executePostCreate`; `neo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales invoice lines (`SalesInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order and purchase invoice lines still do not get it (measured 2026-09-30: purchase order line gross 0, purchase invoice line net / gross 0 / 0). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
 
@@ -2514,11 +2517,81 @@ This is a **declared** list, not an unknown one: the point is that the next pers
 path can see what is deliberately unequal. Closing a row means adding the step to
 `preprocessBatchOperation` and re-measuring this table in the same change.
 
+##### Closed: a line discount and the standard price on `neo_create` / `neo_batch` (ETP-5528)
+
+Measured on 2026-09-30 before the ETP-5528 rework (Fernet, list price = standard price 18, 21 % VAT,
+net price list):
+
+| channel | line | `unitPrice` | `lineNetAmount` | `lineGrossAmount` | `standardPrice` |
+|---|---|---|---|---|---|
+| UI (REST single) — the reference | qty 2, `discount 5` | 17.10 | 34.20 | 41.38 | **18** |
+| `neo_create` (first ETP-5528 cut) | qty 10, `discount 5` | **18** | **180** | 217.80 | **0** |
+| `neo_create`, no discount | qty 10 | 18 | 180 | 217.80 | **0** |
+| `neo_batch` | qty 10, `discount 5` | **18** | **180** | 217.80 | **0** |
+| `neo_update` to `discount 10` | qty 10 | 16.20 | 162 | 196.02 | **16.20** |
+
+**Measured after ETP-5528 on 2026-09-30** (local build, values read back from the DB; same data,
+qty 10). `neo_create` and `neo_batch` gave identical results:
+
+| channel | line | `unitPrice` | `lineNetAmount` | `lineGrossAmount` | `standardPrice` |
+|---|---|---|---|---|---|
+| `neo_create` / `neo_batch` | no discount | 18 | 180 | 217.80 | 18 |
+| `neo_create` / `neo_batch` | `discount 5` | 17.10 | 171 | 206.91 | 18 |
+| `neo_create` / `neo_batch` | explicit `unitPrice 20` | 20 | 200 | 242 | 18 |
+| `neo_create` / `neo_batch` | `discount 5` + explicit `unitPrice 20` | 20 | 200 | 242 (`discount 5` persisted) | 18 |
+| `neo_update` | `discount 5 → 10` | 16.20 | 162 | 196.02 | 18 |
+| `neo_update` | `discount 10 → 0` | 18 | 180 | 217.80 | 18 |
+| `neo_update` | `discount 0 → 5` | 17.10 | 171 | 206.91 | 18 |
+| UI (REST single) | add line | unchanged — the add-line POST carries `unitPrice` and the amounts (network payload inspected) | | | |
+
+End to end through the UI, a quotation with a 10 % total discount → order (stays in Draft, §4.12.21)
+→ shipment + invoice gave an invoice of 675.90 net / 817.84 total.
+
+Known gaps, still open after the measurement (details in §4.12.20):
+
+- `neo_create` with a discount still answers `supersededDefaults: {discount: …}` and its hint,
+  although the discount is applied.
+- With an explicit `unitPrice`, `listPrice` persists as the defaults cascade left it (usually 0):
+  `McpLinePriceInjector` abstains when the agent sent a price. Pre-existing, unchanged from
+  `develop`.
+- Each resolution logs one ERROR line tagged `(warn)` from
+  `NeoExtensionIndex.warnOnQualifierDisagreement`, because the `Java_Qualifier` is kept on purpose.
+
+Both verbs now agree with the form. The discount rule no longer needs to know which keys the caller
+sent: it mirrors the form, which always sends `unitPrice = listPrice × (1 − discount/100)`, so a
+body whose `unitPrice` still equals the undiscounted `listPrice` next to a non-zero discount is one
+the discount has not reached yet — which is exactly what `McpLinePriceInjector` leaves behind. No
+ETP-5415 plumbing (`NeoContext`, `BatchService`, the context builders) was touched, and
+`McpLinePriceInjector` is unchanged: it stays a shared MCP compensation for every commercial line,
+tolerated until migration M4. Details in §4.12.20.
+
+##### Closed: sales invoice line amounts on `neo_create` (ETP-5528)
+
+Measured on 2026-09-30 (Fernet, sales price list *Tarifa de venta principal* at 18, 21 % VAT, net
+list, qty 10; `line_gross_amount` is the DB column behind `grossAmount`). The "after" row was
+measured on a local build and read back from the DB:
+
+| channel | `listPrice` | `unitPrice` | `lineNetAmount` | `grossAmount` |
+|---|---|---|---|---|
+| `neo_batch` (before and after, unchanged) | 18 | 18 | 180 | 217.80 (217.79999999999998 unrounded) |
+| `neo_create` — before | 18 | 18 | **0** | **0** |
+| `neo_create` — after (measured) | 18 | 18 | 180 | 217.80 (217.79999999999998 unrounded) |
+
+`neo_create` never reaches `executePostCreate`, where `neo_batch` runs `injectCommercialAmounts`.
+The sales invoice line customization now calls it explicitly on every create (§4.12.20, *Sales
+invoice lines*), and writes the policy's own unrounded value — the same one `neo_batch` persists, so
+the two verbs agree to the last digit. `McpToolRouter.handleCreate` is unchanged. **Purchase invoice
+lines still persist 0 / 0 on `neo_create`**, and purchase order lines still persist a gross amount
+of 0, as on `develop` (re-measured 2026-09-30) — they are not annotated and stay on
+`InvoiceLineHandler` / `OrderLineHandler` alone.
+
 ##### REST `/sws/neo/batch` is unaffected
 
 It shares `BatchService` and passes **no** preprocessor, so none of the MCP compensations above
 apply to it. That is by decision — the underlying defects live in the shared selector-aux path the
-React frontend also uses, and changing what the frontend persists is out of scope. `BatchService`
+React frontend also uses, and changing what the frontend persists is out of scope. The ETP-5528
+customizations (§4.12.20) do run on REST batch — they are entity pre-hooks, not MCP compensations —
+but they only act on a missing or stale value, so REST batch results do not change. `BatchService`
 itself holds no knowledge of who supplies a preprocessor or what it does.
 
 ##### Atomicity
@@ -6075,3 +6148,242 @@ entities, the `sii-monitor` entities) resolve it from the parent, which for `sii
 
 Not covered: `NeoCrudHandler.addTabWherePredicate` (the `_distinct` read) still carries its own copy
 of the same rule.
+
+#### 4.12.20 Commercial line prices and amounts match the form (ETP-5528)
+
+**Product rule:** an order or quotation line written through the API must end with the same price
+and amounts as the same line entered in the form. Two gaps broke that:
+
+| Symptom (sales quotation line, qty 10 × 18, 21% VAT, `discount: 5`) | Cause | Where it is fixed |
+|---|---|---|
+| `lineGrossAmount` 0 ("Importe bruto de línea 0,00"), even without a discount, and copied as 0 into the order converted from the quotation | `SL_Order_Amt` publishes `grossUnitPrice × qty`, which is 0 on a net price list, and the `C_OrderLine` trigger only derives the gross for tax-included lists. REST fills it with `NeoCommercialLinePolicy.injectCommercialAmounts` in `executePostCreate`; `neo_create` is a separate pipeline and never called it. | **In the entities' own customizations**, not in shared code: the sales order and quotation line pre-hook calls `injectCommercialAmounts` explicitly (T12) on every create (`deriveAmountsOnCreate`, below). `McpToolRouter.handleCreate` is left as on `develop` and does not call it, so no other entity's `neo_create` changes. |
+| `unitPrice` stayed 18 and `lineNetAmount` 180 (expected 17.10 / 171); `standardPrice` 0 on create and discounted on update (expected 18) | The only code that turns a discount into a price is the core callout `SL_Order_Amt`. The form runs it (it computes the discounted `unitPrice` client-side and sends it); a caller that sends only `discount` reaches no path that runs it. | **In the entities' own customizations**, below, on every channel — by the form's own rule, not by knowing which keys the caller sent. |
+
+##### The rules live in two customizations
+
+`SalesOrderLineHandler` — `@NeoExtension(spec = "sales-order", entity = "lines")` — and
+`SalesQuotationLineHandler` — `@NeoExtension(spec = "sales-quotation", entity = "quotationLine")`.
+Two classes because the annotation is not repeatable; both extend `OrderLineHandler`, so they keep
+its GET filter and `productCode`, its `afterCallout` tax rate and its PATCH gross-price fix, and both
+call the same entity helper `OrderLineDiscountSupport` explicitly (T12). Nothing is selected by a
+property-name guard; the former `McpLineAmountSupport`, which was, is deleted.
+`McpLinePriceInjector` is **not** part of this: it stays a shared MCP compensation, selected by a
+`hasProperty` guard, for every commercial line — tolerated until migration M4 and unchanged here.
+
+The pre-hook (`handle`, CREATE and UPDATE surfaces, every channel) runs, after the parent's:
+
+1. **`setStandardPriceOnCreate`** (create only). Sets `standardPrice` to the standard price of the
+   product in the parent order's price list at the order date (`FinancialUtils.getProductPrice`,
+   the call `McpLinePriceInjector` makes for `unitPrice`), whatever the body carries — the form
+   persists that value whatever unit price the user typed. Safe to overwrite because `standardPrice`
+   is read-only (`system`) on both entities, so it is never the caller's: MCP refuses it and the form
+   sends the product callout's value, which is the same one. Without it `neo_create` persisted
+   `PriceStd 0`, or, with an explicit `unitPrice 20`, 20 (the defaults cascade copies `priceActual`
+   into `inppricestd`). The parent is `salesOrder` on `neo_create`, `parentId` on REST and batch.
+   `unitPrice` is never touched, and `listPrice` is not set (it is editable on both entities).
+   Abstains on a tax-included list (its standard price is gross, `standardPrice` is net), and when
+   product, order, list or price are missing.
+2. **`applyDiscount`**. Re-fires `SL_Order_Amt` for `discount` through the shared
+   `NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields`, when the body carries a `discount`,
+   no explicit gross price, and either
+   - no `unitPrice` — any discount, 0 included (on update, 0 restores the list price), or
+   - a **non-zero** `discount` and a `unitPrice` equal to the **undiscounted** `listPrice`
+     (`BigDecimal.compareTo`, so `18 == 18.00`). On update the list price is the stored line's,
+     overlaid with the patch.
+
+   Any other `unitPrice` is the caller's price and wins. A non-zero `grossUnitPrice` is an explicit
+   price too (tax-included lists) and wins; a zero one is not (a net list carries 0 there).
+   **Accepted edge case:** a caller that deliberately sends `unitPrice == listPrice` with a non-zero
+   discount gets the discount applied — what the form does with those two values.
+
+What the re-fire may write:
+
+- **Protected** (kept as the body has them): every body key except `unitPrice`, a zero
+  `grossUnitPrice`, and — on create — the amounts judged server-derived (below).
+- **Suppressed** (never written, present or not): `standardPrice` and `baseGrossUnitPrice`
+  (`C_OrderLine.GrossPriceStd`). `SL_Order_Amt` publishes both discounted, directly and again through
+  the `unitPrice` it cascades into; the form keeps them undiscounted (`PriceStd 18`,
+  `PriceActual 17.10`). This is why `neo_update` used to persist `standardPrice 16.20`: protecting a
+  field only keeps a value already in the body, and a sparse patch does not carry it. The new
+  `executeCalloutsForTriggerFields` overload takes the suppressed set; it is generic and names no
+  entity.
+- **Aligned on input** (`alignStandardPriceWithCurrentPrice`): the callout READS the line's current
+  `unitPrice` as its `standardPrice` (and a non-zero `grossUnitPrice` as `baseGrossUnitPrice`).
+  `SL_Order_Amt`'s `inpdiscount` branch only recomputes when the new discount differs from
+  `(priceList − priceStd) / priceList`, the discount it infers from `inppricestd`. With the stored,
+  undiscounted `standardPrice` 18 it inferred 0 on a line at discount 5, so a `neo_update` back to
+  `discount 0` compared 0 with 0 and left `PriceActual 17.10` next to discount 0. Only the callout's
+  input changes; the output stays suppressed, so the persisted `standardPrice` is still 18.
+
+Amounts after the re-fire:
+
+- **Update:** the callout writes `lineNetAmount`; `lineGrossAmount` is derived with
+  `injectCommercialAmounts` over the final quantity, price and tax (stored line as fallback). Neither
+  overwrites an amount the patch carries.
+- **Create, re-fire:** on `neo_create` the defaults cascade already ran on the undiscounted price,
+  so the body cannot say whether an amount is the caller's. It is judged **by value**: an amount is
+  server-derived when absent, zero, or equal at 2 decimals to what the undiscounted price yields
+  (`orderedQuantity × unitPrice` for `lineNetAmount`, `injectCommercialAmounts` over the same inputs
+  for `lineGrossAmount`). Server-derived amounts are left to the re-fire — `lineNetAmount` is
+  rewritten by the callout, a stale `lineGrossAmount` is dropped. Any other value is the caller's
+  and is kept. Edge case: a caller that sends exactly the undiscounted amount with a discount gets
+  it recomputed.
+- The values written are type-coerced there, because `neo_create` and `neo_update` coerce before
+  their pre-hook.
+- A line with no list price is left alone: the callout would discount from 0.
+
+**3. `deriveAmountsOnCreate`** (create only, **every** create, with or without a discount). Calls
+`NeoCommercialLinePolicy.injectCommercialAmounts` explicitly (T12) over the final quantity, price,
+gross price and tax, and writes `lineGrossAmount` when the body's value is absent, zero, or already
+equal (2 decimals) to the derived one; any other value is the caller's and is kept. `lineNetAmount`
+is not touched (the policy derives it only from `invoicedQuantity`; for an order line it comes from
+the callout). This is what gives `neo_create` a correct `lineGrossAmount` — it never reaches
+`executePostCreate`, and the shared MCP path is deliberately left as on `develop`.
+
+- **No tax in the body → abstain.** A REST or batch create reaches its pre-hook before the create
+  cascade resolves the tax; deriving there would use a 0 % rate. `executePostCreate` derives it
+  after its cascade, as it always has.
+- **No double computation.** With a tax, the value written is non-zero, so `executePostCreate`'s own
+  `injectCommercialAmounts` keeps it (it only fills a zero) — and it is the same function over the
+  same inputs anyway. The UI sends its own `lineGrossAmount`; it is kept unless it already equals
+  the derived value.
+
+**Batch and REST creates after the pre-hook.** `NeoCrudHandler.executePostCreate` takes its
+`userSubmittedFields` snapshot after the pre-hook, so the discounted `unitPrice`, the derived
+`lineNetAmount` and the filled `standardPrice` are protected in the create cascade that follows:
+`SL_Order_Product` and `SL_Order_Amt` fire there but cannot revert them. `injectCommercialAmounts`
+then derives `lineGrossAmount` from the discounted price, with the tax the cascade resolved (the
+customization abstained on it, having no tax yet).
+
+##### What each channel gets
+
+Fernet, list = standard price 18, net list, 21 % VAT, qty 10. `std` = `standardPrice`.
+
+| channel | no discount | `discount 5` | `unitPrice 20` | `discount 5` + `unitPrice 20` |
+|---|---|---|---|---|
+| `neo_create` | 18 / 180 / 217.80, std 18 | 17.10 / 171 / 206.91, std 18 | 20 / 200 / 242, std 18 | 20 / 200 / 242, discount 5 kept, std 18 |
+| `neo_batch` | idem | idem | idem | idem |
+| REST single — the React form | unchanged | unchanged (17.10 / 171 / 206.91 on qty 10) | not a form input: the form derives `unitPrice` from `listPrice` | not reachable from the form |
+| REST single / REST batch — other clients | as `neo_create` when `unitPrice` is absent or equals `listPrice`; the caller's price otherwise | | | |
+
+`neo_update` on that line (std stays 18 in every row):
+
+| from → to | `unitPrice` / `lineNetAmount` / `lineGrossAmount` |
+|---|---|
+| discount 0 → 5 | 17.10 / 171 / 206.91 |
+| discount 5 → 10 | 16.20 / 162 / 196.02 |
+| discount 5 → 0 | 18 / 180 / 217.80 |
+| `unitPrice 20` only | 20, amounts not refreshed (known gap below) |
+
+**The form never meets the rule.** Both UI line writes send `unitPrice = round6(listPrice × (1 −
+discount/100))`: the add row and the inline edit send the whole row with its `listPrice`
+(`prepareLineForPost`), and the side-panel save sends the edited keys plus that `unitPrice`, computed
+from the open line's `listPrice`. So `unitPrice == listPrice` only when the discount is 0, and the rule
+needs a non-zero discount. A tax-included list sends a non-zero `grossUnitPrice`, which is explicit.
+The only theoretical overlap is a side-panel save whose open line has a `listPrice` other than the
+stored one (a concurrent edit); the re-fire would then apply the discount to the stored list price —
+the value the form itself would have sent with fresh data.
+
+##### Known gaps
+
+- Only a change to `discount` re-fires `SL_Order_Amt`. An update that changes only
+  `orderedQuantity` or `unitPrice` does not; on `neo_update` its amounts are not refreshed.
+- On a REST patch from a non-UI client, `lineGrossAmount` is read-only and dropped by
+  `filterWriteRequest`, so it is not refreshed there.
+- A tax-included price list: `standardPrice` is not filled, and `neo_create` gets no price from
+  `McpLinePriceInjector` either, so the rule usually abstains (no list price).
+- `neo_create` with a discount still answers `supersededDefaults: {discount: {sent: 5, callout: 0}}`
+  and its hint, although the discount is now applied. The entry is recorded by the defaults cascade
+  on the router's own context (`McpToolRouter.handleCreate`, reported with
+  `ctx.getSupersededDefaults()`); the customization only receives the hook context, which does not
+  share it, and reaching it would be ETP-5415 plumbing. Declared, not fixed.
+- With an explicit `unitPrice`, `listPrice` persists as the defaults cascade left it (usually 0):
+  `McpLinePriceInjector` abstains when the agent sent a price, and the selector-aux values the
+  cascade reads have no price-list context. Unchanged from `develop`. Not filled by the
+  customization because `listPrice` is editable on both entities, so a 0 in the body cannot be told
+  apart from a caller's 0.
+- The rule compares `unitPrice` with the line's `listPrice`. A price list whose standard price
+  differs from its list price gives `McpLinePriceInjector`'s `unitPrice` (the standard price) ≠
+  `listPrice`, so a discount sent to `neo_create` / `neo_batch` on such a list is not applied.
+
+##### Sales invoice lines: amounts on `neo_create`
+
+`SalesInvoiceLineHandler` — `@NeoExtension(spec = "sales-invoice", entity = "lines")` — extends
+`InvoiceLineHandler`, so it keeps everything the parent does (return-invoice negation, the imported
+source line, the conversion-rate and order-reference syncs, the SII exemption signals, the GET
+filters, `afterCallout`). Its pre-hook, after the parent's (a response from it still
+short-circuits), calls `InvoiceLineAmountSupport.deriveAmountsOnCreate` (CRUD POST only):
+
+- It runs `NeoCommercialLinePolicy.injectCommercialAmounts` explicitly (T12) over a view holding
+  only the inputs — `invoicedQuantity`, `unitPrice`, `grossUnitPrice`, `tax` — and writes
+  **`lineNetAmount`** (`LineNetAmt`) and **`grossAmount`** (`Line_Gross_Amount`).
+- **Never overwrites the caller**: each amount is written only when the body's value is absent,
+  zero, or already equal at 2 decimals to the derived one (`LineAmountSupport.isStaleAmount`, the
+  same value rule the order-line customizations use), and only when the derived value is non-zero.
+- **No tax in the body → abstain**, as the order lines do: a REST or batch create reaches its
+  pre-hook before the create cascade resolves the tax. On `neo_create` the tax is mandatory and
+  already resolved when the pre-hook runs.
+- **No double computation.** On REST and batch, `executePostCreate` runs `injectCommercialAmounts`
+  afterwards, and for an invoice line both injectors write unconditionally (qty × price, then net ×
+  (1 + rate)): whatever the pre-hook wrote is replaced by the same function over the same inputs, so
+  those channels persist exactly what they did before.
+- Values are written as `BigDecimal` (`neo_create` coerced before its pre-hook) and unrounded — the
+  policy's own value, identical to `neo_batch`'s.
+- **Amounts only.** Prices, `standardPrice` and the line discount (`etgoDiscount`) are neither read
+  for a decision nor written.
+
+| channel | sales invoice line, Fernet 18 × 10, 21 %: `lineNetAmount` / `grossAmount` |
+|---|---|
+| `neo_create` | 180 / 217.79999999999998 (was 0 / 0) |
+| `neo_batch` | 180 / 217.79999999999998 (unchanged) |
+| REST single — the React form | unchanged: the add-line POST sends its own `lineNetAmount` and `grossAmount`, and `executePostCreate` re-derives both after the pre-hook as it always has |
+
+The value rule lives in `LineAmountSupport`, a plain utility that names no entity or property;
+`OrderLineDiscountSupport` delegates to it, with its behaviour unchanged. The `Java_Qualifier` of
+the row stays `invoiceLineHandler`, for the reasons below. `purchase-invoice/lines` is not
+annotated: it keeps 0 / 0 on `neo_create`, as on `develop`.
+
+##### Binding: the `Java_Qualifier` stays
+
+`ETGO_SF_ENTITY.Java_Qualifier` still reads `orderLineHandler` on both rows, deliberately. Several
+readers resolve the qualifier directly instead of going through `NeoExtensionDispatcher`: the REST
+CRUD gate (`NeoCrudHandler.dispatchCrudRequestInternal` only calls `handleWithHooks` when a qualifier
+exists), the MCP read post-hook (`McpHookExecutor.resolveEntityHandler`), `NeoFieldFilter`'s
+read-only rejection and `protectedCreateCalloutFields`. Clearing the qualifier would switch the
+customization off on REST single and drop the discount-line filter from MCP reads. With it kept,
+those readers resolve the parent class — whose behaviour the customizations inherit unchanged — and
+the dispatched surfaces resolve the annotation. The cost is one `(warn)` ERROR line per resolution
+from `NeoExtensionIndex.warnOnQualifierDisagreement`, and a conflict line in `make extension-parity`.
+
+##### Scope
+
+`purchase-order/lines` stays on `OrderLineHandler`, untouched. Return lines and invoice lines are not
+re-fired either (sales invoice lines only get their amounts derived on create, above — no discount
+re-fire): they had this behaviour only on the unreleased ETP-5528 branch, through the removed
+MCP-layer class, so this is no regression against `develop`.
+
+#### 4.12.21 `Convertquotation` leaves the new sales order in Draft on every channel (ETP-5528)
+
+Core's `ConvertQuotationIntoOrder` always completes the order it creates (`c_order_post1`). The
+SPA used to put it back into Draft with a second request from the browser
+(`QuotationConfirmModal`: `POST sales-order/header/{id}/action/DocAction {docAction:'RE'}`, ETP-3570).
+An order created through `neo_action Convertquotation` therefore stayed Completed.
+
+`SalesQuotationHeaderHandler.handleConvertQuotation` now does the reactivation itself, in the same
+request. `OrderDocActionSupport.runDocAction(order, "RE")` writes the action onto the order and
+calls `C_Order_Post` (AD_Process `104`), the procedure the DocAction button reaches. It also keeps
+the button's process-access check.
+
+- **Response:** `{ "salesOrderId": "<id>", "documentStatus": "DR" }`.
+- **Best-effort only for reported failures:** if the procedure reports a failure (an `AD_PInstance`
+  result other than 1), or the role lacks access, the conversion is kept, the order stays `CO`, the
+  failure is logged, and `documentStatus` says so.
+- **A thrown exception fails the whole request.** A failed flush, `CallProcess` wrapping an
+  `SQLException`, or a statement timeout leaves the PostgreSQL transaction aborted. Such an
+  exception is not swallowed: the request answers with an error and nothing is persisted. It never
+  answers 200 with a `salesOrderId` that the commit then rolls back.
+- **No total-discount sync on this RE.** The backend RE does not run `syncTotalDiscountOnDocAction`;
+  on a freshly converted order that sync would be a no-op anyway.
+- **UI unchanged:** the modal's own RE call only fires when the fetched order is `CO`, so against
+  a Draft order it is a no-op. The UI still ends with a Draft order, and nothing is reactivated
+  twice.

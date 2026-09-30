@@ -421,6 +421,108 @@ public class SalesQuotationHeaderHandlerTest {
     verify(process).convertQuotationIntoSalesOrder(false, "q-001");
   }
 
+  // ── ETP-5528: the converted order is reactivated to Draft ─────────────────
+
+  /**
+   * Runs {@code Convertquotation} on a handler whose conversion returns {@code order}, with
+   * {@link OrderDocActionSupport} statically mocked by the caller.
+   */
+  private static NeoResponse convertQuotation(Order order) throws Exception {
+    ConvertQuotationIntoOrder process = mock(ConvertQuotationIntoOrder.class);
+    when(process.convertQuotationIntoSalesOrder(false, "q-5528")).thenReturn(order);
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(
+        mock(TotalDiscountService.class), mock(NeoCloneRecordHandler.class),
+        mock(CurrencyOptionsHandler.class), mock(CreateDraftInvoiceHandler.class),
+        mock(RejectQuotationHandler.class), mock(CreateRejectReasonHandler.class));
+    setField(handler, "convertQuotationProcess", process);
+    return handler.handle(NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("Convertquotation").recordId("q-5528").build());
+  }
+
+  /** An order whose documentStatus reads {@code first}, then {@code then} on every later call. */
+  private static Order orderWithStatus(String first, String then) {
+    Order order = mock(Order.class);
+    when(order.getId()).thenReturn("order-5528");
+    when(order.getDocumentNo()).thenReturn("SO-5528");
+    when(order.getDocumentStatus()).thenReturn(first, then);
+    return order;
+  }
+
+  /**
+   * Core completes the order it creates: a CO order is reactivated through C_Order_Post 'RE' and
+   * the response reports the Draft status the procedure left.
+   */
+  @Test
+  public void testConvertQuotation_completedOrder_isReactivatedToDraft() throws Exception {
+    Order order = orderWithStatus("CO", "DR");
+    try (MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class)) {
+      docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(true);
+
+      NeoResponse result = convertQuotation(order);
+
+      docAction.verify(() -> OrderDocActionSupport.runDocAction(order, "RE"));
+      assertEquals(200, result.getHttpStatus());
+      assertEquals("order-5528", result.getBody().getString("salesOrderId"));
+      assertEquals("DR", result.getBody().getString("documentStatus"));
+    }
+  }
+
+  /**
+   * A failure the procedure REPORTS is best-effort: the conversion is kept, the order stays CO
+   * and the response says so.
+   */
+  @Test
+  public void testConvertQuotation_reactivationReportsFailure_keepsCompletedOrder()
+      throws Exception {
+    Order order = orderWithStatus("CO", "CO");
+    try (MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class)) {
+      docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE")).thenReturn(false);
+
+      NeoResponse result = convertQuotation(order);
+
+      assertEquals(200, result.getHttpStatus());
+      assertEquals("order-5528", result.getBody().getString("salesOrderId"));
+      assertEquals("CO", result.getBody().getString("documentStatus"));
+    }
+  }
+
+  /**
+   * A THROWN failure leaves the transaction aborted, so answering 200 with a salesOrderId that
+   * will never be persisted would lie: the whole request must fail.
+   */
+  @Test
+  public void testConvertQuotation_reactivationThrows_returnsError() throws Exception {
+    Order order = orderWithStatus("CO", "CO");
+    try (MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class)) {
+      docAction.when(() -> OrderDocActionSupport.runDocAction(order, "RE"))
+          .thenThrow(new java.sql.SQLException("statement timeout"));
+
+      NeoResponse result = convertQuotation(order);
+
+      assertEquals(500, result.getHttpStatus());
+      assertFalse(result.getBody().has("salesOrderId"));
+    }
+  }
+
+  /** An order core did not leave in CO is not reactivated. */
+  @Test
+  public void testConvertQuotation_orderNotCompleted_noReactivation() throws Exception {
+    Order order = orderWithStatus("DR", "DR");
+    try (MockedStatic<OrderDocActionSupport> docAction =
+             Mockito.mockStatic(OrderDocActionSupport.class)) {
+
+      NeoResponse result = convertQuotation(order);
+
+      docAction.verify(() -> OrderDocActionSupport.runDocAction(any(), anyString()), never());
+      assertEquals(200, result.getHttpStatus());
+      assertEquals("DR", result.getBody().getString("documentStatus"));
+    }
+  }
+
   // ── afterHandle / transferCurrencyRateToNewOrder ──────────────────────────
 
   /**
