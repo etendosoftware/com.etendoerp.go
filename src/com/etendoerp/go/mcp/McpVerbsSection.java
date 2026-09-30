@@ -21,9 +21,12 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * The {@code verbs} section of {@code MCP_CONFIG}: hides MCP write verbs that
@@ -80,6 +83,8 @@ final class McpVerbsSection {
       Set.of(KEY_CREATE, KEY_UPDATE, KEY_DELETE, KEY_REASON, KEY_INSTEAD);
 
   /** The reason an agent reads when the configuration itself cannot be trusted. */
+  private static final Logger log = LogManager.getLogger(McpVerbsSection.class);
+
   private static final String UNUSABLE_REASON = "its MCP configuration is invalid";
 
   private McpVerbsSection() {
@@ -169,6 +174,8 @@ final class McpVerbsSection {
     }
     McpEntityConfig.Resolved resolved = McpEntityConfig.forEntity(entity);
     if (!resolved.isUsable()) {
+      log.warn("MCP write {} hidden on entity '{}' ({}): its MCP_CONFIG is unusable — {}", method,
+          entity.getName(), entity.getId(), resolved.describeProblems());
       return new Hidden(UNUSABLE_REASON, null);
     }
     JSONObject body = resolved.section(NAME).orElse(null);
@@ -180,13 +187,13 @@ final class McpVerbsSection {
   }
 
   private static String verbOf(String method) {
-    if ("POST".equals(method)) {
+    if (NeoMethodPolicy.METHOD_POST.equals(method)) {
       return KEY_CREATE;
     }
-    if ("PUT".equals(method) || "PATCH".equals(method)) {
+    if (NeoMethodPolicy.METHOD_PUT.equals(method) || NeoMethodPolicy.METHOD_PATCH.equals(method)) {
       return KEY_UPDATE;
     }
-    if ("DELETE".equals(method)) {
+    if (NeoMethodPolicy.METHOD_DELETE.equals(method)) {
       return KEY_DELETE;
     }
     return null;

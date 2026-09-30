@@ -243,12 +243,75 @@ class McpVerbsSectionTest {
           + "', view:'actions')"), hint);
     }
 
+    /**
+     * Review WARN-3: a method whose flag is off keeps its historical refusal, but its "Enabled
+     * methods" list must be the MCP's — listing a verb the section hides would send the agent
+     * straight into a second refusal.
+     */
+    @Test
+    @DisplayName("a flag-off refusal never lists a hidden verb among the enabled methods")
+    void flagOffRefusalListsOnlyMcpMethods() throws Exception {
+      SFEntity e = entity("{\"verbs\":{\"create\":false,\"reason\":\"r\"}}");
+      when(e.isDelete()).thenReturn(false);
+
+      McpRoutingException refusal = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.requireMethodEnabled(e.getETGOSFSpec(), e, "DELETE"));
+      String detail = refusal.toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("Enabled methods: GET, PUT, PATCH."), detail);
+      assertFalse(detail.contains("POST"), "POST is hidden from the MCP: " + detail);
+    }
+
+    @Test
+    @DisplayName("every verb hidden plus a flag off reads as read-only, like the shared wording")
+    void flagOffOnAnMcpReadOnlyEntity() throws Exception {
+      SFEntity e = entity("{\"verbs\":{\"create\":false,\"update\":false,\"reason\":\"r\"}}");
+      when(e.isDelete()).thenReturn(false);
+
+      McpRoutingException refusal = assertThrows(McpRoutingException.class,
+          () -> McpToolRouterSupport.requireMethodEnabled(e.getETGOSFSpec(), e, "DELETE"));
+      String detail = refusal.toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("Enabled methods: GET."), detail);
+      assertTrue(detail.contains("read-only by configuration"), detail);
+    }
+
     @Test
     @DisplayName("a verb that is not hidden passes")
     void visibleVerbPasses() {
       SFEntity e = entity("{\"verbs\":{\"create\":false,\"reason\":\"r\"}}");
       assertDoesNotThrow(
           () -> McpToolRouterSupport.requireMethodEnabled(e.getETGOSFSpec(), e, "PUT"));
+    }
+  }
+
+  // ── a fail-closed entity says so ──────────────────────────────────────
+
+  /**
+   * Review WARN-1: failing closed on a header entity used to be silent. The scope never reads the
+   * configuration of a header (it is NOT_CHILD before that), so {@code configError} only ever
+   * appeared on children, and a header whose writes had vanished looked merely read-only.
+   */
+  @Nested
+  @DisplayName("configError on any entity whose MCP_CONFIG is unusable")
+  class ConfigError {
+
+    @Test
+    @DisplayName("neo_discover reports configError on a header entity with an unusable config")
+    void headerReportsConfigError() throws Exception {
+      SFEntity e = entity("{\"verbs\":{\"create\":false}}");
+
+      JSONObject item = McpSupportInternals.buildDiscoverEntity(e);
+
+      assertTrue(item.has("configError"), item.toString());
+      assertTrue(item.getString("configError").contains("reason"), item.toString());
+      assertTrue(item.getBoolean("readOnly"), "its writes are hidden, and now it says why");
+    }
+
+    @Test
+    @DisplayName("a usable config adds no configError")
+    void usableConfigAddsNothing() throws Exception {
+      JSONObject item = McpSupportInternals.buildDiscoverEntity(
+          entity("{\"verbs\":{\"create\":false,\"reason\":\"r\"}}"));
+      assertFalse(item.has("configError"), item.toString());
     }
   }
 
@@ -300,9 +363,41 @@ class McpVerbsSectionTest {
         String src = McpSourceScanner.stripComments(
             McpSourceScanner.read("com/etendoerp/go/mcp/" + file));
         assertFalse(Pattern.compile("NeoMethodPolicy\\s*(\\.|::)\\s*(isMethodEnabled|"
-            + "enabledMethods|isReadOnly|hasMutableMethod)").matcher(src).find(),
+            + "enabledMethods|isReadOnly|hasMutableMethod|buildMcpNotEnabledMessage)").matcher(src)
+            .find(),
             file + " reads the raw flags; route it through McpMethodPolicy so hidden verbs agree");
       }
+    }
+
+    /**
+     * Review WARN-2: the entity's own getters are the other way to read the raw flags, and
+     * {@code McpParentScope.advertisedWrites} was doing exactly that. Every MCP class except the
+     * policy itself is scanned.
+     */
+    @Test
+    @DisplayName("no MCP class reads the write flags — getters or NeoMethodPolicy — but the policy")
+    void noRawFlagGetters() throws Exception {
+      java.nio.file.Path dir = java.nio.file.Paths.get(McpSourceScanner.srcRootForTests())
+          .resolve("com/etendoerp/go/mcp");
+      Pattern raw = Pattern.compile("\\.\\s*is(Post|Put|Patch|Delete)\\s*\\(\\s*\\)"
+          + "|NeoMethodPolicy\\s*(\\.|::)\\s*(isMethodEnabled|enabledMethods|isReadOnly|"
+          + "hasMutableMethod|buildMcpNotEnabledMessage)");
+      List<String> offenders = new java.util.ArrayList<>();
+      try (java.util.stream.Stream<java.nio.file.Path> files = java.nio.file.Files.list(dir)) {
+        for (java.nio.file.Path f : (Iterable<java.nio.file.Path>) files::iterator) {
+          String name = f.getFileName().toString();
+          if (!name.endsWith(".java") || "McpMethodPolicy.java".equals(name)) {
+            continue;
+          }
+          String src = McpSourceScanner.stripComments(
+              McpSourceScanner.read("com/etendoerp/go/mcp/" + name));
+          if (raw.matcher(src).find()) {
+            offenders.add(name);
+          }
+        }
+      }
+      assertTrue(offenders.isEmpty(), "raw ETGO_SF_ENTITY write-flag reads in " + offenders
+          + "; ask McpMethodPolicy so a verb MCP_CONFIG.verbs hides is hidden there too");
     }
   }
 }

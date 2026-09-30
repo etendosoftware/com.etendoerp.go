@@ -45,7 +45,6 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
-import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
@@ -238,7 +237,7 @@ final class McpToolRouterSupport {
     // A flag that is off keeps its historical refusal; neither REST nor MCP may use the method.
     if (!McpMethodPolicy.isFlagEnabled(entity, method)) {
       throw McpRoutingException.methodNotAllowed(
-          NeoMethodPolicy.buildMcpNotEnabledMessage(specName, entityName, method, entity));
+          McpMethodPolicy.buildNotEnabledMessage(specName, entityName, method, entity));
     }
     requireVerbNotHidden(spec, entity, method);
   }
@@ -1054,16 +1053,6 @@ final class McpToolRouterSupport {
    * @return the same object, for call chaining
    * @throws JSONException never in practice (all values are plain strings/ints)
    */
-  /**
-   * Whether a batch {@code error} object is already in the IMP-5 shape — it carries a string
-   * {@code error} code. {@code BatchService}'s own failures carry {@code status}/{@code message}/
-   * {@code detail} and never an {@code error} key, so the two cannot be confused.
-   */
-  private static boolean isImp5Envelope(JSONObject error) {
-    Object code = error.opt(McpConstants.KEY_ERROR);
-    return code instanceof String && StringUtils.isNotBlank((String) code);
-  }
-
   static JSONObject toMcpBatchFailure(JSONObject result) throws JSONException {
     if (result == null || result.optBoolean("committed", false)) {
       return result;
@@ -1095,5 +1084,15 @@ final class McpToolRouterSupport {
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     result.put(McpConstants.KEY_ERROR, clean);
     return result;
+  }
+
+  /**
+   * Whether a batch {@code error} object is already in the IMP-5 shape — it carries a string
+   * {@code error} code. {@code BatchService}'s own failures carry {@code status}/{@code message}/
+   * {@code detail} and never an {@code error} key, so the two cannot be confused.
+   */
+  private static boolean isImp5Envelope(JSONObject error) {
+    Object code = error.opt(McpConstants.KEY_ERROR);
+    return code instanceof String && StringUtils.isNotBlank((String) code);
   }
 }

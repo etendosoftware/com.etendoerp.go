@@ -137,6 +137,9 @@ final class McpSupportInternals {
     // can read parentField and parentRequiredFor gets the call right the first time. neo_schema
     // emits the same block from the same helper, so the two tools cannot drift apart.
     McpParentScope.publishInto(item, McpParentScope.forEntity(entity));
+    // ETP-5558: and for a header too — its scope never reads the configuration, and a broken one
+    // now hides every MCP write (MCP_CONFIG.verbs fails closed), so it must say why.
+    McpParentScope.publishConfigError(item, entity);
     // Entity-level agent guidance (ETP-4278), additive to the spec-level and
     // per-field prompts. Emitted only when set so untagged entities stay lean.
     String agentPrompt = entity.getAgentPrompt();

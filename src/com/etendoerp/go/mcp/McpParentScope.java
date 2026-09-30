@@ -37,6 +37,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * Answers, for one SchemaForge entity: is this a child record, which field links it to its parent,
@@ -413,19 +414,10 @@ final class McpParentScope {
    * @return the advertised write methods, empty for a read-only entity
    */
   private static List<String> advertisedWrites(SFEntity entity) {
-    List<String> writes = new ArrayList<>();
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      writes.add("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      writes.add("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      writes.add("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      writes.add("DELETE");
-    }
+    // ETP-5558: what the MCP advertises, not the raw flags — an unparented entity whose writes
+    // MCP_CONFIG.verbs hides has nothing to write, and must not be reclassified UNRESOLVABLE.
+    List<String> writes = new ArrayList<>(McpMethodPolicy.enabledMethods(entity));
+    writes.remove(NeoMethodPolicy.METHOD_GET);
     return writes;
   }
 
@@ -651,6 +643,32 @@ final class McpParentScope {
    * @return the error envelope
    * @throws JSONException if the envelope cannot be built
    */
+  /** The key a broken configuration is reported under, by every tool that describes an entity. */
+  static final String KEY_CONFIG_ERROR = "configError";
+
+  /**
+   * Report an unusable {@code MCP_CONFIG} on any entity, header or child (ETP-5558).
+   *
+   * <p>{@link #publishInto} covers children only: the scope of a header entity is {@code NOT_CHILD}
+   * before the configuration is ever read. Since {@code MCP_CONFIG.verbs} fails closed — an unusable
+   * configuration hides every MCP write — a header in that state lost its writes with nothing
+   * saying why. This names the problem wherever the configuration is unusable; it adds nothing when
+   * {@link #publishInto} already reported one.</p>
+   *
+   * @param target the response object to decorate
+   * @param entity the entity being described
+   * @throws JSONException if the key cannot be written
+   */
+  static void publishConfigError(JSONObject target, SFEntity entity) throws JSONException {
+    if (target.has(KEY_CONFIG_ERROR) || entity == null) {
+      return;
+    }
+    McpEntityConfig.Resolved resolved = McpEntityConfig.forEntity(entity);
+    if (!resolved.isUsable()) {
+      target.put(KEY_CONFIG_ERROR, resolved.describeProblems());
+    }
+  }
+
   static JSONObject buildParentRequiredError(String specName, String entityName, Scope scope)
       throws JSONException {
     return McpRoutingException
@@ -677,7 +695,7 @@ final class McpParentScope {
    */
   static void publishInto(JSONObject target, Scope scope) throws JSONException {
     if (!scope.isPublishable()) {
-      target.put("configError", scope.getProblem());
+      target.put(KEY_CONFIG_ERROR, scope.getProblem());
     }
     Optional<JSONObject> parentInfo = scope.describe();
     if (parentInfo.isEmpty()) {

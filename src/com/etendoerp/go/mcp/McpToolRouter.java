@@ -1469,6 +1469,7 @@ public class McpToolRouter {
     // to call something, so it is the one place the parent requirement must not be a surprise
     // discovered by getting a 422. Emitted only for child entities; a header tab adds nothing.
     McpParentScope.publishInto(entitySchema, parentScope);
+    McpParentScope.publishConfigError(entitySchema, sfEntity);
 
     // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
     // each keyed by name, so the agent can discover them instead of guessing. Only the

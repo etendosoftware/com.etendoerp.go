@@ -157,6 +157,32 @@ class McpParentScopeUnresolvableTest {
   }
 
   /**
+   * Review WARN-2: {@code unparented} is refused as UNRESOLVABLE when the entity advertises a write
+   * — and "advertises" must mean what the MCP advertises. An unparented entity whose flags are all
+   * on but whose writes {@code MCP_CONFIG.verbs} hides has nothing to write, so it is UNPARENTED.
+   */
+  @Test
+  @DisplayName("unparented with every write hidden by verbs stays UNPARENTED")
+  void unparentedWithHiddenWritesIsPublishable() {
+    Tab tab = child.getADTab();
+    SFSpec spec = child.getETGOSFSpec();
+    SFEntity scoped = mock(SFEntity.class);
+    when(scoped.getId()).thenReturn("ent-unparented");
+    when(scoped.getName()).thenReturn("unparentedLines");
+    when(scoped.getADTab()).thenReturn(tab);
+    when(scoped.getETGOSFSpec()).thenReturn(spec);
+    when(scoped.isPost()).thenReturn(true);
+    when(scoped.isPut()).thenReturn(true);
+    when(scoped.isPatch()).thenReturn(true);
+    when(scoped.isDelete()).thenReturn(true);
+    when(scoped.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(
+        "{\"parent\":{\"mode\":\"unparented\",\"reason\":\"r\"},"
+            + "\"verbs\":{\"create\":false,\"update\":false,\"delete\":false,\"reason\":\"r\"}}");
+
+    assertEquals(McpParentScope.Kind.UNPARENTED, McpParentScope.forEntity(scoped).getKind());
+  }
+
+  /**
    * The remedy "Set MCP_CONFIG parent.field …" is for whoever configures the entity: it stays in
    * the scope's problem ({@code configError}, the log) but must not reach the agent, who cannot
    * act on it and would only be sent looking for a tool that does not exist.

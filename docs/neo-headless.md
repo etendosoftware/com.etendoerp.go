@@ -2336,9 +2336,13 @@ hides the verb for the MCP only.
   hint is `neo_schema(spec, entity, view:'actions')` on the same entity.
 - `REPLACE`. Written at entity level; a spec-level body applies to every entity of that spec that
   declares none.
-- **Fails closed.** An entity whose `MCP_CONFIG` is unusable (bad JSON, unknown section or key, a
-  failing validator in any section) has every MCP write verb hidden; reads stay. A restriction that
-  failed validation must not switch itself off.
+- **Fails closed, and says so.** An entity whose `MCP_CONFIG` is unusable (bad JSON, unknown
+  section or key, a failing validator in any section) has every MCP write verb hidden; reads stay. A
+  restriction that failed validation must not switch itself off. `neo_discover` and `neo_schema`
+  report `configError` on **any** such entity, header or child (`McpParentScope.publishConfigError`
+  — the parent scope of a header never reads the configuration, so before this a header whose
+  writes had vanished only looked read-only), and every hidden-verb decision taken for that reason
+  is logged at WARN with the entity and the problems.
 
 **One policy, every surface.** `McpMethodPolicy` = the flags (`NeoMethodPolicy`) minus the hidden
 verbs, and it is the only MCP-side answer to "may the MCP use this method": the tool catalogue
@@ -2347,8 +2351,11 @@ verbs, and it is the only MCP-side answer to "may the MCP use this method": the 
 `view:"create"` on a hidden create is refused rather than publishing a create contract),
 `neo_create` / `neo_update` / `neo_delete` (`requireMethodEnabled`) and `neo_batch`
 (`preprocessBatchOperation`, before any other gate). `McpVerbsSectionTest` fails the build if an MCP
-class reads `NeoMethodPolicy`'s predicates directly. REST keeps reading `NeoMethodPolicy` and is
-unchanged.
+class other than `McpMethodPolicy` reads the write flags — through `NeoMethodPolicy`'s predicates or
+through the entity's own `isPost()`/`isPut()`/`isPatch()`/`isDelete()`. That includes
+`McpParentScope`: `mode:"unparented"` is refused as `UNRESOLVABLE` only when the entity has a write
+the **MCP** advertises, so an unparented entity whose writes `verbs` hides stays publishable. REST
+keeps reading `NeoMethodPolicy` and is unchanged.
 
 The refusal:
 
@@ -2360,7 +2367,8 @@ The refusal:
 ```
 
 A verb whose flag is off keeps its historical refusal (same 405 and code, the "Enabled methods: …"
-wording).
+wording), built by `McpMethodPolicy.buildNotEnabledMessage` so the list is the MCP's and never names
+a hidden verb. The shared `NeoMethodPolicy.buildMcpNotEnabledMessage` is not changed.
 
 **Applied today (ETP-5558):**
 

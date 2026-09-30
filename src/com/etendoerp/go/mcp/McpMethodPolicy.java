@@ -96,6 +96,38 @@ final class McpMethodPolicy {
   }
 
   /**
+   * The refusal for a method whose {@code ETGO_SF_ENTITY} flag is off, worded as
+   * {@link NeoMethodPolicy#buildMcpNotEnabledMessage} but listing the methods the <b>MCP</b> may use
+   * (ETP-5558). The shared message lists the raw flags, so on an entity that also hides a verb it
+   * would name that verb as available and send the agent into a second refusal. The shared method
+   * is left as it is.
+   *
+   * @param specName   the spec being called
+   * @param entityName the entity
+   * @param method     the refused method
+   * @param entity     the SchemaForge entity
+   * @return the message
+   */
+  static String buildNotEnabledMessage(String specName, String entityName, String method,
+      SFEntity entity) {
+    List<String> enabled = enabledMethods(entity);
+    String enabledText = enabled.isEmpty() ? "none" : String.join(", ", enabled);
+    StringBuilder message = new StringBuilder()
+        .append("Entity '").append(entityName).append("' of spec '").append(specName)
+        .append("' does not enable ").append(method)
+        .append(". Enabled methods: ").append(enabledText).append('.');
+    if (isReadOnly(entity)) {
+      message.append(" This entity is read-only by configuration — use neo_list or neo_get "
+          + "to read it. CRUD writes to it are not allowed; a separately configured "
+          + "neo_action may still be available. Do not retry this CRUD operation.");
+    } else {
+      message.append(" Pick a tool that matches an enabled method, or use neo_discover to "
+          + "inspect this spec's entities before retrying.");
+    }
+    return message.toString();
+  }
+
+  /**
    * @param entity the SchemaForge entity
    * @return {@code true} when the entity is readable and the MCP may not write it
    */

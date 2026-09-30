@@ -24,6 +24,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
+
 /**
  * A routing failure that already knows its own IMP-5 envelope (ETP-4793 / IMP-17).
  *
@@ -235,10 +237,10 @@ class McpRoutingException extends OBException {
   }
 
   private static String verbName(String method) {
-    if ("POST".equals(method)) {
+    if (NeoMethodPolicy.METHOD_POST.equals(method)) {
       return "create";
     }
-    if ("DELETE".equals(method)) {
+    if (NeoMethodPolicy.METHOD_DELETE.equals(method)) {
       return "delete";
     }
     return "update";
