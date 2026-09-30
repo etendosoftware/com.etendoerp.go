@@ -4031,17 +4031,26 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 of the caller's OWN tenant's roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
 
-**UI-excluded windows (ETP-5068).** `resolveActiveEtendoGoWindowsById()` subtracts
-`SFRolesOverview.UI_EXCLUDED_WINDOW_IDS` from the active-`SPEC_TYPE='W'` spec set: windows Etendo GO
-serves read-only over NEO/MCP but deliberately shows nowhere in its own UI. Because that one method is
-the single source every downstream structure derives from — each role's `windows` array, its
-`windowCount`, and the `matrix` — a single entry in that set removes the window from **both** admin
-screens at once:
+**Shared matrix builder (ETP-5485).** The window set, tier resolution (real windows plus the
+ETP-5071 proxy rows), `matrix`, `reportsMatrix` and each card's `windows` array are built by
+`com.etendoerp.go.schemaforge.util.RoleAccessMatrix`, NOT by this webhook. `SFSystemRoleTemplates`
+(§8f) calls the same builder for its `includeMatrix=true` response, which is what the User window's
+"Roles del usuario" tab renders — so both admin screens list the **same rows by construction**.
+Before ETP-5485 that tab rebuilt its rows from the per-role `windows[]` arrays and never got the
+ETP-5071 proxy rows ("Modelos Fiscales", "Documentos no contabilizados"). `SFRolesOverview` itself
+only decides which roles are columns (tenant role vs system-template fallback), user counts and
+cards. Same pattern as `ReportAccessCatalog` for the Informes rows. Any new matrix rule (a row, an
+exclusion, a proxy) goes into `RoleAccessMatrix`, never into one webhook.
 
-- **"Configuración > Roles"** (`RolesAccessMatrix.jsx`) renders `matrix.categories` directly.
-- **"Usuario > Roles"** (`UserRolesTab.jsx`) walks `SFListMenu`'s raw AD tree but intersects it
-  against the union of every role's `windows[]` from THIS endpoint (`activeWindowIds`), which is also
-  what already keeps classic-only entries such as Application Dictionary out of that tab.
+**UI-excluded windows (ETP-5068).** `RoleAccessMatrix.resolveActiveEtendoGoWindowsById()` subtracts
+`RoleAccessMatrix.UI_EXCLUDED_WINDOW_IDS` from the active-`SPEC_TYPE='W'` spec set: windows Etendo GO
+serves read-only over NEO/MCP but deliberately shows nowhere in its own UI. Because that one method is
+the single source every matrix derives from — plus this endpoint's per-role `windows` array and
+`windowCount` — a single entry in that set removes the window from **both** admin screens at once:
+
+- **"Configuración > Roles"** (`RolesAccessMatrix.jsx`) renders this endpoint's `matrix.categories`.
+- **"Usuario > Roles del usuario"** (`UserRolesTab.jsx`) renders `SFSystemRoleTemplates`'
+  `includeMatrix=true` `matrix` (or this endpoint's, for an admin holder), built by the same class.
 
 Note the exclusion cannot be achieved by revoking `AD_Window_Access`: the `matrix` lists every GO
 spec window regardless of grants (an ungranted window simply shows `access: "none"`), and the grants
@@ -4049,8 +4058,21 @@ are deliberately kept so administrators can still reach the window in Etendo cla
 deliberately NOT applied in `SFListMenu`, whose tree must keep reporting the native AD menu as-is for
 its other consumers (`useRoleMenu`'s allowed-id filter, the Explorer's spec picker).
 
-Current contents: `6FEBA130CDE24CC09041FFA6117ADFA9` — "Conversion Rate Downloader Log" (ETP-5068),
-an internal log of the conversion-rate downloader job that adds no value to the Etendo Go end user.
+Current contents (10 ids — `RoleAccessMatrix.UI_EXCLUDED_WINDOW_IDS` and its javadoc are the source
+of truth; keep this table in sync when the set changes):
+
+| Window id | Window | Why it is excluded |
+|-----------|--------|--------------------|
+| `6FEBA130CDE24CC09041FFA6117ADFA9` | Conversion Rate Downloader Log | ETP-5068 — internal job log, no value to the Etendo Go end user |
+| `F4675DAB02134762B66881DAE4672AD0` | Monitor Verifactu | ETP-5116 — folded into "Fiscal Monitor" (representative: SII Monitor) |
+| `71F24BF89DE748B483BE87594747D6FB` | TBAI Facturas Enviadas | ETP-5116 — folded into "Fiscal Monitor" (representative: SII Monitor) |
+| `C327DE215AC945F69363905840118177` | Configuración TBAI | ETP-5116 — folded into "Fiscal Configuration" (representative: SII Configuration) |
+| `27A453FA86974745977672F1A8DCCEFF` | Configuración Verifactu | ETP-5116 — folded into "Fiscal Configuration" (representative: SII Configuration) |
+| `B5673F73F613496C8BEA22FB55E4E1E4` | End Year Close | ETP-5116 — an action inside Fiscal Calendar (window `117`), not its own page |
+| `121` | Location | ETP-5116 — classic embedded address reference window |
+| `82922976BB524D1BAA3CF8462B9219FE` | Transaction Type | ETP-5116 — classic embedded reference window |
+| `C50A8AEE6F044825B5EF54FAAE76826F` | Return to Vendor | ETP-5116 — dead window, replaced by Return to Vendor Shipment (`273673D2ED914C399A6C51DB758BE0F9`) |
+| `FF808081330213E60133021822E40007` | Return from Customer | ETP-5116 — dead window, replaced by Return Receipt (`123271B9AD60469BAE8A924841456B63`) |
 
 > **Doc correction (ETP-4907):** this section previously described a `SFRolesOverview.GOCLIENT_ROLE_IDS` hardcoded to GOClient's own 5 per-client role ids. That was already stale — the webhook was fixed on 2026-07-27 (live RolesPresa bug) to resolve roles by name (`Finance`/`Sales`/`Purchasing`/`Inventory`) plus `is_client_admin='Y'`, scoped to `currentRole.getClient()`, with no hardcoded id list at all. This section now documents the actual current behavior, including the ETP-4907 system-template fallback below.
 
@@ -4160,10 +4182,11 @@ each resolving its per-role access via a human-chosen PROXY entity instead — F
 through the SII Monitor window's access, Fiscal Models through the Tax Report window's access, and
 Not Posted Documents through a specific process's access — including a duplicate-row guard for the
 case where a proxy (SII Monitor) already produces its own real row from the query above. This is a
-**display-only** resolution scoped entirely to this endpoint's `matrix`/frontend `RolesAccessMatrix`
-consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount`, or any
-provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
-`SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
+**display-only** resolution scoped entirely to the `matrix` (this endpoint's, and since ETP-5485
+also `SFSystemRoleTemplates`' `includeMatrix=true` one — both built by `RoleAccessMatrix`); it does
+not touch `AD_Window_Access` grants, `windows`/`windowCount`, or any provisioning path. Full
+mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
+`RoleAccessMatrix.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
 `TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
 §8d's "Six matrix rows" note below: this proxy resolution is unrelated to (and does not close)
 that separate, provisioning-side gap — as of ETP-5116, ALL 3 of these windowless items (Monitor
@@ -4839,8 +4862,9 @@ Ventas only the Receivables schedule; Compras only the Payables one).
 > **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now fully closed.**
 > This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript` — whether
 > the 4 system role templates can be GRANTED `AD_Window_Access`/`OBUIAPP_Process_Access` for these
-> rows at all. Of the three names ETP-5071 first proxied on the DISPLAY side (`SFRolesOverview`'s
-> "Configuración > Roles" admin screen, §8c above, via `PROXY_MATRIX_ROWS`) — **Documentos no
+> rows at all. Of the three names ETP-5071 first proxied on the DISPLAY side (`RoleAccessMatrix`'s
+> `PROXY_MATRIX_ROWS`, shown on "Configuración > Roles", §8c above, and since ETP-5485 on the User
+> window's "Roles del usuario" tab) — **Documentos no
 > contabilizados**, **Monitor fiscal**, **Modelos fiscales** — an earlier ETP-5116 pass closed the
 > provisioning-side gap for the latter two: Finance now holds a real `AD_Window_Access` grant on
 > the same two proxy windows (SII Monitor, Tax Report) via
@@ -5006,7 +5030,8 @@ pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as `SFAssi
 `com.etendoerp.go.roles.SystemRoleTemplates`) — resolved at the SYSTEM client
 (`AD_Client_ID = '0'`), never the caller's own tenant. It backs the "which template roles can I
 compose from" question for the multi-role assignment UI (`AssignTemplateRolesControl.jsx`,
-`UserRolesTab.jsx`, `RoleChipsCell.jsx`, `RoleFilterControl.jsx` in `etendo_schema_forge`).
+`UserRolesTab.jsx`, `RoleChipsCell.jsx`, `RoleFilterControl.jsx` in `etendo_schema_forge`), and
+(ETP-5485, opt-in) the permission matrix of the User window's "Roles del usuario" tab.
 
 **Why not `SFRolesOverview` (§8c)?** That webhook is hard-scoped to the CALLING tenant's own
 client by design — it resolves the 4 fixed role NAMES plus the client-admin role WITHIN
@@ -5056,11 +5081,35 @@ system client and a non-system caller's ambient readable-client set would otherw
 
 **Informes `reports` field (ETP-5402).** Each role also carries a `reports` array, same `{id,
 name, tier}` shape as `windows[]`, resolved via the shared `ReportAccessCatalog` utility
-documented in §8c — required here, not just on `SFRolesOverview`, because `UserRolesTab.jsx`'s
-matrix COLUMNS (the actual per-cell access data for the common non-admin-holder case) come from
-THIS endpoint, not `SFRolesOverview` (that one is used there only for `activeWindowIds`/admin-
-holder detection). Without it, every Informes cell in that tab would silently resolve "no access"
-for every role regardless of the real grant.
+documented in §8c. Since ETP-5485 `UserRolesTab.jsx` renders the `reportsMatrix` below instead of
+this array; the array stays for backward compatibility.
+
+**Opt-in `matrix` + `reportsMatrix` (ETP-5485).** `GET /sws/neo/systemroletemplates?includeMatrix=true`
+adds the same two keys `SFRolesOverview` returns (§8c) — same shape, same rows, same categories,
+built by the same `RoleAccessMatrix` class — with one `access` entry per template role id:
+
+```json
+{"roles": [...],
+ "matrix": {"categories": [
+   {"name": "Finance", "windows": [
+     {"id": "3E8FEA1EA7404D979306C9EE7FD2E7E8", "name": "Fiscal Models",
+      "access": {"B88A34B5D1874F8685FA6F3C3A609412": "full", "15ECC46CFBD74CF3A76D1F4DC8BA9F80": "none", ...}}
+   ]}]},
+ "reportsMatrix": {"categories": [{"name": "Finance", "reports": [{"id": "...", "name": "...", "access": {...}}]}]}}
+```
+
+This is what the User window's "Roles del usuario" tab renders, so its rows always match
+"Configuración > Roles" — including the ETP-5071 proxy rows, which it was missing while it rebuilt
+rows from `windows[]` itself. Opt-in because the other callers (`RoleChipsCell.jsx`,
+`AssignTemplateRolesControl.jsx`) only need `roles`, and the matrix costs a category query plus the
+proxy-access queries per template. Any other value of the parameter, or none, returns exactly the
+pre-ETP-5485 shape. Cells can still legitimately differ between the two views on a hybrid-state
+tenant: the Roles page shows the tenant's own active copy of a role, while the User tab shows the
+system template the user actually composes.
+
+Note the per-role `windows[]` here keeps its original window set — every active `SPEC_TYPE='W'`
+window, NOT minus `UI_EXCLUDED_WINDOW_IDS` — so its consumers see no change. Only the `matrix` is
+UI-filtered.
 
 ---
 
