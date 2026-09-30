@@ -87,6 +87,12 @@ public class NeoProcessService {
    * extracted BEFORE translation. See {@link #translatePInstanceResult}.
    */
   public static final String MESSAGE_KEYS = "messageKeys";
+  /**
+   * ETP-5175 — response field carrying the values interpolated by {@link #MESSAGE_KEYS} (a JSON
+   * object), so a client can render a parameterized message in its own locale. Present only when
+   * non-empty; see {@code DocumentPostingService#putMessageIdentity}.
+   */
+  public static final String MESSAGE_PARAMS = "messageParams";
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";

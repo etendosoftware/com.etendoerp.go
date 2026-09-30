@@ -512,6 +512,80 @@ public class NeoFieldFilter {
   }
 
   /**
+   * Refuses a client-authored value for a curated read-only field.
+   *
+   * <p>This check deliberately runs before a REST request reaches a {@link NeoHandler}. A handler
+   * may add a derived read-only value to the body afterwards, but a value already present at this
+   * boundary can only have come from the client. Keeping this separate from
+   * {@link #filterWriteRequest(JSONObject)} preserves the latter's role of filtering the final
+   * persistence body, including values injected by server-side hooks.</p>
+   *
+   * <p>The predicate is the existing REST metadata: an included field that is not writable. It
+   * therefore honors API-key aliases and explicit writable grants for {@code id}, {@code active},
+   * and link-to-parent columns without introducing a second field-policy model.</p>
+   *
+   * <p><b>On a create (POST), a field already exempted from {@link #rejectableOnCreateFields}
+   * is exempted here too</b> (ETP-5537). That set already encodes "this entity has a {@code
+   * Java_Qualifier}, so its own {@code NeoHandler} pre-hook may legitimately be the one supplying
+   * this value" (see the set's javadoc, IMP-28 clause 2) — a policy {@link #filterCreateRequest}
+   * applies later in the same request. Before this fix, THIS earlier check ran before that
+   * handler ever got a chance to run and used a stricter, unconditional predicate, so it rejected
+   * the value first and the later exemption was never reached — e.g. a create-time client value
+   * for an otherwise read-only field the window's own config panel deliberately sends once at
+   * creation (see {@code AssetsHandler}, {@code currency} on the {@code assets} entity). This is a
+   * generic alignment of the two checks, not a per-entity carve-out: any entity with a {@code
+   * Java_Qualifier} gets the same exemption on create, and none on PUT/PATCH — a create-only value
+   * must still never be changed once the record exists.</p>
+   *
+   * @param requestBody the original request body, optionally wrapped in {@code data}
+   * @param httpMethod  the request's HTTP method; the create exemption applies only when this is
+   *     {@code "POST"} (case-insensitive). May be {@code null} (treated as not a create).
+   * @throws ReadOnlyFieldRejectedException if the client supplied a curated read-only field that
+   *     is not exempted for this method
+   */
+  public void validateClientWriteRequest(JSONObject requestBody, String httpMethod) {
+    if (!active || requestBody == null || includedFields == null || writableFields == null) {
+      return;
+    }
+
+    boolean isCreate = "POST".equalsIgnoreCase(httpMethod);
+    JSONObject body = requestBody.optJSONObject("data");
+    if (body == null) {
+      body = requestBody;
+    }
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (isMetadataKey(key) || isWritableOrExemptOnCreate(key, isCreate)) {
+        continue;
+      }
+      throw new ReadOnlyFieldRejectedException(key);
+    }
+  }
+
+  /**
+   * Tells whether {@code key} may be safely written by the client: either it is not a read-only
+   * included field at all, or (on a POST) it is exempted by {@link #rejectableOnCreateFields} —
+   * the same create-time exemption {@link #filterCreateRequest} applies (ETP-5537, see
+   * {@link #validateClientWriteRequest} javadoc).
+   *
+   * @param key the raw API-level key from the request body
+   * @param isCreate whether the current request is a POST
+   * @return {@code true} if the client may supply this key
+   */
+  private boolean isWritableOrExemptOnCreate(String key, boolean isCreate) {
+    String propertyName = apiKeyToPropName.getOrDefault(key, key);
+    boolean readOnlyIncluded = !NeoServerOwnedFields.isServerOwned(propertyName)
+        && includedFields.contains(propertyName) && !writableFields.contains(propertyName);
+    if (!readOnlyIncluded) {
+      return true;
+    }
+    // Create-time exemption: filterCreateRequest would not reject this field either.
+    return isCreate && (rejectableOnCreateFields == null
+        || !rejectableOnCreateFields.contains(propertyName));
+  }
+
+  /**
    * Resolves an API-level field key (e.g. {@code accountingDate}, the {@code java_qualifier}
    * declared in {@code ETGO_SF_FIELD}) to the DAL property name {@code filterWriteRequest}
    * actually persists (e.g. {@code dateAcct}) — the same rename {@code remapApiKeys} applies to

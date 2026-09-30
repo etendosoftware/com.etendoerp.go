@@ -9,5 +9,17 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_INVOICE_STATUS" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_DELIVERY_STATUS" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_DELIV_STATUS_PURCHASE" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
     </table>
   </database>

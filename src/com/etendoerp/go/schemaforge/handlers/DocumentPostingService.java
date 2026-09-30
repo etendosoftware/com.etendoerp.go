@@ -19,14 +19,18 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -137,24 +141,31 @@ public class DocumentPostingService {
    * produced a false-positive "missing account" report (the column the BP Group's Non-Invoiced
    * Receipts DocMatchInv actually reads was fine; the unrelated, unused Non-Invoiced Receivables
    * column happened to also be null and was wrongly surfaced to the user). Each entry pairs the
-   * account's EN/ES label with the {@link CategoryAccounts} getter that reads it.
+   * account's stable wire code (sent in {@link #MESSAGE_PARAMS_MISSING_BP_GROUP_ACCOUNTS}, so the
+   * SPA can label it in its own locale) and its EN/ES label (backend prose only) with the
+   * {@link CategoryAccounts} getter that reads it.
    * {@code getVendorLiability()} is a DB {@code NOT NULL} column — its null-check structurally
    * never fires, kept for completeness.
    */
   private static final List<BpGroupAccountColumn> BP_GROUP_ACCOUNT_COLUMNS = List.of(
-      new BpGroupAccountColumn("Non-Invoiced Receipts", "Recibos no facturados", CategoryAccounts::getNonInvoicedReceipts),
-      new BpGroupAccountColumn("Customer Receivables No.", "Recibos de clientes", CategoryAccounts::getCustomerReceivablesNo),
-      new BpGroupAccountColumn("Vendor Liability", "Pasivo del proveedor", CategoryAccounts::getVendorLiability),
-      new BpGroupAccountColumn("Customer Prepayment", "Prepago del cliente", CategoryAccounts::getCustomerPrepayment),
-      new BpGroupAccountColumn("Vendor Prepayment", "Pagos por adelantado del proveedor", CategoryAccounts::getVendorPrepayment));
+      new BpGroupAccountColumn("nonInvoicedReceipts", "Non-Invoiced Receipts", "Recibos no facturados",
+          CategoryAccounts::getNonInvoicedReceipts),
+      new BpGroupAccountColumn("customerReceivablesNo", "Customer Receivables No.", "Recibos de clientes",
+          CategoryAccounts::getCustomerReceivablesNo),
+      new BpGroupAccountColumn("vendorLiability", "Vendor Liability", "Pasivo del proveedor",
+          CategoryAccounts::getVendorLiability),
+      new BpGroupAccountColumn("customerPrepayment", "Customer Prepayment", "Prepago del cliente",
+          CategoryAccounts::getCustomerPrepayment),
+      new BpGroupAccountColumn("vendorPrepayment", "Vendor Prepayment", "Pagos por adelantado del proveedor",
+          CategoryAccounts::getVendorPrepayment));
 
   /**
-   * One curated {@code C_BP_Group_Acct} column: its EN/ES labels plus its {@link CategoryAccounts}
-   * getter. {@link #label(String)} picks the Spanish label when {@code lang} is
+   * One curated {@code C_BP_Group_Acct} column: its stable wire code, its EN/ES labels plus its
+   * {@link CategoryAccounts} getter. {@link #label(String)} picks the Spanish label when {@code lang} is
    * {@value #LANGUAGE_ES_ES} (same exact-match precedent as
    * {@code NotPostedDocumentsHandler#getTranslatedName}), English otherwise.
    */
-  private record BpGroupAccountColumn(String labelEn, String labelEs,
+  private record BpGroupAccountColumn(String code, String labelEn, String labelEs,
       Function<CategoryAccounts, AccountingCombination> getter) {
     String label(String lang) {
       return LANGUAGE_ES_ES.equals(lang) ? labelEs : labelEn;
@@ -169,30 +180,44 @@ public class DocumentPostingService {
    * above, its null-check structurally never fires on an existing row; kept for completeness.
    */
   private static final List<ProductAccountColumn> PRODUCT_ACCOUNT_COLUMNS = List.of(
-      new ProductAccountColumn("Product Expense", "Gastos del producto", ProductAccounts::getProductExpense),
-      new ProductAccountColumn("Invoice Price Variance", "Desviación Pr. Factura",
+      new ProductAccountColumn("productExpense", "Product Expense", "Gastos del producto",
+          ProductAccounts::getProductExpense),
+      new ProductAccountColumn("invoicePriceVariance", "Invoice Price Variance", "Desviación Pr. Factura",
           ProductAccounts::getInvoicePriceVariance));
 
   /**
-   * One curated {@code M_Product_Acct} column: its EN/ES labels plus its {@link ProductAccounts}
-   * getter. Same language-selection rule as {@link BpGroupAccountColumn#label(String)}.
+   * One curated {@code M_Product_Acct} column: its stable wire code, its EN/ES labels plus its
+   * {@link ProductAccounts} getter. Same language-selection rule as {@link BpGroupAccountColumn#label(String)}.
    */
-  private record ProductAccountColumn(String labelEn, String labelEs,
+  private record ProductAccountColumn(String code, String labelEn, String labelEs,
       Function<ProductAccounts, AccountingCombination> getter) {
     String label(String lang) {
       return LANGUAGE_ES_ES.equals(lang) ? labelEs : labelEn;
     }
   }
 
+  /** {@code messageParams} entry: the failing Business Partner's name (ETP-5175). */
+  static final String MESSAGE_PARAMS_BP_NAME = "bpName";
+  /** {@code messageParams} entry: the failing Business Partner's Contact Category (BP Group) name. */
+  static final String MESSAGE_PARAMS_BP_GROUP = "bpGroup";
+  /** {@code messageParams} entry: stable codes of the unconfigured Contact Category accounts. */
+  static final String MESSAGE_PARAMS_MISSING_BP_GROUP_ACCOUNTS = "missingBpGroupAccounts";
+  /** {@code messageParams} entry: stable codes of the unconfigured Product accounts. */
+  static final String MESSAGE_PARAMS_MISSING_PRODUCT_ACCOUNTS = "missingProductAccounts";
+
   /**
    * Result of a post/unpost attempt. {@code messageKeys} (ETP-5360) are the AD_MESSAGE search keys
    * behind a failure {@code message}, captured before translation so a client can map the failure
-   * by identity; never {@code null}, empty when there are none.
+   * by identity; never {@code null}, empty when there are none. {@code messageParams} (ETP-5175)
+   * are the values those keys interpolate, so a client can render the whole sentence in its own
+   * locale instead of trusting the backend prose; never {@code null}, empty when there are none.
+   * Values are {@code String} or {@code List<String>}.
    */
-  public record PostResult(boolean ok, String message, List<String> messageKeys) {
+  public record PostResult(boolean ok, String message, List<String> messageKeys,
+      Map<String, Object> messageParams) {
     /**
-     * Canonical constructor. Normalizes {@code messageKeys} to an immutable copy, and a
-     * {@code null} list to an empty one, so callers never have to null-check it.
+     * Canonical constructor. Normalizes {@code messageKeys} and {@code messageParams} to
+     * immutable copies, and {@code null} to empty, so callers never have to null-check them.
      *
      * @param ok
      *     {@code true} when the post/unpost succeeded.
@@ -200,9 +225,26 @@ public class DocumentPostingService {
      *     the user-facing outcome message, already translated to the session language.
      * @param messageKeys
      *     the AD_MESSAGE search keys behind {@code message}; may be {@code null}.
+     * @param messageParams
+     *     the values interpolated by {@code messageKeys}; may be {@code null}.
      */
     public PostResult {
       messageKeys = messageKeys == null ? List.of() : List.copyOf(messageKeys);
+      messageParams = messageParams == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(messageParams));
+    }
+
+    /**
+     * Result whose message was built from AD_MESSAGE tokens but carries no interpolated values.
+     *
+     * @param ok
+     *     {@code true} when the post/unpost succeeded.
+     * @param message
+     *     the user-facing outcome message.
+     * @param messageKeys
+     *     the AD_MESSAGE search keys behind {@code message}; may be {@code null}.
+     */
+    public PostResult(boolean ok, String message, List<String> messageKeys) {
+      this(ok, message, messageKeys, Map.of());
     }
 
     /**
@@ -215,7 +257,34 @@ public class DocumentPostingService {
      *     the user-facing outcome message.
      */
     public PostResult(boolean ok, String message) {
-      this(ok, message, List.of());
+      this(ok, message, List.of(), Map.of());
+    }
+  }
+
+  /**
+   * Writes {@code result}'s message identity — {@link NeoProcessService#MESSAGE_KEYS} and
+   * {@link NeoProcessService#MESSAGE_PARAMS} — onto a response body, each only when non-empty, so
+   * a success body (and a failure with no identity) stays exactly as before. The one place that
+   * serializes the identity, shared by {@link #handleAction} and {@code NotPostedDocumentsHandler}.
+   *
+   * @param body
+   *     the response body (or per-row result) to write onto.
+   * @param result
+   *     the post/unpost outcome.
+   * @throws JSONException
+   *     never in practice (keys are non-null constants).
+   */
+  static void putMessageIdentity(JSONObject body, PostResult result) throws JSONException {
+    if (!result.messageKeys().isEmpty()) {
+      body.put(NeoProcessService.MESSAGE_KEYS, new JSONArray(result.messageKeys()));
+    }
+    if (!result.messageParams().isEmpty()) {
+      JSONObject params = new JSONObject();
+      for (Map.Entry<String, Object> entry : result.messageParams().entrySet()) {
+        Object value = entry.getValue();
+        params.put(entry.getKey(), value instanceof List<?> list ? new JSONArray(list) : value);
+      }
+      body.put(NeoProcessService.MESSAGE_PARAMS, params);
     }
   }
 
@@ -271,7 +340,7 @@ public class DocumentPostingService {
       boolean posted = acct.post(recordId, false, vars, conn, con);
       if (!posted || acct.errors != 0) {
         conn.releaseRollbackConnection(con);
-        return new PostResult(false, errorMessageOf(acct));
+        return failureOf(acct);
       }
       conn.releaseCommitConnection(con);
       return new PostResult(true, "Document posted");
@@ -322,7 +391,7 @@ public class DocumentPostingService {
    *     document with at least one line transaction whose cost is not yet calculated (including a
    *     null/unset flag, treated as not calculated); {@code false} otherwise, including when the
    *     table is neither of those two, the record cannot be resolved, or the lookup itself fails.
-   *     Unlike {@link #resolveMissingAccountsDetail} and {@link #resolveMissingProductAccountsDetail}
+   *     Unlike {@link #resolveMissingBpGroupAccounts} and {@link #resolveMissingProductAccounts}
    *     — enrichment helpers called AFTER {@code acct.post()} has already failed, where a failure
    *     here just omits extra detail text and the post stays blocked either way — this method is
    *     a GATE called BEFORE {@code acct.post()}. On a lookup error it returns {@code false},
@@ -452,9 +521,7 @@ public class DocumentPostingService {
       JSONObject body = new JSONObject();
       body.put("success", result.ok());
       body.put("message", result.message());
-      if (!result.messageKeys().isEmpty()) {
-        body.put(NeoProcessService.MESSAGE_KEYS, new JSONArray(result.messageKeys()));
-      }
+      putMessageIdentity(body, result);
       // NOTE: pass the JSONObject itself, NOT body.toString() — that String would bind to the
       // NeoResponse.error(int, String) overload, which wraps it as a nested error.message
       // string instead of sending this flat body, silently discarding the real message from
@@ -510,39 +577,64 @@ public class DocumentPostingService {
         message = localizedNotCalculated;
       }
     }
-    return enrichWithFailingEntity(acct, message);
+    return message;
   }
 
   /**
-   * Core Etendo's accounting engine ({@link AcctServer}) does not always populate which entity
-   * caused an "account could not be found" failure: {@code DocInOut#createFact} (and other
-   * {@code Doc*} subclasses) can leave an account null and fall through to
-   * {@code AcctServer#post}'s generic {@code setMessageResult(conn, vars, getStatus(), "")}
-   * fallback with no parameters, which resolves to the bare {@code @InvalidAccount@} message
-   * ("Account could not be found.") — no account type, no owning entity, nothing to grep server
-   * logs for. This enriches that specific, generic status with the transaction's Business
-   * Partner and BP Group, resolved generically from the public {@code C_BPartner_ID} that
-   * {@link AcctServer} sets for every document type it posts (not specific to Goods Receipts or
-   * to the Not-Invoiced-Receipts account type — any document/account-type combination that hits
-   * this same fallback benefits). Other statuses already carry their own detailed message from
-   * core Etendo and are left untouched.
+   * Failure result for a failed {@code acct.post()}. Every status keeps core's (re-localized, see
+   * {@link #errorMessageOf}) message and no identity, except {@code STATUS_InvalidAccount}: core's
+   * accounting engine does not always say which entity caused that failure — {@code
+   * DocInOut#createFact} (and other {@code Doc*} subclasses) can leave an account null and fall
+   * through to {@code AcctServer#post}'s generic {@code setMessageResult(conn, vars, getStatus(),
+   * "")} fallback, which resolves to the bare {@code @InvalidAccount@} message ("Account could not
+   * be found.") — so the message is enriched with the transaction's Business Partner, its Contact
+   * Category (BP Group) and the unconfigured accounts, resolved generically from the public
+   * {@code C_BPartner_ID} {@link AcctServer} sets for every document type it posts.
    *
-   * @param acct
-   *     the {@link AcctServer} instance after a failed {@code post()} call.
-   * @param baseMessage
-   *     the message already resolved from {@code acct.getMessageResult()}.
-   * @return {@code baseMessage}, optionally suffixed with resolvable Business Partner / BP Group
-   *     detail.
+   * <p>ETP-5175 (pasada 1): the enrichment also travels as structured identity — {@code
+   * messageKeys} plus {@code messageParams} (names and stable account codes) — because the
+   * Spanish wording of the {@code ETGO_InvalidAccount*} fragments has no versioned home: this
+   * module is not a translation module, so {@code AD_MESSAGE_TRL} is never exported for it and
+   * drifts per environment. The SPA renders the sentence from the identity in its own locale; the
+   * prose stays for clients that do not (MCP, older SPA builds).</p>
+   *
+   * <p>When the Business Partner cannot be resolved the keys are just {@code ["InvalidAccount"]}
+   * with no params, and the message is the bare base text, as before.</p>
    */
-  private static String enrichWithFailingEntity(AcctServer acct, String baseMessage) {
-    if (acct == null || !AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
-      return baseMessage;
+  private static PostResult failureOf(AcctServer acct) {
+    String message = errorMessageOf(acct);
+    if (!AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
+      return new PostResult(false, message);
     }
-    String detail = resolveBusinessPartnerDetail(acct);
-    return detail != null ? baseMessage + " " + detail : baseMessage;
+    InvalidAccountDetail detail = resolveInvalidAccountDetail(acct);
+    if (detail == null) {
+      return new PostResult(false, message, List.of(MSG_INVALID_ACCOUNT_BASE));
+    }
+    return new PostResult(false, message + " " + detail.prose(), detail.messageKeys(),
+        detail.messageParams());
   }
 
-  private static String resolveBusinessPartnerDetail(AcctServer acct) {
+  /**
+   * The Invalid-Account enrichment, both as prose (backend-localized, appended to the base
+   * message) and as identity ({@code messageKeys} starting with {@code InvalidAccount}, plus the
+   * {@code messageParams} they interpolate).
+   */
+  private record InvalidAccountDetail(String prose, List<String> messageKeys,
+      Map<String, Object> messageParams) {
+  }
+
+  /** One unconfigured curated account: its stable wire code and its backend-localized label. */
+  private record MissingAccount(String code, String label) {
+  }
+
+  /**
+   * Builds the {@link InvalidAccountDetail} for a failed post, or {@code null} when the Business
+   * Partner is not set or cannot be resolved, or the lookup fails (the caller then keeps the bare
+   * base message). The two missing-accounts lookups fail closed on their own (empty list), so a
+   * failure there never discards the already-resolved BP / Contact Category detail (QA
+   * regression, ETP-5175).
+   */
+  private static InvalidAccountDetail resolveInvalidAccountDetail(AcctServer acct) {
     String bpartnerId = acct.C_BPartner_ID;
     if (StringUtils.isBlank(bpartnerId)) {
       return null;
@@ -552,64 +644,74 @@ public class DocumentPostingService {
       if (bp == null) {
         return null;
       }
-      // Fails closed on its own (see javadoc) — safe to call unconditionally, before the
-      // BP-Group branching below, without risking the outer try/catch here.
-      String productAccountsDetail = resolveMissingProductAccountsDetail(acct);
+      List<MissingAccount> missingProductAccounts = resolveMissingProductAccounts(acct);
+      List<String> keys = new ArrayList<>(List.of(MSG_INVALID_ACCOUNT_BASE));
+      Map<String, Object> params = new LinkedHashMap<>();
+      params.put(MESSAGE_PARAMS_BP_NAME, bp.getName());
       Category bpGroup = bp.getBusinessPartnerCategory();
+      String prose;
       if (bpGroup == null) {
-        String bpOnly = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY).replace("@bpName@", bp.getName());
-        return appendDetail(bpOnly, productAccountsDetail);
+        keys.add(MSG_INVALID_ACCOUNT_BP_ONLY);
+        prose = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY).replace("@bpName@", bp.getName());
+      } else {
+        keys.add(MSG_INVALID_ACCOUNT_BP_AND_GROUP);
+        params.put(MESSAGE_PARAMS_BP_GROUP, bpGroup.getName());
+        prose = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_AND_GROUP)
+            .replace("@bpName@", bp.getName())
+            .replace("@bpGroup@", bpGroup.getName());
+        prose = appendMissingAccounts(prose, keys, params, MSG_MISSING_BP_GROUP_ACCOUNTS,
+            MESSAGE_PARAMS_MISSING_BP_GROUP_ACCOUNTS, resolveMissingBpGroupAccounts(bpGroup.getId(), acct));
       }
-      String detail = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_AND_GROUP)
-          .replace("@bpName@", bp.getName())
-          .replace("@bpGroup@", bpGroup.getName());
-      detail = appendDetail(detail, resolveMissingAccountsDetail(bpGroup.getId(), acct));
-      return appendDetail(detail, productAccountsDetail);
+      prose = appendMissingAccounts(prose, keys, params, MSG_MISSING_PRODUCT_ACCOUNTS,
+          MESSAGE_PARAMS_MISSING_PRODUCT_ACCOUNTS, missingProductAccounts);
+      return new InvalidAccountDetail(prose, keys, params);
     } catch (Exception e) {
       log.debug("Could not resolve Business Partner detail for account error, bpartnerId={}", bpartnerId, e);
       return null;
     }
   }
 
-  /** Appends {@code addendum} to {@code base} (space-separated) when present, otherwise returns {@code base} unchanged. */
-  private static String appendDetail(String base, String addendum) {
-    return addendum != null ? base + " " + addendum : base;
+  /**
+   * Appends one "missing accounts" addendum when {@code missing} is non-empty: the prose sentence
+   * ({@code messageKey} with its labels, space-separated), the key, and the account codes under
+   * {@code paramName}. Returns {@code prose} unchanged, touching nothing, when nothing is missing.
+   */
+  private static String appendMissingAccounts(String prose, List<String> keys, Map<String, Object> params,
+      String messageKey, String paramName, List<MissingAccount> missing) {
+    if (missing.isEmpty()) {
+      return prose;
+    }
+    keys.add(messageKey);
+    params.put(paramName, missing.stream().map(MissingAccount::code).toList());
+    String labels = String.join(", ", missing.stream().map(MissingAccount::label).toList());
+    return prose + " " + OBMessageUtils.messageBD(messageKey).replace("@missingAccounts@", labels);
   }
 
   /**
-   * Names which of the curated {@link #BP_GROUP_ACCOUNT_COLUMNS} are unconfigured for the failing
-   * BP Group + accounting schema (ETP-5175). Returns {@code null} when the accounting schema
-   * cannot be resolved (defensive — leaves the message unchanged rather than guessing), when
-   * every curated column is configured, so a fully-configured group produces no behavior change,
-   * or when the lookup itself fails (e.g. transient DB error, OBDal/Hibernate mapping issue) —
-   * this addendum is optional, so it fails closed on its own instead of propagating to
-   * {@link #resolveBusinessPartnerDetail}, which would otherwise discard the already-built
-   * BP + BP Group detail along with it (QA regression, ETP-5175).
+   * Which of the curated {@link #BP_GROUP_ACCOUNT_COLUMNS} are unconfigured for the failing BP
+   * Group + accounting schema (ETP-5175). Empty when the accounting schema cannot be resolved
+   * (defensive — no guessing), when every curated column is configured, or when the lookup itself
+   * fails (e.g. transient DB error, OBDal/Hibernate mapping issue): the addendum is optional, so
+   * it fails closed on its own instead of propagating to {@link #resolveInvalidAccountDetail},
+   * which would otherwise discard the already-built BP + BP Group detail along with it.
    *
    * @param bpGroupId
    *     id of the resolved BP Group ({@code C_BP_Group_ID}).
    * @param acct
    *     the failed {@link AcctServer} instance, used to resolve the accounting schema.
-   * @return the "missing account setup" message detail, or {@code null} if nothing is missing or
-   *     the lookup failed.
+   * @return the unconfigured accounts; empty if nothing is missing or the lookup failed.
    */
-  private static String resolveMissingAccountsDetail(String bpGroupId, AcctServer acct) {
+  private static List<MissingAccount> resolveMissingBpGroupAccounts(String bpGroupId, AcctServer acct) {
     String acctSchemaId = resolveAcctSchemaId(acct);
     if (StringUtils.isBlank(acctSchemaId)) {
-      return null;
+      return List.of();
     }
-    List<String> missing;
     try {
-      missing = resolveMissingBpGroupAccounts(bpGroupId, acctSchemaId);
+      return queryMissingBpGroupAccounts(bpGroupId, acctSchemaId);
     } catch (Exception e) {
       log.debug("Could not resolve missing BP Group accounts detail, bpGroupId={}", bpGroupId, e);
-      return null;
+      return List.of();
     }
-    if (missing.isEmpty()) {
-      return null;
-    }
-    return OBMessageUtils.messageBD(MSG_MISSING_BP_GROUP_ACCOUNTS)
-        .replace("@missingAccounts@", String.join(", ", missing));
   }
 
   /** First accounting schema's id, resolved the same way the rest of {@code AcctServer} does (its public {@code m_as} array). */
@@ -620,17 +722,17 @@ public class DocumentPostingService {
   /**
    * Looks up the {@link CategoryAccounts} row (the {@code C_BP_Group_Acct} table) for the given
    * BP Group + accounting schema — the unique constraint {@code c_bp_group_acct_schem_group_un}
-   * guarantees at most one row — and returns the EN labels of every curated column that is null.
-   * When no row exists at all for that group + schema, every curated column is reported as
-   * missing (there is no configuration whatsoever), which is itself the useful signal.
+   * guarantees at most one row — and returns every curated column that is null. When no row
+   * exists at all for that group + schema, every curated column is reported as missing (there is
+   * no configuration whatsoever), which is itself the useful signal.
    *
    * @param bpGroupId
    *     id of the BP Group ({@code C_BP_Group_ID}).
    * @param acctSchemaId
    *     id of the accounting schema ({@code C_AcctSchema_ID}).
-   * @return labels of the unconfigured curated columns; empty when everything is configured.
+   * @return the unconfigured curated columns; empty when everything is configured.
    */
-  private static List<String> resolveMissingBpGroupAccounts(String bpGroupId, String acctSchemaId) {
+  private static List<MissingAccount> queryMissingBpGroupAccounts(String bpGroupId, String acctSchemaId) {
     OBCriteria<CategoryAccounts> criteria = OBDal.getInstance().createCriteria(CategoryAccounts.class);
     criteria.add(Restrictions.eq(CategoryAccounts.PROPERTY_BUSINESSPARTNERCATEGORY + ".id", bpGroupId));
     criteria.add(Restrictions.eq(CategoryAccounts.PROPERTY_ACCOUNTINGSCHEMA + ".id", acctSchemaId));
@@ -638,65 +740,59 @@ public class DocumentPostingService {
     CategoryAccounts categoryAccounts = (CategoryAccounts) criteria.uniqueResult();
 
     String lang = OBContext.getOBContext().getLanguage().getLanguage();
-    List<String> missing = new ArrayList<>();
+    List<MissingAccount> missing = new ArrayList<>();
     for (BpGroupAccountColumn column : BP_GROUP_ACCOUNT_COLUMNS) {
       AccountingCombination value = categoryAccounts == null ? null : column.getter().apply(categoryAccounts);
       if (value == null) {
-        missing.add(column.label(lang));
+        missing.add(new MissingAccount(column.code(), column.label(lang)));
       }
     }
     return missing;
   }
 
   /**
-   * Names which of the curated {@link #PRODUCT_ACCOUNT_COLUMNS} are unconfigured for the product
-   * on a failing Matched Purchase Invoice (ETP-5175). {@code DocMatchInv#createFact} resolves
-   * these from {@code M_Product_Acct} — a completely different table from the BP-Group one above,
-   * keyed by the invoice line's PRODUCT, not the Business Partner's group — so this check is
-   * gated to {@code AcctServer.DOCTYPE_MatMatchInv} only: a Sales Invoice's (or any other document
-   * type's) Invalid-Account failure has nothing to do with product accounts.
+   * Which of the curated {@link #PRODUCT_ACCOUNT_COLUMNS} are unconfigured for the product on a
+   * failing Matched Purchase Invoice (ETP-5175). {@code DocMatchInv#createFact} resolves these
+   * from {@code M_Product_Acct} — a completely different table from the BP-Group one above, keyed
+   * by the invoice line's PRODUCT, not the Business Partner's group — so this check is gated to
+   * {@code AcctServer.DOCTYPE_MatMatchInv} only: a Sales Invoice's (or any other document type's)
+   * Invalid-Account failure has nothing to do with product accounts.
    *
-   * <p>Fails closed on its own, same as {@link #resolveMissingAccountsDetail}: any exception here
-   * (product lookup, criteria query) is caught locally and yields {@code null}, so it never
-   * unwinds {@link #resolveBusinessPartnerDetail}'s outer try and discards the already-built
-   * BP (+ BP Group) detail — the same regression class QA caught once for the sibling BP-Group
+   * <p>Fails closed on its own, same as {@link #resolveMissingBpGroupAccounts}: any exception here
+   * (product lookup, criteria query) is caught locally and yields an empty list, so it never
+   * unwinds {@link #resolveInvalidAccountDetail}'s outer try and discards the already-built BP
+   * (+ BP Group) detail — the same regression class QA caught once for the sibling BP-Group
    * lookup (ETP-5175 reject cycle).</p>
    *
    * @param acct
    *     the failed {@link AcctServer} instance; {@code acct.Record_ID} is the
    *     {@code M_MatchInv_ID} on a Matched Purchase Invoice failure.
-   * @return the "missing account setup" message detail, or {@code null} if the document is not a
-   *     Matched Purchase Invoice, nothing is missing, or the lookup failed.
+   * @return the unconfigured accounts; empty if the document is not a Matched Purchase Invoice,
+   *     nothing is missing, or the lookup failed.
    */
-  private static String resolveMissingProductAccountsDetail(AcctServer acct) {
+  private static List<MissingAccount> resolveMissingProductAccounts(AcctServer acct) {
     if (!AcctServer.DOCTYPE_MatMatchInv.equals(acct.DocumentType)) {
-      return null;
+      return List.of();
     }
     String acctSchemaId = resolveAcctSchemaId(acct);
     if (StringUtils.isBlank(acctSchemaId)) {
-      return null;
+      return List.of();
     }
-    List<String> missing;
     try {
-      missing = resolveMissingProductAccounts(acct.Record_ID, acctSchemaId);
+      return queryMissingProductAccounts(acct.Record_ID, acctSchemaId);
     } catch (Exception e) {
       log.debug("Could not resolve missing product accounts detail, matchInvId={}", acct.Record_ID, e);
-      return null;
+      return List.of();
     }
-    if (missing.isEmpty()) {
-      return null;
-    }
-    return OBMessageUtils.messageBD(MSG_MISSING_PRODUCT_ACCOUNTS)
-        .replace("@missingAccounts@", String.join(", ", missing));
   }
 
   /**
    * Looks up the {@link ProductAccounts} row (the {@code M_Product_Acct} table, keyed by
    * {@code (M_Product_ID, C_AcctSchema_ID)}) for the product on the given Matched Purchase Invoice
-   * ({@code M_MatchInv_ID}) + accounting schema, and returns the EN labels of every curated column
-   * that is null. When no {@code ProductAccounts} row exists at all (the product's accounting was
-   * never provisioned) every curated column is reported as missing, mirroring
-   * {@link #resolveMissingBpGroupAccounts}'s "no row" handling. When the {@code M_MatchInv} record
+   * ({@code M_MatchInv_ID}) + accounting schema, and returns every curated column that is null.
+   * When no {@code ProductAccounts} row exists at all (the product's accounting was never
+   * provisioned) every curated column is reported as missing, mirroring
+   * {@link #queryMissingBpGroupAccounts}'s "no row" handling. When the {@code M_MatchInv} record
    * or its product cannot be resolved at all (a data-integrity edge case, not an accounting-setup
    * gap), nothing is reported — there is no product to name a missing account against.
    *
@@ -705,9 +801,9 @@ public class DocumentPostingService {
    *     failure).
    * @param acctSchemaId
    *     id of the accounting schema ({@code C_AcctSchema_ID}).
-   * @return labels of the unconfigured curated columns; empty when everything is configured.
+   * @return the unconfigured curated columns; empty when everything is configured.
    */
-  private static List<String> resolveMissingProductAccounts(String matchInvId, String acctSchemaId) {
+  private static List<MissingAccount> queryMissingProductAccounts(String matchInvId, String acctSchemaId) {
     ReceiptInvoiceMatch match = OBDal.getInstance().get(ReceiptInvoiceMatch.class, matchInvId);
     Product product = match == null ? null : match.getProduct();
     if (product == null) {
@@ -721,11 +817,11 @@ public class DocumentPostingService {
     ProductAccounts productAccounts = (ProductAccounts) criteria.uniqueResult();
 
     String lang = OBContext.getOBContext().getLanguage().getLanguage();
-    List<String> missing = new ArrayList<>();
+    List<MissingAccount> missing = new ArrayList<>();
     for (ProductAccountColumn column : PRODUCT_ACCOUNT_COLUMNS) {
       AccountingCombination value = productAccounts == null ? null : column.getter().apply(productAccounts);
       if (value == null) {
-        missing.add(column.label(lang));
+        missing.add(new MissingAccount(column.code(), column.label(lang)));
       }
     }
     return missing;
