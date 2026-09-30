@@ -276,10 +276,12 @@ public class ToolRegistry {
       if (!deletableWindowSpecs.isEmpty()) {
         tools.add(buildDeleteTool(deletableWindowSpecs));
       }
-      // ETP-5335: published only while the flag is on. See McpConstants#BATCH_TOOL_ENABLED for
-      // why it is off — neo_batch is a second create implementation that had drifted from
-      // neo_create in both directions, and one correct write path beats two out of step.
-      if (McpConstants.BATCH_TOOL_ENABLED) {
+      // Published only while the flag is on. ETP-5335 switched it off because neo_batch was a
+      // second create implementation that had drifted from neo_create in both directions, and
+      // ETP-5415 closed those divergences and turned it back on. The accessor is a method, not
+      // the constant, so a partial rebuild cannot leave this class publishing a tool the router
+      // still refuses. See McpConstants#batchToolEnabled.
+      if (McpConstants.batchToolEnabled()) {
         tools.add(buildBatchTool());
       }
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));

@@ -91,19 +91,19 @@ class McpBillToInjectorCallSiteTest {
   }
 
   @Test
-  @DisplayName("neo_batch derives the bill-to too, after its own FK pre-pass")
+  @DisplayName("neo_batch derives the bill-to too, after its own FK resolution")
   void batchPathDerivesBillTo() {
-    String body = routerMethod("resolveBatchOpFkNames");
+    String body = routerMethod("preprocessBatchOperation");
 
-    int injector = indexOfOrFail(body, INJECTOR_CALL, "resolveBatchOpFkNames",
-        "McpBillToInjector.injectIfMissing(body, dalEntity, log)");
-    int fkResolution = indexOfOrFail(body, FK_RESOLUTION, "resolveBatchOpFkNames",
+    int injector = indexOfOrFail(body, INJECTOR_CALL, "preprocessBatchOperation",
+        "McpBillToInjector.injectIfMissing(body, adTab, dalEntity, log)");
+    int fkResolution = indexOfOrFail(body, FK_RESOLUTION, "preprocessBatchOperation",
         "McpFkResolver.resolveFkNames(...)");
 
     assertTrue(fkResolution < injector,
-        "resolveBatchOpFkNames derives the bill-to before its FK pre-pass, so a partner given by"
-            + " name or as a $ref: placeholder is not an id yet and the injector abstains."
-            + " Move the injectIfMissing call to the end of the pre-pass.");
+        "preprocessBatchOperation derives the bill-to before resolving FK names, so a partner"
+            + " given by name is not an id yet and the injector abstains."
+            + " Move the injectIfMissing call after McpFkResolver.resolveFkNames.");
   }
 
   private static String routerMethod(String name) {
