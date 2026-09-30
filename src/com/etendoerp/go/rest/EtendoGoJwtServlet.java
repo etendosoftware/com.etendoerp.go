@@ -25,6 +25,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.Date;
@@ -4620,7 +4621,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Body: { "userId": "..." }
    * Enters an environment: verifies the user belongs to the account, resolves the full context
    * (user/role/client/org/warehouse) and rotates the session with that context stored. Returns
-   * { status, environment, roleList, csrfToken } plus a rotated cookie. Unsafe method → CSRF required.
+   * { status, environment, roleList, csrfToken } plus a rotated cookie. Re-entering the environment
+   * the session already holds keeps the session, its cookies and its CSRF token (ETP-5550). Unsafe
+   * method → CSRF required.
    */
   private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -4677,6 +4680,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      List<String> previousContext = environmentContextOf(sessionRecord);
       // Reuse the platform's context derivation: generate the environment JWT and read its claims,
       // so the session stores exactly the user/role/client/org/warehouse the JWT layer would.
       DecodedJWT context = SecureWebServicesUtils.decodeToken(
@@ -4688,24 +4692,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sessionRecord.setCtxOrgId(requestedOrgId.isEmpty() ? generatedOrgId : requestedOrgId);
       sessionRecord.setWarehouseId(resolveWarehouseId(requestedOrgId, generatedOrgId, context));
 
-      IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
-      if (rotated == null) {
+      IssuedGoSession entered = rotateUnlessReentry(sessionRecord,
+          previousContext.equals(environmentContextOf(sessionRecord)), response);
+      if (entered == null) {
         writeError(response, HttpServletResponse.SC_CONFLICT,
             "Session changed concurrently; restore and retry");
         return;
       }
 
-      setSessionCookies(response, rotated);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put("environment", buildSessionEnvironment(rotated.getRecord()));
+      result.put("environment", buildSessionEnvironment(entered.getRecord()));
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
-      result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      result.put(FIELD_CSRF_TOKEN, entered.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
-      recordCookieEnvironmentLogin(rotated.getRecord(), startNanos);
+      recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);
@@ -4775,6 +4779,38 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Requested role is not available to this user");
     }
     return role;
+  }
+
+  /**
+   * ETP-5550 — rotating on an environment entry guards a privilege change; re-entering the
+   * environment the session already holds is none, and rotating anyway revokes the CSRF token every
+   * other open tab still holds (the onboarding re-enters on its own whenever it mounts with a live
+   * session). So a re-entry keeps the session as it is.
+   *
+   * @param sessionRecord the authenticated session, already carrying the entered context
+   * @param reentry       whether that context is the one the session held before
+   * @param response      where a rotation sets its new cookies
+   * @return on a re-entry, the current session with no plaintext tokens (its cookies are left
+   *     untouched) and its current CSRF token; otherwise the rotated session, its cookies set; or
+   *     {@code null} when a concurrent rotation won
+   */
+  private IssuedGoSession rotateUnlessReentry(GoSessionRecord sessionRecord, boolean reentry,
+      HttpServletResponse response) {
+    if (reentry) {
+      return new IssuedGoSession(null, null, sessionRecord.getCsrfToken(), sessionRecord);
+    }
+    IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
+    if (rotated != null) {
+      setSessionCookies(response, rotated);
+    }
+    return rotated;
+  }
+
+  /** The environment a session is in; any difference in it is a privilege change. */
+  private static List<String> environmentContextOf(GoSessionRecord sessionRecord) {
+    return Arrays.asList(sessionRecord.getUserId(), sessionRecord.getRoleId(),
+        sessionRecord.getCtxClientId(), sessionRecord.getCtxOrgId(),
+        sessionRecord.getWarehouseId());
   }
 
   /**

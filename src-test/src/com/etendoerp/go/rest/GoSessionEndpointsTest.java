@@ -19,6 +19,7 @@ package com.etendoerp.go.rest;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -462,6 +463,91 @@ public class GoSessionEndpointsTest {
     GoSessionRecord sessionRecord = new GoSessionRecord();
     sessionRecord.setAccountId("ACC1");
     sessionRecord.setCsrfToken(CSRF);
+
+    GoSessionRecord rotatedRecord = new GoSessionRecord();
+    rotatedRecord.setUserId("U1");
+    rotatedRecord.setRoleId("R1");
+    rotatedRecord.setCtxClientId("C1");
+    rotatedRecord.setCtxOrgId("O1");
+    rotatedRecord.setWarehouseId("W1");
+    IssuedGoSession rotated = new IssuedGoSession("newtok", "newref", "newcsrf", rotatedRecord);
+    when(goSessionService.rotate(any())).thenReturn(rotated);
+
+    CapturedResponse resp = enterEnvironment(sessionRecord);
+
+    assertEquals(200, resp.status);
+    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME).startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertEquals("newcsrf", body.getString("csrfToken"));
+    assertTrue(body.has("roleList"));
+    assertEquals("U1", body.getJSONObject("environment").getString("userId"));
+    assertEquals("O1", body.getJSONObject("environment").getString("orgId"));
+
+    ArgumentCaptor<GoSessionRecord> captor = ArgumentCaptor.forClass(GoSessionRecord.class);
+    verify(goSessionService).rotate(captor.capture());
+    assertEquals("U1", captor.getValue().getUserId());
+    assertEquals("C1", captor.getValue().getCtxClientId());
+  }
+
+  /**
+   * ETP-5550 — re-entering the environment the session already holds is not a privilege change,
+   * so it must not rotate: rotating revokes the CSRF token every other open tab still holds, and
+   * the onboarding re-enters on its own whenever it mounts with a live session.
+   */
+  @Test
+  public void environmentReentryWithSameContextKeepsSessionAndCsrf() throws Exception {
+    GoSessionRecord sessionRecord = sessionInEnvironment("O1");
+
+    CapturedResponse resp = enterEnvironment(sessionRecord);
+
+    assertEquals(200, resp.status);
+    verify(goSessionService, never()).rotate(any());
+    assertNull("the session cookie must stay as it is", resp.cookie(GoSessionSecurity.COOKIE_NAME));
+    assertNull("the refresh cookie must stay as it is",
+        resp.cookie(GoSessionSecurity.REFRESH_COOKIE_NAME));
+    JSONObject body = new JSONObject(resp.body.toString());
+    assertEquals(CSRF, body.getString("csrfToken"));
+    assertEquals("U1", body.getJSONObject("environment").getString("userId"));
+    assertEquals("O1", body.getJSONObject("environment").getString("orgId"));
+    assertTrue(body.has("roleList"));
+    assertEquals("no-store", resp.headers.get("Cache-Control"));
+  }
+
+  @Test
+  public void environmentSwitchToAnotherOrganizationStillRotates() throws Exception {
+    GoSessionRecord sessionRecord = sessionInEnvironment("O2");
+    GoSessionRecord rotatedRecord = new GoSessionRecord();
+    rotatedRecord.setUserId("U1");
+    rotatedRecord.setCtxOrgId("O1");
+    when(goSessionService.rotate(any()))
+        .thenReturn(new IssuedGoSession("newtok", "newref", "newcsrf", rotatedRecord));
+
+    CapturedResponse resp = enterEnvironment(sessionRecord);
+
+    assertEquals(200, resp.status);
+    verify(goSessionService).rotate(any());
+    assertEquals("newcsrf", new JSONObject(resp.body.toString()).getString("csrfToken"));
+  }
+
+  /** A live session already inside U1/R1/C1/{@code orgId}/W1, as the resolver returns it. */
+  private static GoSessionRecord sessionInEnvironment(String orgId) {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    sessionRecord.setUserId("U1");
+    sessionRecord.setRoleId("R1");
+    sessionRecord.setCtxClientId("C1");
+    sessionRecord.setCtxOrgId(orgId);
+    sessionRecord.setWarehouseId("W1");
+    return sessionRecord;
+  }
+
+  /**
+   * Posts {@code /session/environment} for U1/R1/O1 with the platform stubbed so the
+   * context derivation yields U1/R1/C1/O1/W1. {@code rotate} is left to each test.
+   */
+  private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord)
+      throws Exception {
     when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
@@ -491,15 +577,6 @@ public class GoSessionEndpointsTest {
     when(decoded.getClaim("organization")).thenReturn(orgClaim);
     when(decoded.getClaim("warehouse")).thenReturn(warehouseClaim);
 
-    GoSessionRecord rotatedRecord = new GoSessionRecord();
-    rotatedRecord.setUserId("U1");
-    rotatedRecord.setRoleId("R1");
-    rotatedRecord.setCtxClientId("C1");
-    rotatedRecord.setCtxOrgId("O1");
-    rotatedRecord.setWarehouseId("W1");
-    IssuedGoSession rotated = new IssuedGoSession("newtok", "newref", "newcsrf", rotatedRecord);
-    when(goSessionService.rotate(any())).thenReturn(rotated);
-
     CapturedResponse resp = new CapturedResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
         MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
@@ -520,19 +597,7 @@ public class GoSessionEndpointsTest {
               .put("orgId", "O1").toString(), "tok", CSRF),
           resp.response);
     }
-
-    assertEquals(200, resp.status);
-    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME).startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
-    JSONObject body = new JSONObject(resp.body.toString());
-    assertEquals("newcsrf", body.getString("csrfToken"));
-    assertTrue(body.has("roleList"));
-    assertEquals("U1", body.getJSONObject("environment").getString("userId"));
-    assertEquals("O1", body.getJSONObject("environment").getString("orgId"));
-
-    ArgumentCaptor<GoSessionRecord> captor = ArgumentCaptor.forClass(GoSessionRecord.class);
-    verify(goSessionService).rotate(captor.capture());
-    assertEquals("U1", captor.getValue().getUserId());
-    assertEquals("C1", captor.getValue().getCtxClientId());
+    return resp;
   }
 
   @Test
