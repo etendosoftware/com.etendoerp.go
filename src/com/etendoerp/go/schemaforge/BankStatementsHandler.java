@@ -71,7 +71,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
  * NeoHandler powering the bank-statements endpoint introduced by ETP-4121.
@@ -162,8 +161,19 @@ public class BankStatementsHandler implements NeoHandler {
    * it by EXACT text after {@code .trim()} — rewording this string silently drops users back to
    * English.
    */
-  private static final String MSG_STATEMENT_BANK_CONNECTED =
+  static final String MSG_STATEMENT_BANK_CONNECTED =
       "Statements from a bank-connected account cannot be deleted.";
+  /**
+   * Business rejection for creating or importing a statement on a bank-connected account
+   * (ETP-5471): its statements arrive from the bank sync, which writes them through OBDal and never
+   * reaches this check. Same text contract as {@link #MSG_STATEMENT_BANK_CONNECTED} — matched by
+   * EXACT text against {@code backendError.statementBankConnectedNotCreatable} in the frontend's
+   * {@code BACKEND_ERROR_MAP}. Covers the REST actions and the MCP named actions alike
+   * ({@code createStatement}, {@code importStatement}, {@code previewStatement}), which dispatch to
+   * the same methods.
+   */
+  static final String MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE =
+      "This account is synchronized with the bank; statements cannot be created or imported manually.";
   static final String MSG_LINE_REQUIRED = "At least one line is required";
   private static final String MSG_NO_VALID_LINES =
       "The file contains no valid lines to import";
@@ -228,6 +238,10 @@ public class BankStatementsHandler implements NeoHandler {
     FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
     if (account == null) {
       return UploadInput.fail(NeoResponse.error(400, "Financial account not found: " + accountId));
+    }
+    // ETP-5471: covers both ?action=import and ?action=preview, before the file is even decoded.
+    if (BankStatementsSupport.isBankConnected(account)) {
+      return UploadInput.fail(NeoResponse.error(409, MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE));
     }
 
     byte[] fileBytes = Base64.getDecoder().decode(contentBase64);
@@ -570,6 +584,10 @@ public class BankStatementsHandler implements NeoHandler {
       if (account == null) {
         return NeoResponse.error(400, "Financial account not found: " + accountId);
       }
+      // ETP-5471: checked before anything is saved, so the refusal leaves nothing to roll back.
+      if (BankStatementsSupport.isBankConnected(account)) {
+        return NeoResponse.error(409, MSG_STATEMENT_BANK_CONNECTED_NOT_CREATABLE);
+      }
 
       String name = body.optString(FIELD_NAME, null);
       FIN_BankStatement statement = newManualBankStatement(account, body);
@@ -785,11 +803,8 @@ public class BankStatementsHandler implements NeoHandler {
       // a statement that is about to vanish.
       BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
-      // Same predicate as every other PSD2 connection check in this module. It is kept in
-      // lockstep with the copies in the payment-registration, PIS-payment and bank-connection
-      // handlers, so a change to what "connected" means has to touch all of them.
-      if (BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
-          .equals(statement.getAccount().getPSD2ConnectionStatus())) {
+      // Same predicate as every other PSD2 connection check in this module (see isBankConnected).
+      if (BankStatementsSupport.isBankConnected(statement.getAccount())) {
         return NeoResponse.error(409, MSG_STATEMENT_BANK_CONNECTED);
       }
       // A reactivated draft can still carry matched lines (ETP-4921 — reactivation no longer

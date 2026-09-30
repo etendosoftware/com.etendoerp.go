@@ -1,9 +1,12 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.weld.WeldUtils;
@@ -17,6 +20,7 @@ import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
+import com.etendoerp.go.schemaforge.util.NeoHandlerResolutionCache;
 
 /**
  * Shared lookups used by {@link NeoServlet}.
@@ -62,14 +66,53 @@ class NeoServletSupport {
    * applied, silently violating downstream NOT NULL constraints.
    */
   static NeoResponse handleWithHooks(String javaQualifier, NeoContext context, NeoCrudHandler crudHandler) {
+    return handleWithHooks(javaQualifier, context, crudHandler,
+        NeoExtensionChannel.REST_SINGLE);
+  }
+
+  /**
+   * Same dispatch, with the {@link NeoExtensionChannel} stated by the caller.
+   *
+   * <p>Only the trace differs: the channel names which caller family this dispatch came from, and
+   * for the REST channels both values select the very same resolver, so {@code REST_SINGLE} and
+   * {@code REST_BATCH} resolve identically. {@link BatchService} passes {@code REST_BATCH} so a
+   * dispatch made for one operation of a {@code /batch} request is distinguishable in the trace
+   * from the same entity's direct HTTP write — the two reach this method through different code
+   * and have already diverged once (see this method's javadoc).</p>
+   *
+   * @param javaQualifier the entity's {@code Java_Qualifier}
+   * @param context       the request context
+   * @param crudHandler   the generic CRUD service, run as the wrapped default step
+   * @param channel       the caller family, recorded in the trace
+   * @return the response the caller will send
+   */
+  static NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
+      NeoCrudHandler crudHandler, NeoExtensionChannel channel) {
     try {
-      NeoHandler handler = lookupHandler(javaQualifier);
+      NeoExtensionRequest request = NeoExtensionRequest.builder()
+          .qualifier(javaQualifier)
+          .specName(context.getSpecName())
+          .entityName(context.getEntityName())
+          .surface(NeoExtensionSurface.of(context))
+          .channel(channel)
+          .context(context)
+          .build();
+
+      NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(request);
+      NeoHandler handler = preDispatch.customization();
       if (handler == null) {
-        log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
+        // ETP-5415: a blank qualifier is not an anomaly — it is the normal state of an entity that
+        // has no customization, and callers no longer filter those out before dispatching (the
+        // blank-qualifier early returns were removed so @NeoExtension is reachable everywhere).
+        // Warning on it would fire once per batch operation for ordinary entities and drown the
+        // case the warning exists for: a qualifier that IS configured and resolves to nothing.
+        if (StringUtils.isNotBlank(javaQualifier)) {
+          log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
+        }
         return crudHandler.handleDefault(context);
       }
 
-      NeoResponse preResult = handler.handle(context);
+      NeoResponse preResult = preDispatch.response();
       if (preResult != null) {
         // Error responses from the pre-hook short-circuit the whole pipeline.
         // afterHandle is a post-CRUD side effect (e.g. auto-filling adoption dates) and must
@@ -79,7 +122,7 @@ class NeoServletSupport {
         if (preResult.getHttpStatus() >= 400) {
           return preResult;
         }
-        return runPostHook(handler, context, preResult);
+        return runPostHook(request, handler, preResult);
       }
 
       NeoResponse defaultResult = crudHandler.handleDefault(context);
@@ -92,7 +135,7 @@ class NeoServletSupport {
         return defaultResult;
       }
 
-      return runPostHook(handler, context, defaultResult);
+      return runPostHook(request, handler, defaultResult);
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
       return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
@@ -117,34 +160,96 @@ class NeoServletSupport {
    * token straight into it. See {@link NeoAuditTokenRefresh} for why this belongs here rather than
    * in each handler.
    *
+   * @param request       the dispatch request built for this operation, whose context's
+   *                      {@code previousResult} the dispatcher sets
    * @param handler       the entity's handler; never {@code null} at this point
-   * @param context       the request context, whose {@code previousResult} this method sets
    * @param previousResult the result {@code afterHandle} is being given the chance to replace
    * @return the post-hook's response when it returned one, otherwise {@code previousResult}
    */
-  private static NeoResponse runPostHook(NeoHandler handler, NeoContext context,
+  private static NeoResponse runPostHook(NeoExtensionRequest request, NeoHandler handler,
       NeoResponse previousResult) {
-    context.setPreviousResult(previousResult);
-    NeoResponse afterResult = handler.afterHandle(context);
+    NeoContext context = request.context();
+    // The post phase runs on the instance the pre phase resolved, never on a freshly resolved one:
+    // handlers carry per-request state from handle() into afterHandle(), and both resolvers hand
+    // out a new @Dependent reference per call. The dispatcher sets previousResult on the context
+    // before invoking, exactly as this method used to do inline.
+    NeoResponse afterResult = NeoExtensionDispatcher
+        .dispatch(request.post(handler).withPreviousResult(previousResult))
+        .response();
     NeoResponse effective = afterResult != null ? afterResult : previousResult;
     NeoAuditTokenRefresh.refreshInResponse(context, effective);
     return effective;
   }
 
+  /**
+   * Resolve the {@link NeoHandler} whose class carries {@code @Named(qualifier)}.
+   *
+   * <p><b>This is not the same resolver as {@code NeoHandlerLookup.byQualifier}</b>, and the
+   * difference is load-bearing. Matching is done by reading {@code @Named} off the resolved
+   * instance's class, so a normal-scoped bean — whose reference is a Weld client proxy, a subclass
+   * that does not carry the non-{@code @Inherited} annotation — is silently skipped. That is the
+   * behaviour the REST and batch paths have always had, and the {@code @Named}-only rule for
+   * handlers exists because of it. Keeping it is deliberate: switching to the CDI-name match would
+   * make handlers that today do not resolve here start resolving.</p>
+   *
+   * <p>The scan is memoised by {@link NeoHandlerResolutionCache}, which without it ran on every
+   * single request and instantiated every deployed handler to inspect one. Only the handler's
+   * <b>class</b> is cached; the instance is obtained per call, so nothing about a handler's
+   * lifecycle changes. On the warm path {@code getInstanceFromStaticBeanManager} applies the very
+   * same {@code getReference} that {@code getInstances} applied, to the one bean that matched.</p>
+   *
+   * @param qualifier the {@code Java_Qualifier} to match
+   * @return the matching handler, or {@code null} when none is deployed or the lookup failed
+   */
   static NeoHandler lookupHandler(String qualifier) {
     try {
-      for (NeoHandler handler : WeldUtils.getInstances(NeoHandler.class)) {
-        javax.inject.Named named = handler.getClass().getAnnotation(javax.inject.Named.class);
-        if (named != null && qualifier.equals(named.value())) {
-          return handler;
-        }
+      // The scan already builds the instance it matched; on a cold call that instance IS the
+      // answer, so the cold path stays exactly what it was before the cache existed.
+      AtomicReference<NeoHandler> scanned = new AtomicReference<>();
+      Optional<Class<? extends NeoHandler>> cached =
+          NeoHandlerResolutionCache.handlerClass(qualifier, q -> {
+            NeoHandler match = scanForHandler(q);
+            scanned.set(match);
+            return match == null ? Optional.empty() : Optional.of(match.getClass());
+          });
+      if (!cached.isPresent()) {
+        log.warn("No NeoHandler found with @Named(\"{}\")", qualifier);
+        return null;
       }
-      log.warn("No NeoHandler found with @Named(\"{}\")", qualifier);
-      return null;
+      if (scanned.get() != null) {
+        return scanned.get();
+      }
+      NeoHandler instance = instantiate(cached.get());
+      // Fall back to the full scan rather than degrade to "no handler": the cached class is known
+      // to have matched once, so failing to instantiate it directly is a resolution problem
+      // (a producer-declared bean, a redeployed container), never an answer.
+      return instance != null ? instance : scanForHandler(qualifier);
     } catch (Exception e) {
       log.error("Failed to lookup handler with qualifier: {}", qualifier, e);
       return null;
     }
+  }
+
+  /** A fresh CDI reference for the cached handler class, or {@code null} if CDI cannot give one. */
+  private static NeoHandler instantiate(Class<? extends NeoHandler> handlerClass) {
+    try {
+      return WeldUtils.getInstanceFromStaticBeanManager(handlerClass);
+    } catch (RuntimeException e) {
+      log.debug("Cached handler class {} is not directly resolvable, rescanning: {}",
+          handlerClass.getName(), e.getMessage());
+      return null;
+    }
+  }
+
+  /** The cold path: instantiate the deployed handlers and take the first matching {@code @Named}. */
+  private static NeoHandler scanForHandler(String qualifier) {
+    for (NeoHandler handler : WeldUtils.getInstances(NeoHandler.class)) {
+      javax.inject.Named named = handler.getClass().getAnnotation(javax.inject.Named.class);
+      if (named != null && qualifier.equals(named.value())) {
+        return handler;
+      }
+    }
+    return null;
   }
 
   static SFSpec findSpec(String specName) {

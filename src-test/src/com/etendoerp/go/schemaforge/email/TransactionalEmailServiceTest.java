@@ -868,7 +868,14 @@ public class TransactionalEmailServiceTest {
         new EmailDocumentRecord("Cliente", "customer@example.com", "ABC123", "INV/0001", null,
             "https://example.test/download/ABC123", "client-1"));
     DefaultDocumentSendEmailContract contract =
-        new DefaultDocumentSendEmailContract("message-edits-send", "Documento", resolver);
+        new DefaultDocumentSendEmailContract("message-edits-send", "Documento", resolver) {
+          // ETP-5205 — authorize() now checks the window write tier against the DAL; this test
+          // is about what happens after authorization, so grant it.
+          @Override
+          protected boolean canWriteSpec() {
+            return true;
+          }
+        };
     TransactionalEmailService service = service(contract, adapter);
 
     JSONObject command = new JSONObject();

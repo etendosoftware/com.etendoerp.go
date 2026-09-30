@@ -80,14 +80,13 @@ import com.etendoerp.go.schemaforge.BatchService;
  * endpoint keeps the existing behaviour too: it shares {@code BatchService} but not the MCP
  * pre-pass this runs from.
  *
- * <p><b>Two call sites, one of them dormant.</b> {@code McpToolRouter#handleCreate} is the live
- * one. The second, in the per-operation pre-pass {@code McpToolRouter#resolveBatchOpFkNames}, only
- * runs while {@link McpConstants#BATCH_TOOL_ENABLED} is {@code true} — and it is {@code false}
- * today, so {@code neo_batch} is neither published nor routable. The call site is kept rather than
- * removed because the derivation is not what made that verb doubtful: if the flag is ever flipped
- * back, batched documents must not start being persisted with a null bill-to again. Read it as
- * wiring that is ready, not as coverage that is in force — {@code neo_create} is the only write
- * verb this reaches today
+ * <p><b>Two call sites, both live.</b> {@code McpToolRouter#handleCreate}, and the per-operation
+ * transform {@code McpToolRouter#preprocessBatchOperation}. The second one ran only while
+ * {@link McpConstants#batchToolEnabled()} was {@code true}, which it is again as of ETP-5415: the
+ * divergences that had {@code neo_batch} switched off were closed, so both write verbs now reach
+ * this derivation. It was written for exactly that — the call site was added and kept while the
+ * flag was off, so batched documents could not start being persisted with a null bill-to the
+ * moment the verb came back.
  */
 final class McpBillToInjector {
 

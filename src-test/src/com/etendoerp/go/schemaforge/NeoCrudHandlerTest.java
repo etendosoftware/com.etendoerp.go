@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -34,6 +35,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -172,6 +174,32 @@ class NeoCrudHandlerTest {
     };
   }
 
+  @Test
+  @DisplayName("REST write validation returns the stable read-only response before dispatch")
+  void clientReadOnlyValidationReturnsStructured422() throws Exception {
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    SFEntity entity = mock(SFEntity.class);
+    NeoFieldFilter filter = mock(NeoFieldFilter.class);
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getName()).thenReturn("Order");
+    JSONObject body = new JSONObject().put("documentNo", "SO-9999");
+    doThrow(new ReadOnlyFieldRejectedException("documentNo"))
+        .when(filter).validateClientWriteRequest(body, "PATCH");
+
+    try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+      fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "Order")).thenReturn(filter);
+
+      NeoResponse response = handler.validateClientWriteRequest(
+          buildContext("PATCH", "record-1", adTab, entity, body, Collections.emptyMap()));
+
+      assertNotNull(response);
+      assertEquals(422, response.getHttpStatus());
+      assertEquals("read_only_field", response.getBody().getString("error"));
+      assertEquals("documentNo", response.getBody().getString("field"));
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Method-flag gate. ETP-4254 extracted the private NeoCrudHandler#isMethodEnabled into
   // the shared NeoMethodPolicy (the MCP write path needed the same check), so these cases
@@ -280,6 +308,108 @@ class NeoCrudHandlerTest {
   @Nested
   @DisplayName("handleWindowEntityCrud")
   class HandleWindowEntityCrud {
+
+    @ParameterizedTest
+    @ValueSource(strings = { "POST", "PUT", "PATCH" })
+    @DisplayName("rejects a read-only field before the REST write reaches a handler")
+    void readOnlyFieldIsRejectedBeforeDispatch(String method) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      SFEntity entity = createMockEntity(false, false, true, true, true, false);
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      NeoFieldFilter filter = mock(NeoFieldFilter.class);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      NeoServlet.NeoPathInfo pathInfo = new NeoServlet.NeoPathInfo(
+          "testSpec", "orders", "POST".equals(method) ? null : "REC-1");
+      when(spec.getId()).thenReturn("SPEC-1");
+      when(entity.getADTab()).thenReturn(adTab);
+      when(entity.getJavaQualifier()).thenReturn("orderHook");
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("Order");
+      when(servlet.findEntity("SPEC-1", "orders")).thenReturn(entity);
+      when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
+      when(request.getInputStream()).thenReturn(
+          toServletInputStream("{\"documentNo\":\"SO-9999\"}"));
+      doThrow(new ReadOnlyFieldRejectedException("documentNo"))
+          .when(filter).validateClientWriteRequest(any(), any());
+
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+        fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "Order")).thenReturn(filter);
+
+        handler.handleWindowEntityCrud(spec, pathInfo, method, request, response);
+      }
+
+      ArgumentCaptor<NeoResponse> responseCaptor = ArgumentCaptor.forClass(NeoResponse.class);
+      verify(servlet).writeResponse(eq(response), responseCaptor.capture());
+      assertEquals(422, responseCaptor.getValue().getHttpStatus());
+      assertEquals("read_only_field", responseCaptor.getValue().getBody().getString("error"));
+      assertEquals("documentNo", responseCaptor.getValue().getBody().getString("field"));
+      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+    }
+
+    /**
+     * Builds a REAL (non-mocked) {@link NeoFieldFilter} via reflection on its package-private
+     * constructor — same technique {@code NeoFieldFilterTest} uses — so this test exercises the
+     * actual {@code validateClientWriteRequest}/{@code rejectableOnCreateFields} interaction
+     * instead of restating it as a stub. Mirrors an entity with a {@code Java_Qualifier} (like
+     * {@code assets}/{@code AssetsHandler}): {@code currency} is included + read-only, but NOT in
+     * {@code rejectableOnCreateFields}, exactly as {@code NeoFieldFilter#forEntity} would build it
+     * for such an entity (see its {@code entityHasHandler} branch).
+     */
+    private NeoFieldFilter buildCreateExemptedFilter() throws Exception {
+      Constructor<NeoFieldFilter> ctor = NeoFieldFilter.class.getDeclaredConstructor(
+          Set.class, Set.class, Set.class, Map.class, Map.class, boolean.class);
+      ctor.setAccessible(true);
+      return ctor.newInstance(
+          new HashSet<>(Set.of("id", "currency")), new HashSet<>(Set.of("id")),
+          Collections.emptySet(), Collections.emptyMap(), Collections.emptyMap(), true);
+    }
+
+    @Test
+    @DisplayName("ETP-5537: POST accepts a create-exempted read-only field (entity has a "
+        + "NeoHandler) and reaches dispatch; PUT/PATCH still reject the same field before it")
+    void createExemptedFieldPassesButUpdateStaysRejected() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      SFEntity entity = createMockEntity(false, false, true, true, true, false);
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+      when(entity.getADTab()).thenReturn(adTab);
+      when(entity.getJavaQualifier()).thenReturn("assetsHandler");
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("A_Asset");
+      when(servlet.findEntity("SPEC-1", "assets")).thenReturn(entity);
+      when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
+      NeoFieldFilter filter = buildCreateExemptedFilter();
+
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+        fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "A_Asset")).thenReturn(filter);
+
+        // POST: currency in the body is exempted (create-only) -> reaches dispatch.
+        when(request.getInputStream()).thenReturn(
+            toServletInputStream("{\"currency\":\"102\"}"));
+        NeoServlet.NeoPathInfo postPath = new NeoServlet.NeoPathInfo("assets", "assets", null);
+        handler.handleWindowEntityCrud(spec, postPath, "POST", request, response);
+        verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(request), eq(response));
+        verify(servlet, never()).writeResponse(eq(response), any());
+
+        // PUT on an existing record: the same field is still rejected before dispatch.
+        HttpServletRequest putRequest = mock(HttpServletRequest.class);
+        when(putRequest.getInputStream()).thenReturn(
+            toServletInputStream("{\"currency\":\"102\"}"));
+        NeoServlet.NeoPathInfo putPath = new NeoServlet.NeoPathInfo("assets", "assets", "REC-1");
+        handler.handleWindowEntityCrud(spec, putPath, "PUT", putRequest, response);
+
+        ArgumentCaptor<NeoResponse> responseCaptor = ArgumentCaptor.forClass(NeoResponse.class);
+        verify(servlet).writeResponse(eq(response), responseCaptor.capture());
+        assertEquals(422, responseCaptor.getValue().getHttpStatus());
+        assertEquals("currency", responseCaptor.getValue().getBody().getString("field"));
+        verify(servlet, never()).handleWithHooks(anyString(), any(), eq(putRequest), eq(response));
+      }
+    }
 
     @Test
     @DisplayName("Returns 404 when entity is not found in spec")
@@ -752,16 +882,15 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // buildReadOnlyFieldRejectedResponse tests (via reflection, IMP-28 clause 2)
+  // NeoReadOnlyFieldResponse tests (IMP-28 clause 2)
   // -------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("buildReadOnlyFieldRejectedResponse")
+  @DisplayName("NeoReadOnlyFieldResponse")
   class BuildReadOnlyFieldRejectedResponse {
 
-    private NeoResponse invokeBuildResponse(ReadOnlyFieldRejectedException e) throws Exception {
-      return (NeoResponse) invokePrivate(handler, "buildReadOnlyFieldRejectedResponse",
-          new Class<?>[] { ReadOnlyFieldRejectedException.class }, e);
+    private NeoResponse invokeBuildResponse(ReadOnlyFieldRejectedException e) {
+      return NeoReadOnlyFieldResponse.build(e);
     }
 
     @Test
@@ -821,7 +950,7 @@ class NeoCrudHandlerTest {
 
       assertNotNull(result);
       assertEquals(422, result.getHttpStatus(),
-          "must be routed through buildReadOnlyFieldRejectedResponse, not the generic 500 path");
+          "must be routed through NeoReadOnlyFieldResponse, not the generic 500 path");
       assertEquals("read_only_field", result.getBody().getString("error"));
       assertEquals("salePrice", result.getBody().getString("field"));
     }
@@ -987,6 +1116,26 @@ class NeoCrudHandlerTest {
       invokeApplyWhereClause(params, adTab, null);
 
       assertNull(params.get("whereAndFilterClause"));
+    }
+
+    @Test
+    @DisplayName("Resolves the parent placeholder of the tab where clause (rule shared with MCP)")
+    void resolvesParentPlaceholderInTabWhere() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getHqlwhereclause()).thenReturn("e.storageBin.id=@Locator.id@");
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      // With no parent tab, each token falls back to the parent id (see resolveTokenFromParent).
+      try (MockedStatic<KernelUtils> kernelMock = Mockito.mockStatic(KernelUtils.class)) {
+        KernelUtils kernelUtils = mock(KernelUtils.class);
+        kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+        when(kernelUtils.getParentTab(adTab)).thenReturn(null);
+
+        Map<String, String> params = new HashMap<>();
+        invokeApplyWhereClause(params, adTab, "BIN-1");
+
+        assertEquals("(e.storageBin.id='BIN-1')", params.get("whereAndFilterClause"));
+      }
     }
 
     @Test

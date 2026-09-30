@@ -360,6 +360,12 @@ class NeoBuiltInEndpointHandler {
       return;
     }
     if ("POST".equals(method)) {
+      // ETP-5205 — write-tier check before the multipart is touched.
+      NeoResponse denied = NeoAttachmentAuthorizer.checkWriteOnTable(tableName);
+      if (denied != null) {
+        servlet.writeResponse(response, denied);
+        return;
+      }
       boolean markAsMain = "true".equalsIgnoreCase(request.getParameter(MARK_AS_MAIN_PARAM));
       servlet.writeResponse(response,
           NeoAttachmentsHelper.handleUpload(tableName, recordId, request, markAsMain));
@@ -390,6 +396,10 @@ class NeoBuiltInEndpointHandler {
 
     if ("GET".equals(method)) {
       NeoAttachmentsHelper.handleDownload(attachmentId, response);
+      return;
+    }
+    // ETP-5205 — every remaining verb writes: delete and description need the write tier.
+    if (isAttachmentWriteDenied(attachmentId, method, response)) {
       return;
     }
     if (METHOD_DELETE.equals(method)) {
@@ -424,12 +434,34 @@ class NeoBuiltInEndpointHandler {
           "Attachments main endpoint only supports PATCH");
       return;
     }
+    if (isAttachmentWriteDenied(attachmentId, method, response)) {
+      return;
+    }
     Optional<Boolean> isMainValue = readIsMainFromBody(request, response);
     if (isMainValue.isEmpty() && response.isCommitted()) {
       return;
     }
     servlet.writeResponse(response,
         NeoAttachmentsHelper.handleMarkMain(attachmentId, Boolean.TRUE.equals(isMainValue.orElse(null))));
+  }
+
+  /**
+   * ETP-5205 — write-tier check for an attachment addressed by id ({@link NeoAttachmentAuthorizer}).
+   * Only DELETE and PATCH are checked; any other verb falls through to the caller's own 405.
+   *
+   * @return {@code true} when the 403 was already written and the caller must stop
+   */
+  private boolean isAttachmentWriteDenied(String attachmentId, String method,
+      HttpServletResponse response) throws IOException {
+    if (!METHOD_DELETE.equals(method) && !METHOD_PATCH.equals(method)) {
+      return false;
+    }
+    NeoResponse denied = NeoAttachmentAuthorizer.checkWriteOnAttachment(attachmentId);
+    if (denied == null) {
+      return false;
+    }
+    servlet.writeResponse(response, denied);
+    return true;
   }
 
   /**

@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.Date;
 import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
@@ -27,12 +30,13 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.ad.system.ClientInformation;
 import org.openbravo.model.ad.utility.Image;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.geography.Location;
 
+import com.etendoerp.go.common.CompanyLogoResolver;
 import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
@@ -47,6 +51,7 @@ import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
  * {
  *   "currencyCode": "EUR",
  *   "yourCompanyDocumentImageId": "A1B2C3...",
+ *   "brandingUpdated": "2026-09-29T10:15:30Z",
  *   "organization": {
  *     "name":     "F&amp;B España, S.A",
  *     "taxId":    "B81639719",
@@ -72,6 +77,18 @@ import com.etendoerp.go.schemaforge.util.NeoAddressHelper;
  *   <li>Client base currency — ultimate DB fallback</li>
  * </ol>
  *
+ * <p>{@code yourCompanyDocumentImageId} is resolved by {@link CompanyLogoResolver} (ETP-5541):
+ * the current organization's {@code AD_OrgInfo} logo — the one the GO Organization screen
+ * uploads — then the client's first organization logo, then {@code AD_ClientInfo} as the last
+ * resort.
+ *
+ * <p>{@code brandingUpdated} is the latest {@code updated} among the rows a printed document
+ * takes the issuer identity from: the organization, its {@code AD_OrgInfo}, that info's
+ * address and the resolved logo image. The web client compares it with a cached PDF's own
+ * write time, so a logo or company-data change invalidates the cached renderings the way a
+ * record edit does (see {@code attachmentFreshness.js} in schema_forge). {@code null} when
+ * none of those rows carries a timestamp.
+ *
  * Frontend components that do not have a document record (dashboards, sidebars) should
  * call this endpoint once per session to resolve the org's functional currency, rather
  * than parsing it from document-type defaults endpoints.
@@ -84,6 +101,7 @@ public class NeoSessionService {
   private static final String KEY_CURRENCY_ID = "currencyId";
   private static final String KEY_CURRENCY_STANDARD_PRECISION = "currencyStandardPrecision";
   private static final String KEY_YOUR_COMPANY_DOCUMENT_IMAGE_ID = "yourCompanyDocumentImageId";
+  private static final String KEY_BRANDING_UPDATED = "brandingUpdated";
   private static final String KEY_ORGANIZATION = "organization";
   private static final String KEY_ORG_NAME = "name";
   private static final String KEY_ORG_TAXID = "taxId";
@@ -113,6 +131,7 @@ public class NeoSessionService {
     String currencyId = null;
     int standardPrecision = 2;
     String yourCompanyDocumentImageId = null;
+    Date brandingUpdated = null;
     JSONObject organization = null;
 
     try {
@@ -125,8 +144,10 @@ public class NeoSessionService {
         }
       }
       currencyCode = resolveCurrencyCode(orgId);
-      yourCompanyDocumentImageId = resolveYourCompanyDocumentImageId(clientId);
+      Image logo = CompanyLogoResolver.resolve(clientId, orgId);
+      yourCompanyDocumentImageId = logo != null ? logo.getId() : null;
       organization = resolveOrganization(orgId);
+      brandingUpdated = resolveBrandingUpdated(orgId, logo);
     } catch (Exception e) {
       log.warn("Could not resolve session defaults for org {} client {}: {}",
           orgId, clientId, e.getMessage());
@@ -141,6 +162,12 @@ public class NeoSessionService {
       body.put(KEY_CURRENCY_STANDARD_PRECISION, standardPrecision);
       body.put(KEY_YOUR_COMPANY_DOCUMENT_IMAGE_ID,
           yourCompanyDocumentImageId != null ? yourCompanyDocumentImageId : JSONObject.NULL);
+      // Whole seconds, like the attachment's `updatedAt` (NeoAttachmentsHelper), so the
+      // client's strict comparison treats a same-second change as fresh on both sides.
+      body.put(KEY_BRANDING_UPDATED, brandingUpdated != null
+          ? DateTimeFormatter.ISO_INSTANT.format(
+              brandingUpdated.toInstant().truncatedTo(ChronoUnit.SECONDS))
+          : JSONObject.NULL);
       body.put(KEY_ORGANIZATION, organization != null ? organization : JSONObject.NULL);
       putAccountIdentity(body);
       return NeoResponse.ok(body);
@@ -257,16 +284,37 @@ public class NeoSessionService {
     return FALLBACK_CURRENCY;
   }
 
-  private static String resolveYourCompanyDocumentImageId(String clientId) {
-    if (clientId == null || clientId.isBlank()) {
-      return null;
+  /**
+   * The latest {@code updated} among the rows the printed issuer identity comes from — the
+   * organization (name), its {@code AD_OrgInfo} (tax ID, logo reference), that info's address
+   * and the resolved logo image (ETP-5541). A change to any of them makes cached PDFs stale.
+   *
+   * @param orgId the current organization ID
+   * @param logo  the logo {@link CompanyLogoResolver} resolved, or {@code null}
+   * @return the latest timestamp, or {@code null} when no row carries one
+   */
+  static Date resolveBrandingUpdated(String orgId, Image logo) {
+    Date latest = logo != null ? logo.getUpdated() : null;
+    if (orgId == null) {
+      return latest;
     }
-    ClientInformation clientInformation = OBDal.getReadOnlyInstance().get(ClientInformation.class, clientId);
-    if (clientInformation == null) {
-      log.warn("Client information not found for client {}", clientId);
-      return null;
+    OrganizationInformation info = OBDal.getReadOnlyInstance().get(OrganizationInformation.class, orgId);
+    if (info != null) {
+      latest = later(latest, info.getUpdated());
+      Location location = info.getLocationAddress();
+      latest = later(latest, location != null ? location.getUpdated() : null);
     }
-    Image documentImage = clientInformation.getYourCompanyDocumentImage();
-    return documentImage != null ? documentImage.getId() : null;
+    Organization org = OBDal.getReadOnlyInstance().get(Organization.class, orgId);
+    return later(latest, org != null ? org.getUpdated() : null);
+  }
+
+  private static Date later(Date a, Date b) {
+    if (a == null) {
+      return b;
+    }
+    if (b == null) {
+      return a;
+    }
+    return b.after(a) ? b : a;
   }
 }
