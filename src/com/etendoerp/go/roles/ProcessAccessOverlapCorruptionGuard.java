@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.roles;
 
+import java.util.List;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.model.ad.access.ProcessAccess;
@@ -105,8 +107,8 @@ public class ProcessAccessOverlapCorruptionGuard
   }
 
   @Override
-  protected void removeFromOwnerCollection(Role owner, ProcessAccess access) {
-    owner.getADProcessAccessList().remove(access);
+  protected List<ProcessAccess> ownerAccessList(Role owner) {
+    return owner.getADProcessAccessList();
   }
 
   @Override

@@ -240,16 +240,25 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
   // ── XML helpers (same approach as ReconciliationDocTypeSampleDataTest) ──────
 
   /**
-   * Every user-facing product category the dataset ships carries exactly one Spanish translation,
-   * and that translation is a real one.
+   * Every user-facing product category the dataset ships carries AT MOST one Spanish translation
+   * row, and when one exists it is a real translation, never a placeholder.
    *
    * <p>Same shape, and the same class of defect, as
    * {@link #testEveryDocumentTypeHasARealSpanishTranslation()}. ETP-5079 renamed the starter
    * category from the Spanish "Otros" to the English base name {@code Generic} and moved the Spanish
    * into an {@code M_PRODUCT_CATEGORY_TRL} row ("Genérico") — the same English-base-plus-translation
    * convention this ticket applied to document types. A placeholder row (blank, flagged
-   * {@code ISTRANSLATED='N'}, or a verbatim copy of the English name) renders as English in the UI
+   * {@code ISTRANSLATED='N'}, or a verbatim copy of the base name) renders as English in the UI
    * with no error anywhere, which is exactly how the document-type defect stayed invisible.</p>
+   *
+   * <p>ETP-5498 changed the requirement from "exactly one" to "at most one": it moved the starter
+   * category's own base NAME to the Spanish text itself ({@code Generic} -> {@code Genérico}), so
+   * that category now needs NO {@code _Trl} row at all — the base already IS the intended Spanish
+   * display text, and a same-text {@code _Trl} row would only re-trip the very
+   * "repeats the base name" check right below. A category whose base name is still English (like a
+   * future new starter) must keep exactly one real translation; this method can no longer tell those
+   * two cases apart from the XML alone, so it accepts zero-or-one and leans on the
+   * "must not repeat the base name" assertion to keep catching an actual untranslated placeholder.</p>
    *
    * <p>SCOPE: non-system categories only. The other shipped category, {@code Discounts}
    * ({@code EM_Etgo_IsSystemCategory='Y'}), deliberately has NO translation row: it is filtered out
@@ -300,8 +309,11 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
     }
 
     for (Map.Entry<String, String> category : userFacingNameById.entrySet()) {
-      assertEquals("user-facing product category '" + category.getValue() + "' must have exactly one"
-          + " es_ES translation", Integer.valueOf(1), spanishRowsById.get(category.getKey()));
+      // Zero rows is fine when the base NAME is already the intended Spanish text (ETP-5498, e.g.
+      // "Genérico"); more than one would mean duplicate/conflicting translations for one category.
+      Integer count = spanishRowsById.get(category.getKey());
+      assertTrue("user-facing product category '" + category.getValue() + "' must have at most one"
+          + " es_ES translation row", count == null || count.intValue() == 1);
     }
   }
 
