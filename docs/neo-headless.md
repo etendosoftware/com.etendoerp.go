@@ -239,7 +239,7 @@ overwritten by a re-cascaded callout.
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
 
-#### 4.3.5 Curated read-only fields are refused before a REST write (ETP-5347)
+#### 4.3.0 Curated read-only fields are refused before a REST write (ETP-5347)
 
 `POST`, `PUT`, and `PATCH` reject a value submitted for an included field that the NEO
 curation marks read-only. The rejection happens at the REST boundary, before a
@@ -2619,7 +2619,7 @@ disagreement this section exists to end, reintroduced by the fix for it.
 ##### Scope and what is not fixed
 
 - **The excluded-field gate is MCP only.** REST has its own `NeoFieldFilter`; its separate
-  read-only REST gate is documented in §4.3.5 (ETP-5347).
+  read-only REST gate is documented in §4.3.0 (ETP-5347).
 - **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
   write path in silence. The set refused here is only the explicitly excluded one.
 - **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
@@ -2891,7 +2891,7 @@ A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key i
 and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
 humanized name, so a cosmetic field can never drop a tool from the list.
 
-#### 4.12.17 `neo_delete` always confirms a successful delete (ETP-5474)
+#### 4.12.16 `neo_delete` always confirms a successful delete (ETP-5474)
 
 A successful `neo_delete` answers `{"deleted": true, "id": "<recordId>"}` whichever path removed
 the row — the generic removal, or an entity `NeoHandler` whose pre-hook resolved the DELETE itself
@@ -5940,7 +5940,7 @@ is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`
 
 **Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` are fully supported. The `executeCustomHqlQuery()` method handles custom HQL with org filtering, validation rules, search across searchable properties, and pagination.
 
-#### 4.12.15 `client` and `organization` are resolved from the session, never from the payload
+#### 4.12.17 `client` and `organization` are resolved from the session, never from the payload
 
 **The tenant a record belongs to is not a per-request choice.** `client` and `organization` are
 resolved from the caller's session on every write, on both verbs and on both the MCP and REST
@@ -5992,7 +5992,7 @@ REST does not report: its client is the SPA, which never sends these fields.
 **Update is in scope too.** An update that changed `organization` would relocate an existing
 record into another tenant — the same hole from the other direction.
 
-#### 4.12.16 The report catalogue answers the same question the execution does
+#### 4.12.18 The report catalogue answers the same question the execution does
 
 A report the role cannot run is no longer offered. `neo_discover` and the publication of the
 `generate_*` tool now resolve through the same rule that refuses the call, so the catalogue
@@ -6000,7 +6000,7 @@ stops advertising what it will then deny.
 
 **What it looked like before.** Under a role holding no grant for it, `neo_discover` listed
 `tax-report` with `callable: true` and the `generate_tax_report` tool was published — and calling
-it answered `403`. Two surfaces asked the permissive shared gate (§4.12.15's fail-open, which a
+it answered `403`. Two surfaces asked the permissive shared gate (§4.12.17's fail-open, which a
 type-`R` spec with no linked process and no `AD_TAB_ID` falls through to), while the third asked
 the handler, which owns the real rule.
 
@@ -6040,7 +6040,7 @@ forever. Both refusal types are now mapped: `SecurityException` and Openbravo's 
 passes. See `schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md` for the
 remaining work, including the guardrail test that would make the omission fail the build.
 
-#### 4.12.17 `neo_list` resolves the parent placeholders of a child tab's where clause (ETP-5542)
+#### 4.12.19 `neo_list` resolves the parent placeholders of a child tab's where clause (ETP-5542)
 
 A child tab can store, in `AD_Tab.HQLWhereClause`, a placeholder for its **parent record** — the
 Bin Contents tab stores `e.quantityOnHand<>0 AND e.storageBin.id=@Locator.id@`. The `@…@` is a hole
