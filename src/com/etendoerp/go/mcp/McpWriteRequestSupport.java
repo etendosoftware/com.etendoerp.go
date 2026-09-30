@@ -717,7 +717,8 @@ final class McpWriteRequestSupport {
     if (refuse) {
       SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();
       throw McpRoutingException.parentUnresolvable(spec == null ? null : spec.getName(),
-          sfEntity == null ? null : sfEntity.getName(), scope.getProblem());
+          sfEntity == null ? null : sfEntity.getName(), scope.getParentEntity(),
+          scope.getProblem());
     }
     return scope;
   }

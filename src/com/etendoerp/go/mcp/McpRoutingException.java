@@ -494,13 +494,15 @@ class McpRoutingException extends OBException {
    * points at an intermediate record (a payment detail, a payment schedule) the agent has no safe
    * way to choose, so that advice would lead straight back to a wrong parent.</p>
    *
-   * @param specName   the spec being written
-   * @param entityName the child entity
-   * @param problem    why the parent cannot be mapped, or {@code null} when the scope gives none
+   * @param specName     the spec being written
+   * @param entityName   the child entity
+   * @param parentEntity the parent entity's name, or {@code null} when it could not be named — the
+   *                     hint then sends the agent to {@code neo_discover} instead
+   * @param problem      why the parent cannot be mapped, or {@code null} when the scope gives none
    * @return the exception to throw
    */
   static McpRoutingException parentUnresolvable(String specName, String entityName,
-      String problem) {
+      String parentEntity, String problem) {
     String why = problem == null ? "the entity declares no field that links it to its parent"
         : problem;
     return new McpRoutingException(
@@ -509,8 +511,12 @@ class McpRoutingException extends OBException {
             + "chose. Nothing was written.",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_UNRESOLVABLE,
         McpConstants.PARAM_PARENT_ID, List.of(),
-        "Do not retry this create. Call neo_schema(spec:'" + specName + "', entity:'<the parent "
-            + "entity>', view:'actions') and use the action that creates this record.",
+        parentEntity == null
+            ? "Do not retry this create. Call neo_discover to find the parent entity of '"
+                + entityName + "', then neo_schema on it with view:'actions' and use the action "
+                + "that creates this record."
+            : "Do not retry this create. Call neo_schema(spec:'" + specName + "', entity:'"
+                + parentEntity + "', view:'actions') and use the action that creates this record.",
         McpConstants.SEE_ALSO_WRITING);
   }
 

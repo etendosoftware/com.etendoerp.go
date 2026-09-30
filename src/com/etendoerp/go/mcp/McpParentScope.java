@@ -333,7 +333,7 @@ final class McpParentScope {
     Resolution r = new Resolution(entity, tab, parentTabOf(tab), entityOf(tab), config);
 
     if (r.dalEntity == null) {
-      return unresolvable(tab, "its table has no DAL entity", r.optional, r.reason);
+      return unresolvable(r, "its table has no DAL entity");
     }
     Scope unparented = unparentedScope(r);
     if (unparented != null) {
@@ -419,9 +419,8 @@ final class McpParentScope {
     boolean declared = McpParentSection.isSameRecord(r.config);
     boolean actual = r.parentTab != null && sameTable(r.tab, r.parentTab);
     if (declared && !actual) {
-      return unresolvable(r.tab,
-          "MCP_CONFIG declares mode 'sameRecord' but this tab's table differs from its parent's",
-          r.optional, r.reason);
+      return unresolvable(r,
+          "MCP_CONFIG declares mode 'sameRecord' but this tab's table differs from its parent's");
     }
     if (!actual) {
       return null;
@@ -434,12 +433,12 @@ final class McpParentScope {
   private static Scope declaredScope(Resolution r, String declared) {
     Property property = resolveProperty(r.dalEntity, declared);
     if (property == null) {
-      return unresolvable(r.tab, "MCP_CONFIG parent.field '" + declared
-          + "' matches no property or column of " + r.dalEntity.getName(), r.optional, r.reason);
+      return unresolvable(r, "MCP_CONFIG parent.field '" + declared
+          + "' matches no property or column of " + r.dalEntity.getName());
     }
     if (property.isPrimitive() || property.getTargetEntity() == null) {
-      return unresolvable(r.tab, "MCP_CONFIG parent.field '" + declared
-          + "' is not a foreign key — filtering by parent needs a reference", r.optional, r.reason);
+      return unresolvable(r, "MCP_CONFIG parent.field '" + declared
+          + "' is not a foreign key — filtering by parent needs a reference");
     }
     // Deliberately not an error when it disagrees with the SEQNO parent: the 17 mismatched
     // entities are exactly the case where the declaration is meant to override the heuristic.
@@ -460,13 +459,13 @@ final class McpParentScope {
    */
   private static Scope heuristicScope(Resolution r) {
     if (r.parentTab == null) {
-      return unresolvable(r.tab, "its parent tab could not be resolved", r.optional, r.reason);
+      return unresolvable(r, "its parent tab could not be resolved");
     }
     List<Property> candidates = parentLinkProperties(r.tab, r.dalEntity);
     if (candidates.isEmpty()) {
-      return unresolvable(r.tab, "it declares no active parent-link column. Set MCP_CONFIG "
+      return unresolvable(r, "it declares no active parent-link column. Set MCP_CONFIG "
           + "parent.field to the property that links it to '"
-          + r.parentTab.getTable().getDBTableName() + "'", r.optional, r.reason);
+          + r.parentTab.getTable().getDBTableName() + "'");
     }
     for (Property candidate : candidates) {
       if (targetsTableOf(candidate, r.parentTab)) {
@@ -478,15 +477,23 @@ final class McpParentScope {
     for (Property candidate : candidates) {
       names.add(candidate.getName());
     }
-    return unresolvable(r.tab, "none of its parent-link fields " + names + " points at the parent tab "
+    return unresolvable(r, "none of its parent-link fields " + names + " points at the parent tab "
         + "table '" + r.parentTab.getTable().getDBTableName() + "'. Set MCP_CONFIG parent.field to "
-        + "the correct one", r.optional, r.reason);
+        + "the correct one");
   }
 
-  private static Scope unresolvable(Tab tab, String why, Set<String> optional, String reason) {
-    String problem = "cannot determine the parent of tab '" + tab.getName() + "': " + why;
+  /**
+   * An unresolvable scope that still names its parent entity when the parent tab is known.
+   *
+   * <p>Only the link column is missing — the parent tab usually is not — and the
+   * {@code parent_unresolvable} refusal needs the parent's name to point the agent at a call it can
+   * make as is (ETP-5558). Looked up exactly as a resolved scope looks it up.</p>
+   */
+  private static Scope unresolvable(Resolution r, String why) {
+    String problem = "cannot determine the parent of tab '" + r.tab.getName() + "': " + why;
     log.warn("Parent scope unresolvable — {}", problem);
-    return new Scope(Kind.UNRESOLVABLE, null, null, optional, reason, problem);
+    return new Scope(Kind.UNRESOLVABLE, null, parentEntityName(r.entity, r.parentTab, r.config),
+        r.optional, r.reason, problem);
   }
 
   // -- model helpers --------------------------------------------------------

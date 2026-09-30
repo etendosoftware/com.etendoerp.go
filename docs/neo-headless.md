@@ -2367,11 +2367,15 @@ Now the create is refused before any body transform, and nothing is persisted:
 ```json
 { "status": 422, "error": "parent_unresolvable", "field": "parentId",
   "detail": "Cannot create 'lines' of 'payment-out' through MCP: its parent cannot be identified (cannot determine the parent of tab 'Lines': none of its parent-link fields [paymentDetails, invoicePaymentSchedule] points at the parent tab table 'FIN_Payment'. ...), so the record would be attached to a parent nobody chose. Nothing was written.",
-  "hint": "Do not retry this create. Call neo_schema(spec:'payment-out', entity:'<the parent entity>', view:'actions') and use the action that creates this record.",
+  "hint": "Do not retry this create. Call neo_schema(spec:'payment-out', entity:'header', view:'actions') and use the action that creates this record.",
   "seeAlso": "..." }
 ```
 
-The hint deliberately does not suggest setting the link field by hand: on these entities it points
+The hint names the real parent entity: an `UNRESOLVABLE` scope is missing only its link column, not
+its parent tab, so `McpParentScope` still looks the parent entity up (which also makes
+`parentEntity` appear next to `configError` in `neo_discover`/`neo_schema` for these entities). When
+the parent is not an included entity of the spec, the hint sends the agent to `neo_discover`
+instead. It deliberately does not suggest setting the link field by hand: on these entities it points
 at an intermediate record (a payment detail, a payment schedule) the agent has no safe way to pick.
 
 | Scope kind | create with `parentId` | create without `parentId` |

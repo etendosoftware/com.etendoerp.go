@@ -67,6 +67,7 @@ class McpParentUnresolvableTest {
   private static final String ENTITY_NAME = "lines";
   private static final String PARENT_ID = "PAYMENT-1";
   private static final String PARENT_FIELD = "invoice";
+  private static final String PARENT_ENTITY = "header";
   private static final String PROBLEM = "cannot determine the parent of tab 'Lines': none of its "
       + "parent-link fields [paymentDetails, invoicePaymentSchedule] points at the parent tab "
       + "table 'FIN_Payment'";
@@ -98,11 +99,16 @@ class McpParentUnresolvableTest {
   /** A real {@link McpParentScope.Scope}, built through its private constructor. */
   private static McpParentScope.Scope scope(McpParentScope.Kind kind, String parentField,
       String problem) throws Exception {
+    return scope(kind, parentField, PARENT_ENTITY, problem);
+  }
+
+  private static McpParentScope.Scope scope(McpParentScope.Kind kind, String parentField,
+      String parentEntity, String problem) throws Exception {
     Constructor<McpParentScope.Scope> ctor = McpParentScope.Scope.class.getDeclaredConstructor(
         McpParentScope.Kind.class, String.class, String.class, Set.class, String.class,
         String.class);
     ctor.setAccessible(true);
-    return ctor.newInstance(kind, parentField, "header", Set.of(), null, problem);
+    return ctor.newInstance(kind, parentField, parentEntity, Set.of(), null, problem);
   }
 
   private void withScope(McpParentScope.Scope resolved) {
@@ -235,6 +241,31 @@ class McpParentUnresolvableTest {
     String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
     assertFalse(hint.contains("fields"), "the hint must not suggest setting the link: " + hint);
     assertTrue(hint.contains("action"), "the hint must name the way forward: " + hint);
+  }
+
+  @Test
+  @DisplayName("the hint names the real parent entity, so the next call is direct")
+  void hintNamesTheParentEntity() throws Exception {
+    withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, PROBLEM));
+
+    McpRoutingException refusal = assertThrows(McpRoutingException.class,
+        () -> McpWriteRequestSupport.requireApplicableParent(sfEntity, null));
+    String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
+    assertTrue(hint.contains("neo_schema(spec:'" + SPEC_NAME + "', entity:'" + PARENT_ENTITY
+        + "', view:'actions')"), "the hint must be a call the agent can make as is: " + hint);
+    assertFalse(hint.contains("<"), "no placeholder may reach the agent: " + hint);
+  }
+
+  @Test
+  @DisplayName("with no parent entity known, the hint sends the agent to neo_discover instead")
+  void hintFallsBackWithoutParentEntity() throws Exception {
+    withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, null, PROBLEM));
+
+    McpRoutingException refusal = assertThrows(McpRoutingException.class,
+        () -> McpWriteRequestSupport.requireApplicableParent(sfEntity, null));
+    String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
+    assertTrue(hint.contains("neo_discover"), hint);
+    assertFalse(hint.contains("<") || hint.contains("null"), "no placeholder or null: " + hint);
   }
 
   // ── neo_create applies the gate before the defaults ───────────────────
