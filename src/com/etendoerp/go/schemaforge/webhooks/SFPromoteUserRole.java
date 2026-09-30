@@ -98,9 +98,19 @@ public class SFPromoteUserRole extends BaseWebhookService {
           : service.demoteFromAdmin(callerUserId, currentRole, userId);
       responseVars.put(RESPONSE_VAR_RESULT, success(result).toString());
     } catch (OBException e) {
-      responseVars.put(RESPONSE_VAR_RESULT,
-          WebhookFailureResponses.failure(e.getMessage()).toString());
+      // ETP-5278 — a lost race is checked first, so it is never reported as a domain rejection.
+      if (!WebhookFailureResponses.rejectConcurrentRoleWrite(e, responseVars,
+          RESPONSE_VAR_RESULT, "SFPromoteUserRole", userId)) {
+        responseVars.put(RESPONSE_VAR_RESULT,
+            WebhookFailureResponses.failure(e.getMessage()).toString());
+      }
     } catch (Exception e) {
+      // ETP-5278 — a lost race (StaleState, lock timeout, …) is answered as
+      // CONCURRENT_MODIFICATION instead of the bridge's generic 500.
+      if (WebhookFailureResponses.rejectConcurrentRoleWrite(e, responseVars,
+          RESPONSE_VAR_RESULT, "SFPromoteUserRole", userId)) {
+        return;
+      }
       log.error("Unexpected error in SFPromoteUserRole for user {}", userId, e);
       responseVars.put("error", e.getMessage());
     }
