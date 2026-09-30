@@ -147,15 +147,23 @@ final class McpParentScope {
     private final Set<String> optionalVerbs;
     private final String reason;
     private final String problem;
+    private final String agentProblem;
 
     private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
         String reason, String problem) {
+      this(kind, parentField, parentEntity, optionalVerbs, reason, problem, problem);
+    }
+
+    @SuppressWarnings("java:S107") // one value object; the extra field is the agent-facing text
+    private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
+        String reason, String problem, String agentProblem) {
       this.kind = kind;
       this.parentField = parentField;
       this.parentEntity = parentEntity;
       this.optionalVerbs = optionalVerbs;
       this.reason = reason;
       this.problem = problem;
+      this.agentProblem = agentProblem;
     }
 
     Kind getKind() {
@@ -183,6 +191,17 @@ final class McpParentScope {
      */
     String getProblem() {
       return problem;
+    }
+
+    /**
+     * The problem as an agent may read it: {@link #getProblem()} without the remedy addressed to
+     * whoever configures the entity ("Set MCP_CONFIG parent.field …"), which the agent cannot act
+     * on (ETP-5558). {@code configError} and the log keep the full text.
+     *
+     * @return the agent-facing problem, or {@code null} when the entity can be served
+     */
+    String getAgentProblem() {
+      return agentProblem;
     }
 
     /**
@@ -293,7 +312,8 @@ final class McpParentScope {
       // whose configuration cannot be trusted must not be served on the strength of the parts that
       // happened to parse. Reporting it through the scope is what keeps callers to one question
       // ("may I serve this, and how?") instead of two.
-      return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), null, resolved.describeProblems());
+      return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), null, resolved.describeProblems(),
+          "its MCP configuration is invalid");
     }
     return resolveChild(entity, tab, resolved.section(McpParentSection.NAME).orElse(null));
   }
@@ -374,11 +394,13 @@ final class McpParentScope {
     }
     List<String> writes = advertisedWrites(r.entity);
     if (!writes.isEmpty()) {
+      String agentProblem = "entity '" + r.entity.getName() + "' has no link to its parent, so a "
+          + "record written to it would be an orphan";
       return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), r.reason,
           "MCP_CONFIG declares mode '" + McpParentSection.MODE_UNPARENTED + "' but entity '"
               + r.entity.getName() + "' advertises " + writes + ". A record whose parent cannot be "
               + "named cannot be written without creating an orphan — either turn those methods "
-              + "off or declare a parent.field");
+              + "off or declare a parent.field", agentProblem);
     }
     return new Scope(Kind.UNPARENTED, null, parentEntityName(r.entity, r.parentTab, r.config),
         Set.of(), r.reason, null);
@@ -463,9 +485,9 @@ final class McpParentScope {
     }
     List<Property> candidates = parentLinkProperties(r.tab, r.dalEntity);
     if (candidates.isEmpty()) {
-      return unresolvable(r, "it declares no active parent-link column. Set MCP_CONFIG "
-          + "parent.field to the property that links it to '"
-          + r.parentTab.getTable().getDBTableName() + "'");
+      return unresolvable(r, "it declares no active parent-link column",
+          "Set MCP_CONFIG parent.field to the property that links it to '"
+              + r.parentTab.getTable().getDBTableName() + "'");
     }
     for (Property candidate : candidates) {
       if (targetsTableOf(candidate, r.parentTab)) {
@@ -478,8 +500,8 @@ final class McpParentScope {
       names.add(candidate.getName());
     }
     return unresolvable(r, "none of its parent-link fields " + names + " points at the parent tab "
-        + "table '" + r.parentTab.getTable().getDBTableName() + "'. Set MCP_CONFIG parent.field to "
-        + "the correct one");
+        + "table '" + r.parentTab.getTable().getDBTableName() + "'",
+        "Set MCP_CONFIG parent.field to the correct one");
   }
 
   /**
@@ -490,10 +512,19 @@ final class McpParentScope {
    * make as is (ETP-5558). Looked up exactly as a resolved scope looks it up.</p>
    */
   private static Scope unresolvable(Resolution r, String why) {
-    String problem = "cannot determine the parent of tab '" + r.tab.getName() + "': " + why;
+    return unresolvable(r, why, null);
+  }
+
+  /**
+   * @param remedy what whoever configures the entity should do about it, or {@code null}. Part of
+   *               the problem {@code configError} and the log show; left out of the agent's text
+   */
+  private static Scope unresolvable(Resolution r, String why, String remedy) {
+    String agentProblem = "cannot determine the parent of tab '" + r.tab.getName() + "': " + why;
+    String problem = remedy == null ? agentProblem : agentProblem + ". " + remedy;
     log.warn("Parent scope unresolvable — {}", problem);
     return new Scope(Kind.UNRESOLVABLE, null, parentEntityName(r.entity, r.parentTab, r.config),
-        r.optional, r.reason, problem);
+        r.optional, r.reason, problem, agentProblem);
   }
 
   // -- model helpers --------------------------------------------------------

@@ -2190,6 +2190,33 @@ class McpToolRouterSupportTest {
       assertFalse(mapped.toString().contains("MISSING_REQUIRED_FIELDS"));
     }
 
+    /**
+     * ETP-5558: a preprocessor rejection already carries its IMP-5 envelope — built from an
+     * {@code McpRoutingException} (parent_unresolvable, read_only_field, …) or by the FK resolver.
+     * Rewriting it by status alone flattened it to {@code validation_error} / "Batch operation
+     * failed" and threw away the code, the detail and the hint the single-record verb returns.
+     */
+    @Test
+    @DisplayName("an error that is already an IMP-5 envelope keeps its code, detail and hint")
+    void keepsAnExistingEnvelope() throws Exception {
+      JSONObject envelope = new JSONObject();
+      envelope.put("status", 422);
+      envelope.put("error", "parent_unresolvable");
+      envelope.put("detail", "Cannot create 'lines' of 'payment-out' through MCP: ...");
+      envelope.put("hint", "Do not retry this create.");
+      envelope.put("field", "parentId");
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(envelope, 0, "l0");
+
+      JSONObject error = McpToolRouterSupport.toMcpBatchFailure(body).getJSONObject("error");
+
+      assertEquals(422, error.getInt("status"));
+      assertEquals("parent_unresolvable", error.getString("error"));
+      assertEquals("Do not retry this create.", error.getString("hint"));
+      assertTrue(error.getString("detail").startsWith("Cannot create 'lines'"));
+      assertEquals("parentId", error.getString("field"));
+      assertEquals("l0", body.getJSONObject("failedAt").getString("id"));
+    }
+
     @Test
     @DisplayName("a committed batch and a body with no error object pass through untouched")
     void passesThroughNonFailures() throws Exception {

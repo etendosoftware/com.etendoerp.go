@@ -2366,10 +2366,14 @@ Now the create is refused before any body transform, and nothing is persisted:
 
 ```json
 { "status": 422, "error": "parent_unresolvable", "field": "parentId",
-  "detail": "Cannot create 'lines' of 'payment-out' through MCP: its parent cannot be identified (cannot determine the parent of tab 'Lines': none of its parent-link fields [paymentDetails, invoicePaymentSchedule] points at the parent tab table 'FIN_Payment'. ...), so the record would be attached to a parent nobody chose. Nothing was written.",
+  "detail": "Cannot create 'lines' of 'payment-out' through MCP: its parent cannot be identified (cannot determine the parent of tab 'Lines': none of its parent-link fields [paymentDetails, invoicePaymentSchedule] points at the parent tab table 'FIN_Payment'), so the record would be attached to a parent nobody chose. Nothing was written.",
   "hint": "Do not retry this create. Call neo_schema(spec:'payment-out', entity:'header', view:'actions') and use the action that creates this record.",
   "seeAlso": "..." }
 ```
+
+The `detail` carries the reason without its administrator remedy: "Set MCP_CONFIG parent.field …"
+is kept in `configError` and in the log (`Scope.getProblem()`), but the agent's text comes from
+`Scope.getAgentProblem()`, because an agent cannot act on it.
 
 The hint names the real parent entity: an `UNRESOLVABLE` scope is missing only its link column, not
 its parent tab, so `McpParentScope` still looks the parent entity up (which also makes
@@ -2533,7 +2537,7 @@ than keeping two in step. ETP-5415 closed enough of that gap to turn it back on 
 | `McpBillToInjector` | idem — added by ETP-5335 while the tool was off, live since |
 | `resolveFkSentinels` | idem — the `"0"` sentinel cleanup |
 | **the read-only / excluded field gates** | idem, and FIRST, before any injection. `neo_create` applies them inside `mapFieldsToDalProperties`; batch never calls that method, so it accepted a value for a field the spec publishes as read-only that `neo_create` refuses with 422. Batch now calls `McpWriteRequestSupport.applyWriteGatesToDalBody`, which refuses without remapping keys |
-| **the parent gate** (ETP-5558) | `requireApplicableParent(sfEntity, op.parentId())`, first of all in `preprocessBatchOperation`. `BatchService` maps the parent itself and never reaches `resolveParentFK`, so without it a batched child whose parent cannot be identified — with or without a `parentRef` — was written with a link the defaults picked. Same 422 `parent_unresolvable` as `neo_create` (§4.12.6), inside the batch failure envelope |
+| **the parent gate** (ETP-5558) | `requireApplicableParent(sfEntity, op.parentId())`, first of all in `preprocessBatchOperation`. `BatchService` maps the parent itself and never reaches `resolveParentFK`, so without it a batched child whose parent cannot be identified — with or without a `parentRef` — was written with a link the defaults picked. Same 422 `parent_unresolvable` as `neo_create` (§4.12.6), inside the batch failure envelope. Every preprocessor rejection keeps its IMP-5 `status`/`error`/`detail`/`hint` in the batch `error`: `toMcpBatchFailure` passes an error that already carries a string `error` code through unchanged, instead of flattening it by status to `validation_error` / "Batch operation failed" |
 | the spec **name** in `NeoContext` | `BatchService.createRecord` passed the spec's UUID where every other path passes its name, so a customization branching on `getSpecName()` saw a different value here (D10) |
 
 **These transforms run per operation, from inside the batch loop** — `BatchService` calls back into

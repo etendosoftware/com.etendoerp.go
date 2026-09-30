@@ -1030,12 +1030,26 @@ final class McpToolRouterSupport {
    * @return the same object, for call chaining
    * @throws JSONException never in practice (all values are plain strings/ints)
    */
+  /**
+   * Whether a batch {@code error} object is already in the IMP-5 shape — it carries a string
+   * {@code error} code. {@code BatchService}'s own failures carry {@code status}/{@code message}/
+   * {@code detail} and never an {@code error} key, so the two cannot be confused.
+   */
+  private static boolean isImp5Envelope(JSONObject error) {
+    Object code = error.opt(McpConstants.KEY_ERROR);
+    return code instanceof String && StringUtils.isNotBlank((String) code);
+  }
+
   static JSONObject toMcpBatchFailure(JSONObject result) throws JSONException {
     if (result == null || result.optBoolean("committed", false)) {
       return result;
     }
     JSONObject rawError = result.optJSONObject(McpConstants.KEY_ERROR);
-    if (rawError == null) {
+    if (rawError == null || isImp5Envelope(rawError)) {
+      // ETP-5558: an MCP preprocessor rejection (an McpRoutingException, the FK resolver, the image
+      // check) already carries its IMP-5 envelope. Rewriting it by status flattened it to
+      // validation_error / "Batch operation failed" and lost the code, detail and hint the
+      // single-record verb returns for the same condition.
       return result;
     }
     int status = rawError.optInt(McpConstants.KEY_STATUS, 500);

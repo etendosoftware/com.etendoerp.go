@@ -17,6 +17,7 @@
 package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -153,5 +154,25 @@ class McpParentScopeUnresolvableTest {
     assertEquals("header", scope.getParentEntity(),
         "the refusal needs the parent entity to point the agent at a direct call");
     assertTrue(scope.getProblem().contains("FIN_Payment"), scope.getProblem());
+  }
+
+  /**
+   * The remedy "Set MCP_CONFIG parent.field …" is for whoever configures the entity: it stays in
+   * the scope's problem ({@code configError}, the log) but must not reach the agent, who cannot
+   * act on it and would only be sent looking for a tool that does not exist.
+   */
+  @Test
+  @DisplayName("the admin remedy stays in configError but not in the agent's refusal")
+  void adminRemedyIsNotShownToTheAgent() throws Exception {
+    McpParentScope.Scope scope = McpParentScope.forEntity(child);
+    assertTrue(scope.getProblem().contains("MCP_CONFIG"),
+        "configError keeps the remedy for the administrator: " + scope.getProblem());
+
+    McpRoutingException refusal = org.junit.jupiter.api.Assertions.assertThrows(
+        McpRoutingException.class,
+        () -> McpWriteRequestSupport.requireApplicableParent(child, null));
+    String detail = refusal.toEnvelope().getString(McpConstants.KEY_DETAIL);
+    assertTrue(detail.contains("FIN_Payment"), "the reason itself still reaches the agent: " + detail);
+    assertFalse(detail.contains("MCP_CONFIG"), "no admin instruction for the agent: " + detail);
   }
 }
