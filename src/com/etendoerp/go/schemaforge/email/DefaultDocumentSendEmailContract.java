@@ -35,6 +35,7 @@ import com.etendoerp.go.schemaforge.email.render.EmailDates;
 import com.etendoerp.go.schemaforge.email.render.EmailEscape;
 import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 import com.etendoerp.go.schemaforge.email.render.EmailMessages;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Base contract for document-send transactional emails resolved from trusted server records.
@@ -103,6 +104,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   public static final String ENV_MAX_PER_DOMAIN = "ETGO_EMAIL_THROTTLE_MAX_PER_DOMAIN";
 
   private static final String DOCUMENT_RECORD_NOT_FOUND = "Email document record was not found";
+  private static final String SPEC_ACCESS_DENIED = "Access denied to spec for current role";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
 
@@ -235,9 +237,32 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     if (!validation.isAllowed()) {
       return validation;
     }
+    // ETP-5205 — sending is a write on the document's window (it emails the customer and the
+    // client caches the PDF as the main attachment first). The email-contracts endpoint is
+    // dispatched before the spec router, so the router's write-tier check never runs here:
+    // a Solo-Lectura role must be refused explicitly. Checked before resolving the document so a
+    // denied role learns nothing about the record. 403 maps to UNAUTHORIZED, which the send
+    // modal already translates.
+    if (!canWriteSpec()) {
+      return EmailAuthorizationResult.rejected(403, SPEC_ACCESS_DENIED);
+    }
     return resolveDocument(command).isPresent()
         ? EmailAuthorizationResult.allowed()
         : EmailAuthorizationResult.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
+  }
+
+  /**
+   * Whether the current role may write through this contract's window (ETP-5205).
+   *
+   * <p>Delegates to {@link NeoAccessHelper#canWriteSpec(String)} with {@link #getSpecName()}:
+   * full access passes, Solo Lectura or no access is denied, and so is a contract whose spec
+   * name resolves no active spec (fail closed). Overridable so unit tests can exercise
+   * {@link #authorize} without the DAL.</p>
+   *
+   * @return {@code true} if the current role has write access to the document's spec
+   */
+  protected boolean canWriteSpec() {
+    return NeoAccessHelper.canWriteSpec(getSpecName());
   }
 
   /**

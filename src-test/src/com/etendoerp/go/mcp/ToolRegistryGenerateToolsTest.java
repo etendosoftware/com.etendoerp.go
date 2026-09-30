@@ -1861,7 +1861,7 @@ class ToolRegistryGenerateToolsTest {
         // drifted from neo_create in both directions. The assertion follows the flag rather than
         // hardcoding today's value, so flipping it back on does not fail a test that was never
         // about the flag.
-        assertEquals(McpConstants.BATCH_TOOL_ENABLED, names.contains("neo_batch"),
+        assertEquals(McpConstants.batchToolEnabled(), names.contains("neo_batch"),
             "neo_batch must be published exactly while its flag is on");
       }
     }

@@ -239,7 +239,7 @@ overwritten by a re-cascaded callout.
 
 Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. PATCH is handled via a `service()` override that intercepts the PATCH method at the Servlet API level.
 
-#### 4.3.5 Curated read-only fields are refused before a REST write (ETP-5347)
+#### 4.3.0 Curated read-only fields are refused before a REST write (ETP-5347)
 
 `POST`, `PUT`, and `PATCH` reject a value submitted for an included field that the NEO
 curation marks read-only. The rejection happens at the REST boundary, before a
@@ -1060,6 +1060,21 @@ would drift, and the drift is user-hostile: the UI says yes, the API answers 400
 Plain text (`text/plain`) is deliberately **not** accepted — the ticket's original complaint was
 that `.txt` uploaded fine while the UI advertised "PDF, Word, Excel, PowerPoint, images". ZIP, XML
 and RTF are kept: Facturae XML and zipped document bundles are real use cases.
+
+#### Write-tier authorization (ETP-5205)
+
+Every attachment **write** — `POST` upload, `DELETE /attachments/file/{id}`,
+`PATCH /attachments/file/{id}` (description) and `PATCH /attachments/file/{id}/main` — is checked
+by `NeoAttachmentAuthorizer` in `NeoBuiltInEndpointHandler` before the operation runs. The current
+role needs **editable** access (`AD_Window_Access.IsReadWrite = 'Y'`, or an admin/client-admin
+role) to at least one active window that shows the attachment's table; otherwise the answer is
+`403` `"Access denied to spec for current role"`, which the SPA already translates. A table no
+window shows is allowed (WARN log). A few tables are only shown by a technical support window
+that no role template grants; for those `NeoAttachmentAuthorizer.PROXY_WINDOWS_BY_TABLE` also
+accepts the window that proxies the feature — today `ETGO_Fiscal_Decl` → Tax Report, the proxy
+Finance already holds for "Modelos fiscales" (ETP-5116), so justificante uploads keep working. For the bare-ID operations the table comes from the stored
+`C_File` row, never from the request. Reads (list, download, zip, main) are unchanged. This is
+only the window-tier slice of ADR-0003; record/org scoping and the uniform `404` remain ETP-4570.
 
 #### GET — List attachments
 
@@ -1970,8 +1985,8 @@ write body pass a **human search string** for an FK field; the router resolves i
 id server-side before persisting, via the same selector path `neo_selectors` uses
 (`NeoSelectorService.querySelectorByColumn`, limit 10). This runs for both `neo_create` and
 `neo_update` (`McpFkResolver.resolveFkNames`, invoked from `handleCreate` and `handleUpdate`) and,
-since IMP-15, on every `neo_batch` operation body (`McpToolRouter.resolveBatchFkNames`, run before
-the batch transaction opens).
+since IMP-15, on every `neo_batch` operation body (`McpToolRouter.preprocessBatchOperation`, run
+per operation from inside the batch loop — see §4.12.9).
 
 **Request** — `businessPartner` given by name instead of id:
 
@@ -2065,9 +2080,9 @@ reference.
 
 #### 4.12.4 `neo_batch` failure envelope (IMP-15)
 
-> **`neo_batch` is switched off** since ETP-5335 (§4.12.9). This section describes the contract the
-> tool had, and the one it resumes if the flag is flipped back; the REST `/batch` endpoint it shares
-> `BatchService` with is unaffected and this envelope still applies there.
+> **`neo_batch` is live again** since ETP-5415, after being switched off by ETP-5335 — see §4.12.9
+> for what converged and what is still deliberately unequal. This envelope applies to it and to the
+> REST `/batch` endpoint it shares `BatchService` with.
 
 `BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
 the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
@@ -2423,75 +2438,96 @@ already carries a value, the business partner is unknown or still a `$ref:` plac
 partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
 so a location the role cannot read never becomes the invoicing address of a document it writes.
 
-**Where it runs.** `neo_create` runs it in `handleCreate`, before the mandatory check — this is the
-live call site. A second call site exists in the per-operation pre-pass `resolveBatchOpFkNames`,
-after the FK resolution so a partner given by name is already an id, but it is **dormant**:
-`neo_batch` is switched off (`McpConstants.BATCH_TOOL_ENABLED = false`, §4.12.9) and is neither
-published nor routable. It is kept wired so that flipping the flag back cannot silently reintroduce
-null bill-tos — on that path the missing value was never a 422 at all, because the shared
-`NeoCrudHandler` validator only checks submitted keys, so the document was simply persisted without
-one.
+**Where it runs.** Both MCP write verbs, and both live since ETP-5415: `neo_create` in
+`handleCreate` before the mandatory check, and each `neo_batch` operation in
+`preprocessBatchOperation`, after the FK resolution so a partner given by name is already an id.
+Without it the missing value was never a 422 at all, because the shared `NeoCrudHandler` validator
+only checks submitted keys — the document was simply persisted without a bill-to.
 
 **The REST `/sws/neo/batch` endpoint keeps the existing behaviour.** It shares `BatchService` but
-not the MCP pre-pass, and changing what the React frontend persists is out of scope for this fix.
+passes no preprocessor (§4.12.9), and changing what the React frontend persists is out of scope for
+this fix.
 
 ---
 
-#### 4.12.9 `neo_batch` is switched off (ETP-5335)
+#### 4.12.9 `neo_batch` is on again, and what still differs (ETP-5335 → ETP-5415)
 
-`McpConstants.BATCH_TOOL_ENABLED` is `false`. The tool is not published in `tools/list`
-(`ToolRegistry`) **and** is refused if called by name (`McpToolRouter.route`) — withdrawing it from
-the listing alone would leave an agent that learned the name elsewhere reaching a code path we chose
-not to maintain, and a silent success there is worse than a refusal.
+`McpConstants.batchToolEnabled()` returns `true`. The tool is published in `tools/list`
+(`ToolRegistry`) and routable by name (`McpToolRouter.route`).
 
-**Why.** `neo_batch` and `neo_create` are two different implementations of "create".
+> **It is a method, not a constant, deliberately.** A `static final boolean` initialised to a
+> literal is inlined by javac into every use site, so recompiling `McpConstants` alone changed
+> nothing: the tool stayed unpublished with the flag reading `true` in the source. The worse shape
+> is the asymmetric one — a partial rebuild leaving `ToolRegistry` publishing a tool
+> `McpToolRouter` still refuses. Read the flag through the accessor; never reintroduce the constant.
+
+**The background.** `neo_batch` and `neo_create` are two implementations of "create".
 `neo_create` runs the MCP write pipeline in `handleCreate`; `neo_batch` delegates each operation to
-the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). They had drifted apart in
-**both** directions:
+the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). ETP-5335 switched the tool
+off because they had drifted apart in both directions and keeping one write path correct is cheaper
+than keeping two in step. ETP-5415 closed enough of that gap to turn it back on — **not all of it**.
 
-| | in `neo_create`, not in `neo_batch` |
+##### Closed (ETP-5415)
+
+| step | how |
 |---|---|
-| `validateMandatoryFields` | the full sweep of mandatory AD columns (the shared validator only checks keys the caller submitted) |
-| `coerceFieldTypes` + `buildInvalidDatesError` | the 422 for unreadable/ambiguous dates (ETP-4793 / IMP-24) |
-| `McpImageFieldSupport.validateImageFields` | which tool produces a valid image id (ETP-5184) |
-| `McpLinePriceInjector` | the unit price derived from the parent's price list |
-| `resolveFkSentinels` | the `"0"` sentinel cleanup |
-| entity pre-hook | `handleDefault` never goes through `handleWithHooks`, so `NeoHandler.handle()` does not run |
+| `McpImageFieldSupport.validateImageFields` | runs per operation in `preprocessBatchOperation` |
+| `McpLinePriceInjector` | idem — the unit price derived from the parent's price list |
+| `McpBillToInjector` | idem — added by ETP-5335 while the tool was off, live since |
+| `resolveFkSentinels` | idem — the `"0"` sentinel cleanup |
+| **the read-only / excluded field gates** | idem, and FIRST, before any injection. `neo_create` applies them inside `mapFieldsToDalProperties`; batch never calls that method, so it accepted a value for a field the spec publishes as read-only that `neo_create` refuses with 422. Batch now calls `McpWriteRequestSupport.applyWriteGatesToDalBody`, which refuses without remapping keys |
+| the spec **name** in `NeoContext` | `BatchService.createRecord` passed the spec's UUID where every other path passes its name, so a customization branching on `getSpecName()` saw a different value here (D10) |
 
-| | in `neo_batch`, not in `neo_create` |
-|---|---|
-| `NeoCommercialLinePolicy.injectCommercialAmounts` | ETP-4855's net-before-gross ordering, reached only via `executePostCreate` |
-| `stripContactsPreCreateBillingDefaults` | — |
-| `handler.protectedCreateCalloutFields` | the fields each handler shields from the cascade |
+**These transforms run per operation, from inside the batch loop** — `BatchService` calls back into
+`McpToolRouter.preprocessBatchOperation` through the `OperationPreprocessor` hook, after
+`substituteRefs` and `resolveParentId` and before the record is written. They used to run as a pass
+over the whole operations array *before* the transaction opened, which is not the same thing: at
+that point no operation has run, so a `$ref:<opId>` is still a placeholder and a `parentRef` names a
+record that does not exist. Every parent-dependent injection therefore abstained in silence — a
+batched order line persisted at price 0 while the identical single create priced correctly. **Do not
+move these back to an up-front pass.**
 
-Keeping one write path correct is cheaper than keeping two in step, so the second is off until they
-converge.
+##### Measured, not assumed
 
-**What is given up.** Not the ability to create several records — an agent calls `neo_create` once
-per record — but **atomicity**. A batch was applied as a unit (IMP-23) and let a later operation
-reference an earlier one's id through `$ref:`. Without it, a run that fails halfway leaves the
-records already created in place, and the agent carries the parent id forward itself. The refusal
-says so, so an agent does not assume the two are equivalent:
+Every row below was verified against a running instance on 2026-09-28 by writing through both verbs
+and reading back what persisted. **The previous version of this table was wrong in four of them**,
+in both directions, because it was carried forward by reading rather than by measuring. Before
+acting on this table again, re-measure: it is the definition of "converged", and a wrong list either
+blocks work already done or hides a real gap.
 
-```json
-{
-  "status": 405,
-  "error": "tool_disabled",
-  "detail": "neo_batch is disabled on this server. Create the records one at a time with neo_create instead: create the parent first, then pass its returned id as parentId on each child create.",
-  "hint": "These are not equivalent in one respect: a batch was applied as a unit, so a failure undid the whole set. Separate creates are not undone — if one fails, the records already created stay. Check what exists before retrying.",
-  "seeAlso": "docs(topic:\"creating records\")"
-}
-```
+| step | `neo_create` | `neo_batch` | evidence |
+|---|---|---|---|
+| `validateMandatoryFields` | yes | **yes** | a batch omitting `businessPartner` on `sales-order/header` is refused 422 with `missingFields:["businessPartner"]` and rolled back. The shared `NeoCrudHandler.executePostCreate` validates after the full resolution chain, so batch is not more permissive here |
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | yes | **yes** | runs in `executePostCreate`, which both paths reach. (`grossUnitPrice` still persists as 0 on both — a separate, undiagnosed defect, not a divergence) |
+| `stripContactsPreCreateBillingDefaults` | yes | **yes** | idem — `executePostCreate` |
+| `handler.protectedCreateCalloutFields` | yes | **yes** | idem — `executePostCreate`, resolved statically so a null-servlet batch reaches it |
+| the entity pre-hook | yes | **yes** | `BatchService` calls `handleWithHooks` when a qualifier exists |
 
-`tool_disabled` rather than `not_found` on purpose: the agent misspelled nothing and will not find a
-working variant by retrying.
+##### Still divergent
 
-**Scope.** The flag governs the MCP tool only. The REST `/sws/neo/batch` endpoint is untouched and
-keeps serving its callers (the OCR purchase-invoice ingest), so `BatchService` stays live.
-`handleBatch` and the MCP-side pre-pass are kept as they are — flipping the flag to `true` restores
-the tool with nothing else to change.
+| step | in `neo_create` | in `neo_batch` | consequence |
+|---|---|---|---|
+| `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
+| the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
 
----
+This is a **declared** list, not an unknown one: the point is that the next person to touch either
+path can see what is deliberately unequal. Closing a row means adding the step to
+`preprocessBatchOperation` and re-measuring this table in the same change.
+
+##### REST `/sws/neo/batch` is unaffected
+
+It shares `BatchService` and passes **no** preprocessor, so none of the MCP compensations above
+apply to it. That is by decision — the underlying defects live in the shared selector-aux path the
+React frontend also uses, and changing what the frontend persists is out of scope. `BatchService`
+itself holds no knowledge of who supplies a preprocessor or what it does.
+
+##### Atomicity
+
+Unchanged, and it is what `neo_batch` exists for: a batch is applied as a unit (IMP-23), a failure
+rolls the whole set back, and a later operation can reference an earlier one's id through `$ref:`.
+An operation rejected by the preprocessor is reported after the earlier operations have executed
+rather than before the transaction opens; nothing is left behind, and the envelope is the same
+`committed:false` + `failedAt` shape documented in §4.12.4.
 
 #### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
 
@@ -2583,7 +2619,7 @@ disagreement this section exists to end, reintroduced by the fix for it.
 ##### Scope and what is not fixed
 
 - **The excluded-field gate is MCP only.** REST has its own `NeoFieldFilter`; its separate
-  read-only REST gate is documented in §4.3.5 (ETP-5347).
+  read-only REST gate is documented in §4.3.0 (ETP-5347).
 - **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
   write path in silence. The set refused here is only the explicitly excluded one.
 - **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
@@ -2855,7 +2891,7 @@ A title never mentions `neo`. A new fixed tool needs a `title.<tool name>` key i
 and an entry in `McpToolTitlesTest.FIXED_TOOLS`, which checks both. A spec-title lookup failure is swallowed, falling back to the
 humanized name, so a cosmetic field can never drop a tool from the list.
 
-#### 4.12.17 `neo_delete` always confirms a successful delete (ETP-5474)
+#### 4.12.16 `neo_delete` always confirms a successful delete (ETP-5474)
 
 A successful `neo_delete` answers `{"deleted": true, "id": "<recordId>"}` whichever path removed
 the row — the generic removal, or an entity `NeoHandler` whose pre-hook resolved the DELETE itself
@@ -3236,6 +3272,26 @@ public class MyCustomHandler implements NeoHandler {
 
 Then set `JAVA_QUALIFIER = 'myCustomHandler'` on the corresponding ETGO_SF_Entity record.
 
+> **`@Named` only — never a normal CDI scope.** Do not add `@ApplicationScoped`,
+> `@RequestScoped`, `@SessionScoped` or `@ConversationScoped` to a handler an
+> `ETGO_SF_ENTITY` row resolves. `NeoServletSupport.lookupHandler` matches by reading
+> `@Named` off the resolved instance's class, and a normal-scoped bean resolves to a Weld
+> client proxy — a generated subclass that does not carry the (non-`@Inherited`)
+> annotation. The handler is skipped **silently**: the endpoint still answers, with the
+> generic CRUD body. `@Named`-only defaults to `@Dependent`, which is not proxied. The set
+> this applies to is every `<JAVA_QUALIFIER>` in
+> `src-db/database/sourcedata/ETGO_SF_ENTITY.xml`. A handler consumed only by `@Inject`
+> (e.g. `NeoCloneRecordHandler`, which has no row there) is exempt and may be scoped —
+> injection is proxy-safe. Nothing enforces this automatically yet; a guardrail test is on
+> the ETP-5415 test backlog.
+>
+> Resolution is memoised per qualifier by `NeoHandlerResolutionCache` (ETP-5415), so the
+> CDI scan runs once per qualifier per deployment instead of once per request. The two
+> resolvers — `lookupHandler` (REST/batch, `@Named`-on-the-class) and
+> `NeoHandlerLookup.byQualifier` (MCP/access, CDI `Bean#getName()`) — keep separate caches
+> and separate semantics on purpose. Only the matched bean/class is cached, never the
+> instance: every request still gets its own handler reference.
+
 **Handler behavior:**
 - The handler receives a `NeoContext` with all request information (spec name, entity name, HTTP method, record ID, request body, query params, AD_Tab, OBContext).
 - Return a `NeoResponse` to take full control of the response.
@@ -3522,6 +3578,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   ```
   qtyPending      = SUM(C_OrderLine.QtyOrdered) - SUM(C_OrderLine.QtyDelivered)
+                    (Total Discount line excluded — ETP-5525)
   needsPrimaryDoc = qtyPending != 0 AND no linked M_InOut in DocStatus 'DR'
 
   totalPending    = order GrandTotal - SUM(GrandTotal of LINKED invoices in DocStatus 'CO')
@@ -3531,6 +3588,8 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`CreateDraftInvoiceHandler#handleList`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
 
   **Cost and shape.** Three batched queries per GET response, independent of page size — never one per row: ordered-vs-delivered quantity grouped by order, draft `M_InOut` by order, and the linked-invoice union above. Sales vs purchase (`IsSOTrx` `'Y'`/`'N'`) is parameterized off the existing `isSalesTransaction()` override, the same switch the callout price-list fallback already uses, so a subclass needs to know nothing about this annotation to be classified correctly. Comparisons are exact-decimal (`BigDecimal.compareTo`), not float subtraction. The order total is read from the JSON record rather than re-queried, so it is the same number the form sees — `applyTotalDiscountToRecord` has already adjusted `grandTotalAmount` for a draft carrying a not-yet-materialized total discount by the time this runs.
+
+  **The Total Discount line is excluded from `qtyPending` (ETP-5525).** The dummy line `TotalDiscountService` creates (product `ETGO_DTO`, `TotalDiscountService.DISCOUNT_PRODUCT_ID`, ordered 1) can never be shipped or received, so counting it left `qtyPending` at 1 forever and `needsPrimaryDoc` stuck `true` on a fully delivered order with a Total Discount. `batchFetchOrderedVsDelivered` filters it with the same product-id criterion `DiscountLineFilter` applies to the `/lines` endpoint the form reads and `batchComputeStatusPercentages` applies to the list percentages (ETP-5317); product-less lines are still counted. `needsInvoiceDoc` compares amounts, not line quantities, and is unaffected. The handler is shared, so the exclusion applies to Purchase Order (`needsPrimaryDoc` = receipt pending) and Sales Quotation as well; the ETP-5525 frontend changes (fallback, modal title, cache invalidation) cover Sales Order only.
 
   **Status-agnostic.** Both flags are annotated for every document status; the form only evaluates them once the order is completed and the kebab already gates its own entry on `status === 'CO'`, so the backend stays a pure function of the order's documents and never re-reads `documentStatus`.
 
@@ -3972,17 +4031,26 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 
 Unlike `SFWindowAccessMap`, which answers "what can the CURRENT caller's own role reach", this endpoint is a cross-role aggregate: it always returns data for all 5 of the caller's OWN tenant's roles regardless of which one the caller happens to be using. That is exactly why it is gated to admin/client-admin callers only.
 
-**UI-excluded windows (ETP-5068).** `resolveActiveEtendoGoWindowsById()` subtracts
-`SFRolesOverview.UI_EXCLUDED_WINDOW_IDS` from the active-`SPEC_TYPE='W'` spec set: windows Etendo GO
-serves read-only over NEO/MCP but deliberately shows nowhere in its own UI. Because that one method is
-the single source every downstream structure derives from — each role's `windows` array, its
-`windowCount`, and the `matrix` — a single entry in that set removes the window from **both** admin
-screens at once:
+**Shared matrix builder (ETP-5485).** The window set, tier resolution (real windows plus the
+ETP-5071 proxy rows), `matrix`, `reportsMatrix` and each card's `windows` array are built by
+`com.etendoerp.go.schemaforge.util.RoleAccessMatrix`, NOT by this webhook. `SFSystemRoleTemplates`
+(§8f) calls the same builder for its `includeMatrix=true` response, which is what the User window's
+"Roles del usuario" tab renders — so both admin screens list the **same rows by construction**.
+Before ETP-5485 that tab rebuilt its rows from the per-role `windows[]` arrays and never got the
+ETP-5071 proxy rows ("Modelos Fiscales", "Documentos no contabilizados"). `SFRolesOverview` itself
+only decides which roles are columns (tenant role vs system-template fallback), user counts and
+cards. Same pattern as `ReportAccessCatalog` for the Informes rows. Any new matrix rule (a row, an
+exclusion, a proxy) goes into `RoleAccessMatrix`, never into one webhook.
 
-- **"Configuración > Roles"** (`RolesAccessMatrix.jsx`) renders `matrix.categories` directly.
-- **"Usuario > Roles"** (`UserRolesTab.jsx`) walks `SFListMenu`'s raw AD tree but intersects it
-  against the union of every role's `windows[]` from THIS endpoint (`activeWindowIds`), which is also
-  what already keeps classic-only entries such as Application Dictionary out of that tab.
+**UI-excluded windows (ETP-5068).** `RoleAccessMatrix.resolveActiveEtendoGoWindowsById()` subtracts
+`RoleAccessMatrix.UI_EXCLUDED_WINDOW_IDS` from the active-`SPEC_TYPE='W'` spec set: windows Etendo GO
+serves read-only over NEO/MCP but deliberately shows nowhere in its own UI. Because that one method is
+the single source every matrix derives from — plus this endpoint's per-role `windows` array and
+`windowCount` — a single entry in that set removes the window from **both** admin screens at once:
+
+- **"Configuración > Roles"** (`RolesAccessMatrix.jsx`) renders this endpoint's `matrix.categories`.
+- **"Usuario > Roles del usuario"** (`UserRolesTab.jsx`) renders `SFSystemRoleTemplates`'
+  `includeMatrix=true` `matrix` (or this endpoint's, for an admin holder), built by the same class.
 
 Note the exclusion cannot be achieved by revoking `AD_Window_Access`: the `matrix` lists every GO
 spec window regardless of grants (an ungranted window simply shows `access: "none"`), and the grants
@@ -3990,8 +4058,21 @@ are deliberately kept so administrators can still reach the window in Etendo cla
 deliberately NOT applied in `SFListMenu`, whose tree must keep reporting the native AD menu as-is for
 its other consumers (`useRoleMenu`'s allowed-id filter, the Explorer's spec picker).
 
-Current contents: `6FEBA130CDE24CC09041FFA6117ADFA9` — "Conversion Rate Downloader Log" (ETP-5068),
-an internal log of the conversion-rate downloader job that adds no value to the Etendo Go end user.
+Current contents (10 ids — `RoleAccessMatrix.UI_EXCLUDED_WINDOW_IDS` and its javadoc are the source
+of truth; keep this table in sync when the set changes):
+
+| Window id | Window | Why it is excluded |
+|-----------|--------|--------------------|
+| `6FEBA130CDE24CC09041FFA6117ADFA9` | Conversion Rate Downloader Log | ETP-5068 — internal job log, no value to the Etendo Go end user |
+| `F4675DAB02134762B66881DAE4672AD0` | Monitor Verifactu | ETP-5116 — folded into "Fiscal Monitor" (representative: SII Monitor) |
+| `71F24BF89DE748B483BE87594747D6FB` | TBAI Facturas Enviadas | ETP-5116 — folded into "Fiscal Monitor" (representative: SII Monitor) |
+| `C327DE215AC945F69363905840118177` | Configuración TBAI | ETP-5116 — folded into "Fiscal Configuration" (representative: SII Configuration) |
+| `27A453FA86974745977672F1A8DCCEFF` | Configuración Verifactu | ETP-5116 — folded into "Fiscal Configuration" (representative: SII Configuration) |
+| `B5673F73F613496C8BEA22FB55E4E1E4` | End Year Close | ETP-5116 — an action inside Fiscal Calendar (window `117`), not its own page |
+| `121` | Location | ETP-5116 — classic embedded address reference window |
+| `82922976BB524D1BAA3CF8462B9219FE` | Transaction Type | ETP-5116 — classic embedded reference window |
+| `C50A8AEE6F044825B5EF54FAAE76826F` | Return to Vendor | ETP-5116 — dead window, replaced by Return to Vendor Shipment (`273673D2ED914C399A6C51DB758BE0F9`) |
+| `FF808081330213E60133021822E40007` | Return from Customer | ETP-5116 — dead window, replaced by Return Receipt (`123271B9AD60469BAE8A924841456B63`) |
 
 > **Doc correction (ETP-4907):** this section previously described a `SFRolesOverview.GOCLIENT_ROLE_IDS` hardcoded to GOClient's own 5 per-client role ids. That was already stale — the webhook was fixed on 2026-07-27 (live RolesPresa bug) to resolve roles by name (`Finance`/`Sales`/`Purchasing`/`Inventory`) plus `is_client_admin='Y'`, scoped to `currentRole.getClient()`, with no hardcoded id list at all. This section now documents the actual current behavior, including the ETP-4907 system-template fallback below.
 
@@ -4101,10 +4182,11 @@ each resolving its per-role access via a human-chosen PROXY entity instead — F
 through the SII Monitor window's access, Fiscal Models through the Tax Report window's access, and
 Not Posted Documents through a specific process's access — including a duplicate-row guard for the
 case where a proxy (SII Monitor) already produces its own real row from the query above. This is a
-**display-only** resolution scoped entirely to this endpoint's `matrix`/frontend `RolesAccessMatrix`
-consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount`, or any
-provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
-`SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
+**display-only** resolution scoped entirely to the `matrix` (this endpoint's, and since ETP-5485
+also `SFSystemRoleTemplates`' `includeMatrix=true` one — both built by `RoleAccessMatrix`); it does
+not touch `AD_Window_Access` grants, `windows`/`windowCount`, or any provisioning path. Full
+mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
+`RoleAccessMatrix.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
 `TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
 §8d's "Six matrix rows" note below: this proxy resolution is unrelated to (and does not close)
 that separate, provisioning-side gap — as of ETP-5116, ALL 3 of these windowless items (Monitor
@@ -4780,8 +4862,9 @@ Ventas only the Receivables schedule; Compras only the Payables one).
 > **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now fully closed.**
 > This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript` — whether
 > the 4 system role templates can be GRANTED `AD_Window_Access`/`OBUIAPP_Process_Access` for these
-> rows at all. Of the three names ETP-5071 first proxied on the DISPLAY side (`SFRolesOverview`'s
-> "Configuración > Roles" admin screen, §8c above, via `PROXY_MATRIX_ROWS`) — **Documentos no
+> rows at all. Of the three names ETP-5071 first proxied on the DISPLAY side (`RoleAccessMatrix`'s
+> `PROXY_MATRIX_ROWS`, shown on "Configuración > Roles", §8c above, and since ETP-5485 on the User
+> window's "Roles del usuario" tab) — **Documentos no
 > contabilizados**, **Monitor fiscal**, **Modelos fiscales** — an earlier ETP-5116 pass closed the
 > provisioning-side gap for the latter two: Finance now holds a real `AD_Window_Access` grant on
 > the same two proxy windows (SII Monitor, Tax Report) via
@@ -4947,7 +5030,8 @@ pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as `SFAssi
 `com.etendoerp.go.roles.SystemRoleTemplates`) — resolved at the SYSTEM client
 (`AD_Client_ID = '0'`), never the caller's own tenant. It backs the "which template roles can I
 compose from" question for the multi-role assignment UI (`AssignTemplateRolesControl.jsx`,
-`UserRolesTab.jsx`, `RoleChipsCell.jsx`, `RoleFilterControl.jsx` in `etendo_schema_forge`).
+`UserRolesTab.jsx`, `RoleChipsCell.jsx`, `RoleFilterControl.jsx` in `etendo_schema_forge`), and
+(ETP-5485, opt-in) the permission matrix of the User window's "Roles del usuario" tab.
 
 **Why not `SFRolesOverview` (§8c)?** That webhook is hard-scoped to the CALLING tenant's own
 client by design — it resolves the 4 fixed role NAMES plus the client-admin role WITHIN
@@ -4997,11 +5081,35 @@ system client and a non-system caller's ambient readable-client set would otherw
 
 **Informes `reports` field (ETP-5402).** Each role also carries a `reports` array, same `{id,
 name, tier}` shape as `windows[]`, resolved via the shared `ReportAccessCatalog` utility
-documented in §8c — required here, not just on `SFRolesOverview`, because `UserRolesTab.jsx`'s
-matrix COLUMNS (the actual per-cell access data for the common non-admin-holder case) come from
-THIS endpoint, not `SFRolesOverview` (that one is used there only for `activeWindowIds`/admin-
-holder detection). Without it, every Informes cell in that tab would silently resolve "no access"
-for every role regardless of the real grant.
+documented in §8c. Since ETP-5485 `UserRolesTab.jsx` renders the `reportsMatrix` below instead of
+this array; the array stays for backward compatibility.
+
+**Opt-in `matrix` + `reportsMatrix` (ETP-5485).** `GET /sws/neo/systemroletemplates?includeMatrix=true`
+adds the same two keys `SFRolesOverview` returns (§8c) — same shape, same rows, same categories,
+built by the same `RoleAccessMatrix` class — with one `access` entry per template role id:
+
+```json
+{"roles": [...],
+ "matrix": {"categories": [
+   {"name": "Finance", "windows": [
+     {"id": "3E8FEA1EA7404D979306C9EE7FD2E7E8", "name": "Fiscal Models",
+      "access": {"B88A34B5D1874F8685FA6F3C3A609412": "full", "15ECC46CFBD74CF3A76D1F4DC8BA9F80": "none", ...}}
+   ]}]},
+ "reportsMatrix": {"categories": [{"name": "Finance", "reports": [{"id": "...", "name": "...", "access": {...}}]}]}}
+```
+
+This is what the User window's "Roles del usuario" tab renders, so its rows always match
+"Configuración > Roles" — including the ETP-5071 proxy rows, which it was missing while it rebuilt
+rows from `windows[]` itself. Opt-in because the other callers (`RoleChipsCell.jsx`,
+`AssignTemplateRolesControl.jsx`) only need `roles`, and the matrix costs a category query plus the
+proxy-access queries per template. Any other value of the parameter, or none, returns exactly the
+pre-ETP-5485 shape. Cells can still legitimately differ between the two views on a hybrid-state
+tenant: the Roles page shows the tenant's own active copy of a role, while the User tab shows the
+system template the user actually composes.
+
+Note the per-role `windows[]` here keeps its original window set — every active `SPEC_TYPE='W'`
+window, NOT minus `UI_EXCLUDED_WINDOW_IDS` — so its consumers see no change. Only the `matrix` is
+UI-filtered.
 
 ---
 
@@ -5832,7 +5940,7 @@ is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`
 
 **Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` are fully supported. The `executeCustomHqlQuery()` method handles custom HQL with org filtering, validation rules, search across searchable properties, and pagination.
 
-#### 4.12.15 `client` and `organization` are resolved from the session, never from the payload
+#### 4.12.17 `client` and `organization` are resolved from the session, never from the payload
 
 **The tenant a record belongs to is not a per-request choice.** `client` and `organization` are
 resolved from the caller's session on every write, on both verbs and on both the MCP and REST
@@ -5884,7 +5992,7 @@ REST does not report: its client is the SPA, which never sends these fields.
 **Update is in scope too.** An update that changed `organization` would relocate an existing
 record into another tenant — the same hole from the other direction.
 
-#### 4.12.16 The report catalogue answers the same question the execution does
+#### 4.12.18 The report catalogue answers the same question the execution does
 
 A report the role cannot run is no longer offered. `neo_discover` and the publication of the
 `generate_*` tool now resolve through the same rule that refuses the call, so the catalogue
@@ -5892,7 +6000,7 @@ stops advertising what it will then deny.
 
 **What it looked like before.** Under a role holding no grant for it, `neo_discover` listed
 `tax-report` with `callable: true` and the `generate_tax_report` tool was published — and calling
-it answered `403`. Two surfaces asked the permissive shared gate (§4.12.15's fail-open, which a
+it answered `403`. Two surfaces asked the permissive shared gate (§4.12.17's fail-open, which a
 type-`R` spec with no linked process and no `AD_TAB_ID` falls through to), while the third asked
 the handler, which owns the real rule.
 
@@ -5931,3 +6039,39 @@ forever. Both refusal types are now mapped: `SecurityException` and Openbravo's 
 **The fail-open itself is not closed by this.** A report handler that declares nothing still
 passes. See `schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md` for the
 remaining work, including the guardrail test that would make the omission fail the build.
+
+#### 4.12.19 `neo_list` resolves the parent placeholders of a child tab's where clause (ETP-5542)
+
+A child tab can store, in `AD_Tab.HQLWhereClause`, a placeholder for its **parent record** — the
+Bin Contents tab stores `e.quantityOnHand<>0 AND e.storageBin.id=@Locator.id@`. The `@…@` is a hole
+the caller has to fill, not a value.
+
+- **REST** filled it: `NeoCrudHandler.applyWhereClause` resolves the placeholders with the parent id.
+- **MCP did not.** `McpToolRouter.handleList` used the stored clause verbatim, so the query filtered
+  on the literal text `@Locator.id@`, matched nothing and answered `200` with `data: []` — no error,
+  no log line. An agent that listed a bin's contents was told the bin was empty, and without the rows
+  it could not obtain the ids `neo_get` needs to reach the cost and valuation the read hook injects.
+
+Both channels now go through one method, `NeoParentTabFilterResolver.resolveTabWhere(tab, parentId)`:
+
+| Input | Result |
+|---|---|
+| tab with no where clause | `null`, as declared |
+| clause without `@` | unchanged, with or without a parent id |
+| clause with `@`, **no parent id** (top-level read) | unchanged — left to the core JSON service |
+| clause with `@` and a parent id | each `@token@` replaced by the value taken from the parent record; `@AD_Org_ID@` / `@AD_Client_ID@` from the parent's organization / client, the parent's own key from `parentId` |
+| a session variable such as `@#AccessibleOrgTree@` | unchanged: `#` is outside the placeholder pattern |
+
+The method names no entity and reads no business property, so it is shared code that respects the
+"structure yes, identity no" rule. Guards: `NeoParentTabFilterResolverTest` (the rule),
+`NeoCrudHandlerTest.ApplyWhereClause` (REST still resolves) and `McpListTabWhereCallSiteTest`
+(`handleList` goes through the resolver and never reads the raw clause).
+
+Visible effects: `binContents` over MCP now lists only rows with `quantityOnHand <> 0`, as the UI
+does. Entities exposed to MCP whose tab clause carries a parent placeholder (`warehouse/binContents`,
+`warehouse/productTransactions`, `purchase-invoice/accounting`, `payment-in`/`payment-out` line
+entities, the `sii-monitor` entities) resolve it from the parent, which for `sii-monitor`'s
+`@AD_Org_ID@` means the parent's organization, as REST always did.
+
+Not covered: `NeoCrudHandler.addTabWherePredicate` (the `_distinct` read) still carries its own copy
+of the same rule.

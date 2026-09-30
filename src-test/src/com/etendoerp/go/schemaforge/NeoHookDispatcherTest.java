@@ -50,6 +50,13 @@ import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 class NeoHookDispatcherTest {
 
   private NeoServlet servlet;
+  /**
+   * ETP-5415: resolution moved off {@code servlet.lookupHandler} (an instance call) onto
+   * {@code NeoServletSupport.lookupHandler} (static), because {@link NeoHookDispatcher} now
+   * dispatches through {@code NeoExtensionDispatcher} — one resolution order and one trace for
+   * every path. The assertions below are unchanged in substance; only the seam they stub moved.
+   */
+  private MockedStatic<NeoServletSupport> servletSupportStatic;
   private NeoHookDispatcher dispatcher;
   private MockedStatic<OBContext> obContextStatic;
   private MockedStatic<NeoAuditTokenRefresh> auditTokenRefreshStatic;
@@ -66,6 +73,7 @@ class NeoHookDispatcherTest {
 
     obContextStatic = Mockito.mockStatic(OBContext.class);
     auditTokenRefreshStatic = Mockito.mockStatic(NeoAuditTokenRefresh.class);
+    servletSupportStatic = Mockito.mockStatic(NeoServletSupport.class);
     OBContext mockOBContext = mock(OBContext.class);
     obContextStatic.when(OBContext::getOBContext).thenReturn(mockOBContext);
 
@@ -89,6 +97,9 @@ class NeoHookDispatcherTest {
     if (auditTokenRefreshStatic != null) {
       auditTokenRefreshStatic.close();
     }
+    if (servletSupportStatic != null) {
+      servletSupportStatic.close();
+    }
   }
 
   // ── dispatchWithHooks: no entity found → default action ──
@@ -103,7 +114,7 @@ class NeoHookDispatcherTest {
 
     assertSame(defaultResponse, result);
     assertEquals(true, defaultActionCalled.get());
-    verify(servlet, never()).lookupHandler(anyString());
+    servletSupportStatic.verify(() -> NeoServletSupport.lookupHandler(anyString()), never());
   }
 
   // ── dispatchWithHooks: blank qualifier → default action ──
@@ -120,7 +131,7 @@ class NeoHookDispatcherTest {
 
     assertSame(defaultResponse, result);
     assertEquals(true, defaultActionCalled.get());
-    verify(servlet, never()).lookupHandler(anyString());
+    servletSupportStatic.verify(() -> NeoServletSupport.lookupHandler(anyString()), never());
   }
 
   @Test
@@ -135,7 +146,7 @@ class NeoHookDispatcherTest {
 
     assertSame(defaultResponse, result);
     assertEquals(true, defaultActionCalled.get());
-    verify(servlet, never()).lookupHandler(anyString());
+    servletSupportStatic.verify(() -> NeoServletSupport.lookupHandler(anyString()), never());
   }
 
   // ── dispatchWithHooks: null handler → default action ──
@@ -146,7 +157,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(null);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(null);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -170,7 +181,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -197,7 +208,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -224,7 +235,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -245,7 +256,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -266,7 +277,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -287,7 +298,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.CRUD, null, "GET", defaultAction);
@@ -316,7 +327,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("actionQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("actionQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("actionQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.ACTION, "docAction", "POST",
@@ -347,7 +358,7 @@ class NeoHookDispatcherTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getJavaQualifier()).thenReturn("myQualifier");
     when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
-    when(servlet.lookupHandler(eq("myQualifier"))).thenReturn(handler);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("myQualifier")).thenReturn(handler);
 
     NeoResponse result = dispatcher.dispatchWithHooks(
         spec, "Header", NeoEndpointType.SELECTOR, "warehouse", "GET", defaultAction);

@@ -72,7 +72,12 @@ final class FinancialAccountBankConnectionSupport {
     return existing != null ? existing : fetchAndRegisterProvider(providerCode, providerName, apiKey);
   }
 
-  private static Provider findProviderByCode(String code) {
+  /**
+   * Looks up a {@link Provider} by its Salt Edge code (admin mode, first match), or {@code null}
+   * when the code is blank or unknown. Package-visible so {@link FinancialAccountHandler} can
+   * check for an existing catalog row before an offline create writes a logo (ETP-5521).
+   */
+  static Provider findProviderByCode(String code) {
     if (StringUtils.isBlank(code)) {
       return null;
     }

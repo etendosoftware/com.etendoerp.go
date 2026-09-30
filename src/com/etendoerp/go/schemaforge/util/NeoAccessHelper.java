@@ -148,6 +148,38 @@ public final class NeoAccessHelper {
   }
 
   /**
+   * Checks whether the current role may WRITE through the spec named {@code specName}
+   * (ETP-5205): resolves the active {@link SFSpec} by name and applies
+   * {@link #hasWindowAccessForSpec(SFSpec, String)} with {@code POST}, i.e. a Solo-Lectura
+   * ({@code AD_Window_Access.IsReadWrite = 'N'}) role is denied.
+   *
+   * <p>For callers outside the spec router that act on a window's records without going through
+   * it — the document email-send endpoint is dispatched before the router, so the router's own
+   * check never runs for it. Fails closed: a blank name, or a name that resolves no active spec,
+   * answers {@code false}.</p>
+   *
+   * @param specName NEO spec name (kebab-case), may be {@code null}
+   * @return {@code true} if the current role has write access to that spec
+   */
+  public static boolean canWriteSpec(String specName) {
+    if (specName == null || specName.isBlank()) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
+      criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
+      criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+      criteria.setFilterOnReadableOrganization(false);
+      criteria.setMaxResults(1);
+      SFSpec spec = (SFSpec) criteria.uniqueResult();
+      return hasWindowAccessForSpec(spec, "POST");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Checks whether the current role has access to {@code spec} for the given HTTP method,
    * covering both ordinary window specs and windowless/custom "combination" specs
    * (ETP-4510 BUG-3).

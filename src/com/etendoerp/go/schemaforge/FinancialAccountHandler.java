@@ -47,8 +47,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
-import com.etendoerp.psd2.bank.integration.data.Provider;
-import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -116,12 +114,6 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String MSG_COUNTRY_REQUIRED = "Country is required";
   private static final String MSG_INVALID_COUNTRY = "Invalid country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
-  /** Salt Edge provider chosen at offline creation (optional); persisted so a later bank connect
-   *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
-   *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
-  private static final String FIELD_PROVIDER_CODE = "providerCode";
-  private static final String FIELD_PROVIDER_NAME = "providerName";
-  private static final String FIELD_PSD2_PROVIDER = "psd2Provider";
   /** Computed flag (ETP-4530): {@code true} when the account has at least one active
    *  {@link FIN_FinaccTransaction}. Injected into every GET row so the frontend can lock the
    *  Currency field once real movements exist — a different, stricter condition than
@@ -159,8 +151,10 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_BANK_CONNECTED = "bankConnected";
   /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
   private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
-  /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. */
-  private static final String FIELD_PROVIDER_LOGO_URL = "providerLogoUrl";
+  /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. Also the
+   *  transient create-body key (ETP-5521) carrying the logo of the Salt Edge provider picked in the
+   *  offline bank picker — see {@link FinancialAccountProviderEnricher}. */
+  static final String FIELD_PROVIDER_LOGO_URL = "providerLogoUrl";
   /** Reserved for the sync badge; never computed server-side (mirrors the R spec's constant false). */
   private static final String FIELD_BANK_CONNECTION_PENDING = "bankConnectionPending";
   /** Currency ISO code, from the {@code c_currency} join. The contract only carries the FK. */
@@ -203,9 +197,9 @@ public class FinancialAccountHandler implements NeoHandler {
    *  {@link FinancialAccountCountrySupport#buildIbanRules}. */
   private static final String FIELD_COUNTRY_IBAN_RULES = "countryIbanRules";
 
-  private static final String TYPE_BANK = "B";
+  static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
-  private static final String TYPE_CARD = "CA";
+  static final String TYPE_CARD = "CA";
   /** Package-private: {@link FinancialAccountSupport#validateLengths} enforces the same limits. */
   static final int NAME_MAX_LENGTH = 60;
   static final int IBAN_MAX_LENGTH = 34;
@@ -213,6 +207,13 @@ public class FinancialAccountHandler implements NeoHandler {
 
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
+
+  /**
+   * Provider enrichment of the offline create (ETP-5521): links the Salt Edge provider and fills
+   * its logo. Package-visible and non-final so unit tests can swap in a spy of the enricher (its
+   * {@code findExistingProvider} lookup is the DAL seam) without static mocking.
+   */
+  FinancialAccountProviderEnricher providerEnricher = new FinancialAccountProviderEnricher();
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -599,36 +600,19 @@ public class FinancialAccountHandler implements NeoHandler {
     if (countryError != null) {
       return countryError;
     }
-    // Persist the chosen Salt Edge provider (offline "with bank selected" flow): upsert the
-    // provider and inject the FK so the account remembers its bank. The account stays offline —
-    // this is metadata only — but a later bank connect can then preselect that provider.
+    // Persist the chosen Salt Edge provider (offline "with bank selected" flow, bank and card
+    // accounts): upsert the provider and inject the FK so the account remembers its bank. The
+    // account stays offline — this is metadata only — but a later bank connect can then preselect
+    // that provider.
     // Runs only AFTER every validation above (ETP-5473): it upserts and flushes, so a create
     // rejected for a missing/invalid country or a bad IBAN pair must not leave a provider row
     // behind. validateCountryAndIban reads only type/iBAN/country, none of which this touches.
-    enrichProvider(body, type);
+    providerEnricher.enrichProvider(body, type);
     // Inject a default matching algorithm when the caller did not provide one,
     // so reconciliation has an algorithm to work with.
     injectDefaultMatchingAlgorithm(body);
 
     return null;
-  }
-
-  /**
-   * When the offline create carries a Salt Edge provider (bank accounts only), upsert the provider
-   * record and inject its id under the {@code psd2Provider} FK property so the generic CRUD links
-   * it — same mechanism used for {@code country}. The transient {@code providerCode}/
-   * {@code providerName} keys are removed so they are not treated as entity properties.
-   */
-  private void enrichProvider(JSONObject body, String type) throws JSONException {
-    String providerCode = body.optString(FIELD_PROVIDER_CODE, "").trim();
-    if (TYPE_BANK.equals(type) && StringUtils.isNotBlank(providerCode)) {
-      String providerName = body.optString(FIELD_PROVIDER_NAME, providerCode).trim();
-      Provider provider = ProviderCatalogUtils.upsertProvider(providerCode, providerName, null);
-      OBDal.getInstance().flush();
-      body.put(FIELD_PSD2_PROVIDER, provider.getId());
-    }
-    body.remove(FIELD_PROVIDER_CODE);
-    body.remove(FIELD_PROVIDER_NAME);
   }
 
   // ---------------------------------------------------------------------------
@@ -639,6 +623,9 @@ public class FinancialAccountHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
+    // The provider keys are create-only (see FinancialAccountProviderEnricher); an update never
+    // re-links or re-logos the provider, so strip them before the generic CRUD sees them.
+    FinancialAccountProviderEnricher.stripTransientProviderKeys(body);
     // Archive guard moved here from the old DELETE-based archive() (ETP-4871): the frontend now
     // archives via PATCH {"active": false} instead of DELETE, so the open-reconciliations check
     // that used to gate the soft-archive must gate this instead, before the generic CRUD persists
