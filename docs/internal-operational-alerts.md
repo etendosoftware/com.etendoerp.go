@@ -42,4 +42,6 @@ The first producer stages cover admin context, tenant selection, admin resolutio
 
 ## Verification evidence
 
-The focused JUnit execution passed 146 tests, including the actual transactional-email pipeline with fake providers, configuration/result filters, translated rendering, plain-JSON rejection, idempotency, and provisioning outcome ordering. Rollback-failure regressions assert that neither internal alerts nor checkout failure diagnostics can commit unresolved provisioning changes, including a failure after the original tenant commit. Unit tests sent no real email.
+The focused JUnit execution passed 148 tests, including the actual transactional-email pipeline with fake providers, configuration/result filters, translated rendering, plain-JSON rejection, idempotency, and provisioning outcome ordering. Rollback-failure regressions assert that neither internal alerts nor checkout failure diagnostics can commit unresolved provisioning changes, including a failure after the original tenant commit. Unit tests sent no real email.
+
+The full module gate initially reported 13,600 tests, five failures and nine skipped tests. Two pool-test stubs were corrected and passed in the focused rerun. Three unrelated integration failures remain: two `GrossAmount` fixture failures requiring a movement type, and one `ReturnLineQty` stock fixture failure. The module push remains blocked by that gate; no deployment was performed.
