@@ -40,6 +40,7 @@ import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.geography.Country;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
@@ -51,7 +52,7 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  * <p>Split out of {@link FinancialAccountHandlerTest} so that file (already at the Sonar
  * 35-method-per-class ceiling) is not pushed over it. Strategy mirrors the sibling file: spy the
  * handler, stub the DAL-bound seams ({@code loadCurrency}, {@code nameExists},
- * {@code listMatchingAlgorithms}) and statically mock {@link ProviderCatalogUtils} /
+ * {@code loadCountry}, {@code listMatchingAlgorithms}) and statically mock {@link ProviderCatalogUtils} /
  * {@link OBDal} so no database or live OBContext is needed.
  *
  * <p>Scenarios:
@@ -61,12 +62,14 @@ import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
  *   <li>Bank create + providerCode without providerName → name defaults to the code.</li>
  *   <li>Non-bank (cash) create + providerCode → no upsert / no FK; keys still stripped.</li>
  *   <li>Bank create without providerCode → no upsert / no FK.</li>
+ *   <li>Bank create + providerCode but no country → 400 before any upsert (ETP-5473).</li>
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerProviderTest {
 
   private static final String EUR_ID = "102";
+  private static final String ES_COUNTRY_ID = "106";
   private static final String PROVIDER_CODE = "providerCode";
   private static final String PROVIDER_NAME = "providerName";
   private static final String PSD2_PROVIDER = "psd2Provider";
@@ -180,15 +183,40 @@ public class FinancialAccountHandlerProviderTest {
     }
   }
 
+  /**
+   * ETP-5473: validation runs before the provider upsert. A bank create carrying a
+   * {@code providerCode} but no {@code country} is rejected with "Country is required" and never
+   * reaches {@code upsertProvider} — which flushes, so reaching it would leave an orphan provider
+   * row behind a rejected create.
+   */
+  @Test
+  public void testCreateBankWithProviderCodeWithoutCountryRejectsBeforeUpsert() throws Exception {
+    JSONObject body = validCreateBody().put(PROVIDER_CODE, SANTANDER_CODE);
+    body.remove("country");
+    stubValidCreate();
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      NeoResponse response = handler.validateAndEnrichCreate(body);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("Country is required",
+          response.getBody().getJSONObject("error").getString("message"));
+      assertFalse("no provider FK injected for a rejected create", body.has(PSD2_PROVIDER));
+      utils.verifyNoInteractions();
+    }
+  }
+
   // ── fixtures ──────────────────────────────────────────────────────────────
 
+  /** Country is mandatory on create for every account type (ETP-5473), so the fixture carries one. */
   private JSONObject validCreateBody() throws Exception {
-    return new JSONObject().put("name", "BBVA").put("currency", EUR_ID);
+    return new JSONObject().put("name", "BBVA").put("currency", EUR_ID).put("country", ES_COUNTRY_ID);
   }
 
   private void stubValidCreate() {
     doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
     doReturn(false).when(handler).nameExists("BBVA", null);
     doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
+    doReturn(mock(Country.class)).when(handler).loadCountry(ES_COUNTRY_ID);
   }
 }

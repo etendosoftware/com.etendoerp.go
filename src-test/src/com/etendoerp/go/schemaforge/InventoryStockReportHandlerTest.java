@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -43,6 +44,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -63,7 +65,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  *
  * <p>Covers: the ETP-5116 window-access gate (403 when denied, proceeds normally when granted),
  * HTTP method guard (405 for non-POST), POST with no filters, POST with product filter, POST
- * with warehouse filter, empty result set, exception path (500), and private helpers via
+ * with warehouse filter, empty result set, exception path (500), the ETP-5492
+ * includeZeroStock movement-history gate, and private helpers via
  * reflection (parseIds, buildNamedParams, toBigDecimal).
  */
 @ExtendWith(MockitoExtension.class)
@@ -537,6 +540,80 @@ class InventoryStockReportHandlerTest {
 
     NeoResponse response = handler.handle(postContextNoBody());
     assertEquals(500, response.getHttpStatus());
+  }
+
+  // ── includeZeroStock movement-history gate (ETP-5492) ───────────────────
+
+  /**
+   * ETP-5492 — before this fix, {@code includeZeroStock} bypassed the zero-stock filter
+   * unconditionally ({@code HAVING (:includeZeroStock = true OR ...)}), so a product that
+   * never had any movement in a warehouse (no {@code m_storage_detail} row at all, since
+   * Etendo never creates one until the first movement) surfaced identically to a product
+   * that had stock and was consumed down to 0. The fixed {@code HAVING} clause must instead
+   * require an {@code EXISTS} against {@code m_transaction} (scoped to the product AND the
+   * warehouse via {@code m_locator}) before a zero-stock row is kept — the same table the
+   * Product window's own sidebar reads to distinguish "Sin movimientos de stock" from
+   * "Disponible 0". This is a structural assertion on the generated SQL (this test class
+   * mocks the query, it never touches a real DB), captured via the {@code String} passed to
+   * {@code session.createNativeQuery(...)}.
+   *
+   * @throws Exception never — declared only because {@link InventoryStockReportHandler#handle}
+   *     is exercised through its public HTTP-facing signature
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testIncludeZeroStockRequiresMovementHistoryInHavingClause() throws Exception {
+    mockQueryReturning(Collections.emptyList());
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+
+    JSONObject body = new JSONObject();
+    body.put("includeZeroStock", true);
+    handler.handle(postContext(body));
+
+    verify(session).createNativeQuery(sqlCaptor.capture());
+    String sql = sqlCaptor.getValue().toLowerCase(java.util.Locale.ROOT);
+
+    // The old, unconditional bypass must be gone.
+    assertFalse(sql.contains(":includezerostock = true or"),
+        "includeZeroStock must no longer unconditionally bypass the zero-stock filter");
+
+    // The new EXISTS gate against m_transaction, scoped by product AND warehouse, must be present.
+    assertTrue(sql.contains("exists"), "HAVING must gate zero-stock rows behind an EXISTS check");
+    assertTrue(sql.contains("m_transaction"),
+        "the movement-history check must read m_transaction, the same ledger the Product "
+            + "window sidebar uses for \"Sin movimientos de stock\"");
+    assertTrue(sql.contains("t.m_product_id = p.m_product_id"),
+        "the EXISTS must correlate to the outer query's product");
+    assertTrue(sql.contains("tl.m_warehouse_id = wh.m_warehouse_id"),
+        "the EXISTS must correlate to the outer query's warehouse — unlike the Product sidebar "
+            + "(which checks \"ever, any warehouse\"), this report is per-warehouse");
+  }
+
+  /**
+   * The {@code includeZeroStock} parameter itself must still be bound — the fix changes what
+   * the {@code HAVING} clause does with it, not whether it reaches the query.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testIncludeZeroStockParameterStillBoundWhenTrue() throws Exception {
+    mockQueryReturning(Collections.emptyList());
+
+    JSONObject body = new JSONObject();
+    body.put("includeZeroStock", true);
+    handler.handle(postContext(body));
+
+    verify(nativeQuery).setParameter("includeZeroStock", true);
+  }
+
+  /** Same binding, defaulting to {@code false} when the caller omits the toggle entirely. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testIncludeZeroStockDefaultsFalseWhenOmitted() throws Exception {
+    mockQueryReturning(Collections.emptyList());
+
+    handler.handle(postContext(new JSONObject()));
+
+    verify(nativeQuery).setParameter("includeZeroStock", false);
   }
 
   // ── Response structure validation ───────────────────────────────────────
