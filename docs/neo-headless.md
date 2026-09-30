@@ -3243,7 +3243,68 @@ Response includes `EntitiesCreated` and `FieldsCreated` counts.
 
 ### 5.3 Custom Handlers (NeoHandler Interface)
 
-To inject custom business logic, implement the `NeoHandler` interface and annotate the class with `@Named`:
+#### 5.3.a Which binding to use — read this first
+
+**`@NeoExtension` is the binding for anything new. `@Named` + `Java_Qualifier` is the legacy one
+and is on its way out.**
+
+Both are resolved at runtime and both keep working: the annotation is looked up first and the
+qualifier remains the fallback, so nothing breaks while the two coexist. What changed is the
+default for new code, and the reason is not style:
+
+| | `@NeoExtension` | `@Named` + `Java_Qualifier` (legacy) |
+|---|---|---|
+| Where the binding lives | in the class, visible when you open it | in an `ETGO_SF_ENTITY` row, invisible from the code |
+| Splitting one handler into three | three new files, no data change | three new qualifiers, three edited rows, `export.database` |
+| Which entities reach this class | readable in the source | you have to go read the row or `ETGO_SF_ENTITY.xml` |
+| CDI scope mistakes | proxy-safe, resolved by `NeoExtensionIndex` | a normal scope makes the handler **silently skipped** (see the box below) |
+| Channel coverage | every surface, every channel, via `NeoExtensionDispatcher` | same dispatcher, resolved as fallback |
+
+Writing one:
+
+```java
+package com.example;
+
+import com.etendoerp.go.schemaforge.NeoExtension;
+import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoResponse;
+
+// spec = ETGO_SF_SPEC.Name (kebab-case), entity = ETGO_SF_ENTITY.Name
+@NeoExtension(spec = "sales-order", entity = "lines")
+public class SalesOrderLineExtension implements NeoHandler {
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    if ("DELETE".equals(context.getHttpMethod())) {
+      // resolve the delete yourself; an empty 2xx becomes the standard confirmation
+      return NeoResponse.noContent();
+    }
+    // null falls through to the default CRUD path
+    return null;
+  }
+}
+```
+
+No row to edit and nothing to export. The class still implements `NeoHandler` exactly as before —
+the annotation changes **how the class is found**, never what it can do once found.
+
+**Migration is opportunistic, not a campaign.** Existing handlers are not being rewritten in bulk;
+one moves to the annotation when someone has a reason to open it anyway. Do not add a new
+`Java_Qualifier` binding: that is what is being retired.
+
+**Conflicts do not fail the build**, by design — a gradual migration passes through exactly those
+states. Two annotated classes claiming the same `(spec, entity)`, or an annotated pair whose row
+still names a different class by qualifier, are logged at `ERROR`. Run `make extension-parity` to
+catch them offline instead of in production.
+
+> Note: `NeoExtension`'s own javadoc describes the annotation as "additive, never a migration",
+> which was accurate as the acceptance criterion of the step that introduced it. The direction
+> above supersedes it for **new** code; the additive runtime behaviour it describes is unchanged.
+
+#### 5.3.b The legacy binding (`@Named` + `Java_Qualifier`)
+
+Still resolved, still supported, documented here because most existing handlers use it.
 
 ```java
 package com.example;
