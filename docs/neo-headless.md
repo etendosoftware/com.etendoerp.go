@@ -1407,6 +1407,14 @@ comma-separated selection of active, compatible DB Extended sources. The browser
 tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
 namespace to its AD table and requires the active role to have entity read access before searching.
 
+The embedding provider seeded by this module (`ETARC_VECTOR_EMBED_PROVIDER`, record
+`LiteLLM etendo-embed`) goes through the Etendo LiteLLM proxy: `API_ENDPOINT` is
+`https://llm.etendo.software/v1`, `MODEL` is the LiteLLM model-group alias `etendo-embed`, and
+`DIMENSIONS` stays 1536 (sent as `dimensions` on every request). `PROVIDER_TYPE` remains `OPENAI`
+because LiteLLM speaks the OpenAI embeddings API. The key read from
+`ETENDO_PGVECTOR_OPENAI_API_KEY` must therefore be a LiteLLM key, requested from the Platform team,
+not an OpenAI one (ETP-5563).
+
 Alternatively, pass `targets=sales-invoice` to select an active configured search target. The
 valid keys are the `Search Key` values of the active `ETARC_VECTOR_SEARCH_TARGET` rows.
 `NeoVectorSearchEndpoint.configuredTargetKeys()` returns them, and the MCP `neo_vector_search` tool
