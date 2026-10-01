@@ -1228,6 +1228,11 @@ public class McpToolRouter {
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
+    // ETP-5558: defaults only exist to prepare a create; where MCP_CONFIG.verbs hides the create,
+    // answer the same 405 neo_create and view:"create" give instead of a starting point for a
+    // record the agent cannot write.
+    McpToolRouterSupport.requireVerbNotHidden(spec, sfEntity, HTTP_METHOD_POST);
+
     // ETP-5184: neo_defaults on a child entity without parentId does not fail — it silently omits
     // every field whose default expression reads from the parent (the parent's warehouse, its
     // price-list version, its next line number). The agent then sends a create built on defaults

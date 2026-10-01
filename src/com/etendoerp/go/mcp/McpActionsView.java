@@ -140,6 +140,9 @@ final class McpActionsView {
       if (instead != null) {
         redirect(button, instead, config.getRedirectReason());
       }
+      if (config != null) {
+        narrowValues(button, config.allowedValuesOf(name));
+      }
       actions.put(button);
     }
     for (NeoActionContract contract : declared.values()) {
@@ -195,6 +198,26 @@ final class McpActionsView {
         + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "
         + "before anything runs.");
     return response;
+  }
+
+  /**
+   * Keep only the {@code actionValues} {@code MCP_CONFIG.actions.values} offers for this button
+   * (ETP-5558): the others are what the UI's own button never sends.
+   */
+  private static void narrowValues(JSONObject button, Set<String> allowed) throws JSONException {
+    JSONArray values = allowed == null ? null
+        : button.optJSONArray(McpConstants.KEY_ACTION_VALUES);
+    if (values == null) {
+      return;
+    }
+    JSONArray kept = new JSONArray();
+    for (int i = 0; i < values.length(); i++) {
+      JSONObject entry = values.optJSONObject(i);
+      if (entry != null && allowed.contains(entry.optString("value", null))) {
+        kept.put(entry);
+      }
+    }
+    button.put(McpConstants.KEY_ACTION_VALUES, kept);
   }
 
   /** Mark a button as one to leave for {@code instead}: listed, not invokable, and why. */

@@ -23,8 +23,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
@@ -102,6 +104,28 @@ final class McpDeclaredActions {
   }
 
   /**
+   * Refuse a value of a list-backed button that {@code MCP_CONFIG.actions.values} does not offer
+   * (ETP-5558). The value travels as {@code docAction} (what the catalogue advertises) or
+   * {@code action} (what classic processes read); sending neither keeps the button's default.
+   */
+  private static void requireAllowedValue(String specName, String entityName, String action,
+      Set<String> allowed, JSONObject parameters) throws JSONException {
+    if (allowed == null || parameters == null) {
+      return;
+    }
+    for (String key : List.of(McpConstants.PARAM_DOC_ACTION, "action")) {
+      String value = parameters.isNull(key) ? null : parameters.optString(key, null);
+      if (StringUtils.isNotBlank(value) && !allowed.contains(value)) {
+        JSONObject error = new JSONObject();
+        error.put("message", "Value '" + value + "' of '" + key + "' is not offered for action '"
+            + action + "' through MCP; send one of " + allowed + ", or none for the default.");
+        error.put("allowedValues", new JSONArray(allowed));
+        throw McpRoutingException.actionParametersInvalid(specName, entityName, action, error);
+      }
+    }
+  }
+
+  /**
    * Judge a {@code neo_action} call before the customization runs.
    *
    * <ol>
@@ -154,6 +178,7 @@ final class McpDeclaredActions {
         throw McpRoutingException.actionRedirected(specName, entityName, action, redirect,
             config.getRedirectReason());
       }
+      requireAllowedValue(specName, entityName, action, config.allowedValuesOf(name), parameters);
     }
     NeoActionContract contract = declared.get(action);
     if (contract != null) {

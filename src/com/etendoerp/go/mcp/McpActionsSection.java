@@ -43,6 +43,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *   "actions": {
  *     "hidden":   ["pisTemplates", "psd2GenerateBankPayment"],
  *     "redirect": { "aPRMAddpayment": "registerPayment" },
+ *     "values":   { "aPRMProcessPayment": ["P"] },
  *     "reason":   "PIS needs a person to authorize at the bank",
  *     "redirectReason": "the classic Add Payment button is not the Etendo GO payment flow"
  *   }
@@ -61,6 +62,10 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *   <li>{@code redirect} — {@code button → action}: a button the agent should not use, and the
  *       action to use instead. The button stays listed (the catalogue is complete, IMP-21) carrying
  *       {@code useInstead}; {@code neo_action} on it is refused with that hint.</li>
+ *   <li>{@code values} — {@code button → [values]}: the only values of a list-backed button
+ *       ({@code actionValues}) the agent is offered — the ones the UI's own button sends. The view
+ *       lists only those, and {@code neo_action} refuses another {@code docAction}/{@code action}
+ *       with 422. Sending none keeps the button's own default, as the UI does.</li>
  *   <li>{@code reason} — mandatory; it reaches the agent in the refusal.</li>
  *   <li>{@code redirectReason} — optional: the reason a redirected button gives, when it is not the
  *       one the hidden actions give. Defaults to {@code reason}.</li>
@@ -79,9 +84,10 @@ final class McpActionsSection {
   static final String KEY_REDIRECT = "redirect";
   static final String KEY_REASON = "reason";
   static final String KEY_REDIRECT_REASON = "redirectReason";
+  static final String KEY_VALUES = "values";
 
   private static final Set<String> ALLOWED_KEYS =
-      Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON);
+      Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES);
 
   /** The reason an agent reads when the configuration itself cannot be trusted. */
   static final String UNUSABLE_REASON = "its MCP configuration is invalid";
@@ -107,10 +113,11 @@ final class McpActionsSection {
    */
   static List<String> validate(JSONObject body) {
     List<String> problems = new ArrayList<>();
-    if (!body.has(KEY_HIDDEN) && !body.has(KEY_REDIRECT)) {
-      problems.add("names no action — declare " + KEY_HIDDEN + " or " + KEY_REDIRECT
-          + ", or remove the section");
+    if (!body.has(KEY_HIDDEN) && !body.has(KEY_REDIRECT) && !body.has(KEY_VALUES)) {
+      problems.add("names no action — declare " + KEY_HIDDEN + ", " + KEY_REDIRECT + " or "
+          + KEY_VALUES + ", or remove the section");
     }
+    validateValues(body, problems);
     if (body.has(KEY_HIDDEN)) {
       JSONArray hidden = body.optJSONArray(KEY_HIDDEN);
       if (hidden == null || hidden.length() == 0) {
@@ -149,6 +156,31 @@ final class McpActionsSection {
     return problems;
   }
 
+  private static void validateValues(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_VALUES)) {
+      return;
+    }
+    JSONObject values = body.optJSONObject(KEY_VALUES);
+    if (values == null || values.length() == 0) {
+      problems.add(KEY_VALUES + " must be a non-empty object {button: [values]}");
+      return;
+    }
+    for (Iterator<?> it = values.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      JSONArray allowed = values.optJSONArray(key);
+      if (allowed == null || allowed.length() == 0) {
+        problems.add(KEY_VALUES + "." + key + " must be a non-empty array of values");
+        continue;
+      }
+      for (int i = 0; i < allowed.length(); i++) {
+        Object value = allowed.opt(i);
+        if (!(value instanceof String) || StringUtils.isBlank((String) value)) {
+          problems.add(KEY_VALUES + "." + key + "[" + i + "] must be a non-blank value");
+        }
+      }
+    }
+  }
+
   /** One entity's resolved {@code actions} configuration. */
   static final class View {
     private static final View NONE =
@@ -156,17 +188,32 @@ final class McpActionsSection {
 
     private final Set<String> hidden;
     private final Map<String, String> redirect;
+    private final Map<String, Set<String>> values;
     private final String reason;
     private final String redirectReason;
     private final boolean unusable;
 
     private View(Set<String> hidden, Map<String, String> redirect, String reason,
         String redirectReason, boolean unusable) {
+      this(hidden, redirect, Collections.emptyMap(), reason, redirectReason, unusable);
+    }
+
+    private View(Set<String> hidden, Map<String, String> redirect,
+        Map<String, Set<String>> values, String reason, String redirectReason, boolean unusable) {
       this.hidden = hidden;
       this.redirect = redirect;
+      this.values = values;
       this.reason = reason;
       this.redirectReason = redirectReason;
       this.unusable = unusable;
+    }
+
+    /**
+     * @return the only values of {@code action} the agent is offered, or {@code null} when the
+     *         configuration does not narrow it
+     */
+    Set<String> allowedValuesOf(String action) {
+      return action == null ? null : values.get(action);
     }
 
     /** @return the reason a redirected button gives: {@code redirectReason}, else {@code reason} */
@@ -229,7 +276,20 @@ final class McpActionsSection {
         redirect.put(key, targets.optString(key));
       }
     }
-    return new View(hidden, redirect, StringUtils.trim(body.optString(KEY_REASON, "")),
+    Map<String, Set<String>> values = new LinkedHashMap<>();
+    JSONObject narrowed = body.optJSONObject(KEY_VALUES);
+    if (narrowed != null) {
+      for (Iterator<?> it = narrowed.keys(); it.hasNext();) {
+        String key = String.valueOf(it.next());
+        Set<String> allowed = new LinkedHashSet<>();
+        JSONArray list = narrowed.optJSONArray(key);
+        for (int i = 0; list != null && i < list.length(); i++) {
+          allowed.add(list.optString(i));
+        }
+        values.put(key, Collections.unmodifiableSet(allowed));
+      }
+    }
+    return new View(hidden, redirect, values, StringUtils.trim(body.optString(KEY_REASON, "")),
         StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false);
   }
 }
