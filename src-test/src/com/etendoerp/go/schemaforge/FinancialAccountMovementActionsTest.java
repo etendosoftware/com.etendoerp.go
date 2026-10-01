@@ -691,8 +691,8 @@ class FinancialAccountMovementActionsTest {
     @Test
     @DisplayName("FinancialAccountHandler declares the movement actions")
     void declared() {
-      assertEquals(FinancialAccountMovementActions.actionContracts().keySet(),
-          new FinancialAccountHandler().actionContracts().keySet());
+      assertTrue(new FinancialAccountHandler().actionContracts().keySet()
+          .containsAll(FinancialAccountMovementActions.actionContracts().keySet()));
     }
 
     @Test

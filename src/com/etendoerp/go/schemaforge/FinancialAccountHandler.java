@@ -222,13 +222,19 @@ public class FinancialAccountHandler implements NeoHandler {
    */
   FinancialAccountMovementActions movementActions = new FinancialAccountMovementActions();
 
+  /** The account's funds transfers as declared actions (ETP-5558). Swappable like the above. */
+  FinancialAccountTransferActions transferActions = new FinancialAccountTransferActions();
+
   /**
-   * The movement actions of the account, declared for agents (ETP-5558): the SPA records them
-   * through {@code financial-account-transactions}, a spec the MCP does not serve.
+   * The movement and funds-transfer actions of the account, declared for agents (ETP-5558): the
+   * SPA runs them through {@code financial-account-transactions}, a spec the MCP does not serve.
    */
   @Override
   public Map<String, NeoActionContract> actionContracts() {
-    return FinancialAccountMovementActions.actionContracts();
+    Map<String, NeoActionContract> contracts =
+        new LinkedHashMap<>(FinancialAccountMovementActions.actionContracts());
+    contracts.putAll(FinancialAccountTransferActions.actionContracts());
+    return contracts;
   }
 
   @Override
@@ -240,6 +246,10 @@ public class FinancialAccountHandler implements NeoHandler {
       NeoResponse movement = movementActions.handle(context);
       if (movement != null) {
         return movement;
+      }
+      NeoResponse transfer = transferActions.handle(context);
+      if (transfer != null) {
+        return transfer;
       }
     }
     if (!NeoEndpointTypes.isCrud(context)) {

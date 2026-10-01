@@ -337,7 +337,7 @@ class McpConfigSourcedataTest {
     String instead = verbs.getString(McpVerbsSection.KEY_INSTEAD);
     assertTrue(instead.contains("neo_action(spec:'financial-account', entity:'account'"), instead);
     for (String action : List.of("createMovement", "updateMovement", "processMovement",
-        "reactivateMovement", "deleteMovement")) {
+        "reactivateMovement", "deleteMovement", "transferFunds")) {
       assertTrue(instead.contains("'" + action + "'"), action + " in " + instead);
     }
     for (String section : List.of(McpVerbsSection.NAME, McpActionsSection.NAME)) {
@@ -367,7 +367,7 @@ class McpConfigSourcedataTest {
   void financialAccountHidesCoreButtonsOnly() throws IOException, JSONException {
     JSONObject payload = payloadOf(FA_ACCOUNT);
     assertEquals(new TreeSet<>(List.of("aPRMImportBankFile", "aPRMMatchTransactions",
-        "aPRMMatchTransactionsForce", "aPRMReconcile", "aprmAddMultiplePayments", "aprmFundsTrans",
+        "aPRMMatchTransactionsForce", "aPRMReconcile", "aprmAddMultiplePayments",
         "pSD2GetBankstatement", "pSD2GetConsent", "psd2ReconnectFa", "psd2GetConnections",
         "psd2RefreshConnections")), setOf(payload.getJSONObject(McpActionsSection.NAME)
         .getJSONArray(McpActionsSection.KEY_HIDDEN)));
@@ -376,8 +376,11 @@ class McpConfigSourcedataTest {
     String reason = payload.getJSONObject(McpActionsSection.NAME)
         .optString(McpActionsSection.KEY_REASON, null);
     assertNotNull(reason);
-    assertTrue(reason.contains("createMovement"),
-        "the hidden Core buttons point at the movement actions: " + reason);
+    assertTrue(reason.contains("createMovement") && reason.contains("transferFunds"),
+        "the hidden Core buttons point at the movement and transfer actions: " + reason);
+    // ETP-5558: Classic's Funds Transfer stays listed, withdrawn, pointing at the agent's action.
+    assertEquals("transferFunds", payload.getJSONObject(McpActionsSection.NAME)
+        .getJSONObject(McpActionsSection.KEY_REDIRECT).getString("aprmFundsTrans"));
     assertResolvesCleanly(FA_ACCOUNT);
   }
 
