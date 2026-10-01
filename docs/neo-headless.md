@@ -2112,6 +2112,13 @@ or `server_error` (5xx, and the batch-wide failure reported at index `-1`) — o
 worth retrying with a corrected request. The DAL's own text is preserved inside `detail`; its numeric
 `status: -4` is dropped, since it names nothing an agent can act on.
 
+A rejection raised by the MCP preprocessor (§4.12.9) already carries its own IMP-5 envelope and is
+passed through unchanged, code, `detail` and `hint` included (ETP-5558). When that code is one no
+change to the operation's body can fix — `method_not_allowed` (the verb is hidden, §4.12.6) or
+`parent_unresolvable` — the top-level `hint` no longer says "fix the operation and retry the whole
+batch", which contradicted the operation's own "Do not retry this call": it says to **remove or
+replace** the operation in `failedAt`, then retry the rest.
+
 ##### 4.12.4.1 `atomic` / `persisted` — the batch rolls back as a unit (IMP-23)
 
 **`neo_batch` and `POST /batch` are atomic**: a failure rolls back every operation, so the recovery

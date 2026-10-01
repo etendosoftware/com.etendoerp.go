@@ -988,6 +988,15 @@ final class McpToolRouterSupport {
   }
 
   /**
+   * Error codes of a batch operation that no change to its body can fix: the entity refuses the
+   * verb ({@code method_not_allowed}) or cannot be attached to a parent at all
+   * ({@code parent_unresolvable}). The criterion is the code, not the status — a 422 can just as
+   * well be a field the agent can correct.
+   */
+  private static final java.util.Set<String> NON_RETRYABLE_OP_CODES = java.util.Set.of(
+      McpConstants.ERROR_METHOD_NOT_ALLOWED, McpConstants.ERROR_PARENT_UNRESOLVABLE);
+
+  /**
    * Report a batch rejected by the MCP FK pre-pass in the same outcome envelope a batch failure
    * always uses (ETP-4793 / IMP-5 clause (i)).
    *
@@ -1021,9 +1030,16 @@ final class McpToolRouterSupport {
     body.put(BatchService.FIELD_COMMITTED, false);
     body.put(BatchService.FIELD_ATOMIC, true);
     body.put(BatchService.FIELD_PERSISTED, new JSONArray());
-    body.put(BatchService.FIELD_HINT, "Nothing was persisted: the batch was rejected before the "
-        + "transaction opened, so no records were created and none need cleaning up. Fix the "
-        + "operation reported in 'failedAt' and retry the whole batch.");
+    String persisted = "Nothing was persisted: the batch was rejected before the transaction "
+        + "opened, so no records were created and none need cleaning up. ";
+    // ETP-5558: a refusal no body change can fix (the verb is hidden, the parent cannot be
+    // identified) must not be met with "fix it and retry" while its own error says "do not retry".
+    body.put(BatchService.FIELD_HINT, NON_RETRYABLE_OP_CODES.contains(
+        fkError == null ? null : fkError.optString(McpConstants.KEY_ERROR, null))
+            ? persisted + "The operation reported in 'failedAt' can never succeed as written — "
+                + "its 'error' says why and what to use instead. Remove or replace that "
+                + "operation, then retry the rest of the batch."
+            : persisted + "Fix the operation reported in 'failedAt' and retry the whole batch.");
     JSONObject failedAt = new JSONObject();
     failedAt.put("index", index);
     if (StringUtils.isNotBlank(opId)) {

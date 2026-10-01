@@ -624,25 +624,6 @@ final class McpParentScope {
     return null;
   }
 
-  /**
-   * The refusal an agent gets when it omits a required parent key.
-   *
-   * <p>Self-correcting on purpose, in the style of {@code buildNotFoundError} and
-   * {@code resolveIncludedEntityOrExplain}: it names the parent entity and the field, so the next
-   * call can be right instead of guessed. A message that only said "parentId is required" would
-   * cost an extra round trip every time.</p>
-   *
-   * <p>The wording lives in {@link McpRoutingException#parentRequired}, which the tools that can
-   * throw use directly; this is the envelope form, for the call sites that return a JSON body
-   * instead of raising. Both spell the refusal the same way because there is only one copy of
-   * it.</p>
-   *
-   * @param specName   the spec being addressed
-   * @param entityName the child entity
-   * @param scope      the resolved scope, which must be {@link Kind#RESOLVED}
-   * @return the error envelope
-   * @throws JSONException if the envelope cannot be built
-   */
   /** The key a broken configuration is reported under, by every tool that describes an entity. */
   static final String KEY_CONFIG_ERROR = "configError";
 
@@ -669,6 +650,25 @@ final class McpParentScope {
     }
   }
 
+  /**
+   * The refusal an agent gets when it omits a required parent key.
+   *
+   * <p>Self-correcting on purpose, in the style of {@code buildNotFoundError} and
+   * {@code resolveIncludedEntityOrExplain}: it names the parent entity and the field, so the next
+   * call can be right instead of guessed. A message that only said "parentId is required" would
+   * cost an extra round trip every time.</p>
+   *
+   * <p>The wording lives in {@link McpRoutingException#parentRequired}, which the tools that can
+   * throw use directly; this is the envelope form, for the call sites that return a JSON body
+   * instead of raising. Both spell the refusal the same way because there is only one copy of
+   * it.</p>
+   *
+   * @param specName   the spec being addressed
+   * @param entityName the child entity
+   * @param scope      the resolved scope, which must be {@link Kind#RESOLVED}
+   * @return the error envelope
+   * @throws JSONException if the envelope cannot be built
+   */
   static JSONObject buildParentRequiredError(String specName, String entityName, Scope scope)
       throws JSONException {
     return McpRoutingException

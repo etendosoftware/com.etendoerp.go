@@ -2217,6 +2217,42 @@ class McpToolRouterSupportTest {
       assertEquals("l0", body.getJSONObject("failedAt").getString("id"));
     }
 
+    /**
+     * ETP-5558: the top-level hint invited "retry the whole batch" while the operation's own error
+     * said "Do not retry this call". For a refusal that no change to the operation's body can fix —
+     * the verb is hidden, the parent cannot be identified — the batch hint must say to drop or
+     * replace the operation instead.
+     */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = { "method_not_allowed",
+        "parent_unresolvable" })
+    @DisplayName("a refusal no body change can fix tells the agent to drop the op, not retry it")
+    void nonRetryableRefusalSaysDropTheOp(String code) throws Exception {
+      JSONObject envelope = new JSONObject();
+      envelope.put("status", 405);
+      envelope.put("error", code);
+      envelope.put("hint", "Do not retry this call.");
+
+      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(envelope, 2, "l2");
+
+      String hint = body.getString("hint");
+      assertFalse(hint.contains("retry the whole batch"), hint);
+      assertTrue(hint.contains("Remove or replace"), hint);
+      assertTrue(hint.contains("Nothing was persisted"), hint);
+    }
+
+    @Test
+    @DisplayName("a refusal fixable in the body keeps the fix-and-retry hint")
+    void fixableRefusalKeepsRetryHint() throws Exception {
+      JSONObject envelope = new JSONObject();
+      envelope.put("status", 422);
+      envelope.put("error", "read_only_field");
+
+      String hint = McpToolRouterSupport.toMcpBatchPreflightFailure(envelope, 0, null)
+          .getString("hint");
+      assertTrue(hint.contains("retry the whole batch"), hint);
+    }
+
     @Test
     @DisplayName("a committed batch and a body with no error object pass through untouched")
     void passesThroughNonFailures() throws Exception {

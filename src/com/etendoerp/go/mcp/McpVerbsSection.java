@@ -82,9 +82,9 @@ final class McpVerbsSection {
   private static final Set<String> ALLOWED_KEYS =
       Set.of(KEY_CREATE, KEY_UPDATE, KEY_DELETE, KEY_REASON, KEY_INSTEAD);
 
-  /** The reason an agent reads when the configuration itself cannot be trusted. */
   private static final Logger log = LogManager.getLogger(McpVerbsSection.class);
 
+  /** The reason an agent reads when the configuration itself cannot be trusted. */
   private static final String UNUSABLE_REASON = "its MCP configuration is invalid";
 
   private McpVerbsSection() {
