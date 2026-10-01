@@ -782,7 +782,8 @@ public class ProductDefaultsHandlerTest {
   //
   // afterHandle's CRUD branch now forks on the HTTP method (POST → seed prices, anything else →
   // hide system-category products). These tests pin the "anything else" half so the fork cannot
-  // silently swallow the ETP-4967 filtering.
+  // silently swallow the ETP-4967 filtering. Since ETP-5009 that filter covers the single-record
+  // GET only; the list GET is restricted in the query by readPredicates.
 
   private static NeoContext crudAfterCtx(String method, JSONObject previousBody,
       OBContext obContext) {
@@ -807,23 +808,61 @@ public class ProductDefaultsHandlerTest {
     return body;
   }
 
+  /**
+   * ETP-5009: the list GET is no longer post-filtered. The exclusion moved into the query
+   * ({@link ProductDefaultsHandler#readPredicates}), so a list response comes back exactly as core
+   * produced it — post-filtering a page core had already cut and counted is what left pages short
+   * and {@code totalRows} wrong. The hidden-category ids are not even resolved.
+   */
   @Test
-  public void testAfterHandleStillHidesSystemCategoryProductsOnGet() throws Exception {
+  public void testAfterHandleNoLongerPostFiltersTheListGet() throws Exception {
     try (MockedStatic<SystemCategoryIds> categoryMock =
         Mockito.mockStatic(SystemCategoryIds.class)) {
       categoryMock.when(() -> SystemCategoryIds.resolve(CLIENT1)).thenReturn(Set.of("cat-system"));
 
+      JSONObject listBody = productListBody("cat-normal", "cat-system", "cat-other");
       NeoResponse result = new ProductDefaultsHandler().afterHandle(crudAfterCtx("GET",
-          productListBody("cat-normal", "cat-system", "cat-other"), obContextWithClient(CLIENT1)));
+          listBody, obContextWithClient(CLIENT1)));
+
+      assertNull(result);
+      JSONObject response = listBody.getJSONObject("response");
+      assertEquals(3, response.getJSONArray("data").length());
+      assertEquals(3, response.getInt("totalRows"));
+      assertEquals(3, response.getInt("endRow"));
+      categoryMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5009: the single-record GET is still post-filtered — core resolves a read by id with its
+   * own {@code id = :id} query, so the read predicate never reaches it — and the row counts of
+   * the emptied response are decremented so it does not still claim to hold a row.
+   */
+  @Test
+  public void testAfterHandleHidesSystemCategoryProductOnSingleRecordGetAndAdjustsRowCounts()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<SystemCategoryIds> categoryMock =
+            Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve(CLIENT1)).thenReturn(Set.of("cat-system"));
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      JSONArray data = new JSONArray();
+      data.put(new JSONObject().put("id", PRODUCT_ID).put("productCategory", "cat-system"));
+      JSONObject body = dataResponse(data);
+      body.getJSONObject("response").put("totalRows", 1);
+      body.getJSONObject("response").put("endRow", 1);
+
+      NeoResponse result = new ProductDefaultsHandler().afterHandle(
+          singleRecordGetCtx(PRODUCT_ID, body, obContextWithClient(CLIENT1)));
 
       assertNotNull(result);
       JSONObject response = result.getBody().getJSONObject("response");
-      assertEquals(2, response.getJSONArray("data").length());
-      assertEquals("product-0", response.getJSONArray("data").getJSONObject(0).getString("id"));
-      assertEquals("product-2", response.getJSONArray("data").getJSONObject(1).getString("id"));
-      // Row counts come from core's count query, computed before the filter ran.
-      assertEquals(2, response.getInt("totalRows"));
-      assertEquals(2, response.getInt("endRow"));
+      assertEquals(0, response.getJSONArray("data").length());
+      assertEquals(0, response.getInt("totalRows"));
+      assertEquals(0, response.getInt("endRow"));
     }
   }
 
@@ -971,7 +1010,8 @@ public class ProductDefaultsHandlerTest {
   }
 
   /**
-   * The list GET is left exactly as it was: no annotation, and above all no COUNT per row.
+   * The list GET is left exactly as core produced it: no annotation, above all no COUNT per row,
+   * and — since ETP-5009 — no post-filter either (the exclusion is in the query).
    */
   @Test
   public void testAfterHandleDoesNotAnnotateTheListGet() throws Exception {
@@ -983,15 +1023,17 @@ public class ProductDefaultsHandlerTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
+      JSONObject listBody = productListBody("cat-normal", "cat-system");
       NeoResponse result = new ProductDefaultsHandler().afterHandle(crudAfterCtx("GET",
-          productListBody("cat-normal", "cat-system"), obContextWithClient(CLIENT1)));
+          listBody, obContextWithClient(CLIENT1)));
 
-      // The ETP-4967 filter still ran...
-      assertNotNull(result);
-      JSONArray data = result.getBody().getJSONObject("response").getJSONArray("data");
-      assertEquals(1, data.length());
-      // ...but nothing was annotated and the Costing table was never queried.
+      // Nothing replaced the list response...
+      assertNull(result);
+      JSONArray data = listBody.getJSONObject("response").getJSONArray("data");
+      assertEquals(2, data.length());
+      // ...nothing was annotated and the Costing table was never queried.
       assertFalse(data.getJSONObject(0).has("etgoHasCost"));
+      assertFalse(data.getJSONObject(1).has("etgoHasCost"));
       verify(dal, never()).createCriteria(Costing.class);
     }
   }
@@ -1182,5 +1224,40 @@ public class ProductDefaultsHandlerTest {
 
     assertEquals(false, body.has("stocked"));
     assertEquals(false, body.has("returnable"));
+  }
+
+  // ── ETP-5009: readPredicates ─────────────────────────────────────────────────────────────
+
+  @Test
+  public void testReadPredicatesExcludesSystemCategoryProductsForTheProductSpec() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+
+    assertEquals(List.of(ProductDefaultsHandler.EXCLUDE_SYSTEM_CATEGORY_PREDICATE),
+        new ProductDefaultsHandler().readPredicates(ctx));
+  }
+
+  @Test
+  public void testReadPredicatesIsACorrelatedNotExistsOnTheSystemCategoryFlag() {
+    String predicate = ProductDefaultsHandler.EXCLUDE_SYSTEM_CATEGORY_PREDICATE;
+    assertTrue(predicate.startsWith("not exists ("));
+    assertTrue(predicate.contains("from ProductCategory pc"));
+    assertTrue(predicate.contains("pc.id = e.productCategory.id"));
+    assertTrue(predicate.contains("pc.etgoIssystemcategory = true"));
+  }
+
+  @Test
+  public void testReadPredicatesIsEmptyForAnotherSpec() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("other-spec").entityName("product")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+
+    assertTrue(new ProductDefaultsHandler().readPredicates(ctx).isEmpty());
+  }
+
+  @Test
+  public void testReadPredicatesIsEmptyForANullContext() {
+    assertTrue(new ProductDefaultsHandler().readPredicates(null).isEmpty());
   }
 }

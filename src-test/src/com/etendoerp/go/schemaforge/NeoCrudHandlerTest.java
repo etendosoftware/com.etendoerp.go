@@ -1025,8 +1025,14 @@ class NeoCrudHandlerTest {
 
     private void invokeApplyWhereClause(Map<String, String> params,
         Tab adTab, String parentId) throws Exception {
+      invokeApplyWhereClause(params, adTab, parentId, null);
+    }
+
+    private void invokeApplyWhereClause(Map<String, String> params,
+        Tab adTab, String parentId, String readPredicate) throws Exception {
       invokePrivate(handler, "applyWhereClause",
-          new Class<?>[] { Map.class, Tab.class, String.class }, params, adTab, parentId);
+          new Class<?>[] { Map.class, Tab.class, String.class, String.class },
+          params, adTab, parentId, readPredicate);
     }
 
     @Test
@@ -1202,6 +1208,73 @@ class NeoCrudHandlerTest {
         assertTrue(where.contains("e.order.id = 'ORD-1'"));
         assertTrue(where.contains("e.qty > 0"));
       }
+    }
+
+    @Test
+    @DisplayName("ETP-5009: a read predicate alone becomes the where clause, parenthesised")
+    void readPredicateAlone() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      invokeApplyWhereClause(params, adTab, null, "e.hidden = false");
+
+      assertEquals("(e.hidden = false)", params.get("whereAndFilterClause"));
+      assertEquals("true", params.get("_use_alias"));
+    }
+
+    @Test
+    @DisplayName("ETP-5009: the read predicate is ANDed after the tab where and neoWhere")
+    void readPredicateAndedAfterTabWhereAndNeoWhere() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getHqlwhereclause()).thenReturn("e.active = true");
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_neoWhere", "e.status = 'CO'");
+      invokeApplyWhereClause(params, adTab, null, "e.hidden = false");
+
+      assertEquals("(e.active = true) and (e.status = 'CO') and (e.hidden = false)",
+          params.get("whereAndFilterClause"));
+    }
+
+    @Test
+    @DisplayName("ETP-5009: the read predicate is ANDed after the parent filter of a child tab")
+    void readPredicateAndedAfterParentFilter() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(1L);
+      when(adTab.getName()).thenReturn("Lines");
+
+      try (MockedStatic<NeoTypeCoercionHelper> coercionMock =
+               Mockito.mockStatic(NeoTypeCoercionHelper.class)) {
+        NeoTypeCoercionHelper.ParentFilter parentFilter =
+            mock(NeoTypeCoercionHelper.ParentFilter.class);
+        when(parentFilter.resolveForStringApi()).thenReturn("e.salesOrder.id = 'ORDER-1'");
+        coercionMock.when(() -> NeoTypeCoercionHelper.buildParentWhereClause(any(), anyString()))
+            .thenReturn(parentFilter);
+
+        Map<String, String> params = new HashMap<>();
+        invokeApplyWhereClause(params, adTab, "ORDER-1", "e.hidden = false");
+
+        assertEquals("(e.salesOrder.id = 'ORDER-1') and (e.hidden = false)",
+            params.get("whereAndFilterClause"));
+      }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "", "   " })
+    @DisplayName("ETP-5009: a blank read predicate adds nothing")
+    void blankReadPredicateAddsNothing(String readPredicate) throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      invokeApplyWhereClause(params, adTab, null, readPredicate);
+
+      assertNull(params.get("whereAndFilterClause"));
     }
   }
 
@@ -2504,8 +2577,13 @@ class NeoCrudHandlerTest {
 
     private NeoResponse invokeDistinctFetch(Tab adTab, Map<String, String> queryParams)
         throws Exception {
+      return invokeDistinctFetch(adTab, queryParams, null);
+    }
+
+    private NeoResponse invokeDistinctFetch(Tab adTab, Map<String, String> queryParams,
+        NeoContext context) throws Exception {
       return (NeoResponse) invokePrivate(handler, "handleDistinctFetch",
-          new Class<?>[] { Tab.class, Map.class }, adTab, queryParams);
+          new Class<?>[] { Tab.class, Map.class, NeoContext.class }, adTab, queryParams, context);
     }
 
     @Test
@@ -3004,6 +3082,174 @@ class NeoCrudHandlerTest {
         assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
       }
     }
+
+    /**
+     * ETP-5009 regression: the Product window's Categoría / Tipo filters offered "Discounts" and
+     * Servicio, values only the hidden {@code ETGO_DTO} product carries, because the distinct
+     * fetch never reached the post-filter in {@code afterHandle}. The customization's read
+     * predicate must now be part of the {@code SELECT DISTINCT} query itself.
+     */
+    @Test
+    @DisplayName("ETP-5009: product _distinct includes the system-category exclusion in the HQL")
+    void productDistinctExcludesSystemCategoryProducts() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("Product");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "productType");
+      NeoContext context = NeoContext.builder()
+          .specName("product").entityName("product")
+          .httpMethod("GET").queryParams(params)
+          .adTab(adTab).sfEntity(mock(SFEntity.class))
+          .obContext(mock(OBContext.class))
+          .endpointType(NeoEndpointType.CRUD)
+          .build();
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+            .thenReturn(new ProductDefaultsHandler());
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("Product")).thenReturn(entity);
+
+        Property prop = mock(Property.class);
+        when(prop.getName()).thenReturn("productType");
+        when(prop.isPrimitive()).thenReturn(true);
+        when(entity.getProperty("productType", false)).thenReturn(prop);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        @SuppressWarnings("unchecked")
+        OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
+        ArgumentCaptor<String> whereCaptor = ArgumentCaptor.forClass(String.class);
+        when(dal.createQuery(eq("Product"), whereCaptor.capture())).thenReturn(obQuery);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<Object> hQuery = mock(org.hibernate.query.Query.class);
+        when(obQuery.createQuery(Object.class)).thenReturn(hQuery);
+        when(hQuery.list()).thenReturn(Arrays.asList("I"));
+
+        NeoResponse result = invokeDistinctFetch(adTab, params, context);
+
+        assertEquals(200, result.getHttpStatus());
+        String where = whereCaptor.getValue();
+        String predicate = "((" + ProductDefaultsHandler.EXCLUDE_SYSTEM_CATEGORY_PREDICATE + "))";
+        assertTrue(where.contains(predicate),
+            "Expected the distinct HQL to carry the read predicate, was: " + where);
+        assertTrue(where.indexOf(predicate) < where.indexOf(" order by "),
+            "The read predicate must be part of the where clause, was: " + where);
+      }
+    }
+
+    @Test
+    @DisplayName("Distinct fetch with no customization keeps the HQL free of read predicates")
+    void distinctWithoutCustomizationAddsNoPredicate() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("C_Order");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "documentStatus");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, params);
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(null);
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("C_Order")).thenReturn(entity);
+
+        Property prop = mock(Property.class);
+        when(prop.getName()).thenReturn("documentStatus");
+        when(prop.isPrimitive()).thenReturn(true);
+        when(entity.getProperty("documentStatus", false)).thenReturn(prop);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        @SuppressWarnings("unchecked")
+        OBQuery<BaseOBObject> obQuery = mock(OBQuery.class);
+        ArgumentCaptor<String> whereCaptor = ArgumentCaptor.forClass(String.class);
+        when(dal.createQuery(eq("C_Order"), whereCaptor.capture())).thenReturn(obQuery);
+
+        @SuppressWarnings("unchecked")
+        org.hibernate.query.Query<Object> hQuery = mock(org.hibernate.query.Query.class);
+        when(obQuery.createQuery(Object.class)).thenReturn(hQuery);
+        when(hQuery.list()).thenReturn(Arrays.asList("CO"));
+
+        NeoResponse result = invokeDistinctFetch(adTab, params, context);
+
+        assertEquals(200, result.getHttpStatus());
+        assertFalse(whereCaptor.getValue().contains("(("),
+            "No read predicate expected, was: " + whereCaptor.getValue());
+      }
+    }
+
+    /**
+     * ETP-5009: a customization whose predicate throws must fail the fetch rather than offer
+     * the values of the rows it was meant to exclude.
+     */
+    @Test
+    @DisplayName("Distinct fetch returns 500 when the customization's read predicate throws")
+    void distinctFailsWhenReadPredicateThrows() throws Exception {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("C_Order");
+      when(adTab.getTable()).thenReturn(table);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> params = new HashMap<>();
+      params.put("_distinct", "documentStatus");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, params);
+
+      NeoHandler customization = mock(NeoHandler.class);
+      when(customization.readPredicates(any()))
+          .thenThrow(new IllegalStateException("predicate failure"));
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+           MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+            .thenReturn(customization);
+
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        Entity entity = mock(Entity.class);
+        when(mp.getEntity("C_Order")).thenReturn(entity);
+
+        Property prop = mock(Property.class);
+        when(prop.getName()).thenReturn("documentStatus");
+        when(prop.isPrimitive()).thenReturn(true);
+        when(entity.getProperty("documentStatus", false)).thenReturn(prop);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        NeoResponse result = invokeDistinctFetch(adTab, params, context);
+
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+        verify(dal, never()).createQuery(anyString(), anyString());
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -3099,6 +3345,109 @@ class NeoCrudHandlerTest {
 
       assertEquals("0", params.get("_startRow"));
       assertEquals("100", params.get("_endRow"));
+    }
+
+    /**
+     * ETP-5009: a list GET (no record id) asks the entity's customization for its read
+     * predicates and ANDs them into the where clause core's list query, count and paging share.
+     */
+    @Test
+    @DisplayName("List GET ANDs the customization's read predicates into the where clause")
+    void listGetAppliesReadPredicates() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn("e.active = true");
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      NeoHandler customization = mock(NeoHandler.class);
+      when(customization.readPredicates(any())).thenReturn(List.of("e.hidden = false"));
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, null);
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+            .thenReturn(customization);
+
+        Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+        assertEquals("(e.active = true) and ((e.hidden = false))",
+            params.get("whereAndFilterClause"));
+        assertEquals("true", params.get("_use_alias"));
+      }
+    }
+
+    /**
+     * ETP-5009: a read by id is resolved by core with its own {@code id = :id} query, which
+     * ignores the where clause — so the customization is not even resolved for it.
+     */
+    @Test
+    @DisplayName("GET by record id does not resolve read predicates")
+    void getByIdDoesNotResolveReadPredicates() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      NeoContext context = buildContext("GET", "REC-123", adTab,
+          mock(SFEntity.class), null, null);
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+        dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(any()), never());
+        assertNull(params.get("whereAndFilterClause"));
+      }
+    }
+
+    @Test
+    @DisplayName("Non-GET request does not resolve read predicates")
+    void nonGetDoesNotResolveReadPredicates() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      NeoContext context = buildContext("DELETE", null, adTab, mock(SFEntity.class), null, null);
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        invokeBuildDalParams(context, adTab, "C_Order");
+
+        dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("List GET with no customization leaves the where clause untouched")
+    void listGetWithoutCustomizationAddsNothing() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, null);
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(null);
+
+        Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+        assertNull(params.get("whereAndFilterClause"));
+      }
     }
   }
 

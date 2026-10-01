@@ -20,12 +20,15 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -47,7 +50,10 @@ import org.openbravo.model.common.plm.ProductCategory;
  *   <li><strong>Create (POST)</strong> – blocks/allows setting default on a new record</li>
  *   <li><strong>Update (PATCH/PUT)</strong> – blocks/allows setting default on an existing record,
  *       including the no-op edit case</li>
- *   <li><strong>afterHandle()</strong> – always returns null (no post-processing needed)</li>
+ *   <li><strong>afterHandle()</strong> – hides a system-flagged category from a single-record GET
+ *       only; a list GET is left as core produced it (ETP-5009)</li>
+ *   <li><strong>readPredicates()</strong> – the query-level exclusion every list read applies
+ *       (ETP-5009)</li>
  * </ul>
  *
  * <p>The conflict scope is per-CLIENT (not per-organization) — see the class Javadoc on
@@ -350,5 +356,90 @@ public class ProductCategoryDefaultHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new ProductCategoryDefaultHandler().afterHandle(ctx));
+  }
+
+  // ── ETP-5009: afterHandle() covers the single-record GET only ────────────────────────────
+
+  private static NeoContext getCtx(String recordId, JSONObject previousBody) {
+    return NeoContext.builder()
+        .specName("product-category").entityName("productCategory")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .recordId(recordId).obContext(obContextWithClient("CLIENT1"))
+        .previousResult(NeoResponse.ok(previousBody)).build();
+  }
+
+  private static JSONObject categoryBody(String... ids) throws JSONException {
+    JSONArray data = new JSONArray();
+    for (String id : ids) {
+      data.put(new JSONObject().put("id", id));
+    }
+    return new JSONObject().put("response", new JSONObject().put("data", data));
+  }
+
+  @Test
+  public void testAfterHandleDoesNotPostFilterTheListGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve("CLIENT1")).thenReturn(Set.of("cat-sys"));
+      JSONObject body = categoryBody("cat-normal", "cat-sys");
+
+      assertNull(new ProductCategoryDefaultHandler().afterHandle(getCtx(null, body)));
+      assertEquals(2, body.getJSONObject("response").getJSONArray("data").length());
+      categoryMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testAfterHandleTreatsAnEmptyRecordIdAsAListGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      assertNull(new ProductCategoryDefaultHandler().afterHandle(
+          getCtx("", categoryBody("cat-sys"))));
+      categoryMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testAfterHandleHidesASystemCategoryOnTheSingleRecordGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve("CLIENT1")).thenReturn(Set.of("cat-sys"));
+
+      NeoResponse result = new ProductCategoryDefaultHandler().afterHandle(
+          getCtx("cat-sys", categoryBody("cat-sys")));
+
+      assertNotNull(result);
+      assertEquals(0, result.getBody().getJSONObject("response").getJSONArray("data").length());
+    }
+  }
+
+  @Test
+  public void testAfterHandleLeavesAVisibleCategoryOnTheSingleRecordGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve("CLIENT1")).thenReturn(Set.of("cat-sys"));
+
+      assertNull(new ProductCategoryDefaultHandler().afterHandle(
+          getCtx("cat-normal", categoryBody("cat-normal"))));
+    }
+  }
+
+  // ── ETP-5009: readPredicates() ────────────────────────────────────────────
+
+  @Test
+  public void testReadPredicatesExcludesSystemFlaggedCategories() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("product-category").entityName("productCategory")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+
+    assertEquals(List.of(ProductCategoryDefaultHandler.EXCLUDE_SYSTEM_CATEGORY_PREDICATE),
+        new ProductCategoryDefaultHandler().readPredicates(ctx));
+  }
+
+  @Test
+  public void testReadPredicatesKeepsCategoriesWithAnUnsetFlag() {
+    String predicate = ProductCategoryDefaultHandler.EXCLUDE_SYSTEM_CATEGORY_PREDICATE;
+    assertTrue(predicate.contains("e.etgoIssystemcategory = false"));
+    assertTrue(predicate.contains("e.etgoIssystemcategory is null"));
   }
 }
