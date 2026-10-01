@@ -101,9 +101,10 @@ class PaymentActionContractsTest {
     for (int i = 0; i < required.length(); i++) {
       req.add(required.getString(i));
     }
-    assertEquals(new TreeSet<>(List.of("scheduleId", "actual_payment", "payment_date",
+    assertEquals(new TreeSet<>(List.of("actual_payment", "payment_date",
         "fin_financial_account_id", "process")), req,
-        "the four the handler refuses a call without, plus process (MCP-only, see below)");
+        "the three the handler refuses a call without, plus process (MCP-only, see below); "
+            + "scheduleId is resolved for an agent (PaymentAgentSupport)");
 
     JSONObject props = schema.getJSONObject("properties");
     assertEquals(List.of("draft", "confirm"),
