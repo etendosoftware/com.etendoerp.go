@@ -174,6 +174,40 @@ public class TemplateAccessPropagationServiceIntegrationTest extends OBBaseTest 
   }
 
   @Test
+  public void duplicateInheritedObuiappCopiesCollapseToTheOldest() {
+    String process = string("SELECT obuiapp_process_id FROM obuiapp_process "
+        + "ORDER BY obuiapp_process_id LIMIT 1");
+    String tpl = template("DupCopies");
+    grant(OBUIAPP, tpl, process, "Y", "Y", null);
+    String role = personal("DupCopies", tpl);
+    grant(OBUIAPP, role, process, "Y", "Y", tpl);
+    grant(OBUIAPP, role, process, "N", "Y", tpl);
+    String oldest = string("SELECT obuiapp_process_access_id FROM obuiapp_process_access "
+        + "WHERE ad_role_id = '" + role + "' ORDER BY created LIMIT 1");
+
+    service.sweepRoles(Collections.singletonList(role));
+
+    assertEquals(oldest, string("SELECT obuiapp_process_access_id FROM obuiapp_process_access "
+        + "WHERE ad_role_id = '" + role + "'"));
+    assertEquals("Y|Y|" + tpl, row(OBUIAPP, role, process));
+  }
+
+  /**
+   * Core's role trigger refuses to deactivate a template while an inheritance depends on it, so
+   * only the fingerprint half can be exercised; the stale-copy half is a defensive guard.
+   */
+  @Test
+  public void deactivatingATemplateChangesItsFingerprint() {
+    String tpl = template("Deactivated");
+    grant(WINDOW, tpl, windowA, "Y", "Y", null);
+    String before = service.fingerprints().get(tpl);
+
+    exec("UPDATE ad_role SET isactive = 'N' WHERE ad_role_id = '" + tpl + "'");
+
+    assertNotEquals(before, service.fingerprints().get(tpl));
+  }
+
+  @Test
   public void roleInheritingANonSystemTemplateIsNotEligible() {
     String tpl = template("Sys");
     String other = template("Tenant");

@@ -198,9 +198,10 @@ public class TemplateAccessPropagationService {
   // ---------------------------------------------------------------------
 
   /**
-   * md5 per system template over its active, distinct grants ({@code W|P|O:element:isreadwrite},
-   * ordered), so it changes exactly when the access a template hands out changes. Inactive rows
-   * do not count, so purging them never changes it. Costs one query, independent of the number of
+   * md5 per system template over the template's own {@code IsActive} plus its active, distinct
+   * grants ({@code W|P|O:element:isreadwrite}, ordered), so it changes exactly when the access a
+   * template hands out changes, including when the whole template is deactivated (an inactive
+   * template grants nothing). Inactive rows do not count, so purging them never changes it. Costs one query, independent of the number of
    * personal roles.
    *
    * @return template id → fingerprint, for every system template (an empty template has the md5
@@ -216,9 +217,10 @@ public class TemplateAccessPropagationService {
           + ":' || g.{el} || ':' || g.isreadwrite AS k FROM {t} g WHERE g.isactive = 'Y' "
           + "AND g.ad_role_id IN (" + SYSTEM_TEMPLATES_SQL + ")"));
     }
-    String sql = "SELECT t.ad_role_id, md5(COALESCE(string_agg(x.k, '|' ORDER BY x.k), '')) "
+    String sql = "SELECT t.ad_role_id, "
+        + "md5(t.isactive || '|' || COALESCE(string_agg(x.k, '|' ORDER BY x.k), '')) "
         + "FROM ad_role t LEFT JOIN (" + grants + ") x ON x.ad_role_id = t.ad_role_id "
-        + "WHERE t.istemplate = 'Y' AND t.ad_client_id = '0' GROUP BY t.ad_role_id "
+        + "WHERE t.istemplate = 'Y' AND t.ad_client_id = '0' GROUP BY t.ad_role_id, t.isactive "
         + "ORDER BY t.ad_role_id";
     Map<String, String> result = new LinkedHashMap<>();
     for (Object[] row : rows(session().createNativeQuery(sql))) {
@@ -248,7 +250,7 @@ public class TemplateAccessPropagationService {
 
   /**
    * Roles holding an inherited copy (from a system template) that is inactive, or whose source
-   * template no longer holds an active grant for that element — what a composition that bypassed
+   * template is inactive or no longer holds an active grant for that element — what a composition that bypassed
    * {@link #sweepRole} (Etendo Classic's Role window, core's "Recalculate Permissions") can leave
    * behind while an inactive template row exists. Cheap enough for every periodic tick at the
    * current scale. Filtered by {@link #eligibleRoles}, sorted by id.
@@ -262,6 +264,7 @@ public class TemplateAccessPropagationService {
       sql.append(access.sql("SELECT a.ad_role_id FROM {t} a "
           + "WHERE a.inherited_from IN (" + SYSTEM_TEMPLATES_SQL + ") "
           + "AND (a.isactive <> 'Y' OR NOT EXISTS (SELECT 1 FROM {t} s "
+          + "JOIN ad_role st ON st.ad_role_id = s.ad_role_id AND st.isactive = 'Y' "
           + "WHERE s.ad_role_id = a.inherited_from AND s.{el} = a.{el} AND s.isactive = 'Y'))"));
     }
     sql.append(" ORDER BY 1");
@@ -331,6 +334,9 @@ public class TemplateAccessPropagationService {
         removeChildrenOfOrphanWindowAccess(roleIds);
       }
       counts.removed += execute(access.sql(REMOVE_ORPHANS_SQL), roleIds);
+      if (access == AccessTable.OBUIAPP_PROCESS) {
+        counts.removed += execute(REMOVE_DUPLICATE_OBUIAPP_COPIES_SQL, roleIds);
+      }
       counts.updated += execute(access.sql(UPDATE_SQL), roleIds);
       counts.inserted += execute(access.sql(INSERT_SQL), roleIds);
     }
@@ -385,6 +391,20 @@ public class TemplateAccessPropagationService {
       + "AND a.inherited_from IN (" + SYSTEM_TEMPLATES_SQL + ") "
       + "AND (a.isreadwrite <> d.rw OR a.inherited_from <> d.src OR a.isactive <> 'Y' "
       + "OR a.ad_client_id <> r.ad_client_id OR a.ad_org_id <> r.ad_org_id)";
+
+  /**
+   * {@code obuiapp_process_access} has no unique key on (role, process), so a personal role could
+   * hold several inherited copies of one process; the UPDATE below would then touch, and
+   * reactivate, all of them. Keeps the oldest inherited copy (by {@code Created}, then primary
+   * key) and deletes the rest. Manual rows are never touched. Core never creates such duplicates
+   * (it resolves the copy by role and process), so this is normally a no-op.
+   */
+  private static final String REMOVE_DUPLICATE_OBUIAPP_COPIES_SQL =
+      "DELETE FROM obuiapp_process_access a WHERE a.ad_role_id IN (:roles) "
+          + "AND a.inherited_from IS NOT NULL AND EXISTS (SELECT 1 FROM obuiapp_process_access k "
+          + "WHERE k.ad_role_id = a.ad_role_id AND k.obuiapp_process_id = a.obuiapp_process_id "
+          + "AND k.inherited_from IS NOT NULL AND (k.created < a.created OR (k.created = a.created "
+          + "AND k.obuiapp_process_access_id < a.obuiapp_process_access_id)))";
 
   /**
    * {@code NOT EXISTS} on any row of the element, active or not, manual or inherited: a manual

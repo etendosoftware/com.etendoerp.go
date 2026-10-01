@@ -5001,7 +5001,8 @@ system templates holding an ACTIVE grant on it. None → the inherited row is re
 row is active, its level is the most permissive among them and its `Inherited_From` is the
 highest-`SeqNo` one among those granting that level, so the source always justifies the level (the
 same end state composition guarantees, `AbstractTemplateAssignmentIntegrationTest`). Manual rows (`Inherited_From`
-null) are never touched and block an inherited insert. Roles that also inherit a non-system-template
+null) are never touched and block an inherited insert. On `obuiapp_process_access`, which has no
+unique key, duplicate inherited copies of one process are collapsed to the oldest first. Roles that also inherit a non-system-template
 role are skipped. The sweep recomputes from the templates, never replays a diff, so it is
 idempotent and order-independent.
 
@@ -5013,7 +5014,11 @@ database; the startup seeds the lease row itself.
 "Recalculate Permissions") while an inactive template row exists is corrected by the next tick,
 not immediately. Rolling back to an image older than ETP-5565 leaves personal roles aligned to the
 newer templates until the next forward deploy. The Jenkins `failure {}` rollback drops the two
-tables while new-image tasks may still run; the startup logs the failure and skips.
+tables while new-image tasks may still run; the startup logs the failure and skips. A task never
+overwrites a fingerprint stored by a NEWER `ALGO_VERSION` (so blue and green tasks of two releases
+cannot ping-pong); the flip side, from `ALGO_VERSION` 2 on, is that an older-version task treats
+those fingerprints as unchanged, so a template change made while only older-version tasks run
+(e.g. after a `dml_rollback`) is not swept until a newer-version task starts.
 
 ---
 
