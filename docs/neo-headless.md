@@ -2932,6 +2932,7 @@ ETP-5558.
 |---|---|---|
 | mutations gated by readable, not writable, organizations | a role with read-only access to an organization can still register, confirm or delete its payments through these actions | open, follow-up |
 | `pisPaymentId` scoped to the tenant, not to the invoice | within one tenant, a PIS transfer of another invoice can be queried, cancelled or retried through any invoice | open, follow-up |
+| `overpaymentAction` accepted whatever the direction and currency | the SPA offers *Dejar a crédito* / *Dar vuelto* only for a collection whose invoice is in the organization currency (`usePaymentBalance.js`, `canRefund = canLeaveCredit`); `PaymentRegistrationService` and the MCP check accept it on a purchase-invoice payment and on a foreign-currency collection too, so an agent can overpay where the UI never lets a person | open, not closed by ETP-5558 |
 
 ##### REST `/sws/neo/batch` is unaffected
 
