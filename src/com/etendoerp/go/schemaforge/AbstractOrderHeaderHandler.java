@@ -728,6 +728,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * {@code artifacts/purchase-order/custom/PurchaseOrderActions.jsx} in {@code etendo_schema_forge}):
    * <pre>
    *   qtyPending      = SUM(C_OrderLine.QtyOrdered) - SUM(C_OrderLine.QtyDelivered)
+   *                     (Total Discount line excluded — ETP-5525)
    *   needsPrimaryDoc = qtyPending != 0 AND no linked M_InOut in DocStatus 'DR'
    *
    *   totalPending    = order GrandTotal - SUM(GrandTotal of LINKED invoices in DocStatus 'CO')
@@ -835,6 +836,14 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * <p>An order with no active lines is simply absent from the result and is then treated as
    * {@code 0 - 0 = 0} pending — the same answer the form reaches from an empty {@code orderLines}
    * array.
+   *
+   * <p><b>The Total Discount line is excluded (ETP-5525).</b> The dummy line
+   * {@link TotalDiscountService} creates (product {@link TotalDiscountService#DISCOUNT_PRODUCT_ID},
+   * ordered 1) can never be shipped or received, so counting it left {@code qtyPending} at 1 forever
+   * and {@code needsPrimaryDoc} stuck {@code true} on a fully delivered order. It is excluded by the
+   * same product-id criterion {@link DiscountLineFilter} applies to the {@code /lines} endpoint the
+   * form reads, and {@link #batchComputeStatusPercentages} applies to the percentages (ETP-5317).
+   * The {@code IS NULL} arm keeps a product-less line counted, as it was before.
    */
   // placeholders contains only "?" literals — all values are bound via setString(); no injection risk.
   @SuppressWarnings("java:S2077")
@@ -843,6 +852,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
         "SELECT ol.C_Order_ID, COALESCE(SUM(ol.QtyOrdered), 0), COALESCE(SUM(ol.QtyDelivered), 0) " +
         "FROM C_OrderLine ol " +
         "WHERE ol.C_Order_ID IN (" + placeholders(ids) + ") AND ol.IsActive = 'Y' " +
+        "AND (ol.M_Product_ID IS NULL OR ol.M_Product_ID <> ?) " +
         "GROUP BY ol.C_Order_ID";
     Map<String, OrderQuantities> result = new HashMap<>();
     Connection conn = OBDal.getInstance().getConnection();
@@ -851,6 +861,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       for (String id : ids) {
         ps.setString(idx++, id);
       }
+      ps.setString(idx, TotalDiscountService.DISCOUNT_PRODUCT_ID);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           result.put(rs.getString(1),
