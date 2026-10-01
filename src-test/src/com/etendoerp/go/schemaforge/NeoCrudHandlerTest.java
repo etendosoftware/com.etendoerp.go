@@ -27,7 +27,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -52,6 +51,11 @@ import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -175,29 +179,47 @@ class NeoCrudHandlerTest {
   }
 
   @Test
-  @DisplayName("REST write validation returns the stable read-only response before dispatch")
-  void clientReadOnlyValidationReturnsStructured422() throws Exception {
+  @DisplayName("ETP-5556: REST write with read-only fields logs every one of them, does not reject")
+  void clientReadOnlyFieldsAreLoggedNotRejected() throws Exception {
     Tab adTab = mock(Tab.class);
     Table table = mock(Table.class);
     SFEntity entity = mock(SFEntity.class);
     NeoFieldFilter filter = mock(NeoFieldFilter.class);
     when(adTab.getTable()).thenReturn(table);
-    when(table.getName()).thenReturn("Order");
-    JSONObject body = new JSONObject().put("documentNo", "SO-9999");
-    doThrow(new ReadOnlyFieldRejectedException("documentNo"))
-        .when(filter).validateClientWriteRequest(body, "PATCH");
+    when(table.getName()).thenReturn("OrderLine");
+    JSONObject body = new JSONObject()
+        .put("lineNetAmount", "30.00")
+        .put("grossAmount", "36.30");
+    when(filter.findClientReadOnlyFields(body, "PATCH"))
+        .thenReturn(List.of("lineNetAmount", "grossAmount"));
+    List<String> warnings = new ArrayList<>();
+    Logger handlerLogger = (Logger) LogManager.getLogger(NeoCrudHandler.class);
+    AbstractAppender capture = new AbstractAppender("capture-etp-5556", null, null, true,
+        org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+      @Override
+      public void append(LogEvent event) {
+        if (event.getLevel() == Level.WARN) {
+          warnings.add(event.getMessage().getFormattedMessage());
+        }
+      }
+    };
+    capture.start();
+    handlerLogger.addAppender(capture);
 
     try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
-      fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "Order")).thenReturn(filter);
+      fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "OrderLine")).thenReturn(filter);
 
-      NeoResponse response = handler.validateClientWriteRequest(
+      handler.warnOnClientReadOnlyFields(
           buildContext("PATCH", "record-1", adTab, entity, body, Collections.emptyMap()));
-
-      assertNotNull(response);
-      assertEquals(422, response.getHttpStatus());
-      assertEquals("read_only_field", response.getBody().getString("error"));
-      assertEquals("documentNo", response.getBody().getString("field"));
+    } finally {
+      handlerLogger.removeAppender(capture);
+      capture.stop();
     }
+
+    assertEquals(1, warnings.size());
+    assertTrue(warnings.get(0).contains("PATCH"));
+    assertTrue(warnings.get(0).contains("[lineNetAmount, grossAmount]"));
+    verify(filter, never()).validateClientWriteRequest(any(), any());
   }
 
   // -------------------------------------------------------------------------
@@ -311,8 +333,9 @@ class NeoCrudHandlerTest {
 
     @ParameterizedTest
     @ValueSource(strings = { "POST", "PUT", "PATCH" })
-    @DisplayName("rejects a read-only field before the REST write reaches a handler")
-    void readOnlyFieldIsRejectedBeforeDispatch(String method) throws Exception {
+    @DisplayName("ETP-5556: a read-only field no longer blocks the REST write from reaching a "
+        + "handler")
+    void readOnlyFieldDoesNotBlockDispatch(String method) throws Exception {
       SFSpec spec = mock(SFSpec.class);
       SFEntity entity = createMockEntity(false, false, true, true, true, false);
       Tab adTab = mock(Tab.class);
@@ -331,8 +354,10 @@ class NeoCrudHandlerTest {
       when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
       when(request.getInputStream()).thenReturn(
           toServletInputStream("{\"documentNo\":\"SO-9999\"}"));
-      doThrow(new ReadOnlyFieldRejectedException("documentNo"))
-          .when(filter).validateClientWriteRequest(any(), any());
+      when(filter.findClientReadOnlyFields(any(), any())).thenReturn(List.of("documentNo"));
+      NeoResponse hookResponse = NeoResponse.ok(new JSONObject());
+      when(servlet.handleWithHooks(eq("orderHook"), any(), eq(request), eq(response)))
+          .thenReturn(hookResponse);
 
       try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
         fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "Order")).thenReturn(filter);
@@ -340,12 +365,8 @@ class NeoCrudHandlerTest {
         handler.handleWindowEntityCrud(spec, pathInfo, method, request, response);
       }
 
-      ArgumentCaptor<NeoResponse> responseCaptor = ArgumentCaptor.forClass(NeoResponse.class);
-      verify(servlet).writeResponse(eq(response), responseCaptor.capture());
-      assertEquals(422, responseCaptor.getValue().getHttpStatus());
-      assertEquals("read_only_field", responseCaptor.getValue().getBody().getString("error"));
-      assertEquals("documentNo", responseCaptor.getValue().getBody().getString("field"));
-      verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+      verify(servlet).handleWithHooks(eq("orderHook"), any(), eq(request), eq(response));
+      verify(servlet).writeResponse(response, hookResponse);
     }
 
     /**
@@ -368,8 +389,8 @@ class NeoCrudHandlerTest {
 
     @Test
     @DisplayName("ETP-5537: POST accepts a create-exempted read-only field (entity has a "
-        + "NeoHandler) and reaches dispatch; PUT/PATCH still reject the same field before it")
-    void createExemptedFieldPassesButUpdateStaysRejected() throws Exception {
+        + "NeoHandler) and reaches dispatch; ETP-5556: PUT with the same field reaches it too")
+    void createExemptedFieldPassesAndUpdateIsNotRejected() throws Exception {
       SFSpec spec = mock(SFSpec.class);
       SFEntity entity = createMockEntity(false, false, true, true, true, false);
       Tab adTab = mock(Tab.class);
@@ -396,19 +417,71 @@ class NeoCrudHandlerTest {
         verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(request), eq(response));
         verify(servlet, never()).writeResponse(eq(response), any());
 
-        // PUT on an existing record: the same field is still rejected before dispatch.
+        // PUT on an existing record: the field is not a create exemption here, but ETP-5556
+        // only logs it, so the write still reaches the handler instead of a 422.
         HttpServletRequest putRequest = mock(HttpServletRequest.class);
         when(putRequest.getInputStream()).thenReturn(
             toServletInputStream("{\"currency\":\"102\"}"));
         NeoServlet.NeoPathInfo putPath = new NeoServlet.NeoPathInfo("assets", "assets", "REC-1");
         handler.handleWindowEntityCrud(spec, putPath, "PUT", putRequest, response);
 
-        ArgumentCaptor<NeoResponse> responseCaptor = ArgumentCaptor.forClass(NeoResponse.class);
-        verify(servlet).writeResponse(eq(response), responseCaptor.capture());
-        assertEquals(422, responseCaptor.getValue().getHttpStatus());
-        assertEquals("currency", responseCaptor.getValue().getBody().getString("field"));
-        verify(servlet, never()).handleWithHooks(anyString(), any(), eq(putRequest), eq(response));
+        verify(servlet).handleWithHooks(eq("assetsHandler"), any(), eq(putRequest), eq(response));
+        verify(servlet, never()).writeResponse(eq(response), any());
       }
+    }
+
+    /**
+     * ETP-5556 regression: the line grid autosave PATCHes the whole row, so the body carries
+     * read-only computed columns (amounts, audit fields) next to the one field the user edited.
+     * The write must still reach the handler instead of failing the whole save with a 422.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "PUT", "PATCH" })
+    @DisplayName("ETP-5556: a full-row write carrying read-only fields still reaches the handler")
+    void fullRowWriteWithReadOnlyFieldsReachesHandler(String method) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      SFEntity entity = createMockEntity(false, false, true, true, true, false);
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(spec.getId()).thenReturn("SPEC-1");
+      when(entity.getADTab()).thenReturn(adTab);
+      when(entity.getJavaQualifier()).thenReturn("linesHook");
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getName()).thenReturn("OrderLine");
+      when(servlet.findEntity("SPEC-1", "lines")).thenReturn(entity);
+      when(servlet.extractQueryParams(any())).thenReturn(new HashMap<>());
+      when(request.getInputStream()).thenReturn(toServletInputStream(
+          "{\"orderedQuantity\":\"3\",\"lineNetAmount\":\"30.00\",\"grossAmount\":\"36.30\"}"));
+      NeoResponse hookResponse = NeoResponse.ok(new JSONObject());
+      when(servlet.handleWithHooks(eq("linesHook"), any(), eq(request), eq(response)))
+          .thenReturn(hookResponse);
+      NeoFieldFilter filter = buildLineFilter();
+
+      try (MockedStatic<NeoFieldFilter> fieldFilters = Mockito.mockStatic(NeoFieldFilter.class)) {
+        fieldFilters.when(() -> NeoFieldFilter.forEntity(entity, "OrderLine")).thenReturn(filter);
+
+        handler.handleWindowEntityCrud(spec,
+            new NeoServlet.NeoPathInfo("testSpec", "lines", "LINE-1"), method, request, response);
+      }
+
+      verify(servlet).handleWithHooks(eq("linesHook"), any(), eq(request), eq(response));
+      verify(servlet).writeResponse(response, hookResponse);
+    }
+
+    /**
+     * Real filter for a sales order line: {@code orderedQuantity} is writable, the computed
+     * amounts are included but read-only.
+     */
+    private NeoFieldFilter buildLineFilter() throws Exception {
+      Constructor<NeoFieldFilter> ctor = NeoFieldFilter.class.getDeclaredConstructor(
+          Set.class, Set.class, Set.class, Map.class, Map.class, boolean.class);
+      ctor.setAccessible(true);
+      return ctor.newInstance(
+          new HashSet<>(Set.of("id", "orderedQuantity", "lineNetAmount", "grossAmount")),
+          new HashSet<>(Set.of("id", "orderedQuantity")),
+          Collections.emptySet(), Collections.emptyMap(), Collections.emptyMap(), true);
     }
 
     @Test

@@ -241,6 +241,15 @@ Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. 
 
 #### 4.3.0 Curated read-only fields are refused before a REST write (ETP-5347)
 
+> **Temporarily disabled on REST — ETP-5556.** The UI line grids still send the whole row on
+> every save, so this rejection made every document-line edit fail with a 422. Until the UI
+> sends only writable fields, `NeoCrudHandler#warnOnClientReadOnlyFields` runs the same check
+> but only logs a `WARN` naming every offending field, and the write continues: the generic
+> persistence filter (`filterWriteRequest`) drops those fields as it did before ETP-5347, and a
+> `NeoHandler` receives the body unchanged. The create-time rejection in `handleDefault`
+> (IMP-28 clause 2) and the MCP refusal (§4.12) are unaffected. The rest of this section
+> describes the contract that returns once the 422 is restored.
+
 `POST`, `PUT`, and `PATCH` reject a value submitted for an included field that the NEO
 curation marks read-only. The rejection happens at the REST boundary, before a
 `NeoHandler` or the generic persistence path sees the request, so PUT and PATCH always
