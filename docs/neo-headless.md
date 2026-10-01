@@ -1969,8 +1969,21 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   { "actions": {
       "hidden":   ["pisTemplates", "psd2GenerateBankPayment"],
       "redirect": { "aPRMAddpayment": "registerPayment" },
+      "values":   { "aPRMProcessPayment": ["P"] },
       "reason":   "why — mandatory, it reaches the agent" } }
   ```
+
+  `values` (`button → [values]`) narrows a list-backed button to the values the UI's own button
+  sends. It must be a non-empty object of non-empty arrays of non-blank strings (each violation is a
+  validation problem, so the section fails closed); a section may carry `values` alone, and `reason`
+  stays mandatory. `view:"actions"` lists only the allowed entries of that button's `actionValues`
+  (a button without `actionValues`, or one not named in `values`, is untouched). `neo_action` refuses
+  a `docAction` or `action` parameter outside the set with **422 `validation_error`**, `detail`
+  *"Value 'X' of 'docAction' is not offered for action '…' through MCP; send one of [P], or none
+  for the default."* and `allowedValues`. The button is matched under every alias (field name, DB
+  column name). Sending no value (`{}`, what the SPA sends) or `docAction: null` passes: the button
+  runs with its own default. Applied today to the payment headers: `aPRMProcessPayment` → `["P"]`
+  (the UI's *Confirmar*; the button's other values `R`, `RE`, `V` are not offered).
 
   `hidden` names declared actions or AD buttons: they leave `view:"actions"` and `neo_discover`, and
   `neo_action` refuses them **405 `method_not_allowed`** although the handler would serve them —
@@ -2012,11 +2025,11 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
 
 | Action | Kind | Parameters (required in **bold**) |
 |---|---|---|
-| `registerPayment` | write | **`scheduleId`**, **`actual_payment`** (number, in the **invoice** currency; a foreign account receives `actual_payment × conversionRate`), **`payment_date`**, **`fin_financial_account_id`**, **`process`** (draft\|confirm), `fin_paymentmethod_id`, `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
+| `registerPayment` | write | `scheduleId` (optional for agents, see below; REST still requires it), **`actual_payment`** (number, in the **invoice** currency; a foreign account receives `actual_payment × conversionRate`), **`payment_date`**, **`fin_financial_account_id`**, **`process`** (draft\|confirm), `fin_paymentmethod_id`, `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
 | `confirmPayment` | write | **`paymentId`** |
 | `deletePayment` | write | **`paymentId`** |
 | `invoicePayments` | read | — |
-| `invoiceAccounts` | read | — (returns `writeoffLimit` and `paymentMethodIds` per account) |
+| `invoiceAccounts` | read | — (returns `writeoffLimit`, `paymentMethodIds` and, for agents, `defaultMethodId` per account) |
 | `invoicePaymentMethods` | read | — |
 | `invoiceCreditSources` | read | `editPaymentId` |
 | `currencyOptions` | read, `GET` | — |
@@ -2065,6 +2078,59 @@ those, REST silently ignores the three keys (§4.12.9). REST is left as it is; t
 `process` **required** (`Param.requiredOptions`), so every call the MCP lets through takes the
 advanced path, and one without it is a 422 `missingParameters:["process"]` before anything runs.
 The SPA always sends `process`.
+
+**What the MCP path adds — the agent checks and the enriched answers (ETP-5558 Step 4,
+`PaymentAgentSupport`).** The SPA settles part of a payment client-side before it calls (it picks
+the installment, asks what to do with an overpayment, only offers the methods the chosen account
+accepts) and re-reads the invoice afterwards. An agent has none of that, so the handler does it, and
+**only** when the call comes through MCP (`NeoContext#isMcpOrigin()`). The REST path — the SPA's —
+never reaches `PaymentAgentSupport` and is byte-for-byte unchanged (§4.12.9).
+
+`registerPayment` is checked in this order, inside the admin session and **before anything is
+written**. A refusal is a 404/422 through the handler; through MCP it arrives flattened by
+`toMcpHandlerError` as `{status, error:"validation_error"|"not_found", detail, <list key>}`:
+
+| Check | Rule | Refusal |
+|---|---|---|
+| installment (`scheduleId` absent) | new payment: the invoice's installments with a **pending** detail (a schedule detail linked to no payment; one held by a draft does not count), in due-date order (no due date last). One → `scheduleId` is filled in. Edit (`paymentId` given): the installment the draft already pays | several → **422** *"This invoice has N pending installments; send scheduleId with the one being paid (see 'installments')."* + `installments[{id, outstandingAmount, dueDate}]`; none → **422** *"No pending payment schedule details found for this installment"*; edit with a `paymentId` that is unknown, of another invoice, or a draft paying none of its installments → **404** *"Payment not found"* (never the "no pending" message) |
+| method ↔ account (`fin_paymentmethod_id` given) | the account must accept the method for this direction | **422** *"The financial account '<name>' does not accept the payment method <id>; send one of 'validMethods', or omit fin_paymentmethod_id to use the account's default."* + `validMethods[{id, name}]`. Blank method passes (the account's default is used). An unknown or foreign account is left to the service (400 *Financial account not found*) |
+| overpayment (`overpaymentAction` absent) | funds = `actual_payment` + Σ `creditSources[].use`, against the installment's capacity: its pending details for a new payment, its whole amount when a draft is edited; both rounded to cents `HALF_UP`. Funds equal to the capacity pass | **422** *"The <funds> funding this payment (actual_payment plus creditSources) exceeds the installment's outstanding <capacity> by <excess>. …"* + `outstandingAmount`, `excess`, `allowedValues:["leave-credit","refund"]`. Re-send with `overpaymentAction`, or lower `actual_payment` |
+
+Unchanged for both channels (service rules, `PaymentRegistrationService`): a cross-currency
+payment without `conversionRate` → 400 *"A conversion rate is required when the invoice and account
+currencies differ"*; `writeoffDifference` above the account's `writeoffLimit` → 400
+`ETGO_WriteoffLimitExceeded` (*"The difference to write off (…) exceeds the write-off limit
+configured for this financial account (…)."*; null/0 limit = no limit; ETP-5558 BUG-4, the one
+accepted REST change, since the SPA already never sends an over-limit write-off).
+
+**The enriched answers (agents only).** `registerPayment` and `confirmPayment` keep their
+`response.data` `{id, documentNo, amount, status, processed}` and add `paymentMethod{id, name}`,
+`creditGenerated`, `creditAvailable` (generated minus used; 0 after a refund), `writeoffAmount` (sum
+of the payment details' write-offs) and `invoice{id, documentNo, outstandingAmount, totalPaid,
+paymentComplete}` (read with a scalar query, after the write). `registerPayment` also adds
+`creditUsed` (Σ `creditSources[].use`). A draft carries `note: "Draft: nothing is applied to the
+invoice until confirmPayment."`. `deletePayment` answers **200**
+`{deleted:{id, documentNo, amount, status}, invoice:{…}}` instead of REST's empty **204**.
+
+**`invoiceAccounts` for agents.** REST answers the invoice's own method as top-level
+`defaultMethodId` (possibly one no listed account accepts) and per account `defaultPaymentMethod`
+(first method by name). For an agent each item gets `defaultMethodId` = the method
+`registerPayment` uses on that account when `fin_paymentmethod_id` is left out (the invoice's method
+when the account accepts it, else the account's first `defaultForMethodIds`, else its first
+`paymentMethodIds`); `defaultPaymentMethod` is removed; the top-level key becomes `invoiceMethodId`
+plus `invoiceMethodAccepted` (whether any listed account accepts it). A non-200 passes through.
+
+**A completed payment is never reported as failed, nor a rolled-back one as done.** The enrichment
+runs after the payment is written. If it throws and the transaction can still commit, the plain
+result goes back with **`enriched:false`** (inside `response.data`, else at the top level; the
+REST-shaped empty 204 of a delete passes unchanged) — the payment is saved, re-read it with
+`invoicePayments`. If the failure marked the transaction rollback-only (Hibernate 5.6 marks it on
+some exceptions, and the commit would then silently undo the payment), the handler rolls back and
+answers **500** *"The payment was not saved; nothing was registered — it is safe to retry"*
+(`deletePayment`: *"The draft was not deleted; nothing changed — it is safe to retry"*). The
+invariant: persisted + 2xx, or non-2xx + nothing persisted. `deletePayment` describes the draft
+before removing it; if that read dooms the transaction the delete is never dispatched (same 500),
+otherwise a failed description only costs the `deleted` block.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
@@ -2480,8 +2546,13 @@ verbs, and it is the only MCP-side answer to "may the MCP use this method": the 
 (`ToolRegistry` — a spec whose every entity hides `create` drops out of `neo_create`'s enum),
 `neo_discover` (`methods`, `readOnly`), the MCP resources, `neo_schema` (`methods`; and
 `view:"create"` on a hidden create is refused rather than publishing a create contract),
-`neo_create` / `neo_update` / `neo_delete` (`requireMethodEnabled`) and `neo_batch`
-(`preprocessBatchOperation`, before any other gate). `McpVerbsSectionTest` fails the build if an MCP
+`neo_create` / `neo_update` / `neo_delete` (`requireMethodEnabled`), `neo_batch`
+(`preprocessBatchOperation`, before any other gate) and `neo_defaults`: defaults only exist to
+prepare a create, so on an entity whose create `verbs` hides it answers the same **405
+`method_not_allowed`** envelope (`reason`, and `instead` as the hint) as `neo_create` and
+`view:"create"`, instead of a `confirm` block for a record the agent cannot write. An entity whose
+create is only off by its raw `ISPOST` flag, with no `verbs` section, keeps its earlier
+`neo_defaults` behaviour (ETP-5558). `McpVerbsSectionTest` fails the build if an MCP
 class other than `McpMethodPolicy` reads the write flags — through `NeoMethodPolicy`'s predicates or
 through the entity's own `isPost()`/`isPut()`/`isPatch()`/`isDelete()`. That includes
 `McpParentScope`: `mode:"unparented"` is refused as `UNRESOLVABLE` only when the entity has a write
@@ -2509,6 +2580,10 @@ a hidden verb. The shared `NeoMethodPolicy.buildMcpNotEnabledMessage` is not cha
 | `payment-out/header` | create, update, delete | idem for payments, on `purchase-invoice/header` |
 | `payment-in/finPaymentScheduleDetail`, `payment-out/lines` | create, update, delete | the allocation of a payment to invoice schedules; the UI only writes it through the invoice actions |
 | `payment-out/bankPayments` | create, update, delete | PIS needs a person to authorize at the bank (SCA) and is excluded from MCP |
+| `sales-invoice/paymentDetails`, `purchase-invoice/paymentDetails` | create, update, delete | the allocation of payments to the invoice's installments, a hand-built allocation of the BUG-1 class; the UI only reads it and writes it through the invoice actions. `instead` = `registerPayment` on the invoice header |
+| `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan` | create, update, delete | the installments are generated from the payment terms when the invoice is completed and only change through its payments; the UI never hand-creates one. Reads stay: a `paymentPlan` id is a valid `scheduleId`. `instead` = `registerPayment` |
+| `financial-account/transaction` | create, update, delete | the UI never writes a movement through this entity (`view:"create"` had 0 fields). No `instead`; its post/unpost actions stay |
+| `financial-account/reconciliations` | create, update, delete | reconciliations are created and undone by the reconciliation flow; `instead` = `neo_action` on `bank-reconciliation` (`id` = the financial account) |
 | `product/transactionAdjustments` | create | its parent cannot be identified, so creates were already refused (`parent_unresolvable`); declared here so `neo_discover` and `neo_schema` stop advertising a `POST` that always fails |
 
 Delete of the two payment headers is hidden too. The UI's *Eliminar* never uses the generic delete:
@@ -2517,6 +2592,18 @@ payment↔schedule join rows first) and the invoice panel runs `deletePayment`. 
 removes only the header, so on a draft with payment details it fails on the foreign key. REST
 `DELETE` on a payment header takes that same generic path (`ReactivatePaymentHandler` only intercepts
 actions), so it fails the same way; it is not changed here, and the SPA does not call it.
+
+##### The `actions` section — applied today (ETP-5558)
+
+The shape and the rules are in §4.12.1.3.
+
+| Entity | `hidden` | `values` / `redirect` | Why |
+|---|---|---|---|
+| `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment` | redirect `aPRMAddpayment` → `registerPayment` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo GO payment flow |
+| `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted` | `aPRMProcessPayment: ["P"]` | the payment windows offer only *Confirmar* (`aPRMProcessPayment`, value `P`), *Eliminar* (`eTPRRemovePayment`) and *Reactivar* (`etprReactivatePayment`), which stay invokable. Payments are created and allocated through `registerPayment` on the invoice header |
+| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `aprmFundsTrans`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | — | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`; PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
+
+`McpConfigSourcedataTest` asserts this content.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -2803,6 +2890,41 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
 | `registerPayment` with `paymentId`, `conversionRate` or `writeoffDifference` but no `process` (nor `creditSources` / `overpaymentAction` / `fin_paymentmethod_id`) | **known quirk, not fixed:** the simple path runs and silently ignores those keys — a NEW payment instead of editing the draft, the cross-currency account refused, no write-off | **422** `missingParameters:["process"]` — `process` is required in the contract |
+
+The agent checks and answers of §4.12.1.3 (ETP-5558 Step 4, `PaymentAgentSupport`) widen the gap,
+also on purpose — the SPA settles these client-side, an agent cannot:
+
+| call | REST (the SPA) | MCP `neo_action` |
+|---|---|---|
+| `registerPayment` without `scheduleId` | **400** *Missing required fields: …* | resolved when only one installment is pending (or from the edited draft); several → **422** + `installments`; none → **422** |
+| `registerPayment` funding above the installment, no `overpaymentAction` | excess silently left as credit of the business partner | **422** + `outstandingAmount`, `excess`, `allowedValues` |
+| `registerPayment` with a method the account does not accept | **silently falls back** to the account's default method | **422** + `validMethods[{id, name}]` |
+| `registerPayment` / `confirmPayment` success | `response.data {id, documentNo, amount, status, processed}` | same, plus `paymentMethod`, `creditUsed` (register), `creditGenerated`, `creditAvailable`, `writeoffAmount`, `invoice{…}`, `note` on a draft; `enriched:false` when the extra read failed |
+| `deletePayment` success | **204**, no body | **200** `{deleted:{id, documentNo, amount, status}, invoice:{…}}` |
+| `invoiceAccounts` | invoice method as `defaultMethodId`, `defaultPaymentMethod` per account | per-account `defaultMethodId`, top-level `invoiceMethodId` + `invoiceMethodAccepted`, no `defaultPaymentMethod` |
+| enrichment failure that marks the transaction rollback-only | n/a (no enrichment) | rollback + **500** *…it is safe to retry* |
+
+Other MCP-only refusals declared in §4.12.6:
+
+| call | REST | MCP |
+|---|---|---|
+| `neo_defaults` on an entity whose create `MCP_CONFIG.verbs` hides | defaults served | **405 `method_not_allowed`**, same envelope as `neo_create` |
+| payment header buttons `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `psd2GenerateBankPayment` | served | **405** (`MCP_CONFIG.actions.hidden`), absent from `view:"actions"` |
+| `aPRMProcessPayment` with a value other than `P` | served | **422** + `allowedValues:["P"]`; `view:"actions"` lists only `P` |
+| `financial-account/account` Core and PSD2 buttons (§4.12.6 table) | served | **405**, not listed |
+| writes on `<invoice>/paymentDetails`, `<invoice>/paymentPlan`, `financial-account/transaction`, `financial-account/reconciliations` | served by the flags | **405** (`MCP_CONFIG.verbs`) |
+
+##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
+
+The payment header's defaults read `@Isreceipt@`, which Classic supplies through the tab's
+auxiliary inputs (`AD_AuxiliarInput`); NEO create (`NeoMandatoryDefaultsService`) does not evaluate
+auxiliary inputs. So a
+REST `POST /sws/neo/payment-out/header` stores `FIN_Payment.isReceipt` with the DB default `'Y'` (a
+payment-out flagged as a collection, BUG-2) and leaves `documentType` without a value or selector
+items (BUG-3). The SPA never takes that route (payments are created through `registerPayment`), and
+MCP no longer reaches it (`verbs` hides create on both payment headers). It is a generic REST gap,
+not a payment one: any tab whose defaults read an auxiliary input has it. Tracked outside
+ETP-5558.
 
 ##### Payment action ids — known gaps (ETP-5558, both channels)
 
