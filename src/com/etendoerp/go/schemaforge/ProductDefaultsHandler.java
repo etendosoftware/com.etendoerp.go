@@ -232,7 +232,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     // record the form keeps showing, so skipping them left a freshly created product with the
     // flag absent — and an absent flag means "has a cost", so the banner stayed hidden until the
     // user reloaded the page. Only a GET list is excluded, where this would be one count per row.
-    if (METHOD_GET.equals(context.getHttpMethod()) && StringUtils.isBlank(context.getRecordId())) {
+    if (METHOD_GET.equals(context.getHttpMethod()) && !context.isReadById()) {
       return filtered;
     }
     NeoResponse target = filtered != null ? filtered : context.getPreviousResult();
@@ -421,10 +421,11 @@ public class ProductDefaultsHandler implements NeoHandler {
    * <p>ETP-5009: single-record reads only. A list read is already restricted in the query by
    * {@link #readPredicates}; a read by id is not, because core resolves it with its own
    * {@code id = :id} query and ignores the where clause, so this post-filter is still what hides
-   * the record there.
+   * the record there. "Read by id" is {@link NeoContext#isReadById}: the path id <em>and</em> the
+   * query-string form {@code GET …/product/product?id=X}, which core fetches by id just the same.
    */
   private NeoResponse hideSystemCategoryProducts(NeoContext context) {
-    if (!METHOD_GET.equals(context.getHttpMethod()) || StringUtils.isBlank(context.getRecordId())) {
+    if (!context.isReadById()) {
       return null;
     }
     NeoResponse previous = context.getPreviousResult();

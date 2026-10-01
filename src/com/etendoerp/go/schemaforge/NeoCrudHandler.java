@@ -485,12 +485,13 @@ class NeoCrudHandler {
 
   /**
    * ETP-5009: the customization's {@link NeoHandler#readPredicates} for a list {@code GET}, or
-   * {@code null} for anything else. A read by id is skipped on purpose: core resolves it with its
-   * own {@code id = :id} query and never applies the where clause, so resolving the customization
-   * for it would be work with no effect.
+   * {@code null} for anything else. A read by id ({@link NeoContext#isReadById}: a path id or a
+   * query-string {@code id}) is skipped on purpose: core resolves it with its own
+   * {@code id = :id} query and never applies the where clause, so a handler that hides a row
+   * from it does so in {@code afterHandle}, gated on the very same {@code isReadById}.
    */
   private static String resolveListReadPredicate(NeoContext context) {
-    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() != null) {
+    if (!"GET".equals(context.getHttpMethod()) || context.isReadById()) {
       return null;
     }
     return NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);

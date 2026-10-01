@@ -64,7 +64,6 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
-  private static final String METHOD_GET = "GET";
   /**
    * ETP-5009: excludes categories flagged {@code EM_Etgo_IsSystemCategory = 'Y'} (DAL property
    * {@code etgoIssystemcategory}, Yes/No mapped as {@code Boolean}). Same expression as
@@ -177,12 +176,12 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
    *
    * <p>ETP-5009: single-record reads only — a list read is restricted in the query by
    * {@link #readPredicates}, while core resolves a read by id with its own {@code id = :id} query
-   * and ignores the where clause, so this post-filter is still what hides the record there.
+   * and ignores the where clause, so this post-filter is still what hides the record there — on
+   * the path id and on the query-string {@code ?id=} alike ({@link NeoContext#isReadById}).
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!METHOD_GET.equals(context.getHttpMethod()) || context.getRecordId() == null
-        || context.getRecordId().isEmpty()) {
+    if (!context.isReadById()) {
       return null;
     }
     String clientId = resolveContextClientId(context);
