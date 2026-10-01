@@ -3157,6 +3157,16 @@ neo_create → 422 field_not_allowed
              "Field 'X' is not allowed on entity 'Y'"                  + available[]
 ```
 
+`neo_selectors` answers the same way for a column it cannot serve (ETP-5558): **422
+`unknown_selector_column`**, *"Column 'X' is not a selector column of entity 'Y'"*, `field` and
+`available[]` = the entity's selector columns (the active columns of the tab's table with a
+TableDir / Table / Search / OBUISEL reference, by field name — the set `neo_selectors` accepts,
+since it resolves columns off the AD rather than off `ETGO_SF_FIELD`). It used to be an
+`IllegalArgumentException` that reached the agent as a 500 *"Column not found in table"*: in blind
+run `20261001T2331-local-8163` an agent asked `financial-account/account` for
+`glItemDifferenceId` (a key the account's handler adds to its rows, not a column; the column is
+`aprmGlitemDiff`) and was told the server had failed. The REST selector endpoint is unchanged.
+
 Neither asserts nor denies that a column of that name exists. Two distinguishable answers would let
 any caller enumerate the columns of the underlying AD table by probing keys and reading which
 refusal came back — the response itself would confirm the existence of every field the spec was

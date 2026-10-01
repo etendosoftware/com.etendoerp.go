@@ -1150,7 +1150,9 @@ public class McpToolRouter {
       adColumn = NeoSelectorPolicy.resolveVirtualSelectorColumn(sfEntity, columnName);
     }
     if (adColumn == null) {
-      throw new IllegalArgumentException("Column not found in table: " + columnName);
+      // ETP-5558: the caller's mistake, not the server's — a 422 naming the selector columns.
+      throw McpRoutingException.unknownSelectorColumn(columnName, entityName,
+          McpSelectorContextHelper.selectorColumnNames(adTab, dalEntity, SELECTOR_REFS));
     }
 
     // Build contextParams from recordContext and window category

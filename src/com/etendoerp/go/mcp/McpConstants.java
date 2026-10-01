@@ -124,6 +124,8 @@ final class McpConstants {
    * made {@code neo_list} on a child entity return every row in the table.</p>
    */
   static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
+  /** {@code neo_selectors} on a column that is not a selector of the entity (ETP-5558). */
+  static final String ERROR_UNKNOWN_SELECTOR_COLUMN = "unknown_selector_column";
   /** Machine-detectable code for a top-level argument the tool does not declare (IMP-40). */
   static final String ERROR_UNKNOWN_ARGUMENT = "unknown_argument";
 

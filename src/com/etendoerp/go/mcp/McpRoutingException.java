@@ -318,6 +318,37 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * {@code neo_selectors} named a column that is not a selector (foreign-key) column of the entity
+   * (ETP-5558). It used to escape as an {@code IllegalArgumentException} — a 500 telling the agent
+   * the server had failed, when it was the agent's argument that was wrong. Blind run
+   * {@code 20261001T2331-local-8163} asked for {@code glItemDifferenceId}, a name the account's
+   * handler adds to its rows, not a column. Same shape as {@link #unknownFilterField}: 422, the
+   * name back in {@code field}, the selector columns in {@code available}.
+   *
+   * @param column     the column as the caller spelled it
+   * @param entityName the entity, for the message
+   * @param available  the entity's selector column names
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownSelectorColumn(String column, String entityName,
+      List<String> available) {
+    List<String> names = available == null ? List.of() : available;
+    boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
+    if (truncated) {
+      names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
+    }
+    return new McpRoutingException(
+        "Column '" + column + "' is not a selector column of entity '" + entityName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_SELECTOR_COLUMN, column,
+        names,
+        truncated
+            ? "Retry with one of the names in 'available'. That list is truncated — neo_schema "
+                + "with view:\"full\" marks every field that has a selector."
+            : RETRY_WITH_AVAILABLE,
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * A filter used a range operator that is not one of the recognized keys (ETP-5184).
    *
    * <p>Third of the three silent drops in {@code appendOperatorConditions}: an unrecognized
