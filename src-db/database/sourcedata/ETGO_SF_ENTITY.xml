@@ -304,6 +304,7 @@
 <!--0D5FAC6A352140EABD483FF77539FAEA-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--0D5FAC6A352140EABD483FF77539FAEA-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--0D5FAC6A352140EABD483FF77539FAEA-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--0D5FAC6A352140EABD483FF77539FAEA-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Payment details are the allocation of collections to this invoice's installments; the UI only reads them and writes them through the invoice payment actions","instead":"neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--0D5FAC6A352140EABD483FF77539FAEA--></ETGO_SF_ENTITY>
 
 <!--0D654005B02741A29A0491FD5AFEA6E8--><ETGO_SF_ENTITY>
@@ -461,6 +462,7 @@
 <!--1343B4002EE14A9896594655770261ED-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--1343B4002EE14A9896594655770261ED-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1343B4002EE14A9896594655770261ED-->  <SEQNO><![CDATA[80]]></SEQNO>
+<!--1343B4002EE14A9896594655770261ED-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--1343B4002EE14A9896594655770261ED--></ETGO_SF_ENTITY>
 
 <!--13A91DF2974D4D1FB24E6E026C04BB66--><ETGO_SF_ENTITY>
@@ -677,6 +679,7 @@
 <!--1F7ACD054BF14A148B7A11CD32A8704D-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1F7ACD054BF14A148B7A11CD32A8704D-->  <JAVA_QUALIFIER><![CDATA[paymentDetailsHandler]]></JAVA_QUALIFIER>
 <!--1F7ACD054BF14A148B7A11CD32A8704D-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--1F7ACD054BF14A148B7A11CD32A8704D-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Payment details are the allocation of payments to this invoice's installments; the UI only reads them and writes them through the invoice payment actions","instead":"neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--1F7ACD054BF14A148B7A11CD32A8704D--></ETGO_SF_ENTITY>
 
 <!--20E4528FA79B47FCBA60A45C24AC9180--><ETGO_SF_ENTITY>
@@ -871,7 +874,7 @@
 <!--26AAEE85345F4D549907007E8821360A-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--26AAEE85345F4D549907007E8821360A-->  <JAVA_QUALIFIER><![CDATA[payment-reactivate]]></JAVA_QUALIFIER>
 <!--26AAEE85345F4D549907007E8821360A-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--26AAEE85345F4D549907007E8821360A-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a collection header by hand: it is created from the invoice (window.hideCreate), which also allocates it to the invoice schedule; a draft header has no editable field; and the generic delete of a draft fails on its payment details, so the UI deletes it through an action","instead":"neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') — with paymentId to edit a draft; to delete a draft: neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'deletePayment', parameters:{paymentId})"}}]]></MCP_CONFIG>
+<!--26AAEE85345F4D549907007E8821360A-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a collection header by hand: it is created from the invoice (window.hideCreate), which also allocates it to the invoice schedule; a draft header has no editable field; and the generic delete of a draft fails on its payment details, so the UI deletes it through an action","instead":"neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') — with paymentId to edit a draft; to delete a draft: neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'deletePayment', parameters:{paymentId})"},"actions":{"hidden":["psd2GenerateBankPayment","aPRMAddScheduledpayments","aprmExecutepayment","aPRMReversePayment","aPRMReconcilePayment","aeatsiiSend","etblkpBulkposting","posted"],"values":{"aPRMProcessPayment":["P"]},"reason":"Not offered by the collection window, whose only actions are Confirmar (aPRMProcessPayment with its default value P), Eliminar (eTPRRemovePayment) and Reactivar (etprReactivatePayment): a collection is created and allocated to invoices with neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment'), and a bank-initiated payment (PSD2) needs a person to authorize it at the bank (SCA)"}}]]></MCP_CONFIG>
 <!--26AAEE85345F4D549907007E8821360A--></ETGO_SF_ENTITY>
 
 <!--2782B015D76B49219F3679BA13105E60--><ETGO_SF_ENTITY>
@@ -910,6 +913,7 @@
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <SEQNO><![CDATA[80]]></SEQNO>
+<!--28A6378134714F1E8D3C0869C1C77438-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"neo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--28A6378134714F1E8D3C0869C1C77438--></ETGO_SF_ENTITY>
 
 <!--28F9B00E6D8F4E489D5EF594423072C8--><ETGO_SF_ENTITY>
@@ -2327,7 +2331,7 @@
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <JAVA_QUALIFIER><![CDATA[payment-reactivate]]></JAVA_QUALIFIER>
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a payment header by hand: it is created from the purchase invoice (window.hideCreate), which also allocates it to the invoice schedule; a draft header has no editable field; and the generic delete of a draft fails on its payment details, so the UI deletes it through an action","instead":"neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') — with paymentId to edit a draft; to delete a draft: neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'deletePayment', parameters:{paymentId})"}}]]></MCP_CONFIG>
+<!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a payment header by hand: it is created from the purchase invoice (window.hideCreate), which also allocates it to the invoice schedule; a draft header has no editable field; and the generic delete of a draft fails on its payment details, so the UI deletes it through an action","instead":"neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') — with paymentId to edit a draft; to delete a draft: neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'deletePayment', parameters:{paymentId})"},"actions":{"hidden":["psd2GenerateBankPayment","aPRMAddScheduledpayments","aprmExecutepayment","aPRMReversePayment","aPRMReconcilePayment","aeatsiiSend","etblkpBulkposting","posted"],"values":{"aPRMProcessPayment":["P"]},"reason":"Not offered by the payment window, whose only actions are Confirmar (aPRMProcessPayment with its default value P), Eliminar (eTPRRemovePayment) and Reactivar (etprReactivatePayment): a payment is created and allocated to invoices with neo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment'), and a bank-initiated payment (PSD2) needs a person to authorize it at the bank (SCA)"}}]]></MCP_CONFIG>
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5--></ETGO_SF_ENTITY>
 
 <!--66782BC6A58C461FBBFC4B57C70BBB97--><ETGO_SF_ENTITY>
@@ -3801,6 +3805,7 @@
 <!--AF50E181A0094E439C7B46B25A9E38FC-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--AF50E181A0094E439C7B46B25A9E38FC-->  <JAVA_QUALIFIER><![CDATA[document-posting]]></JAVA_QUALIFIER>
 <!--AF50E181A0094E439C7B46B25A9E38FC-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--AF50E181A0094E439C7B46B25A9E38FC-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a movement through this entity: deposits, withdrawals, transfers and their processing go through the account's movement flow (the financial-account-transactions spec), and posting through this entity's post/unpost actions, which stay available"}}]]></MCP_CONFIG>
 <!--AF50E181A0094E439C7B46B25A9E38FC--></ETGO_SF_ENTITY>
 
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7--><ETGO_SF_ENTITY>
@@ -4078,6 +4083,7 @@
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <AGENT_PROMPT><![CDATA[The `account` entity represents the company's OWN financial accounts (Etendo table FIN_Financial_Account): its bank, cash and card accounts (required fields: name, currency, type, country — country is mandatory for every account type and is never derived from the IBAN; on update, a Bank account that has an IBAN must keep a country), including their IBAN, SWIFT/BIC and account number. These are NOT a contact's bank details — for a contact's (business partner / BP) bank account (C_BP_BankAccount) use the `contacts` spec (`bankAccount` entity) instead.
 
 Bank statements: create, preview or import them with the `bank-statements` spec actions — `neo_action {spec:"bank-statements", entity:"bank-statements", id:<this financial account id>, action:"createStatement"|"previewStatement"|"importStatement"}`; the catalogue is `neo_schema({spec:"bank-statements", view:"actions"})`. Read statements with neo_list/neo_get on `importedBankStatements` / `bankStatementLines`; generic writes on those entities are refused with 405.]]></AGENT_PROMPT>
+<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["aPRMImportBankFile","aPRMMatchTransactions","aPRMMatchTransactionsForce","aPRMReconcile","aprmAddMultiplePayments","aprmFundsTrans","pSD2GetBankstatement","pSD2GetConsent","psd2ReconnectFa","psd2GetConnections","psd2RefreshConnections"],"reason":"The financial account window offers none of its Core buttons: statements are created and imported with the bank-statements spec, reconciled with the bank-reconciliation spec, and movements and transfers are recorded through the account's movement flow; PSD2 consent and reconnection need a person to authorize at the bank (SCA)"}}]]></MCP_CONFIG>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1--></ETGO_SF_ENTITY>
 
 <!--BE79CE1718074339AE35BE6DDD829308--><ETGO_SF_ENTITY>
@@ -5584,6 +5590,7 @@ Bank statements: create, preview or import them with the `bank-statements` spec 
 <!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Reconciliations are created and undone by the reconciliation flow, never by hand","instead":"neo_action(spec:'bank-reconciliation', entity:'bank-reconciliation', id:'<financialAccountId>', action:<one of neo_schema(spec:'bank-reconciliation', view:'actions')>)"}}]]></MCP_CONFIG>
 <!--F904BC5EBBCA4C55BE9F62871E2AD171--></ETGO_SF_ENTITY>
 
 <!--FC1B38FFA12545A0B10D3485276F9F9F--><ETGO_SF_ENTITY>
