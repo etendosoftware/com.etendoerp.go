@@ -4354,6 +4354,9 @@ process id directly, independent of any window grant" shape, same accepted idemp
 (a re-run's window-button-derived `reconcileProcessAccess` deletes-then-the-standalone-step-
 immediately-reinserts the row on the very next `update.database`, since it isn't in that method's
 own button-derived desired set — the end state is correct, it just isn't a strict no-op).
+**Superseded by ETP-5565:** the standalone ids are now part of `reconcileProcessAccess`'s desired
+set and `reconcileStandaloneClassicProcessAccess` no longer exists, so a re-run is a strict no-op
+(see §8d.1).
 
 ---
 
@@ -4627,6 +4630,11 @@ granting across all four templates (`ALL_STANDALONE_PROCESS_IDS`) — so it can 
 it itself owns, never a row `reconcileProcessAccess` wrote. Insert-side idempotency reuses
 `upsertObuiappProcessAccess` as-is (insert if missing, reactivate if inactive, no-op if already
 active), the same guarantee every other reconciliation in this class already relies on.
+
+**Superseded by ETP-5565:** `reconcileStandaloneProcessAccess`, `removeStaleStandaloneProcessAccess`
+and `ALL_STANDALONE_PROCESS_IDS` were removed. The standalone ids are added to
+`reconcileProcessAccess`'s desired set instead, so one stale removal covers both kinds of grant and
+the old delete-then-reinsert cycle (which duplicated rows on production) is gone. See §8d.1.
 
 **Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
 ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
@@ -4945,6 +4953,67 @@ Result locally, 0→4: 132/96/76 → 67/52/46 OBUIAPP process / process / window
 the distinct items plus 4 window rows where a lower template grants full access over a read-only
 higher one. The access set is identical to assigning the templates one per call, `InheritedFrom`
 included. The summary line counts the kept rows as `skipped`.
+
+### 8d.1 Template changes reach existing personal roles (ETP-5565)
+
+**Problem.** Core's `RoleInheritanceManager` copies a template's access rows onto every role that
+inherits it, but only on Hibernate events. `EnsureSystemRoleTemplatesScript` maintains the four
+templates with plain JDBC, so a template change never reached the personal roles composed before
+it: existing users kept removed grants and lacked new ones (ETP-5116 QA, CP-1). Production adds a
+second layer: `update.database` runs on a deploy clone, and the data delta (`etendo-go-architecture`
+`diff_to_upsert.py`) carries access rows of client `0` only, as INSERT/UPDATE upserts; DELETEs go
+to a contract file that is never applied. So the script's hard deletes never reached the
+production templates, and personal roles (tenant clients) never travel at all.
+
+**Fix, three parts:**
+
+1. **Template removals are soft deletes** (`IsActive='N'`) in `EnsureSystemRoleTemplatesScript`;
+   a returning grant reactivates the row. An UPDATE travels in the delta, a DELETE does not. **Do
+   not revert to `DELETE`.** The standalone process grants are now part of
+   `reconcileProcessAccess`'s desired set (the separate `reconcileStandalone*` passes are gone):
+   the old pass deleted and re-inserted them on every run, and because `obuiapp_process_access`
+   has no natural key the delta shipped every re-insert as a new row, piling up one duplicate per
+   build on production. `dedupeObuiappProcessAccess` deactivates those duplicates (oldest row
+   survives).
+2. **`TemplateRoleAccessStartup`** (`com.etendoerp.go.startup`, a `SessionAwareStartup`) runs on
+   the live database at startup and every 10 minutes. It fingerprints each system template's
+   active grants (one query, independent of the number of users) and compares with
+   `ETGO_TPL_ROLE_SYNC`. Only when a template changed, a personal role holds an inactive or
+   source-less inherited copy, or an inactive template row is older than 7 days does it take the
+   `ETGO_TPL_ROLE_LEASE` lease (one task at a time), purge those old inactive template rows, and
+   sweep the affected personal roles in chunks of 100, each holding its owners'
+   `UserRoleWriteLock`s. Fingerprints advance only when every chunk succeeded; otherwise the next
+   tick retries. When fingerprints changed it also logs a classification of the changed
+   templates' process grants (button on a full window / standalone / button only on a read-only
+   window / unexplained), readable on production with `aws logs filter-log-events
+   --log-group-name /ecs/etendo-production --filter-pattern '"TemplateRoleAccessStartup"'`. The
+   deploy applies the delta before the new containers start, so the first startup of a release
+   already sees the new templates; the first startup after ETP-5565 finds the table empty and
+   heals all existing drift.
+3. **Composition hook.** `UserRoleCompositionService#assignTemplateRoles` runs the same sweep on
+   the personal role after a composition that added or removed an inheritance. Core copies
+   inactive template rows too and lets them win by precedence, so without it a soft-deleted grant
+   of one template could hide another template's active grant.
+
+**The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element
+(window, classic process, OBUIAPP process), look at the role's active inheritances of active
+system templates holding an ACTIVE grant on it. None → the inherited row is removed. Otherwise the
+row is active, its level is the most permissive among them and its `Inherited_From` is the
+highest-`SeqNo` one among those granting that level, so the source always justifies the level (the
+same end state composition guarantees, `AbstractTemplateAssignmentIntegrationTest`). Manual rows (`Inherited_From`
+null) are never touched and block an inherited insert. Roles that also inherit a non-system-template
+role are skipped. The sweep recomputes from the templates, never replays a diff, so it is
+idempotent and order-independent.
+
+**`ETGO_TPL_ROLE_SYNC` / `ETGO_TPL_ROLE_LEASE` rows must never travel:** keep both tables out of
+every dataset, out of `ad_tables_clone.txt` and out of source data. Their rows belong to each live
+database; the startup seeds the lease row itself.
+
+**Known limits.** A composition done outside Etendo GO (Etendo Classic's Role window, core's
+"Recalculate Permissions") while an inactive template row exists is corrected by the next tick,
+not immediately. Rolling back to an image older than ETP-5565 leaves personal roles aligned to the
+newer templates until the next forward deploy. The Jenkins `failure {}` rollback drops the two
+tables while new-image tasks may still run; the startup logs the failure and skips.
 
 ---
 
