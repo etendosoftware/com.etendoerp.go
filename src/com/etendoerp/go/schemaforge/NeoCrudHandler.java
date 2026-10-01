@@ -168,18 +168,6 @@ class NeoCrudHandler {
     Tab adTab = entity.getADTab();
     Map<String, String> queryParams = servlet.extractQueryParams(request);
 
-    // Short-circuit for `?_distinct=<field>` on a list GET: returns the
-    // paginated set of distinct values for the given scalar field, so UI
-    // filter selectors can show all possible options without loading the
-    // entire dataset or inventing them client-side. Runs through the same
-    // tab-where + parent-filter + readable-client/org filtering as the
-    // standard list fetch, just with a different projection.
-    if ("GET".equals(method) && queryParams != null
-        && StringUtils.isNotBlank(queryParams.get(JsonConstants.DISTINCT_PARAMETER))) {
-      servlet.writeResponse(response, handleDistinctFetch(adTab, queryParams));
-      return;
-    }
-
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
         .entityName(pathInfo.entityName)
@@ -191,6 +179,21 @@ class NeoCrudHandler {
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
         .build();
+
+    // Short-circuit for `?_distinct=<field>` on a list GET: returns the
+    // paginated set of distinct values for the given scalar field, so UI
+    // filter selectors can show all possible options without loading the
+    // entire dataset or inventing them client-side. Runs through the same
+    // tab-where + parent-filter + readable-client/org filtering as the
+    // standard list fetch, just with a different projection — and, since
+    // ETP-5009, through the same customization read predicates
+    // (NeoHandler#readPredicates), so it never offers a value only rows the
+    // list hides carry. The pre/post hooks still do not run for it.
+    if ("GET".equals(method) && queryParams != null
+        && StringUtils.isNotBlank(queryParams.get(JsonConstants.DISTINCT_PARAMETER))) {
+      servlet.writeResponse(response, handleDistinctFetch(adTab, queryParams, neoContext));
+      return;
+    }
     if ("POST".equals(method) || "PUT".equals(method) || METHOD_PATCH.equals(method)) {
       neoContext = parseAndAttachRequestBody(neoContext, request, response);
       if (neoContext == null) {
@@ -475,15 +478,30 @@ class NeoCrudHandler {
         ? context.getQueryParams().get(PARAM_PARENT_ID)
         : null;
 
-    applyWhereClause(params, adTab, parentId);
+    applyWhereClause(params, adTab, parentId, resolveListReadPredicate(context));
     applyPaginationDefaults(params);
     return params;
   }
 
   /**
-   * Builds the HQL where clause from the tab filter and parent filter, and adds it to params.
+   * ETP-5009: the customization's {@link NeoHandler#readPredicates} for a list {@code GET}, or
+   * {@code null} for anything else. A read by id is skipped on purpose: core resolves it with its
+   * own {@code id = :id} query and never applies the where clause, so resolving the customization
+   * for it would be work with no effect.
    */
-  private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId) {
+  private static String resolveListReadPredicate(NeoContext context) {
+    if (!"GET".equals(context.getHttpMethod()) || context.getRecordId() != null) {
+      return null;
+    }
+    return NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);
+  }
+
+  /**
+   * Builds the HQL where clause from the tab filter, the parent filter, the internal
+   * {@code _neoWhere} predicate and the customization's read predicate, and adds it to params.
+   */
+  private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId,
+      String readPredicate) {
     StringBuilder where = new StringBuilder();
     // Shared with the MCP read (ETP-5542): one rule for resolving the parent placeholders.
     String tabWhere = NeoParentTabFilterResolver.resolveTabWhere(adTab, parentId);
@@ -499,17 +517,23 @@ class NeoCrudHandler {
         where.append("(").append(parentFilter).append(")");
       }
     }
-    String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
-    if (StringUtils.isNotBlank(neoWhere)) {
-      if (where.length() > 0) {
-        where.append(HQL_AND_OPERATOR);
-      }
-      where.append("(").append(neoWhere).append(")");
-    }
+    appendAndPredicate(where, params.remove(NeoCrudHelper.NEO_WHERE_PARAM));
+    appendAndPredicate(where, readPredicate);
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
     }
     params.put(JsonConstants.USE_ALIAS, "true");
+  }
+
+  /** ANDs a parenthesised {@code predicate} onto {@code where}; a blank predicate is a no-op. */
+  private static void appendAndPredicate(StringBuilder where, String predicate) {
+    if (StringUtils.isBlank(predicate)) {
+      return;
+    }
+    if (where.length() > 0) {
+      where.append(HQL_AND_OPERATOR);
+    }
+    where.append("(").append(predicate).append(")");
   }
 
   /**
@@ -1118,8 +1142,16 @@ class NeoCrudHandler {
    * clause and parent filter as the standard list fetch. {@link OBQuery}
    * automatically applies readable-client/organization/active filters from the
    * current {@link OBContext}.
+   *
+   * <p>ETP-5009: also ANDs the entity customization's {@link NeoHandler#readPredicates},
+   * exactly as the list GET does, so the values offered are the values of the rows the list
+   * can actually return — not those of rows a customization excludes from it.
+   *
+   * @param context the request context, from which the customization is resolved; may be
+   *                {@code null}, in which case no read predicate is applied
    */
-  private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams) {
+  private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams,
+      NeoContext context) {
     if (adTab == null || adTab.getTable() == null) {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Distinct query requires a tab with a linked table");
@@ -1170,11 +1202,14 @@ class NeoCrudHandler {
     String projection = NeoDistinctFetchSupport.buildDistinctProjection(prop, resolvedProperty);
     boolean isRelation = !prop.isPrimitive();
 
-    StringBuilder where = new StringBuilder(" as e where ")
-        .append(String.join(HQL_AND_OPERATOR, predicates))
-        .append(" order by ").append(projection).append(" asc");
-
     try {
+      // Inside the try: a customization whose predicate throws fails the fetch (500) instead of
+      // silently offering the values of the rows it was meant to exclude.
+      addReadPredicate(predicates, context);
+      StringBuilder where = new StringBuilder(" as e where ")
+          .append(String.join(HQL_AND_OPERATOR, predicates))
+          .append(" order by ").append(projection).append(" asc");
+
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
       obQuery.setSelectClause("DISTINCT " + projection);
@@ -1207,7 +1242,7 @@ class NeoCrudHandler {
   }
 
   /**
-   * Builds the HQL predicate list for {@link #handleDistinctFetch(Tab, Map)}: the
+   * Builds the HQL predicate list for {@link #handleDistinctFetch(Tab, Map, NeoContext)}: the
    * not-null guard on the projected property, the tab's own HQL where clause
    * (token-resolved), the parent-record filter for child tabs, and the
    * caller-resolved search predicate. Extracted purely to keep
@@ -1234,7 +1269,7 @@ class NeoCrudHandler {
   }
 
   /**
-   * Builds the {@code data} array for {@link #handleDistinctFetch(Tab, Map)}: for a
+   * Builds the {@code data} array for {@link #handleDistinctFetch(Tab, Map, NeoContext)}: for a
    * to-one association property, resolves display identifiers in batch; for a
    * primitive property, emits the raw distinct values as-is. Extracted purely to
    * keep {@code handleDistinctFetch}'s cognitive complexity within the Sonar
@@ -1253,6 +1288,18 @@ class NeoCrudHandler {
       }
     }
     return data;
+  }
+
+  /**
+   * ETP-5009: appends the customization's {@link NeoHandler#readPredicates} to the distinct
+   * fetch's predicate list. Extracted to keep {@code handleDistinctFetch}'s cognitive complexity
+   * within the Sonar limit (S3776).
+   */
+  private static void addReadPredicate(List<String> predicates, NeoContext context) {
+    String readPredicate = NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);
+    if (StringUtils.isNotBlank(readPredicate)) {
+      predicates.add("(" + readPredicate + ")");
+    }
   }
 
   private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
