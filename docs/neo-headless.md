@@ -2590,7 +2590,7 @@ a hidden verb. The shared `NeoMethodPolicy.buildMcpNotEnabledMessage` is not cha
 
 Delete of the two payment headers is hidden too. The UI's *Eliminar* never uses the generic delete:
 the payment windows run the `eTPRRemovePayment` action (`ReactivatePaymentHandler`, which removes the
-payment↔schedule join rows first) and the invoice panel runs `deletePayment`. The generic delete
+payment↔schedule join rows first, and which agents call too) and the invoice panel runs `deletePayment`. The generic delete
 removes only the header, so on a draft with payment details it fails on the foreign key. REST
 `DELETE` on a payment header takes that same generic path (`ReactivatePaymentHandler` only intercepts
 actions), so it fails the same way; it is not changed here, and the SPA does not call it.
@@ -2602,7 +2602,7 @@ The shape and the rules are in §4.12.1.3.
 | Entity | `hidden` | `values` / `redirect` | Why |
 |---|---|---|---|
 | `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment` | redirect `aPRMAddpayment` → `registerPayment` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo GO payment flow |
-| `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `eTPRRemovePayment`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly *Confirmar* (`aPRMProcessPayment`) and *Reactivar* (`etprReactivatePayment`), both with `parameters:{}`. *Eliminar* (`eTPRRemovePayment`) is hidden: on a processed payment it reactivates and deletes it, which the UI never offers, and it gives no consumed credit back — a draft is deleted with the invoice's `deletePayment`, which restores the credit, checks the invoice/tenant and answers what it removed. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, excluded like every PIS action. Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
+| `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow (`financial-account-transactions`, no agent contracts). What stays for agents is `post` / `unpost` — `neo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
 | `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `aprmFundsTrans`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | — | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`; PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
 
@@ -2913,7 +2913,8 @@ Other MCP-only refusals declared in §4.12.6:
 | call | REST | MCP |
 |---|---|---|
 | `neo_defaults` on an entity whose create `MCP_CONFIG.verbs` hides | defaults served | **405 `method_not_allowed`**, same envelope as `neo_create` |
-| payment header buttons `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `psd2GenerateBankPayment`, `eTPRRemovePayment`, and `retryPisPayment` / `pisPaymentStatus` on the payment record | served | **405** (`MCP_CONFIG.actions.hidden`), absent from `view:"actions"` |
+| payment header buttons `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `psd2GenerateBankPayment`, and `retryPisPayment` / `pisPaymentStatus` on the payment record | served | **405** (`MCP_CONFIG.actions.hidden`), absent from `view:"actions"` |
+| payment header *Eliminar* (`eTPRRemovePayment`) on a void (`RPVOID`) or `pisLocked` payment | **served** — the handler does not refuse it; the SPA simply does not offer the button there | **422**, nothing changed (`ReactivatePaymentHandler`, MCP origin only). On any other status it reactivates and deletes on both channels |
 | `financial-account/transaction` buttons `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | served | **405**, not listed; `post` / `unpost` stay |
 | `aPRMProcessPayment` with a value other than `P` | served | **422** + `allowedValues:["P"]`; `view:"actions"` lists only `P` |
 | `financial-account/account` Core and PSD2 buttons (§4.12.6 table) | served | **405**, not listed |
@@ -2944,6 +2945,15 @@ It shares `BatchService` and passes **no** preprocessor, so none of the MCP comp
 apply to it. That is by decision — the underlying defects live in the shared selector-aux path the
 React frontend also uses, and changing what the frontend persists is out of scope. `BatchService`
 itself holds no knowledge of who supplies a preprocessor or what it does.
+
+**Declared narrowing (ETP-5558) — fiscal and regulatory integrations stay limited for agents.**
+Fiscal/regulatory integrations (AFIP, Verifactu, TicketBAI, Hacienda/SII/AEAT, PSD2/PIS bank
+integration) stay limited in the MCP for now, even when the UI offers them. This is a deliberate,
+declared narrowing, not a parity gap. Everything else follows full UI parity, destructive actions
+included. Its first application is the PIS family on the invoice and payment headers
+(`retryPisPayment`, `pisPaymentStatus`, the five PIS actions, `psd2GenerateBankPayment`): served by
+REST, **405** through MCP. The counter-example is the payment's *Eliminar*: destructive, but not a
+fiscal integration, so it is offered with the UI's gate (above).
 
 **Declared REST ↔ MCP divergence (ETP-5558), `MCP_CONFIG.verbs`:** the verbs §4.12.6 hides are
 refused by `neo_create` / `neo_update` / `neo_delete` / `neo_batch` and absent from every MCP
