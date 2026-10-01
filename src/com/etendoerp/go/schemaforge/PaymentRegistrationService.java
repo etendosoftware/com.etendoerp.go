@@ -135,12 +135,13 @@ public final class PaymentRegistrationService {
   static NeoResponse doRegisterPayment(String invoiceId, String scheduleId,
       String strAmount, String strDate, String accountId, boolean isReceipt) throws Exception {
 
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+    Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
     if (invoice == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
     }
 
-    FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
+    // ETP-5558: the installment must be one of THIS invoice's, readable by the caller.
+    FIN_PaymentSchedule schedule = PaymentOwnership.scheduleOf(scheduleId, invoice);
     if (schedule == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
     }
@@ -161,7 +162,7 @@ public final class PaymentRegistrationService {
           "Invalid date format: " + strDate);
     }
 
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Financial account not found");
@@ -236,7 +237,7 @@ public final class PaymentRegistrationService {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
         if (invoice == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
         }
@@ -378,6 +379,11 @@ public final class PaymentRegistrationService {
     try {
       OBContext.setAdminMode(true);
       try {
+        // ETP-5558: the HQL below filters by the URL's invoice id only, in admin mode, so the
+        // invoice must be the caller's — otherwise another tenant's payments would be listed.
+        if (TenantOwnership.loadOwned(Invoice.class, invoiceId) == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
+        }
         String hql = "select distinct pd.finPayment "
             + "from FIN_Payment_Detail pd "
             + "join pd.fINPaymentScheduleDetailList psd "
@@ -487,7 +493,7 @@ public final class PaymentRegistrationService {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
         if (invoice == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
         }
@@ -580,12 +586,13 @@ public final class PaymentRegistrationService {
   static NeoResponse doRegisterPaymentAdvanced(String invoiceId, JSONObject body, boolean isReceipt)
       throws Exception {
 
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+    Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
     if (invoice == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
     }
     String scheduleId = body.optString("scheduleId", null);
-    if (OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId) == null) {
+    // ETP-5558: the installment must be one of THIS invoice's, readable by the caller.
+    if (PaymentOwnership.scheduleOf(scheduleId, invoice) == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
     }
     BigDecimal cash;
@@ -600,8 +607,8 @@ public final class PaymentRegistrationService {
     } catch (ParseException e) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid date format");
     }
-    FIN_FinancialAccount account = OBDal.getInstance()
-        .get(FIN_FinancialAccount.class, body.optString("fin_financial_account_id", null));
+    FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class,
+        body.optString("fin_financial_account_id", null));
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Financial account not found");
     }
@@ -721,7 +728,9 @@ public final class PaymentRegistrationService {
               fields.paymentDate()),
           fields.rate(), fields.cash());
     }
-    FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
+    // ETP-5558: only a draft of THIS invoice the caller may read; anything else is the same 404 as
+    // an unknown id.
+    FIN_Payment existing = PaymentOwnership.invoicePayment(editPaymentId, invoice.getId());
     return existing != null
         ? PaymentDraftEditService.prepareEditableDraft(existing, fields.paymentMethod(),
             fields.account(), fields.paymentDate(), fields.rate(), fields.cash())

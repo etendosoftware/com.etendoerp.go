@@ -2029,6 +2029,25 @@ not declared either (so the contract refuses it, 422). The five PIS actions are 
 `aPRMAddpayment` (Classic's *Add Payment*) to `registerPayment`; `McpConfigSourcedataTest` asserts
 that content.
 
+**Ids are scoped to the invoice and the tenant (ETP-5558, REST and MCP alike).** These actions
+run in admin mode, and a bare `OBDal.get` applies no client/organization predicate, so a known draft
+id could be confirmed or deleted through any invoice, across tenants. Every request-supplied id now
+goes through `TenantOwnership.loadOwned` (readable clients/organizations of the real session; admin
+mode does not widen them), and `PaymentOwnership` adds the invoice relation:
+
+| Input | Rule | Refusal |
+|---|---|---|
+| invoice in the URL (every payment action, `invoicePayments` included) | tenant-readable | 404 *Invoice not found* |
+| `paymentId` of `confirmPayment` / `deletePayment` / `registerPayment` (edit) | tenant-readable **and** a schedule detail against an installment of this invoice | 404 *Payment not found*, nothing mutated |
+| `scheduleId` | tenant-readable and one of this invoice's installments | 404 *Payment schedule not found* |
+| `fin_financial_account_id` | tenant-readable | 400 *Financial account not found* |
+| `creditSources[].paymentId` / `.psdId` | tenant-readable and the same business partner as the payment | 400 *Credit payment / source not found* |
+| `invoiceCreditSources.editPaymentId` | a draft of this invoice | ignored (listed as for a new payment) |
+| `pisPaymentId` (status, cancel, retry) | tenant-readable | 404 *PIS payment not found* |
+
+Each refusal is the answer a missing id already gave, so ids cannot be probed. The SPA always sends
+the current invoice and ids from that invoice's own listings, so its calls are unchanged.
+
 **`process` is required for agents, and only for agents.** The handler reads `paymentId`,
 `conversionRate` and `writeoffDifference` only on its advanced path, which a body takes only when it
 carries `process`, `creditSources`, `overpaymentAction` or `fin_paymentmethod_id`. Without one of

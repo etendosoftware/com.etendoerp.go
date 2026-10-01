@@ -269,10 +269,12 @@ final class PaymentActionHandlerSupport {
       OBContext.setAdminMode(true);
       try {
         if (isConfirm) {
-          return PaymentDraftEditService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+          return PaymentDraftEditService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null),
+              invoiceId);
         }
         if (DELETE_ACTION.equals(fieldName)) {
-          return PaymentDraftEditService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+          return PaymentDraftEditService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null),
+              invoiceId);
         }
         if (isAdvanced(body)) {
           return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
