@@ -87,6 +87,54 @@ public final class NeoReadPredicates {
     return "(" + existing + ")" + HQL_AND + "(" + predicate + ")";
   }
 
+  /**
+   * The read predicate for a REST list {@code GET}, or {@code null} for anything else. A read by
+   * id ({@link NeoContext#isReadById}: a path id or a query-string {@code id}) is skipped on
+   * purpose: core resolves it with its own {@code id = :id} query and never applies the where
+   * clause, so a handler that hides a row from it does so in {@code afterHandle}, gated on the
+   * very same {@code isReadById}.
+   *
+   * @param context the REST read context; must not be {@code null}
+   * @return the combined predicate, or {@code null} when not a list {@code GET} or none declared
+   */
+  static String forRestListGet(NeoContext context) {
+    if (!"GET".equals(context.getHttpMethod()) || context.isReadById()) {
+      return null;
+    }
+    return resolve(context, NeoExtensionChannel.REST_SINGLE);
+  }
+
+  /**
+   * Appends the REST read predicate, parenthesised, to a predicate list that will be joined with
+   * {@code and} (the REST {@code ?_distinct=} value fetch). A blank predicate adds nothing.
+   *
+   * @param predicates the predicate list being built
+   * @param context    the REST read context
+   */
+  static void addRestTo(List<String> predicates, NeoContext context) {
+    String readPredicate = resolve(context, NeoExtensionChannel.REST_SINGLE);
+    if (StringUtils.isNotBlank(readPredicate)) {
+      predicates.add("(" + readPredicate + ")");
+    }
+  }
+
+  /**
+   * ANDs a parenthesised {@code predicate} onto {@code where} in place; a blank predicate is a
+   * no-op. Unlike {@link #and}, the clause built so far is not re-parenthesised.
+   *
+   * @param where     the clause being built; may be empty
+   * @param predicate the predicate to add; may be blank
+   */
+  static void appendAnd(StringBuilder where, String predicate) {
+    if (StringUtils.isBlank(predicate)) {
+      return;
+    }
+    if (where.length() > 0) {
+      where.append(HQL_AND);
+    }
+    where.append("(").append(predicate).append(")");
+  }
+
   /** Parenthesise and AND the non-blank predicates; {@code null} when there are none. */
   private static String join(List<String> predicates) {
     if (predicates == null || predicates.isEmpty()) {

@@ -478,23 +478,9 @@ class NeoCrudHandler {
         ? context.getQueryParams().get(PARAM_PARENT_ID)
         : null;
 
-    applyWhereClause(params, adTab, parentId, resolveListReadPredicate(context));
+    applyWhereClause(params, adTab, parentId, NeoReadPredicates.forRestListGet(context));
     applyPaginationDefaults(params);
     return params;
-  }
-
-  /**
-   * ETP-5009: the customization's {@link NeoHandler#readPredicates} for a list {@code GET}, or
-   * {@code null} for anything else. A read by id ({@link NeoContext#isReadById}: a path id or a
-   * query-string {@code id}) is skipped on purpose: core resolves it with its own
-   * {@code id = :id} query and never applies the where clause, so a handler that hides a row
-   * from it does so in {@code afterHandle}, gated on the very same {@code isReadById}.
-   */
-  private static String resolveListReadPredicate(NeoContext context) {
-    if (!"GET".equals(context.getHttpMethod()) || context.isReadById()) {
-      return null;
-    }
-    return NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);
   }
 
   /**
@@ -518,23 +504,12 @@ class NeoCrudHandler {
         where.append("(").append(parentFilter).append(")");
       }
     }
-    appendAndPredicate(where, params.remove(NeoCrudHelper.NEO_WHERE_PARAM));
-    appendAndPredicate(where, readPredicate);
+    NeoReadPredicates.appendAnd(where, params.remove(NeoCrudHelper.NEO_WHERE_PARAM));
+    NeoReadPredicates.appendAnd(where, readPredicate);
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
     }
     params.put(JsonConstants.USE_ALIAS, "true");
-  }
-
-  /** ANDs a parenthesised {@code predicate} onto {@code where}; a blank predicate is a no-op. */
-  private static void appendAndPredicate(StringBuilder where, String predicate) {
-    if (StringUtils.isBlank(predicate)) {
-      return;
-    }
-    if (where.length() > 0) {
-      where.append(HQL_AND_OPERATOR);
-    }
-    where.append("(").append(predicate).append(")");
   }
 
   /**
@@ -1206,7 +1181,7 @@ class NeoCrudHandler {
     try {
       // Inside the try: a customization whose predicate throws fails the fetch (500) instead of
       // silently offering the values of the rows it was meant to exclude.
-      addReadPredicate(predicates, context);
+      NeoReadPredicates.addRestTo(predicates, context);
       StringBuilder where = new StringBuilder(" as e where ")
           .append(String.join(HQL_AND_OPERATOR, predicates))
           .append(" order by ").append(projection).append(" asc");
@@ -1289,18 +1264,6 @@ class NeoCrudHandler {
       }
     }
     return data;
-  }
-
-  /**
-   * ETP-5009: appends the customization's {@link NeoHandler#readPredicates} to the distinct
-   * fetch's predicate list. Extracted to keep {@code handleDistinctFetch}'s cognitive complexity
-   * within the Sonar limit (S3776).
-   */
-  private static void addReadPredicate(List<String> predicates, NeoContext context) {
-    String readPredicate = NeoReadPredicates.resolve(context, NeoExtensionChannel.REST_SINGLE);
-    if (StringUtils.isNotBlank(readPredicate)) {
-      predicates.add("(" + readPredicate + ")");
-    }
   }
 
   private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
