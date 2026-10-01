@@ -197,6 +197,27 @@ public class TemplateAccessPropagationServiceIntegrationTest extends OBBaseTest 
    * only the fingerprint half can be exercised; the stale-copy half is a defensive guard.
    */
   @Test
+  public void duplicateCleanupIgnoresCopiesFromNonSystemRoles() {
+    String process = string("SELECT obuiapp_process_id FROM obuiapp_process "
+        + "ORDER BY obuiapp_process_id LIMIT 1");
+    String tpl = template("SysCopy");
+    String tenant = template("TenantCopy");
+    exec("UPDATE ad_role SET ad_client_id = '" + TEST_CLIENT_ID + "' WHERE ad_role_id = '"
+        + tenant + "'");
+    grant(OBUIAPP, tpl, process, "Y", "Y", null);
+    String role = personal("MixedCopies", tpl);
+    grant(OBUIAPP, role, process, "Y", "N", tenant); // older leftover from a non-system role
+    grant(OBUIAPP, role, process, "Y", "Y", tpl);
+
+    service.sweepRoles(Collections.singletonList(role));
+
+    assertEquals("The system copy survives next to the unmanaged one", 2,
+        count("SELECT count(*) FROM obuiapp_process_access WHERE ad_role_id = '" + role + "'"));
+    assertEquals(1, count("SELECT count(*) FROM obuiapp_process_access WHERE ad_role_id = '"
+        + role + "' AND inherited_from = '" + tpl + "' AND isactive = 'Y'"));
+  }
+
+  @Test
   public void deactivatingATemplateChangesItsFingerprint() {
     String tpl = template("Deactivated");
     grant(WINDOW, tpl, windowA, "Y", "Y", null);

@@ -201,8 +201,8 @@ public class TemplateAccessPropagationService {
    * md5 per system template over the template's own {@code IsActive} plus its active, distinct
    * grants ({@code W|P|O:element:isreadwrite}, ordered), so it changes exactly when the access a
    * template hands out changes, including when the whole template is deactivated (an inactive
-   * template grants nothing). Inactive rows do not count, so purging them never changes it. Costs one query, independent of the number of
-   * personal roles.
+   * template grants nothing). Inactive rows do not count, so purging them never changes it. Costs
+   * one query, independent of the number of personal roles.
    *
    * @return template id → fingerprint, for every system template (an empty template has the md5
    *     of the empty string)
@@ -250,10 +250,10 @@ public class TemplateAccessPropagationService {
 
   /**
    * Roles holding an inherited copy (from a system template) that is inactive, or whose source
-   * template is inactive or no longer holds an active grant for that element — what a composition that bypassed
-   * {@link #sweepRole} (Etendo Classic's Role window, core's "Recalculate Permissions") can leave
-   * behind while an inactive template row exists. Cheap enough for every periodic tick at the
-   * current scale. Filtered by {@link #eligibleRoles}, sorted by id.
+   * template is inactive or no longer holds an active grant for that element — what a composition
+   * that bypassed {@link #sweepRole} (Etendo Classic's Role window, core's "Recalculate
+   * Permissions") can leave behind while an inactive template row exists. Cheap enough for every
+   * periodic tick at the current scale. Filtered by {@link #eligibleRoles}, sorted by id.
    */
   public List<String> rolesWithStaleCopies() {
     StringBuilder sql = new StringBuilder();
@@ -395,15 +395,18 @@ public class TemplateAccessPropagationService {
   /**
    * {@code obuiapp_process_access} has no unique key on (role, process), so a personal role could
    * hold several inherited copies of one process; the UPDATE below would then touch, and
-   * reactivate, all of them. Keeps the oldest inherited copy (by {@code Created}, then primary
-   * key) and deletes the rest. Manual rows are never touched. Core never creates such duplicates
-   * (it resolves the copy by role and process), so this is normally a no-op.
+   * reactivate, all of them. Keeps the oldest copy inherited from a system template (by {@code
+   * Created}, then primary key) and deletes the other such copies. Manual rows and copies from any
+   * other role are never touched, the same scope as the rest of the sweep. Core never creates such
+   * duplicates (it resolves the copy by role and process), so this is normally a no-op.
    */
   private static final String REMOVE_DUPLICATE_OBUIAPP_COPIES_SQL =
       "DELETE FROM obuiapp_process_access a WHERE a.ad_role_id IN (:roles) "
-          + "AND a.inherited_from IS NOT NULL AND EXISTS (SELECT 1 FROM obuiapp_process_access k "
+          + "AND a.inherited_from IN (" + SYSTEM_TEMPLATES_SQL + ") "
+          + "AND EXISTS (SELECT 1 FROM obuiapp_process_access k "
           + "WHERE k.ad_role_id = a.ad_role_id AND k.obuiapp_process_id = a.obuiapp_process_id "
-          + "AND k.inherited_from IS NOT NULL AND (k.created < a.created OR (k.created = a.created "
+          + "AND k.inherited_from IN (" + SYSTEM_TEMPLATES_SQL + ") "
+          + "AND (k.created < a.created OR (k.created = a.created "
           + "AND k.obuiapp_process_access_id < a.obuiapp_process_access_id)))";
 
   /**

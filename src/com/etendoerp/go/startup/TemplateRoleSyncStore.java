@@ -41,7 +41,7 @@ import org.openbravo.dal.service.OBDal;
  * expiry, not a PostgreSQL advisory lock: the sweep commits per chunk and DAL hands the
  * connection back to the pool in between, so a session-level advisory lock would be released on
  * the wrong connection or leak on a pooled one. An expired lease means its holder died, and any
- * task may take it over.</p>
+ * task may take it over. {@code Lease_Until} is stored in UTC, see {@link #UTC_NOW}.</p>
  */
 class TemplateRoleSyncStore {
 
@@ -49,6 +49,14 @@ class TemplateRoleSyncStore {
 
   /** How long a lease lasts without renewal; renewed on every sweep chunk. */
   static final int LEASE_MINUTES = 10;
+
+  /**
+   * {@code Lease_Until} is a timestamp without time zone, and {@code now()} converts to the
+   * session's time zone, which follows each JVM (and differs again in a psql session). Writing
+   * and comparing it in UTC keeps the expiry correct between tasks or sessions in different time
+   * zones.
+   */
+  static final String UTC_NOW = "(now() AT TIME ZONE 'UTC')";
 
   private static final String LEASE_LOCK_TIMEOUT = "2s";
   private static final int MAX_ERROR_LENGTH = 2000;
@@ -124,9 +132,11 @@ class TemplateRoleSyncStore {
               + "ON CONFLICT DO NOTHING").executeUpdate();
       NativeQuery<?> take = session().createNativeQuery(
           "UPDATE etgo_tpl_role_lease SET holder = :holder, "
-              + "lease_until = now() + make_interval(mins => :minutes), updated = now() "
+              + "lease_until = " + UTC_NOW + " + make_interval(mins => :minutes), "
+              + "updated = now() "
               + "WHERE etgo_tpl_role_lease_id = '" + LEASE_ID + "' "
-              + "AND (lease_until IS NULL OR lease_until < now() OR holder = :holder)");
+              + "AND (lease_until IS NULL OR lease_until < " + UTC_NOW
+              + " OR holder = :holder)");
       take.setParameter("holder", holder);
       take.setParameter("minutes", LEASE_MINUTES);
       boolean acquired = take.executeUpdate() == 1;
@@ -147,7 +157,8 @@ class TemplateRoleSyncStore {
     try {
       setLockTimeout();
       NativeQuery<?> renew = session().createNativeQuery(
-          "UPDATE etgo_tpl_role_lease SET lease_until = now() + make_interval(mins => :minutes), "
+          "UPDATE etgo_tpl_role_lease SET lease_until = " + UTC_NOW
+              + " + make_interval(mins => :minutes), "
               + "updated = now() WHERE etgo_tpl_role_lease_id = '" + LEASE_ID + "' "
               + "AND holder = :holder");
       renew.setParameter("holder", holder);

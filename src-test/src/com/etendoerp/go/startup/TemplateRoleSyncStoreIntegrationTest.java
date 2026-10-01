@@ -25,6 +25,7 @@ import java.util.List;
 
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
+import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.dal.core.OBContext;
@@ -37,7 +38,9 @@ import org.openbravo.test.base.OBBaseTest;
  *
  * <p>The lease methods commit their own transactions by design, so this test cannot rely on a
  * final rollback: it snapshots the database's real lease row before each test and restores it
- * afterwards. The fingerprint tests never commit.</p>
+ * afterwards. The fingerprint tests never commit. When a running application currently holds a
+ * live lease on the same database (a local Tomcat mid-sweep), every test is skipped instead of
+ * clearing that lease.</p>
  */
 public class TemplateRoleSyncStoreIntegrationTest extends OBBaseTest {
 
@@ -46,6 +49,9 @@ public class TemplateRoleSyncStoreIntegrationTest extends OBBaseTest {
   private static final String FINANCE = "B88A34B5D1874F8685FA6F3C3A609412";
 
   private final TemplateRoleSyncStore store = new TemplateRoleSyncStore();
+  /** Marks a test skipped because the lease was live: nothing to restore. */
+  private static final Object[] SKIPPED = new Object[0];
+
   private Object[] savedLease;
 
   @Before
@@ -55,12 +61,27 @@ public class TemplateRoleSyncStoreIntegrationTest extends OBBaseTest {
     List<Object[]> rows = rows("SELECT holder, CAST(lease_until AS varchar), last_error "
         + "FROM etgo_tpl_role_lease WHERE etgo_tpl_role_lease_id = '0'");
     savedLease = rows.isEmpty() ? null : rows.get(0);
+    boolean liveHolder = ((Number) OBDal.getInstance().getSession().createNativeQuery(
+        "SELECT count(*) FROM etgo_tpl_role_lease WHERE etgo_tpl_role_lease_id = '0' "
+            + "AND holder IS NOT NULL AND lease_until > " + TemplateRoleSyncStore.UTC_NOW)
+        .getSingleResult()).intValue() > 0;
+    if (liveHolder) {
+      // A running application is sweeping this database: clearing its lease would abort it.
+      savedLease = SKIPPED;
+      OBDal.getInstance().rollbackAndClose();
+    }
+    Assume.assumeFalse("A live TemplateRoleAccessStartup holds the lease on this database",
+        liveHolder);
     resetLease();
   }
 
   @After
   public void restoreLease() {
     OBDal.getInstance().rollbackAndClose();
+    if (savedLease == SKIPPED) {
+      OBContext.restorePreviousMode();
+      return;
+    }
     if (savedLease == null) {
       exec("DELETE FROM etgo_tpl_role_lease WHERE etgo_tpl_role_lease_id = '0'");
     } else {
@@ -109,7 +130,8 @@ public class TemplateRoleSyncStoreIntegrationTest extends OBBaseTest {
   @Test
   public void expiredLeaseIsTakenOverAndTheOldHolderCannotRenew() {
     assertTrue(store.acquireLease(ME));
-    exec("UPDATE etgo_tpl_role_lease SET lease_until = now() - interval '1 minute' "
+    exec("UPDATE etgo_tpl_role_lease SET lease_until = " + TemplateRoleSyncStore.UTC_NOW
+        + " - interval '1 minute' "
         + "WHERE etgo_tpl_role_lease_id = '0'");
     OBDal.getInstance().commitAndClose();
 

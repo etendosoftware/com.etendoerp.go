@@ -4995,20 +4995,22 @@ production templates, and personal roles (tenant clients) never travel at all.
    inactive template rows too and lets them win by precedence, so without it a soft-deleted grant
    of one template could hide another template's active grant.
 
-**The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element
-(window, classic process, OBUIAPP process), look at the role's active inheritances of active
-system templates holding an ACTIVE grant on it. None → the inherited row is removed. Otherwise the
-row is active, its level is the most permissive among them and its `Inherited_From` is the
-highest-`SeqNo` one among those granting that level, so the source always justifies the level (the
-same end state composition guarantees, `AbstractTemplateAssignmentIntegrationTest`). Manual rows (`Inherited_From`
-null) are never touched and block an inherited insert. On `obuiapp_process_access`, which has no
-unique key, duplicate inherited copies of one process are collapsed to the oldest first. Roles that also inherit a non-system-template
-role are skipped. The sweep recomputes from the templates, never replays a diff, so it is
-idempotent and order-independent.
+**The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element (window,
+classic process, OBUIAPP process), look at the role's active inheritances of active system templates
+holding an ACTIVE grant on it. None → the inherited row is removed. Otherwise the row is active, its
+level is the most permissive among them and its `Inherited_From` is the highest-`SeqNo` one among
+those granting that level, so the source always justifies the level (the same end state composition
+guarantees, `AbstractTemplateAssignmentIntegrationTest`). Manual rows (`Inherited_From` null) are
+never touched and block an inherited insert. On `obuiapp_process_access`, which has no unique key,
+duplicate inherited copies of one process are collapsed to the oldest first. Roles that also inherit
+a non-system-template role are skipped. The sweep recomputes from the templates, never replays a
+diff, so it is idempotent and order-independent.
 
 **`ETGO_TPL_ROLE_SYNC` / `ETGO_TPL_ROLE_LEASE` rows must never travel:** keep both tables out of
 every dataset, out of `ad_tables_clone.txt` and out of source data. Their rows belong to each live
-database; the startup seeds the lease row itself.
+database; the startup seeds the lease row itself. `Lease_Until` is written and compared in UTC
+(`now() AT TIME ZONE 'UTC'`), because it is a timestamp without time zone and each JVM (or psql)
+session converts `now()` to its own time zone.
 
 **Known limits.** A composition done outside Etendo GO (Etendo Classic's Role window, core's
 "Recalculate Permissions") while an inactive template row exists is corrected by the next tick,
