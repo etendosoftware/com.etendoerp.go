@@ -20,26 +20,44 @@ package com.etendoerp.go.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+import org.apache.logging.log4j.Logger;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.SalesQuotationLineHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 
 /**
@@ -58,14 +76,18 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  * live DAL and an AD_Tab, so it cannot be reached from a unit test. That is the case
  * {@link McpSourceScanner} exists for.</p>
  */
-@DisplayName("ETP-5368 — server-resolved wrapper fields in view:\"create\"")
+@DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and neo_create")
 class McpSchemaServerResolvedFieldsTest {
 
   private static final String ROUTER = "com/etendoerp/go/mcp/McpToolRouter.java";
 
-  /** The union that carries the wrapper's answer into the set the create view partitions by. */
+  /**
+   * The union that carries the wrapper's answer into the set the create view partitions by. Since
+   * ETP-5535 it goes through {@link McpServerResolvedFields#forCreate}, which wraps
+   * {@code NeoSelectorPolicy.serverResolvedFieldNames} and adds the customization's declaration.
+   */
   private static final Pattern UNION = Pattern.compile(
-      "(\\w+)\\s*\\.\\s*addAll\\s*\\(\\s*NeoSelectorPolicy\\s*\\.\\s*serverResolvedFieldNames\\s*\\(");
+      "(\\w+)\\s*\\.\\s*addAll\\s*\\(\\s*McpServerResolvedFields\\s*\\.\\s*forCreate\\s*\\(");
 
   // ── behavioural: the name the policy publishes is the name the view matches ─────
 
@@ -119,7 +141,7 @@ class McpSchemaServerResolvedFieldsTest {
 
     Matcher union = UNION.matcher(body);
     assertTrue(union.find(),
-        "handleSchema must union NeoSelectorPolicy.serverResolvedFieldNames into its "
+        "handleSchema must union McpServerResolvedFields.forCreate into its "
             + "server-resolved set — without it view:\"create\" keeps demanding locationAddress");
 
     String setVariable = union.group(1);
@@ -130,6 +152,170 @@ class McpSchemaServerResolvedFieldsTest {
     String arguments = body.substring(call, statementEnd(body, call));
     assertTrue(arguments.contains(setVariable),
         "the unioned set (" + setVariable + ") must be the one passed to buildResponse");
+  }
+
+  // ── ETP-5535: McpServerResolvedFields.forCreate ─────────────────────────
+
+  /**
+   * The policy's names and the customization's declaration are one set. The real
+   * {@link SalesQuotationLineHandler} is the customization, so its {@code tax} declaration is
+   * exercised through the reader that consumes it.
+   */
+  @Test
+  @DisplayName("forCreate is the union of the policy's names and the customization's declaration")
+  void forCreateUnionsPolicyAndCustomization() {
+    SFEntity sfEntity = quotationLineEntity();
+    NeoHandler customization = new SalesQuotationLineHandler();
+
+    try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher =
+            mockStatic(NeoExtensionDispatcher.class)) {
+      policy.when(() -> NeoSelectorPolicy.serverResolvedFieldNames(sfEntity))
+          .thenReturn(Set.of("locationAddress"));
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(customization);
+
+      assertEquals(Set.of("locationAddress", "tax"), McpServerResolvedFields.forCreate(sfEntity));
+    }
+  }
+
+  @Test
+  @DisplayName("forCreate of a null entity is empty")
+  void forCreateOfNullEntityIsEmpty() {
+    assertTrue(McpServerResolvedFields.forCreate(null).isEmpty());
+  }
+
+  /** A customization whose declaration is {@code null} rather than an empty set. */
+  private static final NeoHandler DECLARES_NULL = new NeoHandler() {
+    @Override
+    public NeoResponse handle(NeoContext context) {
+      return null;
+    }
+
+    @Override
+    public Set<String> serverResolvedCreateFields() {
+      return null;
+    }
+  };
+
+  /** Rows: case, how {@code NeoExtensionDispatcher.resolveOnly} is stubbed. */
+  static Stream<Arguments> unusableCustomizations() {
+    Consumer<MockedStatic<NeoExtensionDispatcher>> throwing = dispatcher -> dispatcher
+        .when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+        .thenThrow(new IllegalStateException("CDI not ready"));
+    Consumer<MockedStatic<NeoExtensionDispatcher>> unbound = dispatcher -> dispatcher
+        .when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(null);
+    Consumer<MockedStatic<NeoExtensionDispatcher>> declaresNull = dispatcher -> dispatcher
+        .when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(DECLARES_NULL);
+    return Stream.of(
+        Arguments.of("the resolution throws", throwing),
+        Arguments.of("no customization is bound", unbound),
+        Arguments.of("the customization declares null", declaresNull));
+  }
+
+  /**
+   * A customization that cannot be read contributes nothing — the field stays required, which is
+   * the pre-ETP-5535 behaviour — and never costs the policy's own names.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("unusableCustomizations")
+  void forCreateKeepsOnlyThePolicyWhenTheCustomizationIsUnusable(String scenario,
+      Consumer<MockedStatic<NeoExtensionDispatcher>> stubDispatcher) {
+    SFEntity sfEntity = quotationLineEntity();
+
+    try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher =
+            mockStatic(NeoExtensionDispatcher.class)) {
+      policy.when(() -> NeoSelectorPolicy.serverResolvedFieldNames(sfEntity))
+          .thenReturn(Set.of("locationAddress"));
+      stubDispatcher.accept(dispatcher);
+
+      assertEquals(Set.of("locationAddress"), McpServerResolvedFields.forCreate(sfEntity),
+          scenario);
+    }
+  }
+
+  // ── ETP-5535: the neo_create mandatory pre-check does NOT skip declared fields ─────
+
+  /**
+   * Rows: case, whether {@link SalesQuotationLineHandler} is bound, the names the selector policy
+   * (wrapper) answers, the expected missing fields. The last row pins that a selector-policy name
+   * is still skipped, because the wrapper builds its value only later, in the handler.
+   */
+  static Stream<Arguments> mandatoryPreCheckCases() {
+    return Stream.of(
+        Arguments.of("customization declares tax", true, Set.of(), List.of("tax", "product")),
+        Arguments.of("no customization", false, Set.of(), List.of("tax", "product")),
+        Arguments.of("a selector-policy name is still skipped", true, Set.of("tax"),
+            List.of("product")));
+  }
+
+  /**
+   * {@code C_OrderLine.C_Tax_ID} and {@code M_Product_ID} are both mandatory and the body carries
+   * neither. The pre-check runs after the create cascade that derives a declared field, so a
+   * declared field still empty there is a real gap: even with {@link SalesQuotationLineHandler}
+   * declaring {@code tax}, both are reported (ETP-5535).
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("mandatoryPreCheckCases")
+  void validateMandatoryFieldsReportsTheCustomizationsDeclaredFields(String scenario,
+      boolean withCustomization, Set<String> policyNames, List<String> expectedMissing)
+      throws Exception {
+    Column taxColumn = mandatoryColumn("C_Tax_ID", "Tax");
+    Column productColumn = mandatoryColumn("M_Product_ID", "Product");
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_OrderLine");
+    when(table.getADColumnList()).thenReturn(List.of(taxColumn, productColumn));
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+    Property taxProperty = namedProperty("tax");
+    Property productProperty = namedProperty("product");
+    Entity dalEntity = mock(Entity.class);
+    when(dalEntity.getPropertyByColumnName("C_Tax_ID")).thenReturn(taxProperty);
+    when(dalEntity.getPropertyByColumnName("M_Product_ID")).thenReturn(productProperty);
+    SFEntity sfEntity = quotationLineEntity();
+    NeoHandler customization = withCustomization ? new SalesQuotationLineHandler() : null;
+
+    JSONArray missing;
+    try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+        MockedStatic<NeoExtensionDispatcher> dispatcher =
+            mockStatic(NeoExtensionDispatcher.class)) {
+      policy.when(() -> NeoSelectorPolicy.serverResolvedFieldNames(sfEntity))
+          .thenReturn(policyNames);
+      dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(customization);
+
+      missing = McpWriteRequestSupport.validateMandatoryFields(new JSONObject(), tab, dalEntity,
+          new HashSet<>(), new HashSet<>(), sfEntity, mock(Logger.class));
+    }
+
+    List<String> names = new ArrayList<>();
+    for (int i = 0; i < missing.length(); i++) {
+      names.add(missing.getJSONObject(i).getString("name"));
+    }
+    assertEquals(expectedMissing, names, scenario);
+  }
+
+  private static SFEntity quotationLineEntity() {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getName()).thenReturn("sales-quotation");
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getName()).thenReturn("quotationLine");
+    when(sfEntity.getETGOSFSpec()).thenReturn(spec);
+    return sfEntity;
+  }
+
+  private static Column mandatoryColumn(String dbColumnName, String label) {
+    Column column = mock(Column.class);
+    when(column.isActive()).thenReturn(true);
+    when(column.isMandatory()).thenReturn(true);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    when(column.getName()).thenReturn(label);
+    return column;
+  }
+
+  private static Property namedProperty(String name) {
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(name);
+    return property;
   }
 
   private static int statementEnd(String body, int from) {

@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 /**
  * Customization of sales-quotation/quotationLine (ETP-5528): everything
  * {@link OrderLineHandler} does, plus the order line's own price rules: the standard price of a new
@@ -42,6 +44,9 @@ package com.etendoerp.go.schemaforge;
 @NeoExtension(spec = "sales-quotation", entity = "quotationLine")
 public class SalesQuotationLineHandler extends OrderLineHandler {
 
+  /** DAL property of {@code C_OrderLine.C_Tax_ID}. */
+  private static final String FIELD_TAX = "tax";
+
   /**
    * Runs the parent's pre-hook first — a response from it still short-circuits — then sets the
    * standard price of a new line, then applies a discount its price does not reflect yet, and
@@ -58,5 +63,20 @@ public class SalesQuotationLineHandler extends OrderLineHandler {
     OrderLineDiscountSupport.applyDiscount(context);
     OrderLineDiscountSupport.deriveAmountsOnCreate(context);
     return null;
+  }
+
+  /**
+   * The tax of a new line is the server's to choose (ETP-5535): {@code SL_Order_Product}, which the
+   * create callout cascade fires for the product, sets it from the product's tax category, the
+   * header's order date and the organization — exactly what the UI does when a product is picked.
+   * {@code product} is itself required, so the source is always there. Declared here so
+   * {@code neo_schema(view:"create")} stops listing {@code tax} as required: an agent sent looking
+   * for a tax by name finds one the server would not have picked, or none at all.
+   *
+   * <p>A caller may still send a tax; the cascade keeps a value the caller provided.
+   */
+  @Override
+  public Set<String> serverResolvedCreateFields() {
+    return Set.of(FIELD_TAX);
   }
 }

@@ -1739,7 +1739,10 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
   — `idDescription` (from `NeoActionContract#withIdDescription`) says what `neo_action`'s `id` is,
   so no window-specific wording lives in the generic MCP classes. The entity's
   AD tab exists only for role gating; dumping its columns/buttons would advertise actions it does
-  not serve.
+  not serve. **ETP-5535:** this replacement applies only to an entity with no `ETGO_SF_FIELD` row
+  (`McpReportActionsSchema.isActionOnlyEntity` — the shape of every report-spec entity). An entity
+  that has fields AND declares actions keeps its normal schema for every view, and its declared
+  actions are appended to the AD buttons in `view:"actions"` — see §4.12.22.
 - **Execution.** `neo_action(spec, entity, id, action, parameters)` reaches the handler's pre-hook
   with `NeoEndpointType.ACTION`. `ReconciliationHandler.handle` sends only that endpoint type to
   `ReconciliationAgentActions.dispatch`; the SPA's report-spec requests carry no endpoint type and
@@ -2063,15 +2066,32 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 }
 ```
 
-> **Known limitation — selector context.** The selector context passed to the resolver is built from
-> the `AD_Tab` alone (`McpSelectorContextHelper.buildSelectorContextParams(null, adTab)` — window
-> sales/purchase context, business-partner role). It does **not** synthesize `recordContext` /
-> `parentContext` from the in-flight body, because that would require resolving fields in dependency
-> order (e.g. `priceList` needs `businessPartner` resolved first). A **dependent** FK — such as
-> `partnerAddress` depending on `businessPartner` — may therefore match more records than a
-> context-aware `neo_selectors` call would, and can return a false `ambiguous_fk`. When that happens,
-> resolve the dependent field explicitly via `neo_selectors` with an explicit `recordContext` and
-> pass its resulting id.
+> **Selector context.** The context passed to the resolver has three layers, later ones winning:
+> the `AD_Tab` (window sales/purchase context, business-partner role); since **ETP-5535**, on
+> `neo_create` and `neo_batch`, the **parent record** of a child entity
+> (`McpParentSelectorContext`) — the header's values handed over as the `parentContext` an agent
+> would pass to `neo_selectors`; and since IMP-22, the body's own already-resolved siblings
+> (`McpSelectorContextHelper.withBodyContext`, resolved in repeated passes so dependency order is
+> discovered by trying). The parent is identified by the entity's parent scope (`McpParentScope`);
+> its id comes from `parentId` / the link field of the body on `neo_create`, and from the op's
+> resolved `OperationContext#parentId()` on `neo_batch` — a `parentRef` op carries its parent nowhere
+> in the body at preprocessing time (`BatchService` injects it only when the record is created), so
+> reading the body alone would give such an op no parent context. The router runs in admin mode, so
+> the record is checked explicitly: a parent whose client is not the current client, or whose
+> organization is not among the role's readable organizations, is not used. Every scalar/FK value it
+> holds is offered **except** a property whose name is also a key of the child body — the child's
+> own value wins even while still an unresolved name, so a line sending `businessPartner:"X"` +
+> `partnerAddress:"Y"` never resolves the address against the header's partner;
+> `McpSelectorContextHelper` still decides which keys a selector understands (`orderDate`,
+> `businessPartner`, `priceList`, …). Measured case: the line tax rule `C_Tax_IsSOTrx_Date` reads
+> `COALESCE(@DateInvoiced@, @DateOrdered@)`; a `sales-quotation/quotationLine` body carries neither
+> date, so before ETP-5535 `tax:"Entregas IVA 21%"` matched no row and answered `not_found`, while
+> `neo_selectors` with `recordContext.orderDate` matched it. With the header's `orderDate` in context
+> it answers `ambiguous_fk` with three candidates (`Entregas IVA 21%`, `… ISP`, `… Revendedores` —
+> the selector search is a substring match), and `tax:"Entregas IVA 21% ISP"` resolves. No parent,
+> a parent outside the caller's tenant, or a batch `$ref` still unresolved → the context is the
+> pre-ETP-5535 one (a failed read is logged at WARN).
+> `neo_update` is unchanged (tab + body context only).
 
 If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `AD_Column` can be
 resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
@@ -6387,3 +6407,93 @@ the button's process-access check.
 - **UI unchanged:** the modal's own RE call only fires when the fetched order is `CO`, so against
   a Draft order it is a no-op. The UI still ends with a Draft order, and nothing is reactivated
   twice.
+
+#### 4.12.22 Rejecting a quotation and creating its lines over MCP behave as in the UI (ETP-5535)
+
+Three gaps on `sales-quotation`, each closed where it belongs: the quotation's behaviour in its
+customizations, the rest in generic, structural MCP code.
+
+**1. `DocAction = RJ` runs the UI's reject flow.** The `DocAction` button lists "Reject" (`RJ`), so
+an agent reads it as the way to reject a quotation. Through `C_Order_Post` it cannot work for any
+caller: `C_ORDER_POST1` requires `C_Reject_Reason_ID` on a quotation (`@NoRejectReason@`), and
+`rejectReason` is read-only, so nothing could set it first. `SalesQuotationHeaderHandler.handle`
+now sends an ACTION on the button (`DocAction` or `documentAction`, POST) whose value is `RJ` —
+read from `docAction` or `documentAction` at the root, or `fieldValues.documentAction` — to
+`RejectQuotationHandler.reject`, the same method the `rejectQuotation` action (the UI's Reject
+modal) runs: status must be `UE`, an active reason is required, then `CJ` + `Processed`. It runs
+ahead of the total-discount sync, which a rejection must not trigger.
+
+- **Reason:** `rejectReason` (or `C_Reject_Reason_ID`) at the root of the body — on `neo_action`,
+  in `parameters` next to `docAction` — or, for the button's other body shape, inside
+  `fieldValues`. The root still wins, so the modal's `{rejectReason}` is read exactly as before.
+- **No reason → 400** `A rejection reason is required: send rejectReason with the id of an active
+  rejection reason (C_Reject_Reason_ID). List them with the rejectReason selector of
+  sales-quotation/quotation, or create one with the createRejectReason action.` The modal cannot
+  submit without a reason, so only API callers read it.
+- **Not affected:** a `DocAction` request without an explicit `RJ` — the SPA's
+  `SendToEvaluationModal` sends `fieldValues: {}` — still reaches `C_Order_Post`.
+- **Both channels:** REST `POST …/quotation/{id}/action/DocAction` and MCP `neo_action` reach the
+  same pre-hook, so there is no channel divergence to record in §4.12.9.
+- **Difference from core's RJ, accepted for UI parity:** core's reject also zeroes the lines'
+  `QtyReserved`; the UI's flow (and so this one) does not.
+
+**2. `rejectQuotation` and `createRejectReason` are listed in `view:"actions"`.** Both were already
+reachable through `neo_action` (the MCP ACTION hook context carries `fieldName = action`), but
+`view:"actions"` listed only AD button columns. `SalesQuotationHeaderHandler#actionContracts()` now
+declares them (`RejectQuotationHandler.CONTRACT`: **`rejectReason`**; `CreateRejectReasonHandler.CONTRACT`:
+**`name`**, `description`), each with an `idDescription`.
+
+The generic change is structural. Until ETP-5535 an entity whose handler declared contracts got the
+action catalog *instead of* its field schema, whatever view — right for the report-spec entities
+(`bank-statements`, `bank-reconciliation`), which have no `ETGO_SF_FIELD` row and an AD tab used
+only for role gating; wrong for a window entity. `McpReportActionsSchema.isActionOnlyEntity` keeps
+the replacement for an entity with **no field row**; any other entity keeps its schema for every
+view, and `McpActionsView.buildResponse(…, declared)` appends the declared entries
+(`NeoActionContract#toJson`) after the AD buttons, counts them in `invokableCount` and adds a
+`declaredActionsHint`. With nothing declared the response is unchanged byte for byte.
+
+- **Not judged by the contract.** These handlers do not call `NeoActionContract.validate`; the body
+  is read by the handler as before, so the modals' requests are accepted unchanged. The contract is
+  for discovery only.
+- **Unchanged:** `neo_discover` (it lists declared actions only for report specs), the
+  `neo_action`/`neo_schema` enums (gated on `SPEC_TYPE = R`), and `NeoActionSurface` (consulted
+  only for tab-less specs). `servesActions()` now answers `true` for this handler; nothing reads it
+  for a tab-backed entity.
+- **Lookup:** `declaredActionsOf` still resolves by `Java_Qualifier` only — an `@NeoExtension`-only
+  customization's contracts would not be found. Not needed here (the header row's qualifier is
+  `salesQuotationHeaderHandler`).
+
+**3. `tax` is not required in `view:"create"` of `quotationLine`.** The create callout cascade fires
+`SL_Order_Product` for the product, which sets the line's tax from the product, the header's order
+date and the organization — what the UI does when a product is picked. `neo_schema` could not see
+that: its server-resolved set came from `neo_defaults` without input plus the selector policies'
+wrapper fields. A new generic extension point lets the customization say so:
+
+- `NeoHandler#serverResolvedCreateFields()` — DAL property names the customization resolves
+  server-side on create, through the create callout cascade; empty by default. The interface
+  Javadoc is the contract.
+- `McpServerResolvedFields.forCreate(sfEntity)` = `NeoSelectorPolicy.serverResolvedFieldNames` ∪
+  that declaration, the customization resolved through `NeoExtensionDispatcher.resolveOnly` (so an
+  `@NeoExtension` binding is found). Read by `neo_schema(view:"create")`: the names move to
+  `optional` with `serverDefaulted:true`.
+- **The `neo_create` mandatory pre-check (`validateMandatoryFields`) does NOT skip declared
+  fields.** In `handleCreate` it runs after `injectMandatoryDefaults` (the create callout cascade
+  that derives them) and before the customization's pre-hook. A declared field the cascade filled is
+  therefore not missing there; one it could not fill is a real gap and keeps its precise 422
+  `missingFields` instead of becoming a DAL NOT NULL error. It keeps skipping only the selector
+  policies' wrapper names, whose value the handler builds after the check. Consequence for the
+  extension point: declare only fields the create cascade derives — a field filled only by the
+  customization's own `handle()` would still be refused on `neo_create`. (`neo_batch` and REST run
+  no such pre-check.)
+- `SalesQuotationLineHandler` declares `tax`. A caller may still send one; the create path restores
+  caller values after the cascade.
+- **Scope:** `quotationLine` only. `sales-order/lines` (`SalesOrderLineHandler`) very likely has the
+  same gap and is not changed here.
+
+**4. A tax given by name is resolved against the header.** The 422 `not_found` for
+`tax:"Entregas IVA 21%"` was missing selector context, not the duplicate name: the second tax
+named exactly "Entregas IVA 21%" belongs to another client and is not visible to the caller. See
+§4.12.3 *Selector context*: `neo_create`/`neo_batch` now resolve a child's FK names with its parent
+record as context — on `neo_batch` including `parentRef` ops, whose parent id is taken from the
+op's resolved `parentId()` rather than the body. The same input now answers `ambiguous_fk` with its candidates (substring match),
+and an unambiguous name resolves.
