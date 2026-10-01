@@ -51,7 +51,11 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
@@ -79,12 +83,16 @@ class PaymentAgentSupportTest {
   private static final String METHOD = "method-1";
   private static final String DRAFT = "pay-draft";
   private static final String KEY_SCHEDULE_ID = "scheduleId";
+  private static final String ORG = "org-1";
+  private static final String ORG_CURRENCY = "cur-eur";
 
   private final Map<String, Object> owned = new HashMap<>();
   private MockedStatic<TenantOwnership> tenantMock;
   private MockedStatic<PaymentRegistrationService> registrationMock;
   private MockedStatic<PaymentAccountMethodsLoader> loaderMock;
   private MockedStatic<OBDal> dalMock;
+  private MockedStatic<OBContext> contextMock;
+  private MockedStatic<OBCurrencyUtils> currencyMock;
   private OBDal dal;
   private Session session;
   private Query<Object[]> invoiceQuery;
@@ -106,10 +114,21 @@ class PaymentAgentSupportTest {
     when(invoiceQuery.setParameter(anyString(), any())).thenReturn(invoiceQuery);
     dalMock = mockStatic(OBDal.class);
     dalMock.when(OBDal::getInstance).thenReturn(dal);
+    // The session's organization and its currency: what the SPA's canLeaveCredit compares with.
+    OBContext context = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG);
+    when(context.getCurrentOrganization()).thenReturn(org);
+    contextMock = mockStatic(OBContext.class);
+    contextMock.when(OBContext::getOBContext).thenReturn(context);
+    currencyMock = mockStatic(OBCurrencyUtils.class);
+    currencyMock.when(() -> OBCurrencyUtils.getOrgCurrency(ORG)).thenReturn(ORG_CURRENCY);
   }
 
   @AfterEach
   void tearDown() {
+    currencyMock.close();
+    contextMock.close();
     dalMock.close();
     loaderMock.close();
     registrationMock.close();
@@ -118,9 +137,11 @@ class PaymentAgentSupportTest {
 
   // ─── fixtures ─────────────────────────────────────────────────────────────
 
+  /** An invoice in the organization's currency (change it with {@link #inCurrency}). */
   private Invoice invoice(String id, FIN_PaymentSchedule... schedules) {
     Invoice invoice = mock(Invoice.class);
     when(invoice.getId()).thenReturn(id);
+    inCurrency(invoice, ORG_CURRENCY);
     when(invoice.getFINPaymentScheduleList()).thenReturn(new ArrayList<>(List.of(schedules)));
     owned.put(id, invoice);
     return invoice;
@@ -143,6 +164,15 @@ class PaymentAgentSupportTest {
     }
     owned.put(id, schedule);
     return schedule;
+  }
+
+  private static void inCurrency(Invoice invoice, String currencyId) {
+    Currency currency = null;
+    if (currencyId != null) {
+      currency = mock(Currency.class);
+      when(currency.getId()).thenReturn(currencyId);
+    }
+    when(invoice.getCurrency()).thenReturn(currency);
   }
 
   private static FIN_PaymentScheduleDetail psd(String amount) {
@@ -339,20 +369,85 @@ class PaymentAgentSupportTest {
   // ─── checkRegister: the overpayment (FR-9) ────────────────────────────────
 
   @Nested
-  @DisplayName("checkRegister — overpayment")
+  @DisplayName("checkRegister — overpayment on a collection in the organization's currency")
   class Overpayment {
+
+    private Invoice invoice;
 
     @BeforeEach
     void installment() {
       // Capacity on create: the 100 still pending. The installment's whole amount is 150.
       FIN_PaymentScheduleDetail drafted = link(psd("50"));
-      invoice(INVOICE, schedule("s-1", INVOICE, day(2026, 1, 1), "150", psd("100"), drafted));
+      invoice = invoice(INVOICE,
+          schedule("s-1", INVOICE, day(2026, 1, 1), "150", psd("100"), drafted));
       draft(DRAFT, drafted);
     }
 
     private NeoResponse register(JSONObject body) throws Exception {
+      return register(body, true);
+    }
+
+    private NeoResponse register(JSONObject body, boolean isReceipt) throws Exception {
       body.put(KEY_SCHEDULE_ID, "s-1");
-      return PaymentAgentSupport.checkRegister(INVOICE, body, true);
+      return PaymentAgentSupport.checkRegister(INVOICE, body, isReceipt);
+    }
+
+    /** The refusal where the UI offers no overpayment at all: lower the amount, no choice. */
+    private void assertLowerTheAmount(NeoResponse refusal, String outstanding, String excess)
+        throws Exception {
+      assertNotNull(refusal);
+      assertEquals(422, refusal.getHttpStatus());
+      JSONObject error = error(refusal);
+      assertFalse(error.has("allowedValues"), "no overpaymentAction is offered: " + error);
+      assertTrue(error.getString("message").contains("only possible on a collection"),
+          error.getString("message"));
+      assertEquals(0, new BigDecimal(outstanding).compareTo(decimal(error, "outstandingAmount")));
+      assertEquals(0, new BigDecimal(excess).compareTo(decimal(error, "excess")));
+    }
+
+    @Test
+    @DisplayName("a payment (not a collection) over the outstanding is refused, whatever"
+        + " overpaymentAction says")
+    void paymentCannotBeOverpaid() throws Exception {
+      assertLowerTheAmount(register(body("actual_payment", "100.01"), false), "100.00", "0.01");
+      assertLowerTheAmount(register(body("actual_payment", "120", "overpaymentAction",
+          "leave-credit"), false), "100.00", "20.00");
+    }
+
+    @Test
+    @DisplayName("a payment within the outstanding passes")
+    void paymentWithinOutstandingPasses() throws Exception {
+      assertNull(register(body("actual_payment", "100"), false));
+    }
+
+    @Test
+    @DisplayName("a collection in another currency cannot be overpaid, even with overpaymentAction")
+    void foreignCurrencyCollectionCannotBeOverpaid() throws Exception {
+      inCurrency(invoice, "cur-usd");
+      assertLowerTheAmount(register(body("actual_payment", "100.01", "overpaymentAction",
+          "refund")), "100.00", "0.01");
+    }
+
+    @Test
+    @DisplayName("an invoice without currency, or an organization without one, allows none")
+    void unresolvableCurrencyAllowsNone() throws Exception {
+      inCurrency(invoice, null);
+      assertLowerTheAmount(register(body("actual_payment", "100.01", "overpaymentAction",
+          "refund")), "100.00", "0.01");
+
+      inCurrency(invoice, ORG_CURRENCY);
+      currencyMock.when(() -> OBCurrencyUtils.getOrgCurrency(ORG)).thenReturn(null);
+      assertLowerTheAmount(register(body("actual_payment", "100.01", "overpaymentAction",
+          "refund")), "100.00", "0.01");
+    }
+
+    @Test
+    @DisplayName("overpaymentAllowed is the SPA's canLeaveCredit: a collection in the org currency")
+    void overpaymentAllowedMirrorsCanLeaveCredit() {
+      assertTrue(PaymentAgentSupport.overpaymentAllowed(invoice, true));
+      assertFalse(PaymentAgentSupport.overpaymentAllowed(invoice, false));
+      inCurrency(invoice, "cur-usd");
+      assertFalse(PaymentAgentSupport.overpaymentAllowed(invoice, true));
     }
 
     @Test

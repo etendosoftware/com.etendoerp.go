@@ -229,6 +229,68 @@ class PaymentActionContractsTest {
     assertTrue(new CurrencyOptionsHandler().agentExcludedActions().isEmpty());
   }
 
+  // ── ETP-5558 Step 4: what the descriptions promise an agent ───────────────
+
+  private static String paramDescription(boolean isReceipt, String param) throws Exception {
+    return PaymentActionHandlerSupport.actionContracts(isReceipt).get("registerPayment").toJson()
+        .getJSONObject("parameters").getJSONObject("properties").getJSONObject(param)
+        .getString("description");
+  }
+
+  private static String actionDescription(boolean isReceipt, String action) {
+    return PaymentActionHandlerSupport.actionContracts(isReceipt).get(action).getDescription();
+  }
+
+  private static void assertMentions(String text, String... fragments) {
+    for (String fragment : fragments) {
+      assertTrue(text.contains(fragment), "missing '" + fragment + "' in: " + text);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  @DisplayName("scheduleId says it is resolved when only one installment is pending")
+  void scheduleIdDescribesItsResolution(boolean isReceipt) throws Exception {
+    assertMentions(paramDescription(isReceipt, "scheduleId"), "only pending installment",
+        "with paymentId", "several pending it is refused with the list", "due date");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  @DisplayName("overpaymentAction says when it is required and where no overpayment is possible")
+  void overpaymentActionIsRequiredOnOverpayment(boolean isReceipt) throws Exception {
+    assertMentions(paramDescription(isReceipt, "overpaymentAction"),
+        "Only a collection whose invoice is in the organization's currency can be overpaid",
+        "required when actual_payment plus creditSources exceeds",
+        "A payment, or a collection in another currency, is refused whenever it exceeds");
+    assertMentions(paramDescription(isReceipt, "actual_payment"),
+        "possible only on a collection in the organization's currency");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  @DisplayName("fin_paymentmethod_id defaults to the account's defaultMethodId")
+  void methodDefaultsToTheAccountsDefault(boolean isReceipt) throws Exception {
+    assertMentions(paramDescription(isReceipt, "fin_paymentmethod_id"),
+        "Default: the account's defaultMethodId in invoiceAccounts", "refused with the valid ones");
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = { true, false })
+  @DisplayName("the action descriptions name the fields of the agent's answer")
+  void actionDescriptionsNameTheAnswerFields(boolean isReceipt) {
+    assertMentions(actionDescription(isReceipt, "registerPayment"), "paymentMethod", "creditUsed",
+        "creditGenerated", "creditAvailable", "writeoffAmount", "outstandingAmount", "totalPaid",
+        "paymentComplete");
+    assertMentions(actionDescription(isReceipt, "invoiceAccounts"), "paymentMethodIds",
+        "defaultMethodId", "invoiceMethodId", "invoiceMethodAccepted");
+    assertFalse(actionDescription(isReceipt, "invoiceAccounts").contains("defaultPaymentMethod"),
+        "an agent never receives defaultPaymentMethod");
+    assertMentions(actionDescription(isReceipt, "confirmPayment"), "invoice's new state");
+    assertMentions(actionDescription(isReceipt, "deletePayment"),
+        "{id, documentNo, amount, status}", "invoice's state");
+  }
+
   private static List<String> names(NeoActionContract c) {
     return c.getParams().stream().map(NeoActionContract.Param::getName).toList();
   }
