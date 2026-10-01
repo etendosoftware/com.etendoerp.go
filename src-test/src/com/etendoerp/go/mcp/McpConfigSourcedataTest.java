@@ -16,9 +16,13 @@
  */
 package com.etendoerp.go.mcp;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -27,13 +31,19 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Validates every hand-authored {@code MCP_CONFIG} payload that ships in the module's sourcedata.
@@ -220,6 +230,132 @@ class McpConfigSourcedataTest {
       assertTrue(instead.contains("paymentId"), id + ": how a draft is edited: " + instead);
       assertTrue(instead.contains("deletePayment"), id + ": how a draft is deleted: " + instead);
     }
+  }
+
+  // ── ETP-5558: the rows of 7c363c467 (and b86eade1d), asserted by content ──
+
+  /** sales-invoice and purchase-invoice paymentDetails, then their paymentPlan. */
+  private static final List<String> INVOICE_PAYMENT_CHILDREN = List.of(
+      "0D5FAC6A352140EABD483FF77539FAEA", "1F7ACD054BF14A148B7A11CD32A8704D",
+      "28A6378134714F1E8D3C0869C1C77438", "1343B4002EE14A9896594655770261ED");
+  private static final String FA_TRANSACTION = "AF50E181A0094E439C7B46B25A9E38FC";
+  private static final String FA_RECONCILIATIONS = "F904BC5EBBCA4C55BE9F62871E2AD171";
+  private static final String FA_ACCOUNT = "BE3EAEED69644E56B0ECDCFE4A7E9BC1";
+
+  private static Set<String> setOf(JSONArray array) throws JSONException {
+    Set<String> out = new TreeSet<>();
+    for (int i = 0; i < array.length(); i++) {
+      out.add(array.getString(i));
+    }
+    return out;
+  }
+
+  /** The row resolved exactly as the MCP reads it: through McpEntityConfig, not just its JSON. */
+  private static void assertResolvesCleanly(String entityId) throws IOException, JSONException {
+    McpConfigSections.resetForTests();
+    McpConfigCache.invalidateAll();
+    try {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("spec-of-" + entityId);
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getId()).thenReturn(entityId);
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG))
+          .thenReturn(payloadOf(entityId).toString());
+      McpEntityConfig.Resolved resolved = McpEntityConfig.forEntity(entity);
+      assertTrue(resolved.isUsable(), entityId + ": " + resolved.describeProblems());
+    } finally {
+      McpConfigCache.invalidateAll();
+    }
+  }
+
+  private static void assertEveryWriteHidden(JSONObject verbs, String id) {
+    assertFalse(verbs.optBoolean(McpVerbsSection.KEY_CREATE, true), id + " create");
+    assertFalse(verbs.optBoolean(McpVerbsSection.KEY_UPDATE, true), id + " update");
+    assertFalse(verbs.optBoolean(McpVerbsSection.KEY_DELETE, true), id + " delete");
+  }
+
+  @Test
+  @DisplayName("the payment headers hide the buttons the payment window does not offer and keep"
+      + " Confirmar at value P")
+  void paymentHeadersExposeOnlyTheUiActions() throws IOException, JSONException {
+    Set<String> expectedHidden = new TreeSet<>(List.of("psd2GenerateBankPayment",
+        "aPRMAddScheduledpayments", "aprmExecutepayment", "aPRMReversePayment",
+        "aPRMReconcilePayment", "aeatsiiSend", "etblkpBulkposting", "posted",
+        // b86eade1d: drafts are deleted with the invoice's deletePayment, which also gives back
+        // the credit the draft consumed; and the PIS retry/status are PIS, excluded from agents.
+        "eTPRRemovePayment", "retryPisPayment", "pisPaymentStatus"));
+    for (String id : PAYMENT_HEADERS) {
+      JSONObject payload = payloadOf(id);
+      JSONObject actions = payload.getJSONObject(McpActionsSection.NAME);
+      Set<String> hidden = setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN));
+      assertEquals(expectedHidden, hidden, id);
+      for (String ui : List.of("aPRMProcessPayment", "etprReactivatePayment")) {
+        assertFalse(hidden.contains(ui), id + ": the UI's " + ui + " must stay");
+      }
+      JSONArray process = actions.getJSONObject(McpActionsSection.KEY_VALUES)
+          .getJSONArray("aPRMProcessPayment");
+      assertEquals(1, process.length(), id);
+      assertEquals("P", process.getString(0), id);
+      assertEquals(1, actions.getJSONObject(McpActionsSection.KEY_VALUES).length(), id);
+      assertEveryWriteHidden(payload.getJSONObject(McpVerbsSection.NAME), id);
+      assertResolvesCleanly(id);
+    }
+  }
+
+  @Test
+  @DisplayName("the invoices' paymentDetails and paymentPlan are read-only, pointing at"
+      + " registerPayment")
+  void invoicePaymentChildrenAreReadOnly() throws IOException, JSONException {
+    for (String id : INVOICE_PAYMENT_CHILDREN) {
+      JSONObject payload = payloadOf(id);
+      JSONObject verbs = payload.getJSONObject(McpVerbsSection.NAME);
+      assertEveryWriteHidden(verbs, id);
+      assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains("registerPayment"), id);
+      assertFalse(payload.has(McpActionsSection.NAME), id);
+      assertResolvesCleanly(id);
+    }
+  }
+
+  @Test
+  @DisplayName("financial-account transaction is read-only with no instead; its movement buttons"
+      + " are hidden")
+  void financialAccountTransactionIsReadOnly() throws IOException, JSONException {
+    JSONObject payload = payloadOf(FA_TRANSACTION);
+    JSONObject verbs = payload.getJSONObject(McpVerbsSection.NAME);
+    assertEveryWriteHidden(verbs, FA_TRANSACTION);
+    assertFalse(verbs.has(McpVerbsSection.KEY_INSTEAD));
+    // b86eade1d: post/unpost stay; the movement flow owns reactivate/remove.
+    assertEquals(new TreeSet<>(List.of("etprReactivateTransaction", "etprRemoveTransaction",
+        "posted", "etblkpBulkposting")), setOf(payload.getJSONObject(McpActionsSection.NAME)
+        .getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    assertResolvesCleanly(FA_TRANSACTION);
+  }
+
+  @Test
+  @DisplayName("financial-account reconciliations are read-only, pointing at bank-reconciliation")
+  void financialAccountReconciliationsAreReadOnly() throws IOException, JSONException {
+    JSONObject verbs = payloadOf(FA_RECONCILIATIONS).getJSONObject(McpVerbsSection.NAME);
+    assertEveryWriteHidden(verbs, FA_RECONCILIATIONS);
+    assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains(
+        "neo_action(spec:'bank-reconciliation'"), verbs.getString(McpVerbsSection.KEY_INSTEAD));
+    assertResolvesCleanly(FA_RECONCILIATIONS);
+  }
+
+  @Test
+  @DisplayName("financial-account account hides every Core button and keeps its writes")
+  void financialAccountHidesCoreButtonsOnly() throws IOException, JSONException {
+    JSONObject payload = payloadOf(FA_ACCOUNT);
+    assertEquals(new TreeSet<>(List.of("aPRMImportBankFile", "aPRMMatchTransactions",
+        "aPRMMatchTransactionsForce", "aPRMReconcile", "aprmAddMultiplePayments", "aprmFundsTrans",
+        "pSD2GetBankstatement", "pSD2GetConsent", "psd2ReconnectFa", "psd2GetConnections",
+        "psd2RefreshConnections")), setOf(payload.getJSONObject(McpActionsSection.NAME)
+        .getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    assertFalse(payload.has(McpVerbsSection.NAME),
+        "create, update and delete stay: the SPA uses them");
+    assertNotNull(payload.getJSONObject(McpActionsSection.NAME)
+        .optString(McpActionsSection.KEY_REASON, null));
+    assertResolvesCleanly(FA_ACCOUNT);
   }
 
   @Test
