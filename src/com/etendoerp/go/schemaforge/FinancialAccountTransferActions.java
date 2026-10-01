@@ -139,8 +139,9 @@ class FinancialAccountTransferActions {
         Param.required(P_AMOUNT, NeoActionContract.TYPE_NUMBER,
             "Amount leaving this account, above zero, in this account's currency."),
         Param.required(P_GL_ITEM_ID, NeoActionContract.TYPE_STRING,
-            "Id of the G/L item (concept) the transfer is booked against; movementGlItems lists "
-                + "them."),
+            "Id of the G/L item (concept): the reason for the transfer, which decides the "
+                + "account it is booked to. If the user did not say it, ask them instead of "
+                + "guessing. movementGlItems finds it by part of its name or account code."),
         Param.optional(P_CONVERSION_RATE, NeoActionContract.TYPE_NUMBER,
             "Rate from this account's currency to the destination's, above zero. Only between "
                 + "two currencies (ignored otherwise). Default: today's system rate "

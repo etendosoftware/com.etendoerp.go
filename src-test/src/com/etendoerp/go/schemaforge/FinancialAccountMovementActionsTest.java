@@ -249,6 +249,26 @@ class FinancialAccountMovementActionsTest {
     }
 
     @Test
+    @DisplayName("the G/L item is described as the reason, to ask for, searchable by name or code")
+    void glItemGuidance() throws Exception {
+      // Blind run 20261001T2331-local-8163: without a concept in the prompt, the agent searched
+      // movementGlItems a dozen times and ran out of steps instead of asking the user.
+      Map<String, NeoActionContract> c = FinancialAccountMovementActions.actionContracts();
+      for (String action : List.of("createMovement", "updateMovement")) {
+        String gl = c.get(action).toJson().getJSONObject("parameters").getJSONObject("properties")
+            .getJSONObject("glItemId").getString("description");
+        assertTrue(gl.contains("reason") && gl.contains("ask them"), action + ": " + gl);
+      }
+      String search = c.get("movementGlItems").toJson().getJSONObject("parameters")
+          .getJSONObject("properties").getJSONObject("search").getString("description");
+      assertTrue(search.contains("account code"), search);
+      String transferGl = FinancialAccountTransferActions.actionContracts().get("transferFunds")
+          .toJson().getJSONObject("parameters").getJSONObject("properties")
+          .getJSONObject("glItemId").getString("description");
+      assertTrue(transferGl.contains("ask them"), transferGl);
+    }
+
+    @Test
     @DisplayName("every write requires movementId except createMovement; reads are not mutating")
     void movementId() {
       Map<String, NeoActionContract> c = FinancialAccountMovementActions.actionContracts();

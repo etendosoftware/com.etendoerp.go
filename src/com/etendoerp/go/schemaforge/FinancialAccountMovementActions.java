@@ -154,8 +154,11 @@ class FinancialAccountMovementActions {
   static Map<String, NeoActionContract> actionContracts() {
     String idDescription = "the id of the financial account the movement belongs to";
     String movementId = "Id of the movement (listMovements → transactions[].id).";
-    String glItem = "Id of the G/L item (concept) the movement is booked against; movementGlItems "
-        + "lists them.";
+    String glItem = "Id of the G/L item (concept): the reason for the movement — what the money "
+        + "is (a partner's capital contribution, a bank charge, a cash withdrawal…), which decides "
+        + "the account it is booked to. If the user did not say what the money is, ask them "
+        + "instead of guessing. movementGlItems finds it: its search matches part of the name, "
+        + "which starts with the account code.";
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(LIST_ACTION, NeoActionContract.read(LIST_ACTION,
         "Lists the account's movements as its Movements tab shows them, newest first: id, date, "
@@ -166,9 +169,12 @@ class FinancialAccountMovementActions {
             + "bpartnerId, the dimensions, and the account totals.")
         .withIdDescription(idDescription));
     contracts.put(GL_ITEMS_ACTION, NeoActionContract.read(GL_ITEMS_ACTION,
-        "Lists the G/L items (concepts) a movement can be booked against: id, name.",
+        "Lists the G/L items (concepts) a movement or a transfer can be booked against: id, "
+            + "name. The G/L item is the reason for the money; when the user has not said what "
+            + "the money is, ask them rather than search for a likely one.",
         Param.optional(P_SEARCH, NeoActionContract.TYPE_STRING,
-            "Part of the name to look for. Default: every G/L item."))
+            "Part of the name or of the account code to look for (the name starts with the code, "
+                + "e.g. '118' or 'aport'); case-insensitive. Default: every G/L item."))
         .withIdDescription(idDescription));
     contracts.put(CREATE_ACTION, NeoActionContract.write(CREATE_ACTION,
         "Records a manual movement in the account — money in (deposit) or out (withdrawal) "
