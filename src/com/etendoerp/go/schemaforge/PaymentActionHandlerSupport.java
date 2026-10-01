@@ -73,7 +73,7 @@ final class PaymentActionHandlerSupport {
     contracts.put(ACTION_NAME, NeoActionContract.write(ACTION_NAME,
         "Registers a " + money + " against one installment of this " + doc + ", exactly as the "
             + "invoice's payment panel does. This is the way to pay or collect an invoice — "
-            + "payments are never created by hand. With process 'confirm' (default) the " + money
+            + "payments are never created by hand. With process 'confirm' the " + money
             + " is processed and applied; with 'draft' it is saved for later and can be confirmed "
             + "with confirmPayment or edited by calling this again with paymentId. Returns the "
             + money + " {id, documentNo, amount, status, processed}. Before calling it: "
@@ -94,8 +94,13 @@ final class PaymentActionHandlerSupport {
         Param.optional("fin_paymentmethod_id", NeoActionContract.TYPE_STRING,
             "Id of the payment method. Must be one the chosen account accepts (invoiceAccounts → "
                 + "paymentMethodIds). Default: the invoice's own payment method."),
-        Param.options("process",
-            "'confirm' (default) processes the " + money + "; 'draft' only saves it.",
+        // Required for agents only (ETP-5558): the handler reads paymentId, conversionRate and
+        // writeoffDifference only when the body carries process (or another advanced key), and
+        // silently ignores them otherwise (§4.12.9). Requiring it here keeps REST unchanged.
+        Param.requiredOptions("process",
+            "'confirm' processes and applies the " + money + "; 'draft' only saves it, to confirm "
+                + "later with confirmPayment. Always send it: paymentId, conversionRate and "
+                + "writeoffDifference only take effect with it.",
             List.of("draft", "confirm")),
         Param.optional(FIELD_PAYMENT_ID, NeoActionContract.TYPE_STRING,
             "Id of an existing DRAFT " + money + " to edit in place instead of creating a new "
@@ -238,20 +243,10 @@ final class PaymentActionHandlerSupport {
     return null;
   }
 
-  /**
-   * True when the register body carries advanced (two-step modal) fields.
-   *
-   * <p>ETP-5558: also any key only the advanced path reads — {@code paymentId} (edit a draft),
-   * {@code conversionRate} and {@code writeoffDifference}. Without them here, a caller sending one
-   * of those keys and no other advanced key was routed to the simple path, which reads none of
-   * them: a new payment instead of the edited draft, a refused rate, a skipped write-off — and no
-   * error. The SPA always sends {@code process}, so it never reached that branch.</p>
-   */
-  static boolean isAdvanced(JSONObject body) {
+  /** True when the register body carries advanced (two-step modal) fields. */
+  private static boolean isAdvanced(JSONObject body) {
     return body.has("process") || body.has("creditSources")
-        || body.has("overpaymentAction") || body.has("fin_paymentmethod_id")
-        || body.has(FIELD_PAYMENT_ID) || body.has("conversionRate")
-        || body.has("writeoffDifference");
+        || body.has("overpaymentAction") || body.has("fin_paymentmethod_id");
   }
 
   /** Runs the mutating action inside an admin session with rollback-on-error handling. */

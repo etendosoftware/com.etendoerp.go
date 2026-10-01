@@ -447,6 +447,21 @@ public final class NeoActionContract {
     }
 
     /**
+     * A required string restricted to a closed set (ETP-5558). For a choice the handler defaults
+     * but the agent must make explicitly — because what the handler does without it differs from
+     * what the contract promises.
+     *
+     * @param name          the body key
+     * @param description   meaning of each value
+     * @param allowedValues every value the handler distinguishes
+     * @return the descriptor
+     */
+    public static Param requiredOptions(String name, String description,
+        List<String> allowedValues) {
+      return new Param(name, TYPE_STRING, null, true, description, allowedValues);
+    }
+
+    /**
      * A list parameter.
      *
      * @param name        the body key

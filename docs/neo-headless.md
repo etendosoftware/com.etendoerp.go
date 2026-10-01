@@ -1995,7 +1995,7 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
 
 | Action | Kind | Parameters (required in **bold**) |
 |---|---|---|
-| `registerPayment` | write | **`scheduleId`**, **`actual_payment`** (number), **`payment_date`**, **`fin_financial_account_id`**, `fin_paymentmethod_id`, `process` (draft\|confirm, default confirm), `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
+| `registerPayment` | write | **`scheduleId`**, **`actual_payment`** (number), **`payment_date`**, **`fin_financial_account_id`**, **`process`** (draft\|confirm), `fin_paymentmethod_id`, `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
 | `confirmPayment` | write | **`paymentId`** |
 | `deletePayment` | write | **`paymentId`** |
 | `invoicePayments` | read | — |
@@ -2011,13 +2011,13 @@ not declared either (so the contract refuses it, 422). Both invoice headers carr
 redirecting `aPRMAddpayment` (Classic's *Add Payment*) to `registerPayment` — the only thing that
 keeps the undeclared PIS actions off `neo_action`, which `McpConfigSourcedataTest` asserts.
 
-**One REST fix, for the contract to be true.** `registerPayment` chose the advanced path only when
-the body carried `process`, `creditSources`, `overpaymentAction` or `fin_paymentmethod_id`; the
-simple path reads neither `paymentId`, `conversionRate` nor `writeoffDifference`. A body with one
-of those and no other advanced key silently created a new payment instead of editing the draft,
-refused the foreign account, or skipped the write-off. Those three keys now select the advanced path
-too (`PaymentActionHandlerSupport.isAdvanced`). The SPA always sends `process`, so its requests are
-unaffected.
+**`process` is required for agents, and only for agents.** The handler reads `paymentId`,
+`conversionRate` and `writeoffDifference` only on its advanced path, which a body takes only when it
+carries `process`, `creditSources`, `overpaymentAction` or `fin_paymentmethod_id`. Without one of
+those, REST silently ignores the three keys (§4.12.9). REST is left as it is; the contract declares
+`process` **required** (`Param.requiredOptions`), so every call the MCP lets through takes the
+advanced path, and one without it is a 422 `missingParameters:["process"]` before anything runs.
+The SPA always sends `process`.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
@@ -2750,6 +2750,7 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | `aPRMAddpayment` | Classic button path | **405**, hint `registerPayment` |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
+| `registerPayment` with `paymentId`, `conversionRate` or `writeoffDifference` but no `process` (nor `creditSources` / `overpaymentAction` / `fin_paymentmethod_id`) | **known quirk, not fixed:** the simple path runs and silently ignores those keys — a NEW payment instead of editing the draft, the cross-currency account refused, no write-off | **422** `missingParameters:["process"]` — `process` is required in the contract |
 
 ##### REST `/sws/neo/batch` is unaffected
 

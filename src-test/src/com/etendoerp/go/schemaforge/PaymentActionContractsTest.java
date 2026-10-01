@@ -102,7 +102,8 @@ class PaymentActionContractsTest {
       req.add(required.getString(i));
     }
     assertEquals(new TreeSet<>(List.of("scheduleId", "actual_payment", "payment_date",
-        "fin_financial_account_id")), req, "the four the handler refuses a call without");
+        "fin_financial_account_id", "process")), req,
+        "the four the handler refuses a call without, plus process (MCP-only, see below)");
 
     JSONObject props = schema.getJSONObject("properties");
     assertEquals(List.of("draft", "confirm"),
@@ -138,19 +139,39 @@ class PaymentActionContractsTest {
 
   /**
    * The contract promises that paymentId, conversionRate and writeoffDifference take effect on
-   * their own. The simple register path reads none of them, so a body carrying one of them without
-   * any other "advanced" key used to create a NEW payment, ignore the rate, or skip the write-off —
-   * silently. The SPA always sends {@code process}, so it never took that path.
+   * their own. The handler reads them only on its advanced path, which a body without
+   * {@code process} (or another advanced key) does not take — over REST such a body creates a NEW
+   * payment, refuses the rate or skips the write-off, silently (§4.12.9). REST stays as it is;
+   * the MCP closes the gap by requiring {@code process}, so every call it lets through takes the
+   * advanced path. The SPA always sends it.
    */
   @ParameterizedTest
   @ValueSource(strings = { "paymentId", "conversionRate", "writeoffDifference" })
-  @DisplayName("a key only the advanced path reads routes the call to the advanced path")
-  void advancedOnlyKeysAreNotIgnored(String key) throws Exception {
+  @DisplayName("the MCP refuses an advanced-only key without process, naming process")
+  void advancedOnlyKeysNeedProcess(String key) throws Exception {
+    Map<String, NeoActionContract> contracts = PaymentActionHandlerSupport.actionContracts(true);
     JSONObject body = new JSONObject("{\"scheduleId\":\"S\",\"actual_payment\":\"10\","
         + "\"payment_date\":\"2026-09-30\",\"fin_financial_account_id\":\"A\"}");
-    assertFalse(PaymentActionHandlerSupport.isAdvanced(body), "the plain body stays simple");
-    body.put(key, "writeoffDifference".equals(key) ? (Object) Boolean.TRUE : "X");
-    assertTrue(PaymentActionHandlerSupport.isAdvanced(body), key);
+    body.put(key, "writeoffDifference".equals(key) ? (Object) Boolean.TRUE : "1.1");
+
+    NeoResponse refused = NeoActionContract.validate(contracts, "registerPayment", body);
+    assertNotNull(refused, key + " without process must not reach the simple path");
+    assertEquals(422, refused.getHttpStatus());
+    assertEquals("process", refused.getBody().getJSONObject("error")
+        .getJSONArray("missingParameters").getString(0));
+
+    body.put("process", "confirm");
+    assertNull(NeoActionContract.validate(contracts, "registerPayment", body), key);
+  }
+
+  @Test
+  @DisplayName("process is a required closed choice whose description tells the agent why")
+  void processIsRequired() throws Exception {
+    JSONObject process = PaymentActionHandlerSupport.actionContracts(false).get("registerPayment")
+        .toJson().getJSONObject("parameters").getJSONObject("properties")
+        .getJSONObject("process");
+    assertEquals(List.of("draft", "confirm"), jsonList(process.getJSONArray("enum")));
+    assertTrue(process.getString("description").contains("'confirm'"));
   }
 
   @Test
