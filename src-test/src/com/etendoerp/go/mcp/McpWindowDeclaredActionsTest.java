@@ -558,6 +558,175 @@ class McpWindowDeclaredActionsTest {
     }
   }
 
+  // ── MCP_CONFIG.actions.values (2a507a327) ─────────────────────────────
+
+  @Nested
+  @DisplayName("MCP_CONFIG.actions.values — a list-backed button narrowed to the UI's values")
+  class Values {
+
+    private static final String NARROW_PROCESS = "{\"actions\":{\"values\":"
+        + "{\"aPRMProcessPayment\":[\"P\"]},\"reason\":\"the UI button only processes\"}}";
+    private static final String NARROW_DOC_ACTION = "{\"actions\":{\"values\":"
+        + "{\"documentAction\":[\"CO\",\"PR\"]},\"reason\":\"the UI completes or prepares\"}}";
+
+    private JSONArray processButton() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject("{\"name\":\"aPRMProcessPayment\",\"type\":\"button\","
+          + "\"invokeVia\":\"neo_action\",\"actionValues\":[{\"value\":\"P\","
+          + "\"label\":\"Process\"},{\"value\":\"R\",\"label\":\"Reactivate\"},"
+          + "{\"value\":\"RE\",\"label\":\"Reactivate and delete\"},"
+          + "{\"value\":\"V\",\"label\":\"Void\"}]}"));
+      fields.put(new JSONObject("{\"name\":\"documentAction\",\"type\":\"button\","
+          + "\"invokeVia\":\"neo_action\",\"actionValues\":[{\"value\":\"CO\"},"
+          + "{\"value\":\"VO\"}]}"));
+      fields.put(new JSONObject("{\"name\":\"posted\",\"type\":\"button\","
+          + "\"invokeVia\":\"neo_action\"}"));
+      return fields;
+    }
+
+    private JSONObject buttonNamed(JSONArray actions, String name) throws Exception {
+      for (int i = 0; i < actions.length(); i++) {
+        if (name.equals(actions.getJSONObject(i).optString("name"))) {
+          return actions.getJSONObject(i);
+        }
+      }
+      throw new AssertionError(name + " not listed in " + actions);
+    }
+
+    private List<String> valuesOf(JSONObject button) throws Exception {
+      JSONArray values = button.getJSONArray(McpConstants.KEY_ACTION_VALUES);
+      List<String> out = new java.util.ArrayList<>();
+      for (int i = 0; i < values.length(); i++) {
+        out.add(values.getJSONObject(i).getString("value"));
+      }
+      return out;
+    }
+
+    @Test
+    @DisplayName("validation: a section with only values (and reason) is valid")
+    void onlyValuesIsValid() throws Exception {
+      assertTrue(McpActionsSection.validate(
+          new JSONObject(NARROW_PROCESS).getJSONObject("actions")).isEmpty());
+    }
+
+    @Test
+    @DisplayName("validation: values must be a non-empty object of non-empty arrays of non-blank"
+        + " strings, and reason stays mandatory")
+    void invalidValues() throws Exception {
+      for (String bad : List.of(
+          "{\"values\":{},\"reason\":\"r\"}",
+          "{\"values\":[\"P\"],\"reason\":\"r\"}",
+          "{\"values\":\"P\",\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[]},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":\"P\"},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[\" \"]},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[1]},\"reason\":\"r\"}",
+          "{\"values\":{\"b\":[\"P\"]}}")) {
+        assertFalse(McpActionsSection.validate(new JSONObject(bad)).isEmpty(), bad);
+      }
+    }
+
+    @Test
+    @DisplayName("validation: each violation yields its own problem")
+    void oneProblemPerViolation() throws Exception {
+      List<String> problems = McpActionsSection.validate(new JSONObject(
+          "{\"values\":{\"a\":[],\"b\":[\"\",\"P\",\" \"]},\"reason\":\"r\"}"));
+      assertEquals(3, problems.size(), problems.toString());
+      assertTrue(problems.stream().anyMatch(p -> p.contains("values.a")), problems.toString());
+      assertTrue(problems.stream().anyMatch(p -> p.contains("values.b[0]")), problems.toString());
+      assertTrue(problems.stream().anyMatch(p -> p.contains("values.b[2]")), problems.toString());
+    }
+
+    @Test
+    @DisplayName("View.allowedValuesOf gives the configured set, and null for a button not listed")
+    void allowedValuesOf() {
+      McpActionsSection.View view = McpActionsSection.forEntity(entity("W", NARROW_DOC_ACTION));
+      assertEquals(Set.of("CO", "PR"), view.allowedValuesOf("documentAction"));
+      assertNull(view.allowedValuesOf("aPRMProcessPayment"));
+      assertNull(view.allowedValuesOf(null));
+    }
+
+    @Test
+    @DisplayName("view: a narrowed button lists only the allowed values; the others are untouched")
+    void viewNarrowsTheButton() throws Exception {
+      SFEntity e = entity("W", NARROW_PROCESS);
+      JSONArray actions = McpActionsView.buildResponse(SPEC, ENTITY, processButton(), Map.of(),
+          McpActionsSection.forEntity(e)).getJSONArray("actions");
+
+      JSONObject process = buttonNamed(actions, "aPRMProcessPayment");
+      assertEquals(List.of("P"), valuesOf(process));
+      assertEquals("Process", process.getJSONArray(McpConstants.KEY_ACTION_VALUES)
+          .getJSONObject(0).getString("label"), "the kept entry is the original one");
+      assertEquals(List.of("CO", "VO"), valuesOf(buttonNamed(actions, "documentAction")));
+      assertFalse(buttonNamed(actions, "posted").has(McpConstants.KEY_ACTION_VALUES),
+          "a button without actionValues gets none");
+    }
+
+    @Test
+    @DisplayName("view: without a values key the response is unchanged")
+    void viewUnchangedWithoutValues() throws Exception {
+      JSONArray plain = McpActionsView.buildResponse(SPEC, ENTITY, processButton(), Map.of(),
+          McpActionsSection.forEntity(entity("W", null))).getJSONArray("actions");
+      assertEquals(List.of("P", "R", "RE", "V"),
+          valuesOf(buttonNamed(plain, "aPRMProcessPayment")));
+      assertEquals(McpActionsView.apply(processButton()).toString(), plain.toString());
+    }
+
+    private McpRoutingException refusedValue(String config, String action, JSONObject params) {
+      return assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", config), action, params));
+    }
+
+    @Test
+    @DisplayName("precheck: a docAction outside the set is a 422 with allowedValues")
+    void docActionOutsideTheSetIsRefused() throws Exception {
+      JSONObject env = refusedValue(NARROW_DOC_ACTION, "documentAction",
+          new JSONObject().put("docAction", "VO")).toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      assertEquals(McpConstants.ERROR_VALIDATION, env.getString(McpConstants.KEY_ERROR));
+      JSONArray allowed = env.getJSONArray("allowedValues");
+      assertEquals(Set.of("CO", "PR"), Set.of(allowed.getString(0), allowed.getString(1)));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("'VO'"));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("Nothing was run"));
+    }
+
+    @Test
+    @DisplayName("precheck: an action key outside the set is refused too")
+    void actionKeyOutsideTheSetIsRefused() throws Exception {
+      JSONObject env = refusedValue(NARROW_DOC_ACTION, "documentAction",
+          new JSONObject().put("action", "VO")).toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+    }
+
+    @Test
+    @DisplayName("precheck: the value is checked under every alias of the button")
+    void checkedUnderEveryAlias() throws Exception {
+      // Configured by field name, called by DB column name.
+      assertEquals(422, refusedValue(NARROW_DOC_ACTION, "DocAction",
+          new JSONObject().put("docAction", "VO")).toEnvelope().getInt(McpConstants.KEY_STATUS));
+      // Configured by DB column name, called by field name.
+      String byColumn = "{\"actions\":{\"values\":{\"DocAction\":[\"CO\"]},"
+          + "\"reason\":\"r\"}}";
+      assertEquals(422, refusedValue(byColumn, "documentAction",
+          new JSONObject().put("docAction", "VO")).toEnvelope().getInt(McpConstants.KEY_STATUS));
+    }
+
+    @Test
+    @DisplayName("precheck: an allowed value, no value, null parameters and docAction:null pass")
+    void allowedOrAbsentValuesPass() throws Exception {
+      SFEntity e = entity("W", NARROW_DOC_ACTION);
+      assertNull(McpDeclaredActions.precheck(e, "documentAction",
+          new JSONObject().put("docAction", "CO")));
+      assertNull(McpDeclaredActions.precheck(e, "DocAction",
+          new JSONObject().put("action", "PR")));
+      assertNull(McpDeclaredActions.precheck(e, "documentAction", new JSONObject()),
+          "{} keeps the button's default, as the SPA sends it");
+      assertNull(McpDeclaredActions.precheck(e, "documentAction", null));
+      assertNull(McpDeclaredActions.precheck(e, "documentAction",
+          new JSONObject().put("docAction", JSONObject.NULL)));
+    }
+  }
+
   // ── the section contract ──────────────────────────────────────────────
 
   @Nested
