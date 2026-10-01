@@ -65,6 +65,12 @@ public final class NeoActionContract {
   public static final String TYPE_STRING = "string";
   /** JSON Schema type for a true/false parameter. */
   public static final String TYPE_BOOLEAN = "boolean";
+  /**
+   * A number. Accepts a JSON number or a numeric string, because the SPA sends amounts as strings
+   * ({@code "121"}) and an agent naturally sends {@code 121}; both reach the handler, which parses
+   * with {@code BigDecimal} (ETP-5558).
+   */
+  public static final String TYPE_NUMBER = "number";
   /** A {@code yyyy-MM-dd} date carried as a string (see {@link NeoReportParam#TYPE_DATE}). */
   public static final String TYPE_DATE = "date";
   /** JSON Schema type for a list parameter; the item type is declared separately. */
@@ -87,19 +93,45 @@ public final class NeoActionContract {
   private final boolean mutating;
   private final List<Param> params;
   private final String idDescription;
+  private final String httpMethod;
+
+  /** The method an action is called with unless it declares another — what the MCP always used. */
+  public static final String DEFAULT_HTTP_METHOD = "POST";
 
   private NeoActionContract(String name, String description, boolean mutating,
       List<Param> params) {
-    this(name, description, mutating, params, null);
+    this(name, description, mutating, params, null, DEFAULT_HTTP_METHOD);
   }
 
+  @SuppressWarnings("java:S107") // one value object: the six fields are the contract itself
   private NeoActionContract(String name, String description, boolean mutating,
-      List<Param> params, String idDescription) {
+      List<Param> params, String idDescription, String httpMethod) {
     this.name = name;
     this.description = description;
     this.mutating = mutating;
     this.params = List.copyOf(params);
     this.idDescription = idDescription;
+    this.httpMethod = httpMethod;
+  }
+
+  /**
+   * The same contract, served under another HTTP method (ETP-5558).
+   *
+   * <p>For a handler action that only answers one method: {@code currencyOptions} refuses anything
+   * but {@code GET}, while the MCP builds every action call as a {@code POST}. Declaring it here
+   * keeps that knowledge in the customization that owns it; the MCP reads it and calls the action
+   * the way the handler expects.</p>
+   *
+   * @param method {@code GET} or {@code POST}
+   * @return a copy carrying the method
+   */
+  public NeoActionContract withHttpMethod(String method) {
+    return new NeoActionContract(name, description, mutating, params, idDescription, method);
+  }
+
+  /** @return the HTTP method the action is called with; {@link #DEFAULT_HTTP_METHOD} unless declared */
+  public String getHttpMethod() {
+    return httpMethod;
   }
 
   /**
@@ -111,7 +143,7 @@ public final class NeoActionContract {
    * @return a copy carrying the description
    */
   public NeoActionContract withIdDescription(String idDescription) {
-    return new NeoActionContract(name, description, mutating, params, idDescription);
+    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod);
   }
 
   /** @return what the {@code id} argument identifies, or {@code null} when not declared */
@@ -380,7 +412,8 @@ public final class NeoActionContract {
      * A required scalar parameter.
      *
      * @param name        the body key
-     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN} or {@link #TYPE_DATE}
+     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN}, {@link #TYPE_NUMBER} or
+     *                    {@link #TYPE_DATE}
      * @param description meaning and expected shape
      * @return the descriptor
      */
@@ -392,7 +425,8 @@ public final class NeoActionContract {
      * An optional scalar parameter. State the default in the description.
      *
      * @param name        the body key
-     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN} or {@link #TYPE_DATE}
+     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN}, {@link #TYPE_NUMBER} or
+     *                    {@link #TYPE_DATE}
      * @param description meaning, expected shape and default
      * @return the descriptor
      */
@@ -482,6 +516,8 @@ public final class NeoActionContract {
       switch (type) {
         case TYPE_BOOLEAN:
           return value instanceof Boolean ? null : "a boolean";
+        case TYPE_NUMBER:
+          return isNumeric(value) ? null : "a number";
         case TYPE_DATE:
           return value instanceof String && DATE.matcher((String) value).matches() ? null
               : "a date in yyyy-MM-dd format";
@@ -489,6 +525,21 @@ public final class NeoActionContract {
           return isArrayOf(value) ? null : "an array of " + itemType + "s";
         default:
           return value instanceof String ? null : "a string";
+      }
+    }
+
+    private static boolean isNumeric(Object value) {
+      if (value instanceof Number) {
+        return true;
+      }
+      if (!(value instanceof String) || StringUtils.isBlank((String) value)) {
+        return false;
+      }
+      try {
+        new java.math.BigDecimal(((String) value).trim());
+        return true;
+      } catch (NumberFormatException e) {
+        return false;
       }
     }
 

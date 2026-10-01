@@ -1943,6 +1943,82 @@ line's statement. The SPA is unaffected: it never wrote through those entities (
 (`AGENT_PROMPT` of `financial-account`, `bank-statements` and of both entities) sends agents to the
 actions.
 
+##### 4.12.1.3 Declared actions on window entities — the invoice payment actions (ETP-5558)
+
+ETP-5468 published declared actions for report specs only, where the declaration **replaces** the
+schema. A window entity is the opposite: its AD buttons are real (`documentAction` completes the
+invoice) and its handler serves further actions beside them. The invoice payment actions had been
+served to the SPA's payment panel all along and were invisible to agents, which therefore built
+payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-5558 diagnosis).
+
+- **Resolution — `McpDeclaredActions`.** The customization is found the way
+  `NeoExtensionDispatcher` finds it: `@NeoExtension` first, `Java_Qualifier` second, so the handler
+  whose contracts are published is the handler `neo_action` runs. A composite header handler
+  declares the union of what its delegates serve. `McpReportActionsSchema.declaredActionsOf`
+  delegates here, so report specs gain the annotation binding too.
+- **Replace vs merge — structure, never name.** `replacesSchema(entity)` is `true` only for an entity
+  of a report spec (`SPEC_TYPE=R`); everything there is as in §4.12.1.1. On a window entity every
+  `neo_schema` view is unchanged except `view:"actions"`, which lists the AD buttons first and then
+  the declared contracts (each `{action, description, mutating, invokeVia, idDescription,
+  parameters}`); `actionCount` counts both, and `invokableCount` counts each declared action as
+  invokable. `neo_discover` adds `actions[]` (the declared names) and `actionsHint` to such an
+  entity.
+- **`MCP_CONFIG.actions`** (`McpActionsSection`, `REPLACE`):
+
+  ```json
+  { "actions": {
+      "hidden":   ["pisTemplates", "psd2GenerateBankPayment"],
+      "redirect": { "aPRMAddpayment": "registerPayment" },
+      "reason":   "why — mandatory, it reaches the agent" } }
+  ```
+
+  `hidden` names declared actions or AD buttons: they leave `view:"actions"` and `neo_discover`, and
+  `neo_action` refuses them **405 `method_not_allowed`** although the handler would serve them —
+  the refusal is the MCP's, the SPA keeps them. `redirect` maps a button to the action to use: the
+  button stays listed (the catalogue is complete, IMP-21) as `invokable:false` with
+  `notInvokableReason` and `useInstead`, and `neo_action` on it is refused 405 with a hint naming the
+  replacement. An unusable `MCP_CONFIG` refuses **every** `neo_action` on the entity (fails closed,
+  like `verbs`).
+- **Validation before dispatch.** `McpToolRouter.handleAction` calls `McpDeclaredActions.precheck`
+  before `NeoExtensionDispatcher`: hidden/redirected → 405; a declared action whose parameters do
+  not match its contract → **422 `validation_error`** with the contract's correction keys
+  (`unknownParameters` + `acceptedParameters`, `missingParameters`, `field` + `expectedType` /
+  `allowedValues`). An AD button is not judged there. Each contract also names its HTTP method
+  (`NeoActionContract#withHttpMethod`, default `POST`), and the handler context is built with it:
+  `currencyOptions` answers only `GET`.
+- **`number`** is a new parameter type: a JSON number or a numeric string, because the SPA sends
+  amounts as strings and an agent sends numbers; the handler parses both with `BigDecimal`.
+
+**The contracts** (`PaymentActionHandlerSupport.actionContracts(isReceipt)`, published by
+`SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` together with
+`CurrencyOptionsHandler.CONTRACT`). For all of them `id` = the invoice id.
+
+| Action | Kind | Parameters (required in **bold**) |
+|---|---|---|
+| `registerPayment` | write | **`scheduleId`**, **`actual_payment`** (number), **`payment_date`**, **`fin_financial_account_id`**, `fin_paymentmethod_id`, `process` (draft\|confirm, default confirm), `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
+| `confirmPayment` | write | **`paymentId`** |
+| `deletePayment` | write | **`paymentId`** |
+| `invoicePayments` | read | — |
+| `invoiceAccounts` | read | — (returns `writeoffLimit` and `paymentMethodIds` per account) |
+| `invoicePaymentMethods` | read | — |
+| `invoiceCreditSources` | read | `editPaymentId` |
+| `currencyOptions` | read, `GET` | — |
+
+**PIS is excluded (product decision).** `pisSupplierAccounts`, `pisTemplates`, `pisPaymentStatus`,
+`cancelPisPayment` and `retryPisPayment` are not declared, and the `pis` key of `registerPayment` is
+not declared either (so the contract refuses it, 422). Both invoice headers carry
+`MCP_CONFIG.actions` hiding the five PIS actions and the `psd2GenerateBankPayment` button and
+redirecting `aPRMAddpayment` (Classic's *Add Payment*) to `registerPayment` — the only thing that
+keeps the undeclared PIS actions off `neo_action`, which `McpConfigSourcedataTest` asserts.
+
+**One REST fix, for the contract to be true.** `registerPayment` chose the advanced path only when
+the body carried `process`, `creditSources`, `overpaymentAction` or `fin_paymentmethod_id`; the
+simple path reads neither `paymentId`, `conversionRate` nor `writeoffDifference`. A body with one
+of those and no other advanced key silently created a new payment instead of editing the draft,
+refused the foreign account, or skipped the write-off. Those three keys now select the advanced path
+too (`PaymentActionHandlerSupport.isAdvanced`). The SPA always sends `process`, so its requests are
+unaffected.
+
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -2222,7 +2298,7 @@ agents are offered and leaves the REST and React contracts untouched.
 
 Resolution is a chain, `spec` → `entity` → `field`, merged by `McpEntityConfig`. Each section
 declares how its levels combine — `REPLACE` (the most specific level that defines the section wins
-outright) or `ADDITIVE` (every level contributes). Both current sections are `REPLACE`.
+outright) or `ADDITIVE` (every level contributes). Every current section is `REPLACE`.
 
 Sections are registered in `McpConfigSections.ensureRegistered()`, and `McpEntityConfig` calls that
 before it parses anything. **An unknown section name, or an unknown key inside a known section, is
@@ -2241,6 +2317,7 @@ metadata.
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
 | `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
 | `verbs` | entity (spec applies to every entity without its own) | Hides MCP write verbs the `ETGO_SF_ENTITY` flags still enable for REST and the SPA — `create`, `update`, `delete`, `reason`, `instead` (ETP-5558). |
+| `actions` | entity (spec applies to every entity without its own) | Hides actions (declared handler actions or AD buttons) from the MCP and redirects buttons to the action to use instead — `hidden`, `redirect`, `reason` (ETP-5558). See §4.12.1.3. |
 
 ##### The `fields` section
 
@@ -2381,14 +2458,15 @@ a hidden verb. The shared `NeoMethodPolicy.buildMcpNotEnabledMessage` is not cha
 
 | Entity | Hidden | Why |
 |---|---|---|
-| `payment-in/finPayment` | create | the UI never creates a collection by hand (`hideCreate`); use `registerPayment` on `sales-invoice/header` |
-| `payment-out/header` | create | idem for payments; `registerPayment` on `purchase-invoice/header` |
+| `payment-in/finPayment` | create, update | the UI never creates a collection by hand (`hideCreate`), and a draft collection header shows only *Eliminar* and *Confirmar* (*Guardar* disabled, no field editable); use `registerPayment` on `sales-invoice/header` — with `paymentId` to edit a draft |
+| `payment-out/header` | create, update | idem for payments; `registerPayment` on `purchase-invoice/header` |
 | `payment-in/finPaymentScheduleDetail`, `payment-out/lines` | create, update, delete | the allocation of a payment to invoice schedules; the UI only writes it through the invoice actions |
 | `payment-out/bankPayments` | create, update, delete | PIS needs a person to authorize at the bank (SCA) and is excluded from MCP |
 | `product/transactionAdjustments` | create | its parent cannot be identified, so creates were already refused (`parent_unresolvable`); declared here so `neo_discover` and `neo_schema` stop advertising a `POST` that always fails |
 
-Update and delete of the two payment headers are **not** hidden yet: pending a check of what the
-*Cobro* / *Pago* windows allow on a draft.
+Delete of the two payment headers is deliberately **kept**: the UI offers *Eliminar* on a draft,
+and `neo_delete` there is the same delete (the invoice action `deletePayment` is the alternative the
+invoice panel uses). Update was hidden after checking the *Cobro* / *Pago* windows on a draft.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -2661,6 +2739,17 @@ blocks work already done or hides a real gap.
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
 `preprocessBatchOperation` and re-measuring this table in the same change.
+
+##### REST and MCP on the invoice payment actions (ETP-5558, declared)
+
+Same handler, same business validations, but the MCP channel refuses more, on purpose (§4.12.1.3):
+
+| call | REST `/sws/neo/<invoice spec>/header/<id>/action/<name>` | MCP `neo_action` |
+|---|---|---|
+| any PIS action (`pisTemplates`, `cancelPisPayment`, …), `psd2GenerateBankPayment` | served | **405** — hidden by `MCP_CONFIG.actions` (a person must authorize at the bank) |
+| `aPRMAddpayment` | Classic button path | **405**, hint `registerPayment` |
+| `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
+| `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
 
 ##### REST `/sws/neo/batch` is unaffected
 

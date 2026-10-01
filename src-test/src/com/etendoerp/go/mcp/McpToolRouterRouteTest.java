@@ -1987,9 +1987,11 @@ class McpToolRouterRouteTest {
       try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
         router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
 
+        // ETP-5558: the method comes from the declared contract; an AD button has none and stays
+        // on POST, exactly as before.
         hookMock.verify(() -> McpHookExecutor.buildActionHookContext(
             eq(SPEC_NAME), eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME),
-            any(), eq(tab), eq(entity)));
+            any(), eq(tab), eq(entity), eq("POST")));
       }
     }
 

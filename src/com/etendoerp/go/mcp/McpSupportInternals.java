@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
@@ -37,6 +38,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.MissingRequiredFieldsException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
@@ -140,6 +142,17 @@ final class McpSupportInternals {
     // ETP-5558: and for a header too — its scope never reads the configuration, and a broken one
     // now hides every MCP write (MCP_CONFIG.verbs fails closed), so it must say why.
     McpParentScope.publishConfigError(item, entity);
+    // ETP-5558: the actions a window entity's customization declares (the invoice payment actions),
+    // named here so the agent learns they exist before it reaches for a hand-built payment.
+    // A report spec already lists them at spec level (ETP-5468), so it is left as it was.
+    if (!McpDeclaredActions.replacesSchema(entity)) {
+      Map<String, NeoActionContract> declared = McpDeclaredActions.of(entity);
+      if (!declared.isEmpty()) {
+        item.put("actions", new JSONArray(declared.keySet()));
+        item.put("actionsHint", "Run these with neo_action (id = the record each acts on); "
+            + "neo_schema with view:\"actions\" returns their parameters next to the AD buttons.");
+      }
+    }
     // Entity-level agent guidance (ETP-4278), additive to the spec-level and
     // per-field prompts. Emitted only when set so untagged entities stay lean.
     String agentPrompt = entity.getAgentPrompt();

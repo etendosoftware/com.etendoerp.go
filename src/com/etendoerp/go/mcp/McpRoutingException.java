@@ -562,6 +562,85 @@ class McpRoutingException extends OBException {
         McpConstants.SEE_ALSO_WRITING);
   }
 
+  /**
+   * An action {@code MCP_CONFIG.actions} hides from the MCP (ETP-5558).
+   *
+   * <p>The customization would serve it — the SPA calls it — so this is a refusal of the channel,
+   * not of the action: the same 405 a hidden write verb answers, carrying the operator's reason.</p>
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param action     the refused action
+   * @param reason     the declared reason (or the unusable-configuration reason)
+   * @return the exception to throw
+   */
+  static McpRoutingException actionHidden(String specName, String entityName, String action,
+      String reason) {
+    return new McpRoutingException(
+        "Action '" + action + "' of '" + entityName + "' (" + specName + ") is not available "
+            + "through MCP: " + reason + ". Nothing was run.",
+        McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+        List.of(),
+        "Do not retry this call. Call neo_schema(spec:'" + specName + "', entity:'" + entityName
+            + "', view:'actions') for the actions this entity offers.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * A button {@code MCP_CONFIG.actions} redirects to another action (ETP-5558).
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param action     the refused button
+   * @param instead    the action to call instead
+   * @param reason     the declared reason
+   * @return the exception to throw
+   */
+  static McpRoutingException actionRedirected(String specName, String entityName, String action,
+      String instead, String reason) {
+    return new McpRoutingException(
+        "Action '" + action + "' of '" + entityName + "' (" + specName + ") is not run through "
+            + "MCP: " + reason + ". Nothing was run.",
+        McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+        List.of(),
+        "Do not retry this call. Use neo_action(spec:'" + specName + "', entity:'" + entityName
+            + "', action:'" + instead + "') instead; neo_schema(view:'actions') gives its "
+            + "parameters.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * A declared action called with parameters its contract refuses (ETP-5558): an undeclared key, a
+   * missing required one, or a value of the wrong shape. Judged before the customization runs.
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param action     the action
+   * @param error      the {@code error} object {@code NeoActionContract.validate} built; its
+   *                   {@code message} becomes the detail and its correction keys
+   *                   ({@code unknownParameters}, {@code missingParameters}, ...) are carried over
+   * @return the exception to throw
+   * @throws JSONException if the error object cannot be read
+   */
+  static McpRoutingException actionParametersInvalid(String specName, String entityName,
+      String action, JSONObject error) throws JSONException {
+    JSONObject extras = new JSONObject();
+    for (java.util.Iterator<?> it = error.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      if (!"message".equals(key) && !McpConstants.KEY_STATUS.equals(key)
+          && !McpConstants.PARAM_FIELD.equals(key)) {
+        extras.put(key, error.get(key));
+      }
+    }
+    String message = error.optString("message", "Invalid parameters for action '" + action + "'.");
+    return new McpRoutingException(message + " Nothing was run.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
+        error.optString(McpConstants.PARAM_FIELD, null), List.of(),
+        "Correct the parameters and retry. neo_schema(spec:'" + specName + "', entity:'"
+            + entityName + "', view:'actions') gives the parameter schema of '" + action + "'.",
+        McpConstants.SEE_ALSO_WRITING).withExtras(extras);
+  }
+
   static McpRoutingException missingArgument(String detail, String field) {
     return new McpRoutingException(detail, McpConstants.STATUS_UNPROCESSABLE,
         McpConstants.ERROR_VALIDATION, field, List.of(),

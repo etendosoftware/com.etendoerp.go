@@ -1326,13 +1326,14 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    // ETP-5468: an entity whose handler declares named actions (bank-reconciliation) has no
-    // field payload of its own — its AD tab is only there for role gating, and dumping that tab's
-    // columns and buttons would advertise actions this entity does not serve. Its schema IS the
-    // action catalog, whatever view was asked for.
-    Map<String, NeoActionContract> declaredActions =
-        McpReportActionsSchema.declaredActionsOf(sfEntity);
-    if (!declaredActions.isEmpty()) {
+    // ETP-5468: an entity of a report spec whose handler declares named actions
+    // (bank-reconciliation) has no field payload of its own — its AD tab is only there for role
+    // gating, and dumping that tab's columns and buttons would advertise actions this entity does
+    // not serve. Its schema IS the action catalog, whatever view was asked for.
+    // ETP-5558: a window entity's declared actions (the invoice payment actions) sit NEXT TO its AD
+    // buttons instead — merged into view:"actions" below; every other view is unchanged.
+    Map<String, NeoActionContract> declaredActions = McpDeclaredActions.of(sfEntity);
+    if (!declaredActions.isEmpty() && McpDeclaredActions.replacesSchema(sfEntity)) {
       return wrapAsTextContent(
           McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions));
     }
@@ -1382,8 +1383,8 @@ public class McpToolRouter {
     String view = args.optString(McpActionsView.PARAM_VIEW, null);
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
-      return wrapAsTextContent(
-          McpActionsView.buildResponse(specName, entityName, fieldsArray));
+      return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
+          declaredActions, McpActionsSection.forEntity(sfEntity)));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
@@ -1779,6 +1780,12 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
+    // ETP-5558: judged before the customization runs — an action MCP_CONFIG.actions hides or
+    // redirects is refused, and a declared one is validated against its contract (422 naming the
+    // wrong key). The contract also says which HTTP method the handler answers it on.
+    NeoActionContract declared = McpDeclaredActions.precheck(sfEntity, actionName, parameters);
+    String httpMethod = declared != null ? declared.getHttpMethod()
+        : NeoActionContract.DEFAULT_HTTP_METHOD;
 
     // The body object is shared with executeButtonActionCore on purpose, so a handler that
     // normalizes or injects the action value is honoured by the process call that follows —
@@ -1788,7 +1795,7 @@ public class McpToolRouter {
     // by buildActionHookContext; the dispatcher does not route on it, so a handler that serves
     // several buttons still discriminates internally, exactly as today.
     NeoContext hookCtx = McpHookExecutor.buildActionHookContext(specName, entityName, recordId,
-        actionName, actionParams, sfEntity.getADTab(), sfEntity);
+        actionName, actionParams, sfEntity.getADTab(), sfEntity, httpMethod);
     NeoExtensionRequest actionRequest = NeoExtensionRequest.builder()
         .qualifier(sfEntity.getJavaQualifier())
         .specName(specName)

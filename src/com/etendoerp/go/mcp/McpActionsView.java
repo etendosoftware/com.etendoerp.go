@@ -86,10 +86,51 @@ final class McpActionsView {
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
       throws JSONException {
+    return buildResponse(specName, entityName, fields, Map.of(), null);
+  }
+
+  /**
+   * The same response for a window entity whose customization also declares actions (ETP-5558):
+   * the AD buttons first, then the declared actions, in one catalogue.
+   *
+   * <p>On a window entity both are real — {@code documentAction} completes the invoice, and
+   * {@code registerPayment} pays it — so neither replaces the other (a report spec, where the AD
+   * tab only gates the role, still uses {@link #buildDeclaredResponse}). {@code MCP_CONFIG.actions}
+   * shapes the buttons: a hidden one is left out, a redirected one stays listed, not invokable,
+   * carrying {@code useInstead}. The declared contracts arrive already filtered, and each counts as
+   * invokable.</p>
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param fields     the full schema field array
+   * @param declared   the actions the customization declares, minus the hidden ones
+   * @param config     the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
+   * @return the response
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared, McpActionsSection.View config)
+      throws JSONException {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
-    JSONArray actions = apply(fields);
+    JSONArray actions = new JSONArray();
+    JSONArray buttons = apply(fields);
+    for (int i = 0; i < buttons.length(); i++) {
+      JSONObject button = buttons.getJSONObject(i);
+      String name = button.optString("name", null);
+      if (config != null && config.isHidden(name)) {
+        continue;
+      }
+      String instead = config != null ? config.redirectOf(name) : null;
+      if (instead != null) {
+        redirect(button, instead, config.getReason());
+      }
+      actions.put(button);
+    }
+    for (NeoActionContract contract : declared.values()) {
+      actions.put(contract.toJson());
+    }
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
@@ -125,6 +166,16 @@ final class McpActionsView {
         + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "
         + "before anything runs.");
     return response;
+  }
+
+  /** Mark a button as one to leave for {@code instead}: listed, not invokable, and why. */
+  private static void redirect(JSONObject button, String instead, String reason)
+      throws JSONException {
+    button.remove(McpSchemaFieldBuilder.KEY_INVOKE_VIA);
+    button.put(McpSchemaFieldBuilder.KEY_INVOKABLE, false);
+    button.put(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, "Not run through MCP: " + reason + ". Use '" + instead
+        + "' (listed below) instead.");
+    button.put("useInstead", instead);
   }
 
   /** @return how many of the catalog's actions {@code neo_action} can actually run (IMP-21). */
