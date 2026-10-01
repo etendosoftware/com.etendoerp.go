@@ -2048,6 +2048,16 @@ mode does not widen them), and `PaymentOwnership` adds the invoice relation:
 Each refusal is the answer a missing id already gave, so ids cannot be probed. The SPA always sends
 the current invoice and ids from that invoice's own listings, so its calls are unchanged.
 
+The edit `paymentId` of `registerPayment` is checked next to `scheduleId`, before any side effect:
+a PIS confirm instructs the bank transfer before the draft is resolved, so a foreign id must be
+refused before that, not on the replay.
+
+**Known gaps, not closed here** (also in §4.12.9): (1) mutations are gated by the **readable**
+organizations, not the writable ones — a role that may read an organization's invoices but not
+write them still reaches these actions; (2) `pisPaymentId` (status, cancel, retry) is scoped to the
+tenant but **not** to the invoice in the URL, so within one tenant a transfer of another invoice can
+be cancelled through any invoice.
+
 **`process` is required for agents, and only for agents.** The handler reads `paymentId`,
 `conversionRate` and `writeoffDifference` only on its advanced path, which a body takes only when it
 carries `process`, `creditSources`, `overpaymentAction` or `fin_paymentmethod_id`. Without one of
@@ -2793,6 +2803,13 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
 | `registerPayment` with `paymentId`, `conversionRate` or `writeoffDifference` but no `process` (nor `creditSources` / `overpaymentAction` / `fin_paymentmethod_id`) | **known quirk, not fixed:** the simple path runs and silently ignores those keys — a NEW payment instead of editing the draft, the cross-currency account refused, no write-off | **422** `missingParameters:["process"]` — `process` is required in the contract |
+
+##### Payment action ids — known gaps (ETP-5558, both channels)
+
+| gap | effect | status |
+|---|---|---|
+| mutations gated by readable, not writable, organizations | a role with read-only access to an organization can still register, confirm or delete its payments through these actions | open, follow-up |
+| `pisPaymentId` scoped to the tenant, not to the invoice | within one tenant, a PIS transfer of another invoice can be queried, cancelled or retried through any invoice | open, follow-up |
 
 ##### REST `/sws/neo/batch` is unaffected
 

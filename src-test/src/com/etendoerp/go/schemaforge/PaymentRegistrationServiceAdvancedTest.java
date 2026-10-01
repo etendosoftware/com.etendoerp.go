@@ -1012,6 +1012,33 @@ class PaymentRegistrationServiceAdvancedTest {
         any(), any(), anyString(), any(), anyString()), never());
   }
 
+  /**
+   * ETP-5558: with pis:true + process:confirm the bank transfer is instructed before the draft is
+   * resolved, so an edit id that is not a draft of this invoice must be refused BEFORE that —
+   * otherwise money moves and only the replay answers 404.
+   */
+  @Test
+  @DisplayName("A foreign edit paymentId is refused before a PIS transfer is instructed")
+  void testAdvancedForeignEditIdRefusedBeforePis() throws Exception {
+    stubAdvancedBasics();
+    when(dal.get(FIN_Payment.class, DRAFT_PAY_ID)).thenReturn(mock(FIN_Payment.class));
+
+    JSONObject body = advancedBody("58.70", CONFIRM).put("paymentId", DRAFT_PAY_ID)
+        .put("pis", true);
+
+    try (MockedStatic<PisPaymentService> pis = mockStatic(PisPaymentService.class);
+        MockedStatic<PisDeferredPaymentService> deferred =
+            mockStatic(PisDeferredPaymentService.class)) {
+      NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+          INVOICE_ID, body, true);
+
+      assertEquals(404, response.getHttpStatus());
+      deferred.verify(() -> PisDeferredPaymentService.initiateDeferredPis(any(), any(), any(),
+          any(), any(), anyBoolean()), never());
+      pis.verify(() -> PisPaymentService.validatePisEligibility(any(), any(), any()), never());
+    }
+  }
+
   @Test
   @DisplayName("Editing an already-processed payment is rejected before any field is rewritten")
   void testAdvancedEditProcessedPaymentThrows() throws Exception {

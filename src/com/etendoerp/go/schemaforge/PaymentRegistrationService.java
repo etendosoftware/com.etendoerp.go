@@ -595,6 +595,14 @@ public final class PaymentRegistrationService {
     if (PaymentOwnership.scheduleOf(scheduleId, invoice) == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
     }
+    // ETP-5558: the draft being edited is checked HERE, before any side effect — a PIS confirm
+    // instructs the bank transfer long before resolveOrCreatePayment runs, so a foreign or stale
+    // id must not get that far (money would move and only the replay would answer 404).
+    String requestedEditId = body.optString(KEY_PAYMENT_ID, null);
+    if (StringUtils.isNotBlank(requestedEditId)
+        && PaymentOwnership.invoicePayment(requestedEditId, invoice.getId()) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
+    }
     BigDecimal cash;
     try {
       cash = new BigDecimal(body.optString("actual_payment", ""));
