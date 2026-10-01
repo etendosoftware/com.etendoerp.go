@@ -56,6 +56,9 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionResult;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -496,6 +499,65 @@ class McpWindowDeclaredActionsTest {
       assertNull(McpDeclaredActions.precheck(entity("W", null), "somethingElse",
           new JSONObject()));
     }
+
+    // ── ETP-5558 (a1a863f83): the record-ownership guard on the MCP action path ──
+
+    private JSONObject actOn(String recordId, NeoResponse guardAnswer,
+        MockedStatic<NeoExtensionDispatcher> dispatch) throws Exception {
+      current = entity("W", null);
+      // McpToolRouterSupport is statically mocked on this path, private helpers included, so the
+      // conversion is asserted by its arguments (a 404 carrying the guard's body) rather than run.
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(),
+          org.mockito.ArgumentMatchers.anyInt())).thenAnswer(inv -> new JSONObject()
+              .put(McpConstants.KEY_STATUS, (int) inv.getArgument(1)).put(McpConstants.KEY_ERROR,
+                  "not_found"));
+      try (MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class)) {
+        guard.when(() -> NeoActionRecordGuard.refusalFor(current, recordId))
+            .thenReturn(guardAnswer);
+        JSONObject args = new JSONObject().put("entity", ENTITY).put("id", recordId)
+            .put("action", "DocAction");
+        return new McpToolRouter().handleAction(SPEC, args);
+      }
+    }
+
+    @Test
+    @DisplayName("an action on another tenant's record is a 404 not_found, and nothing runs")
+    void foreignRecordIsRefused() throws Exception {
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class)) {
+        JSONObject result = actOn("INV-FOREIGN", NeoResponse.error(404, "Record not found"),
+            dispatch);
+
+        assertTrue(result.getBoolean("isError"), result.toString());
+        JSONObject env = new JSONObject(result.getJSONArray("content").getJSONObject(0)
+            .getString("text"));
+        assertEquals(404, env.getInt(McpConstants.KEY_STATUS), env.toString());
+        supportMock.verify(() -> McpToolRouterSupport.toMcpHandlerError(
+            org.mockito.ArgumentMatchers.argThat(body -> body != null
+                && "Record not found".equals(body.optJSONObject("error") == null ? null
+                    : body.optJSONObject("error").optString("message"))),
+            eq(404)));
+        dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()), never());
+        buttonMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(any(), anyString(),
+            anyString(), any()), never());
+      }
+    }
+
+    @Test
+    @DisplayName("an action on an own record is dispatched as before")
+    void ownRecordIsDispatched() throws Exception {
+      try (MockedStatic<NeoExtensionDispatcher> dispatch =
+               mockStatic(NeoExtensionDispatcher.class)) {
+        dispatch.when(() -> NeoExtensionDispatcher.dispatch(any())).thenReturn(
+            new NeoExtensionResult(null, NeoResponse.ok(new JSONObject().put("ran", true)), null));
+
+        JSONObject result = actOn("INV-OWN", null, dispatch);
+
+        assertFalse(result.has("isError"), result.toString());
+        assertTrue(result.toString().contains("ran"), result.toString());
+        dispatch.verify(() -> NeoExtensionDispatcher.dispatch(any()));
+      }
+    }
   }
 
   @Nested
@@ -724,6 +786,99 @@ class McpWindowDeclaredActionsTest {
       assertNull(McpDeclaredActions.precheck(e, "documentAction", null));
       assertNull(McpDeclaredActions.precheck(e, "documentAction",
           new JSONObject().put("docAction", JSONObject.NULL)));
+    }
+  }
+
+  // ── the shipped rows of b86eade1d, judged by precheck ──────────────────
+
+  @Nested
+  @DisplayName("precheck with the shipped payment and movement rows (b86eade1d)")
+  class ShippedRows {
+
+    private static final String PAYMENT_IN = "26AAEE85345F4D549907007E8821360A";
+    private static final String FA_TRANSACTION = "AF50E181A0094E439C7B46B25A9E38FC";
+
+    /** An entity on {@code tableName} carrying the real sourcedata MCP_CONFIG of {@code rowId}. */
+    private SFEntity shipped(String tableName, String rowId, String[][] buttons) throws Exception {
+      Entity dal = mock(Entity.class);
+      when(ModelProvider.getInstance().getEntityByTableName(tableName)).thenReturn(dal);
+      List<Column> columns = new java.util.ArrayList<>();
+      for (String[] b : buttons) {
+        Column column = buttonColumn(b[0]);
+        when(column.getTable().getDBTableName()).thenReturn(tableName);
+        Property property = mock(Property.class);
+        when(property.getName()).thenReturn(b[1]);
+        when(dal.getPropertyByColumnName(b[0])).thenReturn(property);
+        columns.add(column);
+      }
+      SFEntity entity = entity("W", McpConfigSourcedataTest.payloadOf(rowId).toString());
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn(tableName);
+      when(table.getADColumnList()).thenReturn(columns);
+      when(entity.getADTab().getTable()).thenReturn(table);
+      return entity;
+    }
+
+    private SFEntity payment() throws Exception {
+      return shipped("FIN_Payment", PAYMENT_IN, new String[][] {
+          { "em_etpr_remove_payment", "eTPRRemovePayment" },
+          { "EM_APRM_Process_Payment", "aPRMProcessPayment" },
+          { "EM_Etpr_Reactivate_Payment", "etprReactivatePayment" },
+          { "Posted", "posted" } });
+    }
+
+    private SFEntity transaction() throws Exception {
+      return shipped("FIN_Finacc_Transaction", FA_TRANSACTION, new String[][] {
+          { "EM_Etpr_Remove_Transaction", "etprRemoveTransaction" },
+          { "Posted", "posted" } });
+    }
+
+    private int refusalStatus(SFEntity entity, String action) {
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity, action, new JSONObject()), action);
+      try {
+        return e.toEnvelope().getInt(McpConstants.KEY_STATUS);
+      } catch (Exception json) {
+        throw new AssertionError(json);
+      }
+    }
+
+    @Test
+    @DisplayName("eTPRRemovePayment is refused 405 by field name and by its DB name")
+    void removePaymentIsHiddenUnderBothNames() throws Exception {
+      assertEquals(405, refusalStatus(payment(), "eTPRRemovePayment"));
+      assertEquals(405, refusalStatus(payment(), "em_etpr_remove_payment"));
+    }
+
+    @Test
+    @DisplayName("Confirmar (value P) and Reactivar stay callable on the payment header")
+    void uiActionsStayCallable() throws Exception {
+      assertNull(McpDeclaredActions.precheck(payment(), "aPRMProcessPayment",
+          new JSONObject().put("docAction", "P")));
+      assertNull(McpDeclaredActions.precheck(payment(), "EM_APRM_Process_Payment",
+          new JSONObject()));
+      assertNull(McpDeclaredActions.precheck(payment(), "etprReactivatePayment",
+          new JSONObject()));
+      assertEquals(422, assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(payment(), "EM_APRM_Process_Payment",
+              new JSONObject().put("docAction", "V"))).toEnvelope()
+          .getInt(McpConstants.KEY_STATUS));
+    }
+
+    @Test
+    @DisplayName("a movement's remove button is refused 405 under its DB name")
+    void removeTransactionIsHidden() throws Exception {
+      assertEquals(405, refusalStatus(transaction(), "EM_Etpr_Remove_Transaction"));
+      assertEquals(405, refusalStatus(transaction(), "etprRemoveTransaction"));
+      assertEquals(405, refusalStatus(transaction(), "Posted"));
+    }
+
+    @Test
+    @DisplayName("post and unpost on a movement are not refused: no alias scan turns post into"
+        + " posted")
+    void postAndUnpostStayCallable() throws Exception {
+      assertNull(McpDeclaredActions.precheck(transaction(), "post", new JSONObject()));
+      assertNull(McpDeclaredActions.precheck(transaction(), "unpost", new JSONObject()));
     }
   }
 

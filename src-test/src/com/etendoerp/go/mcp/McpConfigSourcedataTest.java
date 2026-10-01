@@ -175,7 +175,7 @@ class McpConfigSourcedataTest {
   private static final List<String> PAYMENT_HEADERS =
       List.of("26AAEE85345F4D549907007E8821360A", "65BF1DFD362B4F1CB6FEC60DB7030CF5");
 
-  private static JSONObject payloadOf(String entityId) throws IOException, JSONException {
+  static JSONObject payloadOf(String entityId) throws IOException, JSONException {
     for (String[] row : authoredPayloads()) {
       if (row[0].equals("ETGO_SF_ENTITY.xml#" + entityId)) {
         return new JSONObject(row[1]);
@@ -299,6 +299,10 @@ class McpConfigSourcedataTest {
       assertEquals("P", process.getString(0), id);
       assertEquals(1, actions.getJSONObject(McpActionsSection.KEY_VALUES).length(), id);
       assertEveryWriteHidden(payload.getJSONObject(McpVerbsSection.NAME), id);
+      String reason = actions.getString(McpActionsSection.KEY_REASON);
+      String invoiceSpec = id.equals(PAYMENT_HEADERS.get(0)) ? "sales-invoice" : "purchase-invoice";
+      assertTrue(reason.contains("neo_action(spec:'" + invoiceSpec + "'")
+          && reason.contains("action:'deletePayment'"), id + ": the way to delete a draft: " + reason);
       assertResolvesCleanly(id);
     }
   }
