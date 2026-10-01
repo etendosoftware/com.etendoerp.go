@@ -1378,6 +1378,12 @@ public class McpToolRouter {
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
     McpSchemaFieldBuilder.applyCuratedLabels(fieldsArray,
         McpSchemaFieldBuilder.loadFieldLabels(adTab, NeoLanguage.currentCode()));
+    // ETP-5558: MCP_CONFIG.actions shapes the buttons here, before any projection, so view:"full"
+    // and its fields:[...] whitelist describe the same buttons view:"actions" does. Shaping only
+    // the actions view let a blind agent read Void off the full view of a payment and offer it.
+    McpActionsSection.View actionsConfig = McpActionsSection.forEntity(sfEntity);
+    Set<String> excludedActions = McpDeclaredActions.excludedOf(sfEntity);
+    fieldsArray = McpActionsView.applyConfig(fieldsArray, actionsConfig, excludedActions);
 
     // IMP-28 clause 4: computed off the full field array, before any view/fields narrowing
     // below, so a caller passing fields:[...] does not skew what the entity as a whole
@@ -1391,8 +1397,7 @@ public class McpToolRouter {
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
       return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
-          declaredActions, McpActionsSection.forEntity(sfEntity),
-          McpDeclaredActions.excludedOf(sfEntity)));
+          declaredActions, actionsConfig, excludedActions));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that

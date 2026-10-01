@@ -734,6 +734,100 @@ class McpWindowDeclaredActionsTest {
       assertEquals(McpActionsView.apply(processButton()).toString(), plain.toString());
     }
 
+    /** The full view's field array: the buttons above plus a plain field and a hidden button. */
+    private JSONArray fullFields() throws Exception {
+      JSONArray fields = processButton();
+      fields.put(new JSONObject("{\"name\":\"amount\",\"type\":\"amount\","
+          + "\"column\":\"Amount\"}"));
+      fields.put(new JSONObject("{\"name\":\"psd2GenerateBankPayment\",\"type\":\"button\","
+          + "\"column\":\"EM_Psd2_Generate_Bank_Payment\",\"invokeVia\":\"neo_action\"}"));
+      fields.put(new JSONObject("{\"name\":\"aPRMAddpayment\",\"type\":\"button\","
+          + "\"column\":\"EM_APRM_Addpayment\",\"invokeVia\":\"neo_action\"}"));
+      return fields;
+    }
+
+    private List<String> namesIn(JSONArray fields) throws Exception {
+      List<String> out = new java.util.ArrayList<>();
+      for (int i = 0; i < fields.length(); i++) {
+        out.add(fields.getJSONObject(i).getString("name"));
+      }
+      return out;
+    }
+
+    @Test
+    @DisplayName("full view: a narrowed button lists only the allowed values (blind run a00c)")
+    void fullViewNarrowsTheButton() throws Exception {
+      // 20261001T1949-local-a00c: the agent read view:"full" and offered Void (V) to its user.
+      JSONArray full = McpActionsView.applyConfig(fullFields(),
+          McpActionsSection.forEntity(entity("W", NARROW_PROCESS)), Set.of());
+      assertEquals(List.of("P"), valuesOf(buttonNamed(full, "aPRMProcessPayment")));
+      assertEquals(List.of("CO", "VO"), valuesOf(buttonNamed(full, "documentAction")));
+      assertEquals(namesIn(fullFields()), namesIn(full), "nothing else is added or removed");
+    }
+
+    @Test
+    @DisplayName("full view: the narrowing also matches the button by its DB column")
+    void fullViewNarrowsByColumn() throws Exception {
+      JSONArray fields = new JSONArray().put(new JSONObject("{\"name\":\"aPRMProcessPayment\","
+          + "\"column\":\"EM_APRM_Process_Payment\",\"type\":\"button\",\"actionValues\":"
+          + "[{\"value\":\"P\"},{\"value\":\"V\"}]}"));
+      JSONArray full = McpActionsView.applyConfig(fields, McpActionsSection.forEntity(entity("W",
+          "{\"actions\":{\"values\":{\"EM_APRM_Process_Payment\":[\"P\"]},\"reason\":\"r\"}}")),
+          Set.of());
+      assertEquals(List.of("P"), valuesOf(full.getJSONObject(0)));
+    }
+
+    @Test
+    @DisplayName("full view: hidden and agent-excluded buttons are left out, plain fields kept")
+    void fullViewLeavesHiddenOut() throws Exception {
+      JSONArray full = McpActionsView.applyConfig(fullFields(),
+          McpActionsSection.forEntity(entity("W", HIDE_PIS)), Set.of("posted"));
+      assertEquals(List.of("aPRMProcessPayment", "documentAction", "amount", "aPRMAddpayment"),
+          namesIn(full));
+    }
+
+    @Test
+    @DisplayName("full view: a hidden button named by its DB column is left out too")
+    void fullViewHiddenByColumn() throws Exception {
+      JSONArray full = McpActionsView.applyConfig(fullFields(), McpActionsSection.forEntity(
+          entity("W", "{\"actions\":{\"hidden\":[\"EM_Psd2_Generate_Bank_Payment\"],"
+              + "\"reason\":\"r\"}}")), Set.of());
+      assertFalse(namesIn(full).contains("psd2GenerateBankPayment"), namesIn(full).toString());
+    }
+
+    @Test
+    @DisplayName("full view: a redirected button is withdrawn and carries useInstead")
+    void fullViewRedirects() throws Exception {
+      JSONObject addPayment = buttonNamed(McpActionsView.applyConfig(fullFields(),
+          McpActionsSection.forEntity(entity("W", HIDE_PIS)), Set.of()), "aPRMAddpayment");
+      assertEquals("registerPayment", addPayment.getString("useInstead"));
+      assertFalse(addPayment.has(McpSchemaFieldBuilder.KEY_INVOKE_VIA));
+      assertFalse(addPayment.getBoolean(McpSchemaFieldBuilder.KEY_INVOKABLE));
+    }
+
+    @Test
+    @DisplayName("full view: an unusable MCP_CONFIG withdraws every button, not the plain fields")
+    void fullViewUnusableWithdrawsButtons() throws Exception {
+      JSONArray full = McpActionsView.applyConfig(fullFields(),
+          McpActionsSection.forEntity(entity("W", "{\"actions\":{\"bogus\":1}}")), Set.of());
+      for (int i = 0; i < full.length(); i++) {
+        JSONObject f = full.getJSONObject(i);
+        boolean button = "button".equals(f.getString("type"));
+        assertEquals(!button, !f.has(McpSchemaFieldBuilder.KEY_INVOKABLE), f.toString());
+        assertFalse(button && f.has(McpSchemaFieldBuilder.KEY_INVOKE_VIA), f.toString());
+      }
+    }
+
+    @Test
+    @DisplayName("full view: no configuration, no exclusion leaves the array as it was")
+    void fullViewUnchangedWithoutConfig() throws Exception {
+      assertEquals(fullFields().toString(), McpActionsView.applyConfig(fullFields(),
+          McpActionsSection.forEntity(entity("W", null)), Set.of()).toString());
+      assertEquals(fullFields().toString(),
+          McpActionsView.applyConfig(fullFields(), null, null).toString());
+      assertEquals(0, McpActionsView.applyConfig(null, null, null).length());
+    }
+
     private McpRoutingException refusedValue(String config, String action, JSONObject params) {
       return assertThrows(McpRoutingException.class,
           () -> McpDeclaredActions.precheck(entity("W", config), action, params));
@@ -964,9 +1058,40 @@ class McpWindowDeclaredActionsTest {
       assertTrue(Pattern.compile("McpActionsView\\s*\\.\\s*buildResponse\\s*\\([^;]*\\b"
           + declared.group(1) + "\\b").matcher(body).find(),
           "view:\"actions\" must receive the declared actions to merge");
-      assertTrue(Pattern.compile("McpActionsView\\s*\\.\\s*buildResponse\\s*\\([^;]*"
-          + "McpDeclaredActions\\s*\\.\\s*excludedOf\\s*\\(").matcher(body).find(),
-          "and the actions the customization excludes, so they are not listed");
+      Matcher excluded = Pattern.compile(
+          "(\\w+)\\s*=\\s*McpDeclaredActions\\s*\\.\\s*excludedOf\\s*\\(").matcher(body);
+      assertTrue(excluded.find(), "handleSchema must resolve the actions the customization excludes");
+      assertTrue(Pattern.compile("McpActionsView\\s*\\.\\s*buildResponse\\s*\\([^;]*\\b"
+          + excluded.group(1) + "\\b").matcher(body).find(),
+          "and pass them to view:\"actions\", so they are not listed");
+    }
+
+    @Test
+    @DisplayName("neo_schema shapes the buttons once, before every projection (full view too)")
+    void schemaShapesButtonsBeforeEveryView() {
+      String body = McpSourceScanner.stripComments(method("handleSchema"));
+      Matcher shaped = Pattern.compile("(\\w+)\\s*=\\s*McpActionsView\\s*\\.\\s*applyConfig\\s*"
+          + "\\(\\s*\\1\\s*,\\s*(\\w+)\\s*,\\s*(\\w+)\\s*\\)").matcher(body);
+      assertTrue(shaped.find(), "handleSchema must reassign the field array through applyConfig");
+      assertTrue(Pattern.compile("\\b" + shaped.group(2)
+          + "\\s*=\\s*McpActionsSection\\s*\\.\\s*forEntity\\s*\\(").matcher(body).find(),
+          "with the entity's MCP_CONFIG.actions");
+      assertTrue(Pattern.compile("\\b" + shaped.group(3)
+          + "\\s*=\\s*McpDeclaredActions\\s*\\.\\s*excludedOf\\s*\\(").matcher(body).find(),
+          "and the customization's agent-excluded actions");
+      Matcher built = Pattern.compile("\\b" + shaped.group(1)
+          + "\\s*=\\s*McpSchemaFieldBuilder\\s*\\.\\s*buildSchemaFieldsArray\\s*\\(")
+          .matcher(body);
+      assertTrue(built.find());
+      assertTrue(built.start() < shaped.start(), "after the array is built");
+      for (String dispatch : List.of("McpActionsView\\s*\\.\\s*isActionsView\\s*\\(",
+          "McpSchemaCreateView\\s*\\.\\s*isCreateView\\s*\\(",
+          "McpSchemaCreateView\\s*\\.\\s*isFullView\\s*\\(",
+          "McpSchemaCreateView\\s*\\.\\s*applyFieldWhitelist\\s*\\(")) {
+        Matcher m = Pattern.compile(dispatch).matcher(body);
+        assertTrue(m.find(), dispatch);
+        assertTrue(shaped.start() < m.start(), "shaped before " + dispatch);
+      }
     }
 
     @Test

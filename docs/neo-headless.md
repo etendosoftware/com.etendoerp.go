@@ -1987,6 +1987,17 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   the catalogue honest; it is a safety boundary only when the handler honours the value it gets
   (`ReactivatePaymentHandler` sends `P` whatever arrives).
 
+  **Every projection, not only `view:"actions"`.** `McpToolRouter.handleSchema` shapes the field
+  array once (`McpActionsView.applyConfig`), right after it is built and before the view dispatch,
+  so `view:"actions"`, `view:"full"` and its `fields:[…]` whitelist describe the same buttons: a
+  hidden or agent-excluded button is absent from all three (a `fields:["<hidden>"]` request reports
+  it in `unknownFields`), a redirected one carries `useInstead`, a narrowed one keeps only its
+  allowed `actionValues`, and an unusable configuration withdraws every button. The match uses the
+  field name and its DB `column`. Until ETP-5558 only the actions view was shaped: in blind run
+  `20261001T1949-local-a00c` the agent read `view:"full"` of `payment-in/finPayment`, found
+  `aPRMProcessPayment` still listing `V` (Void) and offered it to its user. No other MCP surface
+  emits `actionValues` (`neo_get`/`neo_list` carry record values, not button descriptions).
+
   `hidden` names declared actions or AD buttons: they leave `view:"actions"` and `neo_discover`, and
   `neo_action` refuses them **405 `method_not_allowed`** although the handler would serve them —
   the refusal is the MCP's, the SPA keeps them. `redirect` maps a button to the action to use: the

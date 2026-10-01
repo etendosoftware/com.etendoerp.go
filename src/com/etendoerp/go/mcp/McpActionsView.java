@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -128,23 +130,7 @@ final class McpActionsView {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
-    JSONArray actions = new JSONArray();
-    JSONArray buttons = apply(fields);
-    for (int i = 0; i < buttons.length(); i++) {
-      JSONObject button = buttons.getJSONObject(i);
-      String name = button.optString("name", null);
-      if (excluded.contains(name) || (config != null && config.isHidden(name))) {
-        continue;
-      }
-      String instead = config != null ? config.redirectOf(name) : null;
-      if (instead != null) {
-        redirect(button, instead, config.getRedirectReason());
-      }
-      if (config != null) {
-        narrowValues(button, config.allowedValuesOf(name));
-      }
-      actions.put(button);
-    }
+    JSONArray actions = apply(applyConfig(fields, config, excluded));
     for (NeoActionContract contract : declared.values()) {
       actions.put(contract.toJson());
     }
@@ -153,6 +139,87 @@ final class McpActionsView {
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
     return response;
+  }
+
+  /**
+   * Shape the AD buttons of a schema field array the way {@code MCP_CONFIG.actions} and the
+   * customization's agent-excluded actions say (ETP-5558), leaving every other field untouched.
+   *
+   * <p>Every projection of {@code neo_schema} that describes a button goes through here —
+   * {@code view:"actions"}, {@code view:"full"} and its {@code fields:[…]} whitelist — so they
+   * cannot disagree. Before this, only the actions view was shaped: a blind agent read the full
+   * view, found {@code aPRMProcessPayment} still offering Void, and offered it to its user. A
+   * hidden or excluded button is left out, a redirected one is withdrawn with {@code useInstead},
+   * a narrowed one keeps only its allowed {@code actionValues}, and an unusable configuration
+   * withdraws every button. A button is matched by its field name and by its DB column, the two
+   * names {@code neo_action} fires it by.</p>
+   *
+   * @param fields   the full schema field array; its kept buttons are shaped in place
+   * @param config   the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
+   * @param excluded the action names the customization keeps for people only
+   * @return a new array, in the original order
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONArray applyConfig(JSONArray fields, McpActionsSection.View config,
+      Set<String> excluded) throws JSONException {
+    JSONArray shaped = new JSONArray();
+    if (fields == null) {
+      return shaped;
+    }
+    Set<String> keptForPeople = excluded != null ? excluded : Set.of();
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.getJSONObject(i);
+      if (!TYPE_BUTTON.equals(field.optString("type", null))) {
+        shaped.put(field);
+      } else if (shapeButton(field, config, keptForPeople)) {
+        shaped.put(field);
+      }
+    }
+    return shaped;
+  }
+
+  /** @return {@code false} when the button must be left out; otherwise shapes it in place */
+  private static boolean shapeButton(JSONObject button, McpActionsSection.View config,
+      Set<String> excluded) throws JSONException {
+    List<String> names = namesOf(button);
+    for (String name : names) {
+      if (excluded.contains(name) || (config != null && config.isHidden(name))) {
+        return false;
+      }
+    }
+    if (config == null) {
+      return true;
+    }
+    for (String name : names) {
+      String instead = config.redirectOf(name);
+      if (instead != null) {
+        redirect(button, instead, config.getRedirectReason());
+        break;
+      }
+    }
+    for (String name : names) {
+      Set<String> allowed = config.allowedValuesOf(name);
+      if (allowed != null) {
+        narrowValues(button, allowed);
+        break;
+      }
+    }
+    if (config.isUnusable()) {
+      withdraw(button, "Not run through MCP: " + config.getReason());
+    }
+    return true;
+  }
+
+  /** The names a button is known by: its field name, then its DB column. */
+  private static List<String> namesOf(JSONObject button) {
+    List<String> names = new ArrayList<>(2);
+    for (String key : List.of("name", "column")) {
+      String name = button.optString(key, null);
+      if (name != null && !names.contains(name)) {
+        names.add(name);
+      }
+    }
+    return names;
   }
 
   /**
