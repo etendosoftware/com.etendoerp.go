@@ -89,7 +89,8 @@ class McpDeclaredActionsTest {
   private static final Map<String, NeoActionContract> CONTRACTS =
       new ReconciliationHandler().actionContracts();
 
-  // In handleSchema: if (isActionOnlyEntity(...)) { return ... buildDeclaredResponse(...
+  // Guards that handleSchema answers with the declared catalog only when isActionOnlyEntity
+  // is true.
   private static final Pattern CATALOG_GATE = Pattern.compile(
       "if\\s*\\(\\s*McpReportActionsSchema\\s*\\.\\s*isActionOnlyEntity\\s*\\([^)]*\\)\\s*\\)"
           + "\\s*\\{\\s*return[^;]*McpActionsView\\s*\\.\\s*buildDeclaredResponse\\s*\\(");
