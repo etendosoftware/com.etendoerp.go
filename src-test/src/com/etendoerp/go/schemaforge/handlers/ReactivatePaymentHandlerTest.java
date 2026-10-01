@@ -62,6 +62,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
@@ -1371,5 +1372,129 @@ public class ReactivatePaymentHandlerTest {
   @Test
   public void removeRefusesAnotherTenantsPayment() {
     assertForeignPaymentRefused("eTPRRemovePayment");
+  }
+
+  // ── ETP-5558: an agent's Eliminar gets the UI's gate (RPVOID, pisLocked) ──
+
+  private static NeoContext mcpRemoveCtx(String recordId) {
+    return NeoContext.builder()
+        .specName("payment-in")
+        .entityName("finPayment")
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("eTPRRemovePayment")
+        .recordId(recordId)
+        .mcpOrigin(true)
+        .build();
+  }
+
+  /** A processed payment of the tenant, with no details, in {@code status}. */
+  private static FIN_Payment processedPayment(String id, String status) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn(id);
+    when(payment.getStatus()).thenReturn(status);
+    when(payment.isProcessed()).thenReturn(true);
+    when(payment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
+    return payment;
+  }
+
+  /**
+   * Runs Eliminar on {@code payment} with {@code withTransfer} as the payments that have a bank
+   * transfer; the predicate itself ({@code isLifecycleLockedByTransfer}) is the real one.
+   */
+  private static NeoResponse runRemove(NeoContext ctx, FIN_Payment payment,
+      Set<String> withTransfer, MockedStatic<PaymentRemovalUtil> removal,
+      MockedStatic<PisDeferredPaymentService> pis) {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, payment.getId())).thenReturn(payment);
+      pis.when(() -> PisDeferredPaymentService.paymentsWithBankTransfer(Mockito.anyCollection()))
+          .thenReturn(withTransfer);
+      removal.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
+          .thenReturn(Collections.emptySet());
+      return new ReactivatePaymentHandler().handle(ctx);
+    }
+  }
+
+  private static String errorMessage(NeoResponse response) throws JSONException {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  @Test
+  public void mcpRemoveRefusesVoidPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-void", "RPVOID");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-void"), payment, Set.of(), removal, pis);
+
+      assertEquals(422, result.getHttpStatus());
+      assertTrue(errorMessage(result).contains("RPVOID"));
+      removal.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void mcpRemoveRefusesPaymentLockedByItsBankTransfer() throws Exception {
+    FIN_Payment payment = processedPayment("pay-pis", "RPPC");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-pis"), payment, Set.of("pay-pis"),
+          removal, pis);
+
+      assertEquals(422, result.getHttpStatus());
+      assertTrue(errorMessage(result).contains("pisLocked"));
+      removal.verifyNoInteractions();
+      pis.verify(() -> PisDeferredPaymentService.paymentsWithBankTransfer(Set.of("pay-pis")));
+    }
+  }
+
+  /** The transfer the bank refused (ETGOERR) is not a lock, exactly as {@code pisLocked} says. */
+  @Test
+  public void mcpRemoveProceedsOnPaymentWhoseTransferWasRejected() throws Exception {
+    FIN_Payment payment = processedPayment("pay-err", "ETGOERR");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-err"), payment, Set.of("pay-err"),
+          removal, pis);
+
+      assertEquals(200, result.getHttpStatus());
+      removal.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /** A processed payment of the tenant is reactivated and removed, as the UI's trash icon does. */
+  @Test
+  public void mcpRemoveReactivatesAndRemovesProcessedPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-ok", "RPPC");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-ok"), payment, Set.of(), removal, pis);
+
+      assertEquals(200, result.getHttpStatus());
+      removal.verify(() -> PaymentRemovalUtil.reactivate("pay-ok", "R"));
+      removal.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /** REST keeps its behaviour: the SPA withholds the button, the handler does not gate it. */
+  @Test
+  public void restRemoveIsNotGatedOnVoidOrLockedPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-void", "RPVOID");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(removeActionCtx("pay-void"), payment, Set.of("pay-void"),
+          removal, pis);
+
+      assertEquals(200, result.getHttpStatus());
+      removal.verify(() -> PaymentRemovalUtil.remove(payment));
+      pis.verify(() -> PisDeferredPaymentService.paymentsWithBankTransfer(
+          Mockito.anyCollection()), never());
+    }
   }
 }

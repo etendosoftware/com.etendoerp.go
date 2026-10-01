@@ -190,6 +190,8 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String PIS_STATUS_ACTION_FIELD = "pisPaymentStatus";
   /** Mirrors {@code PisDeferredPaymentService.PAYMENT_STATUS_ERROR}, which is not visible here. */
   private static final String PAYMENT_STATUS_ERROR = "ETGOERR";
+  /** A voided payment; the payment window does not offer Eliminar on it. */
+  private static final String PAYMENT_STATUS_VOID = "RPVOID";
   private static final String FIELD_PIS_PAYMENT_ID = "pisPaymentId";
   /**
    * Read-only flag telling the UI that this payment's lifecycle belongs to its bank transfer, so
@@ -430,7 +432,8 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * is harmless now.
    *
    * @param context the current NEO request context
-   * @return a 200 on success, a 404 if the payment does not exist, a 400 if the payment is
+   * @return a 200 on success, a 404 if the payment does not exist, a 422 for an agent when the UI
+   *     would not offer Eliminar (see {@link #agentRemovalRefusal}), a 400 if the payment is
    *     tied to a processed Payment Proposal, or a 500 error on unexpected failure
    */
   private NeoResponse handleRemove(NeoContext context) {
@@ -439,6 +442,12 @@ public class ReactivatePaymentHandler implements NeoHandler {
           context.getRecordId());
       if (payment == null) {
         return NeoResponse.error(404, "Payment not found: " + context.getRecordId());
+      }
+      if (context.isMcpOrigin()) {
+        NeoResponse refused = agentRemovalRefusal(payment);
+        if (refused != null) {
+          return refused;
+        }
       }
 
       FIN_PaymentPropDetail blocking = findProcessedProposalPropDetail(payment);
@@ -482,6 +491,30 @@ public class ReactivatePaymentHandler implements NeoHandler {
       log.error("Error removing payment for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Payment removal failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * The UI's own gate on Eliminar, applied to an agent (ETP-5558): the payment window hides the
+   * button on a void payment ({@code visibleWhen "@status@!='RPVOID'"}) and on one whose lifecycle
+   * belongs to its bank transfer ({@code pisLocked}, the same predicate the GET emits — see
+   * {@link #injectLockFlags}). The SPA enforces both by not offering the button, so the REST path
+   * stays as it was; an agent has no button to withhold, so it gets a 422 instead.
+   *
+   * @return a 422 when the UI would not offer Eliminar on {@code payment}, otherwise {@code null}
+   */
+  private static NeoResponse agentRemovalRefusal(FIN_Payment payment) {
+    String status = payment.getStatus();
+    if (StringUtils.equals(PAYMENT_STATUS_VOID, status)) {
+      return NeoResponse.error(422, "This payment is void (RPVOID) and cannot be deleted: Eliminar "
+          + "is offered at every status except void. Nothing was changed.");
+    }
+    boolean hasBankTransfer = PisDeferredPaymentService
+        .paymentsWithBankTransfer(Set.of(payment.getId())).contains(payment.getId());
+    if (PisDeferredPaymentService.isLifecycleLockedByTransfer(status, hasBankTransfer)) {
+      return NeoResponse.error(422, "This payment belongs to a live bank transfer (pisLocked) and "
+          + "cannot be deleted while the transfer is in progress or executed. Nothing was changed.");
+    }
+    return null;
   }
 
   /**
