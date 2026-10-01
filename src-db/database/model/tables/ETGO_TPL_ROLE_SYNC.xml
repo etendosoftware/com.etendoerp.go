@@ -53,10 +53,6 @@
         <default><![CDATA[0]]></default>
         <onCreateDefault/>
       </column>
-      <column name="ROWS_CHANGED" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
-        <default><![CDATA[0]]></default>
-        <onCreateDefault/>
-      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_TRSYNC_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

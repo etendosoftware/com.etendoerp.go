@@ -125,8 +125,8 @@ class TemplateRoleAccessStartupTest {
     assertEquals(2, result.getChangedTemplates());
     assertEquals(2, result.getRolesSwept());
     verify(propagation).sweepRoles(List.of("P1", "P2"));
-    verify(store).storeFingerprint(eq(FINANCE), eq("f1"), anyInt(), anyInt(), anyInt());
-    verify(store).storeFingerprint(eq(SALES), eq("s1"), anyInt(), anyInt(), anyInt());
+    verify(store).storeFingerprint(eq(FINANCE), eq("f1"), anyInt(), anyInt());
+    verify(store).storeFingerprint(eq(SALES), eq("s1"), anyInt(), anyInt());
     verify(store).releaseLease(eq(HOLDER), isNull());
   }
 
@@ -137,8 +137,8 @@ class TemplateRoleAccessStartupTest {
     startup.tick(false);
 
     verify(propagation).rolesInheriting(Collections.singleton(SALES));
-    verify(store).storeFingerprint(eq(SALES), eq("s1"), anyInt(), anyInt(), anyInt());
-    verify(store, never()).storeFingerprint(eq(FINANCE), anyString(), anyInt(), anyInt(),
+    verify(store).storeFingerprint(eq(SALES), eq("s1"), anyInt(), anyInt());
+    verify(store, never()).storeFingerprint(eq(FINANCE), anyString(), anyInt(),
         anyInt());
   }
 
@@ -177,7 +177,7 @@ class TemplateRoleAccessStartupTest {
     assertEquals(1, result.getFailedChunks());
     verify(propagation, times(3)).sweepRoles(anyCollection());
     verify(store, times(3)).renewLease(HOLDER);
-    verify(store, never()).storeFingerprint(anyString(), anyString(), anyInt(), anyInt(),
+    verify(store, never()).storeFingerprint(anyString(), anyString(), anyInt(),
         anyInt());
     verify(store).releaseLease(eq(HOLDER), eq("1 sweep chunk(s) failed; see the application log"));
   }
@@ -191,7 +191,7 @@ class TemplateRoleAccessStartupTest {
 
     assertEquals(1, result.getRolesSwept());
     verify(propagation).sweepRoles(List.of("P9"));
-    verify(store, never()).storeFingerprint(anyString(), anyString(), anyInt(), anyInt(),
+    verify(store, never()).storeFingerprint(anyString(), anyString(), anyInt(),
         anyInt());
   }
 

@@ -90,22 +90,21 @@ class TemplateRoleSyncStore {
    * each other back and forth).
    */
   void storeFingerprint(String templateId, String fingerprint, int algoVersion,
-      int personalRoles, int rowsChanged) {
+      int personalRoles) {
     NativeQuery<?> query = session().createNativeQuery(
         "INSERT INTO etgo_tpl_role_sync (etgo_tpl_role_sync_id, ad_client_id, ad_org_id, "
             + "isactive, created, createdby, updated, updatedby, ad_role_id, fingerprint, "
-            + "algo_version, synced_at, personal_roles, rows_changed) "
+            + "algo_version, synced_at, personal_roles) "
             + "VALUES (get_uuid(), '0', '0', 'Y', now(), '0', now(), '0', :role, :fingerprint, "
-            + ":version, now(), :roles, :rows) "
+            + ":version, now(), :roles) "
             + "ON CONFLICT (ad_role_id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, "
             + "algo_version = EXCLUDED.algo_version, synced_at = now(), updated = now(), "
-            + "personal_roles = EXCLUDED.personal_roles, rows_changed = EXCLUDED.rows_changed "
+            + "personal_roles = EXCLUDED.personal_roles "
             + "WHERE etgo_tpl_role_sync.algo_version <= EXCLUDED.algo_version");
     query.setParameter("role", templateId);
     query.setParameter("fingerprint", fingerprint);
     query.setParameter("version", algoVersion);
     query.setParameter("roles", personalRoles);
-    query.setParameter("rows", rowsChanged);
     query.executeUpdate();
   }
 

@@ -288,8 +288,7 @@ public class TemplateRoleAccessStartup extends SessionAwareStartup {
     if (!changed.isEmpty() && result.failedChunks == 0) {
       for (String templateId : changed) {
         store.storeFingerprint(templateId, fingerprints.get(templateId),
-            TemplateAccessPropagationService.ALGO_VERSION, inheritorsByTemplate.get(templateId),
-            result.counts.total());
+            TemplateAccessPropagationService.ALGO_VERSION, inheritorsByTemplate.get(templateId));
       }
       OBDal.getInstance().commitAndClose();
     } else if (!changed.isEmpty()) {
