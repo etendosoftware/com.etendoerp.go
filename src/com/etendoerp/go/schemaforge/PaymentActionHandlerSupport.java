@@ -107,8 +107,8 @@ final class PaymentActionHandlerSupport {
                 + "installment's outstanding amount). When the account is in another currency, "
                 + "the account " + (isReceipt ? "receives" : "pays") + " this amount × "
                 + "conversionRate. Less than the outstanding amount is a partial " + money
-                + "; more is an overpayment and then overpaymentAction decides what happens "
-                + "with the excess."),
+                + "; more is an overpayment, possible only on a collection in the organization's "
+                + "currency (see overpaymentAction)."),
         Param.required(FIELD_DATE, NeoActionContract.TYPE_DATE,
             "Date of the " + money + " (yyyy-MM-dd)."),
         Param.required(FIELD_ACCOUNT, NeoActionContract.TYPE_STRING,
@@ -137,9 +137,11 @@ final class PaymentActionHandlerSupport {
                 + "kinds with their available amount ('avail'). Default: none."),
         Param.options("overpaymentAction",
             "What to do with an amount above the outstanding: 'leave-credit' keeps it as credit "
-                + "of the business partner, 'refund' returns it. Required when actual_payment plus "
-                + "creditSources exceeds the installment's outstanding amount: such a call is "
-                + "refused without it.",
+                + "of the business partner, 'refund' returns it. Only a collection whose invoice "
+                + "is in the organization's currency can be overpaid, and then this is required "
+                + "when actual_payment plus creditSources exceeds the installment's outstanding "
+                + "amount. A payment, or a collection in another currency, is refused whenever it "
+                + "exceeds the outstanding: lower the amount.",
             List.of("leave-credit", "refund")),
         Param.optional("conversionRate", NeoActionContract.TYPE_NUMBER,
             "Exchange rate from the invoice currency to the account currency. Required, and "

@@ -28,7 +28,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
@@ -99,7 +101,7 @@ final class PaymentAgentSupport {
       refusal = checkMethod(body, isReceipt);
     }
     if (refusal == null) {
-      refusal = checkOverpayment(invoice, body);
+      refusal = checkOverpayment(invoice, body, isReceipt);
     }
     return refusal;
   }
@@ -186,17 +188,19 @@ final class PaymentAgentSupport {
   }
 
   /**
-   * FR-9: funding above what the installment can take needs an explicit decision. Without
-   * {@code overpaymentAction} the service keeps the excess as credit of the business partner,
-   * which for an agent is usually a typo in the amount, not a decision. Same capacity the service
-   * applies: the pending details of the installment, or its whole amount when a draft is edited
-   * (see {@code PaymentDraftEditService#reapplyLinkedInstallmentPSD}).
+   * FR-9: funding above what the installment can take. Same capacity the service applies: the
+   * pending details of the installment, or its whole amount when a draft is edited (see
+   * {@code PaymentDraftEditService#reapplyLinkedInstallmentPSD}).
+   *
+   * <p>Where the UI allows an overpayment at all — a collection whose invoice is in the
+   * organization's currency, the SPA's {@code canLeaveCredit} — it needs an explicit
+   * {@code overpaymentAction}: without one the service keeps the excess as credit, which for an
+   * agent is usually a typo in the amount. Everywhere else (a payment, or a collection in another
+   * currency) the UI offers no way to resolve an excess but lowering the amount, so neither does
+   * the MCP, whatever {@code overpaymentAction} says.</p>
    */
-  private static NeoResponse checkOverpayment(Invoice invoice, JSONObject body)
+  private static NeoResponse checkOverpayment(Invoice invoice, JSONObject body, boolean isReceipt)
       throws JSONException {
-    if (StringUtils.isNotBlank(body.optString(KEY_OVERPAYMENT, null))) {
-      return null;
-    }
     FIN_PaymentSchedule schedule = PaymentOwnership.scheduleOf(
         body.optString(KEY_SCHEDULE_ID, null), invoice);
     BigDecimal cash = parseAmount(body.optString("actual_payment", null));
@@ -211,16 +215,40 @@ final class PaymentAgentSupport {
     if (excess.signum() <= 0) {
       return null;
     }
-    NeoResponse response = refusal("The " + funds.toPlainString() + " funding this payment "
-        + "(actual_payment plus creditSources) exceeds the installment's outstanding "
-        + capacity.toPlainString() + " by " + excess.toPlainString() + ". Send overpaymentAction "
-        + "'leave-credit' to keep the excess as credit of the business partner or 'refund' to "
-        + "return it, or lower actual_payment.", "allowedValues",
-        new JSONArray(List.of("leave-credit", "refund")));
+    String overrun = "The " + funds.toPlainString() + " funding this payment (actual_payment plus "
+        + "creditSources) exceeds the installment's outstanding " + capacity.toPlainString()
+        + " by " + excess.toPlainString() + ".";
+    NeoResponse response;
+    if (!overpaymentAllowed(invoice, isReceipt)) {
+      response = NeoResponse.error(SC_UNPROCESSABLE, overrun + " An overpayment is only possible "
+          + "on a collection whose invoice is in the organization's currency; lower actual_payment "
+          + "(plus creditSources) to at most the outstanding amount.");
+    } else if (StringUtils.isBlank(body.optString(KEY_OVERPAYMENT, null))) {
+      response = refusal(overrun + " Send overpaymentAction 'leave-credit' to keep the excess as "
+          + "credit of the business partner or 'refund' to return it, or lower actual_payment.",
+          "allowedValues", new JSONArray(List.of("leave-credit", "refund")));
+    } else {
+      return null;
+    }
     JSONObject error = response.getBody().getJSONObject("error");
     error.put(KEY_OUTSTANDING, capacity);
     error.put("excess", excess);
     return response;
+  }
+
+  /**
+   * The SPA's {@code canLeaveCredit} ({@code NewPaymentEntryModal}): a collection, and the invoice
+   * in the currency of the session's organization ({@code /session → currencyCode}, resolved with
+   * {@code OBCurrencyUtils.getOrgCurrency}). An organization with no resolvable currency allows
+   * none.
+   */
+  static boolean overpaymentAllowed(Invoice invoice, boolean isReceipt) {
+    if (!isReceipt || invoice.getCurrency() == null) {
+      return false;
+    }
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(
+        OBContext.getOBContext().getCurrentOrganization().getId());
+    return orgCurrencyId != null && orgCurrencyId.equals(invoice.getCurrency().getId());
   }
 
   // ─── invoiceAccounts: the method each account would really use ─────────────
