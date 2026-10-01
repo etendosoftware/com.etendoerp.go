@@ -47,6 +47,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -215,10 +216,31 @@ public class FinancialAccountHandler implements NeoHandler {
    */
   FinancialAccountProviderEnricher providerEnricher = new FinancialAccountProviderEnricher();
 
+  /**
+   * The account's manual movements as declared actions (ETP-5558). Package-visible and non-final
+   * so unit tests can swap in one over a stubbed movements endpoint.
+   */
+  FinancialAccountMovementActions movementActions = new FinancialAccountMovementActions();
+
+  /**
+   * The movement actions of the account, declared for agents (ETP-5558): the SPA records them
+   * through {@code financial-account-transactions}, a spec the MCP does not serve.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return FinancialAccountMovementActions.actionContracts();
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!SPEC.equals(context.getSpecName())) {
       return null;
+    }
+    if (ENTITY_ACCOUNT.equals(context.getEntityName())) {
+      NeoResponse movement = movementActions.handle(context);
+      if (movement != null) {
+        return movement;
+      }
     }
     if (!NeoEndpointTypes.isCrud(context)) {
       // Button actions, callouts, display logic and selectors are not account writes: let the

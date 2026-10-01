@@ -2145,6 +2145,45 @@ invariant: persisted + 2xx, or non-2xx + nothing persisted. `deletePayment` desc
 before removing it; if that read dooms the transaction the delete is never dispatched (same 500),
 otherwise a failed description only costs the `deleted` block.
 
+##### 4.12.1.4 The account's manual movements — declared actions on `financial-account/account` (ETP-5558)
+
+The financial account's Movements tab lets a person record a deposit or a withdrawal against a G/L
+item (`NewTransactionModal`), edit it, process it, reactivate it and delete it (`MovementRowKebab`).
+The SPA does it through `financial-account-transactions`, a report spec the MCP refuses (422), and
+`financial-account/transaction` refuses every MCP write (`MCP_CONFIG.verbs`, the UI never writes
+there). So an agent could not record a deposit at all: in blind run `20261001T1949-local-a00c` it
+created a bank-statement line instead — what the bank reports, waiting to be matched — not a
+movement of the account.
+
+`FinancialAccountHandler#actionContracts()` (the account's customization, `Java_Qualifier`
+`financialAccountHeaderHandler`) now declares, from `FinancialAccountMovementActions`; for all of
+them `id` = the financial account:
+
+| Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
+|---|---|---|---|
+| `listMovements` | read | — | the Movements list (`GET financial-account-transactions`, same payload: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, … and `totals`) |
+| `movementGlItems` | read | `search` | the G/L item picker (`?action=glitem-lookup`) |
+| `createMovement` | write | **`trxType`** (`BPD`\|`BPW`), **`amount`** (> 0), **`date`** (also the accounting date), **`glItemId`**, `description` (≤ 255), `bpartnerId`, `projectId`, `costcenterId`, `productId`, `process` (`true` = Confirmar, default draft) | *Nuevo movimiento* — the form offers no bank fee and requires a G/L item |
+| `updateMovement` | write | **`movementId`**, any of the create fields, `process` (drafts only) | *Editar*: not on a payment-linked or posted movement; on a processed one only description, G/L item, contact and dimensions |
+| `processMovement` | write | **`movementId`** | *Procesar*: drafts that belong to no payment |
+| `reactivateMovement` | write | **`movementId`** | *Reactivar*: processed movements (payment-linked ones are refused by the endpoint, 409, ETP-5111) |
+| `deleteMovement` | write | **`movementId`** | *Eliminar*: any status — a processed movement is reactivated and removed (`TransactionRemovalUtil.reactivateAndRemove`); payment-linked movements and transfer legs are refused by the endpoint (409) |
+
+Each write hands `FinancialAccountTransactionsHandler` the body the SPA sends (create: account,
+`trxType`, both dates, `depositAmount`/`paymentAmount` split by type, the account's currency, the
+G/L item and the references, `process`), so validation, `FIN_TransactionProcess` and payment removal
+are the same code. Before that, the route checks what the SPA settles client-side: the account must
+be readable by the tenant (404) and the movement one of **its** movements (404 otherwise, whatever
+tenant it belongs to); the row gates above (409); the form's requirements (422 naming the field);
+and every referenced id must be readable (422) — the endpoint drops an unreadable one silently.
+`updateMovement` merges the agent's keys over the movement's own values, because the endpoint has
+no partial update. Every answer is the movement as it now is; `deleteMovement` answers
+`{deleted:{…}}`. The differences with the SPA's route are listed in §4.12.9.
+
+Not declared: funds transfers between accounts (`?action=transfer`) and *Add payment* from the
+account (`?action=create-payment`); both stay SPA-only for now. Posting stays on
+`financial-account/transaction` (`post` / `unpost`, §4.12.6).
+
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
 A window spec (`SPEC_TYPE = 'W'`) can include several entities (Header, Lines, …). To create a
@@ -2595,7 +2634,7 @@ a hidden verb. The shared `NeoMethodPolicy.buildMcpNotEnabledMessage` is not cha
 | `payment-out/bankPayments` | create, update, delete | PIS needs a person to authorize at the bank (SCA) and is excluded from MCP |
 | `sales-invoice/paymentDetails`, `purchase-invoice/paymentDetails` | create, update, delete | the allocation of payments to the invoice's installments, a hand-built allocation of the BUG-1 class; the UI only reads it and writes it through the invoice actions. `instead` = `registerPayment` on the invoice header |
 | `sales-invoice/paymentPlan`, `purchase-invoice/paymentPlan` | create, update, delete | the installments are generated from the payment terms when the invoice is completed and only change through its payments; the UI never hand-creates one. Reads stay: a `paymentPlan` id is a valid `scheduleId`. `instead` = `registerPayment` |
-| `financial-account/transaction` | create, update, delete | the UI never writes a movement through this entity (`view:"create"` had 0 fields); recording, editing, processing, reactivating or deleting a movement is not available through MCP. No `instead`; its `post` / `unpost` actions stay (see the `actions` table below) |
+| `financial-account/transaction` | create, update, delete | the UI never writes a movement through this entity (`view:"create"` had 0 fields). Movements are recorded, edited, processed, reactivated and deleted with the account's declared movement actions (§4.12.1.4); `instead` = `neo_action(spec:'financial-account', entity:'account', id:'<financialAccountId>', action:'createMovement' \| 'updateMovement' \| 'processMovement' \| 'reactivateMovement' \| 'deleteMovement')`. Until ETP-5558's movement actions it had no `instead`, and its reason pointed at `financial-account-transactions`, a report spec the MCP refuses (422). Its `post` / `unpost` actions stay (see the `actions` table below) |
 | `financial-account/reconciliations` | create, update, delete | reconciliations are created and undone by the reconciliation flow; `instead` = `neo_action` on `bank-reconciliation` (`id` = the financial account) |
 | `product/transactionAdjustments` | create | its parent cannot be identified, so creates were already refused (`parent_unresolvable`); declared here so `neo_discover` and `neo_schema` stop advertising a `POST` that always fails |
 
@@ -2614,8 +2653,8 @@ The shape and the rules are in §4.12.1.3.
 |---|---|---|---|
 | `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment` | redirect `aPRMAddpayment` → `registerPayment` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo GO payment flow |
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
-| `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow (`financial-account-transactions`, no agent contracts). What stays for agents is `post` / `unpost` — `neo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
-| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `aprmFundsTrans`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | — | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`; PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
+| `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `neo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
+| `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `aprmFundsTrans`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | — | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
 
 `McpConfigSourcedataTest` asserts this content.
 
@@ -2930,6 +2969,27 @@ Other MCP-only refusals declared in §4.12.6:
 | `aPRMProcessPayment` with a value other than `P` | served | **422** + `allowedValues:["P"]`; `view:"actions"` lists only `P` |
 | `financial-account/account` Core and PSD2 buttons (§4.12.6 table) | served | **405**, not listed |
 | writes on `<invoice>/paymentDetails`, `<invoice>/paymentPlan`, `financial-account/transaction`, `financial-account/reconciliations` | served by the flags | **405** (`MCP_CONFIG.verbs`) |
+
+The account's movement actions (§4.12.1.4) are a **route divergence, declared**: the SPA writes a
+movement through `POST /sws/neo/financial-account-transactions?action=create|update|process|reactivate|delete`
+(a report spec the MCP does not serve); an agent through `neo_action(spec:'financial-account',
+entity:'account', id:<account>, action:'createMovement'|…)`. The second route hands the very same
+body to the same `FinancialAccountTransactionsHandler`, so the business rules are one; what differs
+is what the route checks first, which the SPA settles client-side:
+
+| call | `financial-account-transactions` (the SPA) | `financial-account/account` movement actions |
+|---|---|---|
+| movement id of another account of the same tenant | accepted (the body carries no account) | **404** *Movement not found in this financial account* |
+| `update` / `process` on a payment- or receipt-linked movement | **served** (the SPA hides Editar / Procesar there) | **409** *This movement belongs to a payment; it is edited with the payment, not here.* |
+| `process` on a processed movement, `reactivate` on a draft | left to `FIN_TransactionProcess` / `TransactionRemovalUtil` | **409** before anything runs (the SPA offers neither) |
+| `update` of type, amount or date on a processed movement | silently ignored (`applyEditableDimensions`) | **422** naming the field: reactivate first |
+| `trxType` `BF`, amount ≤ 0, no G/L item, description > 255 | `BF` accepted; no G/L item accepted | **422** naming the field — what `NewTransactionModal` requires |
+| a `glItemId` / `bpartnerId` / dimension id the tenant cannot read | **silently dropped** (`setOptionalRef` → `null`, ETP-4950) — the movement is saved without it | **422** naming the field |
+| `update` with only the changed keys | no partial update: a missing key resets the field (description to empty) | merged over the movement's own values, as `buildDimensionUpdatePayload` |
+| success | `{id, trxType, status}` (create) / `{success, id, status}` | the movement re-read: `{id, accountId, trxType, amount, depositAmount, paymentAmount, date, description, glItemId, bpartnerId, status, processed, posted}`; delete answers `{deleted:{…}}` |
+
+The new route's checks apply to whoever calls it (it has no earlier REST behaviour to preserve);
+`financial-account-transactions` is byte-for-byte unchanged.
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 

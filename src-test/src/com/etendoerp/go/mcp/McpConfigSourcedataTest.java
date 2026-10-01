@@ -326,13 +326,25 @@ class McpConfigSourcedataTest {
   }
 
   @Test
-  @DisplayName("financial-account transaction is read-only with no instead; its movement buttons"
-      + " are hidden")
+  @DisplayName("financial-account transaction is read-only, pointing at the account's movement"
+      + " actions; its movement buttons are hidden")
   void financialAccountTransactionIsReadOnly() throws IOException, JSONException {
     JSONObject payload = payloadOf(FA_TRANSACTION);
     JSONObject verbs = payload.getJSONObject(McpVerbsSection.NAME);
     assertEveryWriteHidden(verbs, FA_TRANSACTION);
-    assertFalse(verbs.has(McpVerbsSection.KEY_INSTEAD));
+    // ETP-5558: the 405 used to name the financial-account-transactions spec, which the MCP refuses
+    // (422, report spec) — a dead end. It now names the account's declared movement actions.
+    String instead = verbs.getString(McpVerbsSection.KEY_INSTEAD);
+    assertTrue(instead.contains("neo_action(spec:'financial-account', entity:'account'"), instead);
+    for (String action : List.of("createMovement", "updateMovement", "processMovement",
+        "reactivateMovement", "deleteMovement")) {
+      assertTrue(instead.contains("'" + action + "'"), action + " in " + instead);
+    }
+    for (String section : List.of(McpVerbsSection.NAME, McpActionsSection.NAME)) {
+      String reason = payload.getJSONObject(section).getString("reason");
+      assertFalse(reason.contains("financial-account-transactions"),
+          section + " must not send the agent to a spec it cannot call: " + reason);
+    }
     // b86eade1d: post/unpost stay; the movement flow owns reactivate/remove.
     assertEquals(new TreeSet<>(List.of("etprReactivateTransaction", "etprRemoveTransaction",
         "posted", "etblkpBulkposting")), setOf(payload.getJSONObject(McpActionsSection.NAME)
@@ -361,8 +373,11 @@ class McpConfigSourcedataTest {
         .getJSONArray(McpActionsSection.KEY_HIDDEN)));
     assertFalse(payload.has(McpVerbsSection.NAME),
         "create, update and delete stay: the SPA uses them");
-    assertNotNull(payload.getJSONObject(McpActionsSection.NAME)
-        .optString(McpActionsSection.KEY_REASON, null));
+    String reason = payload.getJSONObject(McpActionsSection.NAME)
+        .optString(McpActionsSection.KEY_REASON, null);
+    assertNotNull(reason);
+    assertTrue(reason.contains("createMovement"),
+        "the hidden Core buttons point at the movement actions: " + reason);
     assertResolvesCleanly(FA_ACCOUNT);
   }
 
