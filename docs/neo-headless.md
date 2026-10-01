@@ -4320,6 +4320,43 @@ NEO Headless enforces security at multiple levels:
 
 **Bank statements on a PSD2-connected account (ETP-5471):** on an account whose `EM_PSD2_Connection_Status` is connected (`BankStatementsSupport#isBankConnected`, i.e. `BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED`), statements belong to the bank sync, and creating or importing one by hand is refused with `409`. `BankStatementsHandler` checks it in `handleCreate` and, through `parseUploadInput`, in `handleImport`/`handlePreview`; `handleDelete` already refused deleting one. Those methods are the single write path: the REST actions (`?action=create|import|preview|delete`) and the MCP named actions of the `bank-statements` spec (`createStatement`, `importStatement`, `previewStatement`, `deleteStatement`, `BankStatementAgentActions`) dispatch to them, and the generic `financial-account` entities `importedBankStatements`/`bankStatementLines` refuse every write with `405` (`BankStatementEntityHandler`, ETP-5447), so there is no way around the check. The sync itself is not affected: it writes through OBDal (`BankStatementHelper#createBankStatement` in the PSD2 module) and never reaches a NEO handler, which is also why the check is not an entity observer.
 
+**Record ownership before any action (ETP-5558, REST and MCP).** Both channels run an action in
+admin mode, and until this change nothing between the request and the action looked at the record
+id. `NeoButtonActionHelper#executeButtonActionCore` only passed it to the process, and a
+customization such as `ReactivatePaymentHandler` resolved it with a bare `OBDal.get`, which applies
+no tenant predicate. So `POST …/payment-in/finPayment/<another tenant's id>/action/eTPRRemovePayment`
+removed that tenant's payment. `NeoActionRecordGuard.refusalFor(entity, recordId)` now runs once for
+every action of every entity, before the customization and before the AD button:
+
+- **Where.** REST: `NeoHookDispatcher.dispatchWithHooks` for `NeoEndpointType.ACTION`. MCP:
+  `McpToolRouter.handleAction`, after `McpDeclaredActions.precheck` (so a hidden or redirected
+  action keeps its 405) and before `NeoExtensionDispatcher`.
+- **Rule: structure only.** The id is looked up in the table of the entity's own AD tab. If a row
+  with that id exists there and `TenantOwnership.isVisibleToCurrentTenant` says the session cannot
+  read it, the action is refused with **404 "Record not found"**, the same text as an unknown
+  record, so an id cannot be probed for existence. On MCP it arrives flattened as
+  `{status:404, error:"not_found", detail:"Record not found"}`.
+  - The client must be one of the session's readable clients, and the organization one of its
+    readable organizations.
+  - System rows (client/organization `0`) and rows of a table that is not client-enabled are
+    visible.
+  - A row in an organization outside the readable ones gets the 404, as a NEO read does.
+- **Passes unchanged:**
+  - a blank id (an action not about a record);
+  - no tab, or a tab whose table has no DAL entity (report and tab-less specs);
+  - an id that is not a row of that table, such as a report-spec action whose `id` is a financial
+    account (those handlers resolve their own ids through `TenantOwnership.loadOwned`);
+  - a lookup that throws (an id of the wrong shape for the key); the handler answers for it as
+    before.
+  - It is checked only on the URL record id. Ids inside the parameters stay the handler's job
+    (for the invoice payment actions, `PaymentOwnership`, §4.12.1.3).
+- **Defense in depth.** `ReactivatePaymentHandler` loads the payment through owned loads
+  (`NeoActionRecordGuard.loadOwned`, delegating to `TenantOwnership.loadOwned`) for reactivate,
+  process, remove and `clearTransferErrorFlag`. It no longer relies only on the guard.
+- **REST changes, by accepted exception:** only an action on another tenant's (or an unreadable
+  organization's) record now answers 404 instead of running. Every action on the caller's own
+  records is unchanged, and the SPA only ever sends ids it read through NEO.
+
 ---
 
 ## 7b. Dashboard Widget Access (ETP-5088)
