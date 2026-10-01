@@ -844,10 +844,14 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("eTPRRemovePayment is refused 405 by field name and by its DB name")
-    void removePaymentIsHiddenUnderBothNames() throws Exception {
-      assertEquals(405, refusalStatus(payment(), "eTPRRemovePayment"));
-      assertEquals(405, refusalStatus(payment(), "em_etpr_remove_payment"));
+    @DisplayName("eTPRRemovePayment passes precheck under both names; the PIS actions stay 405")
+    void removePaymentPassesAndPisIsHidden() throws Exception {
+      // The UI's Eliminar runs at every status but RPVOID/pisLocked; the handler gates those.
+      assertNull(McpDeclaredActions.precheck(payment(), "eTPRRemovePayment", new JSONObject()));
+      assertNull(McpDeclaredActions.precheck(payment(), "em_etpr_remove_payment",
+          new JSONObject()));
+      assertEquals(405, refusalStatus(payment(), "retryPisPayment"));
+      assertEquals(405, refusalStatus(payment(), "pisPaymentStatus"));
     }
 
     @Test

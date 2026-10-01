@@ -282,15 +282,16 @@ class McpConfigSourcedataTest {
     Set<String> expectedHidden = new TreeSet<>(List.of("psd2GenerateBankPayment",
         "aPRMAddScheduledpayments", "aprmExecutepayment", "aPRMReversePayment",
         "aPRMReconcilePayment", "aeatsiiSend", "etblkpBulkposting", "posted",
-        // b86eade1d: drafts are deleted with the invoice's deletePayment, which also gives back
-        // the credit the draft consumed; and the PIS retry/status are PIS, excluded from agents.
-        "eTPRRemovePayment", "retryPisPayment", "pisPaymentStatus"));
+        // The PIS retry/status are a bank integration, limited for agents. eTPRRemovePayment is
+        // not here: the UI's Eliminar works at every status but RPVOID/pisLocked.
+        "retryPisPayment", "pisPaymentStatus"));
     for (String id : PAYMENT_HEADERS) {
       JSONObject payload = payloadOf(id);
       JSONObject actions = payload.getJSONObject(McpActionsSection.NAME);
       Set<String> hidden = setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN));
       assertEquals(expectedHidden, hidden, id);
-      for (String ui : List.of("aPRMProcessPayment", "etprReactivatePayment")) {
+      for (String ui : List.of("aPRMProcessPayment", "etprReactivatePayment",
+          "eTPRRemovePayment")) {
         assertFalse(hidden.contains(ui), id + ": the UI's " + ui + " must stay");
       }
       JSONArray process = actions.getJSONObject(McpActionsSection.KEY_VALUES)
@@ -302,7 +303,10 @@ class McpConfigSourcedataTest {
       String reason = actions.getString(McpActionsSection.KEY_REASON);
       String invoiceSpec = id.equals(PAYMENT_HEADERS.get(0)) ? "sales-invoice" : "purchase-invoice";
       assertTrue(reason.contains("neo_action(spec:'" + invoiceSpec + "'")
-          && reason.contains("action:'deletePayment'"), id + ": the way to delete a draft: " + reason);
+          && reason.contains("action:'registerPayment'"), id + ": how one is created: " + reason);
+      assertTrue(reason.contains("RPVOID") && reason.contains("pisLocked"),
+          id + ": when Eliminar is refused: " + reason);
+      assertFalse(reason.contains("deletePayment"), id + ": Eliminar is the way: " + reason);
       assertResolvesCleanly(id);
     }
   }
