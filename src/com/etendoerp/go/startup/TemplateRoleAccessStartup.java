@@ -139,6 +139,10 @@ public class TemplateRoleAccessStartup extends SessionAwareStartup {
     }
   }
 
+  /**
+   * Creates the startup with the real collaborators and a holder id unique to this JVM
+   * ({@code pid@host} plus a random suffix), used to own the lease.
+   */
   public TemplateRoleAccessStartup() {
     this(new TemplateAccessPropagationService(), new TemplateRoleSyncStore(),
         new UserRoleWriteLock(), ManagementFactory.getRuntimeMXBean().getName() + "/"

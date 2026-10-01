@@ -38,10 +38,11 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * ETP-5565 — the composition hook ({@code UserRoleCompositionService#sweepAfterComposition}) end
- * to end: core's real propagation copies a template's INACTIVE rows too and lets them win by
- * precedence, the hook's native-SQL sweep corrects the personal role in the same request, and the
- * evicted session state then serves the swept rows and flushes cleanly.
+ * ETP-5565 — the composition hook ({@code
+ * TemplateAccessPropagationService#realignAfterComposition}) end to end: core's real propagation
+ * copies a template's INACTIVE rows too and lets them win by precedence, the hook's native-SQL
+ * sweep corrects the personal role in the same request, and the evicted session state then serves
+ * the swept rows and flushes cleanly.
  *
  * <p>{@code WeldBaseTest}, not plain {@code OBBaseTest}: core's propagation only runs with the CDI
  * interceptor installed (see {@code UserRoleCompositionServiceIntegrationTest}). Nothing is
@@ -73,7 +74,8 @@ public class CompositionSweepIntegrationTest extends WeldBaseTest {
       Window x = windows.get(1);
       Role a;
       Role b;
-      // System-client fixtures: bypass the client check, like UserRoleCompositionServiceIntegrationTest.
+      // System-client fixtures bypass the client check, as in
+      // UserRoleCompositionServiceIntegrationTest.
       OBContext.setAdminMode();
       try {
         a = template();

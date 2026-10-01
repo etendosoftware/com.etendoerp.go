@@ -29,8 +29,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
-import org.hibernate.engine.spi.EntityEntry;
-import org.hibernate.engine.spi.SessionImplementor;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
@@ -38,7 +36,6 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.access.ProcessAccess;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.User;
@@ -211,7 +208,7 @@ public class UserRoleCompositionService {
 
   /**
    * ETP-5565 — realigns the personal role with its templates after every composition that
-   * changed its inheritances (see {@link #sweepAfterComposition}).
+   * changed its inheritances (see {@link TemplateAccessPropagationService#realignAfterComposition}).
    */
   private final TemplateAccessPropagationService templateAccessPropagation;
 
@@ -356,7 +353,7 @@ public class UserRoleCompositionService {
 
       UserRoleSyncSupport.syncSingleActiveUserRole(user, personalRole);
       if (counters[0] > 0 || counters[1] > 0) {
-        sweepAfterComposition(personalRole);
+        templateAccessPropagation.realignAfterComposition(personalRole);
       }
 
       List<String> appliedIds = new ArrayList<>();
@@ -838,54 +835,6 @@ public class UserRoleCompositionService {
   private Role findExistingPersonalRole(User user) {
     Role candidate = user.getDefaultRole();
     return (candidate != null && isReusablePersonalRole(user, candidate)) ? candidate : null;
-  }
-
-  /**
-   * ETP-5565 — after the last flush of a composition that added or removed an inheritance,
-   * recomputes {@code personalRole}'s inherited access rows from its templates with {@link
-   * TemplateAccessPropagationService#sweepRole}, the same rule the startup sweep applies. Core's
-   * own propagation copies a template's inactive rows too and lets them win by precedence, so
-   * without this a template grant soft-deleted by {@code EnsureSystemRoleTemplatesScript} could
-   * hide another template's active grant for the same element. The caller already holds the
-   * user's write lock.
-   *
-   * <p>The sweep is native SQL, so afterwards the session's copies of the role's access rows are
-   * stale (some were even deleted). They are evicted, together with the role whose collections
-   * reference them, so a later read in this transaction loads the swept state and the commit's
-   * flush never touches them. Nothing in them is dirty: everything was flushed before the
-   * sweep.</p>
-   */
-  private void sweepAfterComposition(Role personalRole) {
-    TemplateAccessPropagationService.SweepCounts counts =
-        templateAccessPropagation.sweepRole(personalRole.getId());
-    if (counts.total() == 0) {
-      return;
-    }
-    log.info("Realigned personal role {} with its templates after composition: removed {}, "
-        + "updated {}, inserted {} access row(s)", personalRole.getId(), counts.getRemoved(),
-        counts.getUpdated(), counts.getInserted());
-    Session session = OBDal.getInstance().getSession();
-    String roleId = personalRole.getId();
-    for (Map.Entry<Object, EntityEntry> entry : ((SessionImplementor) session)
-        .getPersistenceContextInternal().reentrantSafeEntityEntries()) {
-      Object entity = entry.getKey();
-      if (isAccessRowOf(entity, roleId)) {
-        session.evict(entity);
-      }
-    }
-    session.evict(personalRole);
-  }
-
-  private static boolean isAccessRowOf(Object entity, String roleId) {
-    Role role = null;
-    if (entity instanceof WindowAccess) {
-      role = ((WindowAccess) entity).getRole();
-    } else if (entity instanceof ProcessAccess) {
-      role = ((ProcessAccess) entity).getRole();
-    } else if (entity instanceof org.openbravo.client.application.ProcessAccess) {
-      role = ((org.openbravo.client.application.ProcessAccess) entity).getRole();
-    }
-    return role != null && roleId.equals(role.getId());
   }
 
   /**

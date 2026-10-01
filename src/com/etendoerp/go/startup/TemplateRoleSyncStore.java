@@ -59,6 +59,7 @@ class TemplateRoleSyncStore {
   static final String UTC_NOW = "(now() AT TIME ZONE 'UTC')";
 
   private static final String LEASE_LOCK_TIMEOUT = "2s";
+  private static final String HOLDER = "holder";
   private static final int MAX_ERROR_LENGTH = 2000;
 
   /** A stored fingerprint and the rule version that computed it. */
@@ -137,7 +138,7 @@ class TemplateRoleSyncStore {
               + "WHERE etgo_tpl_role_lease_id = '" + LEASE_ID + "' "
               + "AND (lease_until IS NULL OR lease_until < " + UTC_NOW
               + " OR holder = :holder)");
-      take.setParameter("holder", holder);
+      take.setParameter(HOLDER, holder);
       take.setParameter("minutes", LEASE_MINUTES);
       boolean acquired = take.executeUpdate() == 1;
       OBDal.getInstance().commitAndClose();
@@ -161,7 +162,7 @@ class TemplateRoleSyncStore {
               + " + make_interval(mins => :minutes), "
               + "updated = now() WHERE etgo_tpl_role_lease_id = '" + LEASE_ID + "' "
               + "AND holder = :holder");
-      renew.setParameter("holder", holder);
+      renew.setParameter(HOLDER, holder);
       renew.setParameter("minutes", LEASE_MINUTES);
       boolean held = renew.executeUpdate() == 1;
       OBDal.getInstance().commitAndClose();
@@ -183,7 +184,7 @@ class TemplateRoleSyncStore {
           "UPDATE etgo_tpl_role_lease SET holder = NULL, lease_until = NULL, "
               + "last_error = CAST(:error AS varchar), updated = now() "
               + "WHERE etgo_tpl_role_lease_id = '" + LEASE_ID + "' AND holder = :holder");
-      release.setParameter("holder", holder);
+      release.setParameter(HOLDER, holder);
       release.setParameter("error", StringUtils.left(error, MAX_ERROR_LENGTH));
       release.executeUpdate();
       OBDal.getInstance().commitAndClose();

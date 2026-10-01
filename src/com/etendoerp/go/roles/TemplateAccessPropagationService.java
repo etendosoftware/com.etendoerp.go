@@ -26,9 +26,16 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.hibernate.Session;
+import org.hibernate.engine.spi.EntityEntry;
+import org.hibernate.engine.spi.SessionImplementor;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.ProcessAccess;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.WindowAccess;
 
 /**
  * ETP-5565 — propagates the system template roles' access rows to the personal roles that inherit
@@ -73,6 +80,8 @@ public class TemplateAccessPropagationService {
    */
   public static final int ALGO_VERSION = 1;
 
+  private static final Logger log = LogManager.getLogger(TemplateAccessPropagationService.class);
+
   /**
    * Sweeps nothing: for plain unit tests that mock {@link OBDal} without a real session (the
    * sweep is native SQL), same idea as {@link UserRoleWriteLock#NO_OP}.
@@ -91,12 +100,14 @@ public class TemplateAccessPropagationService {
       + "WHERE tr.istemplate = 'Y' AND tr.ad_client_id = '0'";
 
   private static final String ROLES_PARAM = "roles";
+  private static final String AD_PROCESS_ID = "ad_process_id";
+  private static final String OBUIAPP_PROCESS_ID = "obuiapp_process_id";
 
   /** One of the three access tables the templates hold rows in. */
   enum AccessTable {
     WINDOW("ad_window_access", "ad_window_access_id", "ad_window_id", "W"),
-    PROCESS("ad_process_access", "ad_process_access_id", "ad_process_id", "P"),
-    OBUIAPP_PROCESS("obuiapp_process_access", "obuiapp_process_access_id", "obuiapp_process_id",
+    PROCESS("ad_process_access", "ad_process_access_id", AD_PROCESS_ID, "P"),
+    OBUIAPP_PROCESS("obuiapp_process_access", "obuiapp_process_access_id", OBUIAPP_PROCESS_ID,
         "O");
 
     final String table;
@@ -134,10 +145,16 @@ public class TemplateAccessPropagationService {
       return inserted;
     }
 
+    /** @return removed + updated + inserted rows */
     public int total() {
       return removed + updated + inserted;
     }
 
+    /**
+     * Adds {@code other}'s counts to these.
+     *
+     * @param other the counts of another sweep
+     */
     public void add(SweepCounts other) {
       removed += other.removed;
       updated += other.updated;
@@ -236,6 +253,9 @@ public class TemplateAccessPropagationService {
   /**
    * Personal roles with an active inheritance of any of {@code templateIds}, filtered by {@link
    * #eligibleRoles}, sorted by id.
+   *
+   * @param templateIds the templates whose inheritors to return
+   * @return the eligible inheriting role ids
    */
   public List<String> rolesInheriting(Collection<String> templateIds) {
     if (templateIds.isEmpty()) {
@@ -254,6 +274,8 @@ public class TemplateAccessPropagationService {
    * that bypassed {@link #sweepRole} (Etendo Classic's Role window, core's "Recalculate
    * Permissions") can leave behind while an inactive template row exists. Cheap enough for every
    * periodic tick at the current scale. Filtered by {@link #eligibleRoles}, sorted by id.
+   *
+   * @return the eligible role ids holding a stale copy
    */
   public List<String> rolesWithStaleCopies() {
     StringBuilder sql = new StringBuilder();
@@ -300,6 +322,9 @@ public class TemplateAccessPropagationService {
    * same locks in the same order: the role's {@code EM_ETGO_Personal_Owner_ID}, every user whose
    * default role it is, and every user with an active {@code AD_User_Roles} row on it. Usually
    * one user per role; several only in the ETP-4604 multi-row anomaly.
+   *
+   * @param roleIds the personal roles
+   * @return their possible owners' {@code AD_User_ID}s, sorted
    */
   public List<String> ownersOf(Collection<String> roleIds) {
     if (roleIds.isEmpty()) {
@@ -323,6 +348,9 @@ public class TemplateAccessPropagationService {
    * Realigns the inherited rows of {@code roleIds} with their templates (see the class javadoc
    * for the rule). Does not lock, filter or commit: the caller passes eligible roles and holds
    * their owners' {@link UserRoleWriteLock}s.
+   *
+   * @param roleIds the eligible personal roles to realign
+   * @return the rows removed, updated and inserted
    */
   public SweepCounts sweepRoles(Collection<String> roleIds) {
     SweepCounts counts = new SweepCounts();
@@ -347,13 +375,66 @@ public class TemplateAccessPropagationService {
    * {@link #sweepRoles} for one personal role inside a composition request (ETP-5565, the
    * composition hook): flushes the session first, so the sweep sees what core just propagated,
    * and leaves the session's copies of the role's access rows stale, so the caller must refresh
-   * or evict them (see {@code UserRoleCompositionService#assignTemplateRoles}). A no-op for a
+   * or evict them (see {@link #realignAfterComposition}). A no-op for a
    * role {@link #eligibleRoles} excludes. The caller already holds the owner's write lock.
+   *
+   * @param roleId the personal role
+   * @return the rows removed, updated and inserted
    */
   public SweepCounts sweepRole(String roleId) {
     OBDal.getInstance().flush();
     List<String> eligible = eligibleRoles(Collections.singletonList(roleId));
     return sweepRoles(eligible);
+  }
+
+  /**
+   * ETP-5565 — the composition hook: {@link #sweepRole} for {@code personalRole}, called by {@code
+   * UserRoleCompositionService#assignTemplateRoles} after the last flush of a composition that
+   * added or removed an inheritance. Core's own propagation copies a template's inactive rows too
+   * and lets them win by precedence, so without this a template grant soft-deleted by {@code
+   * EnsureSystemRoleTemplatesScript} could hide another template's active grant. The caller
+   * already holds the user's write lock.
+   *
+   * <p>The sweep is native SQL, so afterwards the session's copies of the role's access rows are
+   * stale (some were even deleted). When the sweep changed anything they are evicted, together
+   * with the role whose collections reference them, so a later read in this transaction loads the
+   * swept state and the commit's flush never touches them. Nothing in them is dirty: the sweep
+   * flushed first.</p>
+   *
+   * @param personalRole the personal role just composed
+   * @return the rows removed, updated and inserted
+   */
+  public SweepCounts realignAfterComposition(Role personalRole) {
+    SweepCounts counts = sweepRole(personalRole.getId());
+    if (counts.total() == 0) {
+      return counts;
+    }
+    log.info("Realigned personal role {} with its templates after composition: removed {}, "
+        + "updated {}, inserted {} access row(s)", personalRole.getId(), counts.getRemoved(),
+        counts.getUpdated(), counts.getInserted());
+    Session session = session();
+    String roleId = personalRole.getId();
+    for (Map.Entry<Object, EntityEntry> entry : ((SessionImplementor) session)
+        .getPersistenceContextInternal().reentrantSafeEntityEntries()) {
+      Object entity = entry.getKey();
+      if (isAccessRowOf(entity, roleId)) {
+        session.evict(entity);
+      }
+    }
+    session.evict(personalRole);
+    return counts;
+  }
+
+  private static boolean isAccessRowOf(Object entity, String roleId) {
+    Role role = null;
+    if (entity instanceof WindowAccess) {
+      role = ((WindowAccess) entity).getRole();
+    } else if (entity instanceof ProcessAccess) {
+      role = ((ProcessAccess) entity).getRole();
+    } else if (entity instanceof org.openbravo.client.application.ProcessAccess) {
+      role = ((org.openbravo.client.application.ProcessAccess) entity).getRole();
+    }
+    return role != null && roleId.equals(role.getId());
   }
 
   /**
@@ -457,6 +538,9 @@ public class TemplateAccessPropagationService {
   /**
    * True when some system template holds an inactive access row last updated more than {@code
    * graceDays} days ago. Lets the periodic tick check for work without taking the lease.
+   *
+   * @param graceDays the purge grace period
+   * @return whether {@link #purgeInactiveTemplateRows} would delete anything
    */
   public boolean hasPurgeableTemplateRows(int graceDays) {
     for (AccessTable access : AccessTable.values()) {
@@ -480,6 +564,7 @@ public class TemplateAccessPropagationService {
    * them win by precedence. This runs on the live database only, so the delta never sees it (the
    * next build's clone starts without the row and the script does not recreate it).
    *
+   * @param graceDays the purge grace period
    * @return rows deleted
    */
   public int purgeInactiveTemplateRows(int graceDays) {
@@ -522,17 +607,20 @@ public class TemplateAccessPropagationService {
    * {@link TemplateRoleWindowAccess}, a button only on read-only windows, or unexplained. After
    * the script has run, only the first two should exist; anything else on a live database is
    * worth a look. Read-only.
+   *
+   * @param templateIds the templates to classify
+   * @return one entry per active process grant
    */
   public List<ProcessGrantDiagnostic> diagnoseProcessGrants(Collection<String> templateIds) {
     List<ProcessGrantDiagnostic> result = new ArrayList<>();
     if (templateIds.isEmpty()) {
       return result;
     }
-    result.addAll(diagnose(templateIds, "classic", "ad_process_access", "ad_process_id",
-        "c.ad_process_id", "ad_process", "ad_process_id",
+    result.addAll(diagnose(templateIds, "classic", "ad_process_access", AD_PROCESS_ID,
+        "c.ad_process_id", "ad_process", AD_PROCESS_ID,
         TemplateRoleWindowAccess.standaloneClassicProcessGrantsByRoleId()));
     result.addAll(diagnose(templateIds, "obuiapp", "obuiapp_process_access",
-        "obuiapp_process_id", "c.em_obuiapp_process_id", "obuiapp_process", "obuiapp_process_id",
+        OBUIAPP_PROCESS_ID, "c.em_obuiapp_process_id", "obuiapp_process", OBUIAPP_PROCESS_ID,
         TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId()));
     return result;
   }
