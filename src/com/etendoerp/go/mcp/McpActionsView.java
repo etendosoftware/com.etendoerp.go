@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -111,6 +112,19 @@ final class McpActionsView {
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
       Map<String, NeoActionContract> declared, McpActionsSection.View config)
       throws JSONException {
+    return buildResponse(specName, entityName, fields, declared, config, Set.of());
+  }
+
+  /**
+   * Same, also leaving out the buttons the customization excludes from agents
+   * ({@code NeoHandler#agentExcludedActions()}, ETP-5558) — {@code neo_action} refuses them.
+   *
+   * @param excluded the excluded action names
+   */
+  @SuppressWarnings("java:S107") // the catalogue's inputs; a holder would only rename them
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared, McpActionsSection.View config,
+      Set<String> excluded) throws JSONException {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
@@ -119,12 +133,12 @@ final class McpActionsView {
     for (int i = 0; i < buttons.length(); i++) {
       JSONObject button = buttons.getJSONObject(i);
       String name = button.optString("name", null);
-      if (config != null && config.isHidden(name)) {
+      if (excluded.contains(name) || (config != null && config.isHidden(name))) {
         continue;
       }
       String instead = config != null ? config.redirectOf(name) : null;
       if (instead != null) {
-        redirect(button, instead, config.getReason());
+        redirect(button, instead, config.getRedirectReason());
       }
       actions.put(button);
     }

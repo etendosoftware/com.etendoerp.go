@@ -1385,7 +1385,8 @@ public class McpToolRouter {
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
       return wrapAsTextContent(McpActionsView.buildResponse(specName, entityName, fieldsArray,
-          declaredActions, McpActionsSection.forEntity(sfEntity)));
+          declaredActions, McpActionsSection.forEntity(sfEntity),
+          McpDeclaredActions.excludedOf(sfEntity)));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that

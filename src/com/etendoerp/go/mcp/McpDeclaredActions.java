@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -30,6 +31,8 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -136,19 +139,20 @@ final class McpDeclaredActions {
     }
     NeoHandler customization = customizationOf(entity);
     Map<String, NeoActionContract> declared = declaredBy(customization);
-    if (excludedBy(customization).contains(action)) {
-      throw McpRoutingException.actionHidden(specName, entityName, action,
-          "its customization keeps it for people only");
-    }
+    Set<String> excluded = excludedBy(customization);
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
     for (String name : namesOf(action, button)) {
+      if (excluded.contains(name)) {
+        throw McpRoutingException.actionHidden(specName, entityName, action,
+            "its customization keeps it for people only");
+      }
       if (config.isHidden(name)) {
         throw McpRoutingException.actionHidden(specName, entityName, action, config.getReason());
       }
       String redirect = config.redirectOf(name);
       if (redirect != null) {
         throw McpRoutingException.actionRedirected(specName, entityName, action, redirect,
-            config.getReason());
+            config.getRedirectReason());
       }
     }
     NeoActionContract contract = declared.get(action);
@@ -163,6 +167,17 @@ final class McpDeclaredActions {
       return contract;
     }
     return null;
+  }
+
+  /**
+   * The actions the entity's customization excludes from agents
+   * ({@code NeoHandler#agentExcludedActions()}).
+   *
+   * @param entity the SchemaForge entity
+   * @return the names, empty when none or the customization cannot be resolved
+   */
+  static Set<String> excludedOf(SFEntity entity) {
+    return excludedBy(customizationOf(entity));
   }
 
   /** Looked up quietly, like {@link #declaredBy}. */
@@ -180,17 +195,41 @@ final class McpDeclaredActions {
     }
   }
 
-  /** The AD button {@code neo_action} would fire for {@code action}, or {@code null}. */
+  /**
+   * The AD button {@code action} names on the entity, or {@code null}: the one {@code neo_action}
+   * would fire ({@link NeoButtonActionHelper#findButtonColumn} — included fields, by DB column or
+   * field name), else a button column of the entity's table under either name. The second lookup
+   * matters for a button whose field curation left out: it cannot fire, but its alias must still
+   * meet the hidden/redirect check, so the agent gets the reason and the replacement rather than a
+   * bare "Action not found".
+   */
   private static Column buttonOf(SFEntity entity, String action) {
     if (entity == null || action == null) {
       return null;
     }
     try {
-      return NeoButtonActionHelper.findButtonColumn(entity.getId(), action);
+      Column fired = NeoButtonActionHelper.findButtonColumn(entity.getId(), action);
+      return fired != null ? fired : tableButton(entity, action);
     } catch (RuntimeException e) {
       log.debug("Button lookup failed for {} on {}: {}", action, entity.getName(), e.getMessage());
       return null;
     }
+  }
+
+  private static Column tableButton(SFEntity entity, String action) {
+    Tab tab = entity.getADTab();
+    Table table = tab == null ? null : tab.getTable();
+    List<Column> columns = table == null ? null : table.getADColumnList();
+    if (columns == null) {
+      return null;
+    }
+    for (Column column : columns) {
+      if (Boolean.TRUE.equals(column.isActive()) && McpSchemaActionFields.isButtonColumn(column)
+          && (action.equals(column.getDBColumnName()) || action.equals(propertyNameOf(column)))) {
+        return column;
+      }
+    }
+    return null;
   }
 
   /**

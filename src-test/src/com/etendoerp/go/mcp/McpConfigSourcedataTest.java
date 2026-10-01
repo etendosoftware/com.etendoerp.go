@@ -196,23 +196,29 @@ class McpConfigSourcedataTest {
       }
       assertTrue("registerPayment".equals(actions.getJSONObject(McpActionsSection.KEY_REDIRECT)
           .optString("aPRMAddpayment")), id + " must redirect aPRMAddpayment to registerPayment");
+      String redirectReason = actions.optString(McpActionsSection.KEY_REDIRECT_REASON, "");
+      assertTrue(redirectReason.contains("Add Payment"), id + ": the redirect has its own reason");
+      assertFalse(redirectReason.contains("SCA"), id + ": not the PIS reason");
     }
   }
 
   /**
    * ETP-5558: a draft payment header shows only Delete and Confirm in the UI — Save is disabled and
-   * no field is editable — so MCP hides update on both payment headers and keeps delete.
+   * no field is editable — so MCP hides update on both payment headers. Delete is hidden too: the
+   * generic delete of a draft fails on the payment-detail foreign key (measured live), while the
+   * invoice's deletePayment removes it cleanly, and the UI's Eliminar never uses the generic route.
    */
   @Test
-  @DisplayName("the payment headers hide create and update through MCP, and keep delete")
-  void paymentHeadersHideUpdateKeepDelete() throws IOException, JSONException {
+  @DisplayName("the payment headers hide create, update and delete through MCP")
+  void paymentHeadersHideEveryWrite() throws IOException, JSONException {
     for (String id : PAYMENT_HEADERS) {
       JSONObject verbs = payloadOf(id).getJSONObject(McpVerbsSection.NAME);
       assertFalse(verbs.optBoolean(McpVerbsSection.KEY_CREATE, true), id + " create");
       assertFalse(verbs.optBoolean(McpVerbsSection.KEY_UPDATE, true), id + " update");
-      assertTrue(verbs.optBoolean(McpVerbsSection.KEY_DELETE, true), id + " keeps delete");
-      assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains("paymentId"),
-          id + ": the replacement must say how a draft is edited");
+      assertFalse(verbs.optBoolean(McpVerbsSection.KEY_DELETE, true), id + " delete");
+      String instead = verbs.getString(McpVerbsSection.KEY_INSTEAD);
+      assertTrue(instead.contains("paymentId"), id + ": how a draft is edited: " + instead);
+      assertTrue(instead.contains("deletePayment"), id + ": how a draft is deleted: " + instead);
     }
   }
 

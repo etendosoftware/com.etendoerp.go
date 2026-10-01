@@ -66,9 +66,9 @@ public final class NeoActionContract {
   /** JSON Schema type for a true/false parameter. */
   public static final String TYPE_BOOLEAN = "boolean";
   /**
-   * A number or numeric string. Accepts a JSON number or a numeric string, because the SPA sends amounts as strings
-   * ({@code "121"}) and an agent naturally sends {@code 121}; both reach the handler, which parses
-   * with {@code BigDecimal} (ETP-5558).
+   * A number or numeric string. Accepts a JSON number or a numeric string, because the SPA sends
+   * amounts as strings ({@code "121"}) and an agent naturally sends {@code 121}; both reach the
+   * handler, which parses with {@code BigDecimal} (ETP-5558).
    */
   public static final String TYPE_NUMBER = "number";
   /** A {@code yyyy-MM-dd} date carried as a string (see {@link NeoReportParam#TYPE_DATE}). */

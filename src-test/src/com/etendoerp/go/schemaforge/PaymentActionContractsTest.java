@@ -213,10 +213,13 @@ class PaymentActionContractsTest {
   }
 
   @Test
-  @DisplayName("both invoice headers exclude exactly the five PIS actions from agents, in code")
+  @DisplayName("both invoice headers exclude the five PIS actions and the PSD2 button, in code")
   void headersExcludePis() {
-    assertEquals(PIS, new SalesInvoiceHeaderHandler().agentExcludedActions());
-    assertEquals(PIS, new PurchaseInvoiceHeaderHandler().agentExcludedActions());
+    Set<String> expected = new TreeSet<>(PIS);
+    expected.add("psd2GenerateBankPayment");
+    assertEquals(expected, new TreeSet<>(new SalesInvoiceHeaderHandler().agentExcludedActions()));
+    assertEquals(expected,
+        new TreeSet<>(new PurchaseInvoiceHeaderHandler().agentExcludedActions()));
   }
 
   @Test

@@ -52,6 +52,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
@@ -125,9 +126,13 @@ class McpWindowDeclaredActionsTest {
   private static Column buttonColumn(String dbName) {
     Table table = mock(Table.class);
     when(table.getDBTableName()).thenReturn("C_Invoice");
+    Reference button = mock(Reference.class);
+    when(button.getId()).thenReturn("28");
     Column column = mock(Column.class);
     when(column.getDBColumnName()).thenReturn(dbName);
     when(column.getTable()).thenReturn(table);
+    when(column.getReference()).thenReturn(button);
+    when(column.isActive()).thenReturn(true);
     return column;
   }
 
@@ -159,6 +164,14 @@ class McpWindowDeclaredActionsTest {
     when(spec.getSpecType()).thenReturn(specType);
     Tab tab = mock(Tab.class);
     when(tab.getTabLevel()).thenReturn(0L);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_Invoice");
+    List<Column> columns = new java.util.ArrayList<>();
+    for (String db : List.of("DocAction", "EM_APRM_Addpayment", "EM_Psd2_Generate_Bank_Payment")) {
+      columns.add(buttonColumn(db));
+    }
+    when(table.getADColumnList()).thenReturn(columns);
+    when(tab.getTable()).thenReturn(table);
     SFEntity entity = mock(SFEntity.class);
     when(entity.getId()).thenReturn("ent-" + (++seq));
     when(entity.getName()).thenReturn(ENTITY);
@@ -172,7 +185,8 @@ class McpWindowDeclaredActionsTest {
 
   private static final String HIDE_PIS = "{\"actions\":{\"hidden\":[\"pisTemplates\","
       + "\"psd2GenerateBankPayment\"],\"redirect\":{\"aPRMAddpayment\":\"registerPayment\"},"
-      + "\"reason\":\"PIS needs a person to authorize at the bank\"}}";
+      + "\"reason\":\"PIS needs a person to authorize at the bank\","
+      + "\"redirectReason\":\"the classic Add Payment button is not the Etendo GO payment flow\"}}";
 
   private static JSONArray buttons() throws Exception {
     JSONArray fields = new JSONArray();
@@ -261,6 +275,21 @@ class McpWindowDeclaredActionsTest {
       assertEquals("registerPayment", add.getString("useInstead"));
       assertTrue(add.getString("notInvokableReason").contains("registerPayment"),
           add.toString());
+      assertTrue(add.getString("notInvokableReason").contains("Add Payment button"),
+          "a redirect carries its own reason: " + add);
+      assertFalse(add.getString("notInvokableReason").contains("authorize at the bank"),
+          "not the PIS reason: " + add);
+    }
+
+    @Test
+    @DisplayName("a button the customization excludes is not listed, even with no MCP_CONFIG row")
+    void excludedButtonNotListed() throws Exception {
+      when(handler.agentExcludedActions()).thenReturn(Set.of("psd2GenerateBankPayment"));
+      SFEntity e = entity("W", null);
+      JSONObject view = McpActionsView.buildResponse(SPEC, ENTITY, buttons(),
+          McpDeclaredActions.of(e), McpActionsSection.forEntity(e),
+          McpDeclaredActions.excludedOf(e));
+      assertFalse(namesOf(view.getJSONArray("actions")).contains("psd2GenerateBankPayment"));
     }
 
     @Test
@@ -392,6 +421,33 @@ class McpWindowDeclaredActionsTest {
       JSONObject env = refused(HIDE_PIS, "EM_APRM_Addpayment").toEnvelope();
       assertEquals(405, env.getInt(McpConstants.KEY_STATUS));
       assertTrue(env.getString(McpConstants.KEY_HINT).contains("registerPayment"));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("Add Payment button"));
+    }
+
+    /**
+     * Live (ETP-5558): the curated invoice header does not include the aPRMAddpayment and
+     * psd2GenerateBankPayment fields, so findButtonColumn finds neither and the alias answered a
+     * bare 404 — safe, but without the registerPayment hint. The tab's own columns still name them.
+     */
+    @Test
+    @DisplayName("a button whose field is not included is still matched by its DB column name")
+    void notIncludedButtonByColumnName() throws Exception {
+      buttonMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), anyString()))
+          .thenReturn(null);
+      JSONObject redirected = refused(HIDE_PIS, "EM_APRM_Addpayment").toEnvelope();
+      assertEquals(405, redirected.getInt(McpConstants.KEY_STATUS));
+      assertTrue(redirected.getString(McpConstants.KEY_HINT).contains("registerPayment"));
+      when(handler.agentExcludedActions()).thenReturn(Set.of("psd2GenerateBankPayment"));
+      assertEquals(405, refused(null, "EM_Psd2_Generate_Bank_Payment").toEnvelope()
+          .getInt(McpConstants.KEY_STATUS));
+    }
+
+    @Test
+    @DisplayName("an excluded button called by its DB column name is refused in code, without the row")
+    void excludedButtonByColumnNameWithoutTheRow() throws Exception {
+      when(handler.agentExcludedActions()).thenReturn(Set.of("psd2GenerateBankPayment"));
+      assertEquals(405, refused(null, "EM_Psd2_Generate_Bank_Payment").toEnvelope()
+          .getInt(McpConstants.KEY_STATUS));
     }
 
     @Test
@@ -527,6 +583,9 @@ class McpWindowDeclaredActionsTest {
           new JSONObject("{\"redirect\":{\"a\":1},\"reason\":\"r\"}")).isEmpty());
       assertFalse(McpActionsSection.validate(new JSONObject("{\"reason\":\"r\"}")).isEmpty(),
           "names neither hidden nor redirect");
+      assertFalse(McpActionsSection.validate(new JSONObject(
+          "{\"redirect\":{\"a\":\"b\"},\"reason\":\"r\",\"redirectReason\":\" \"}")).isEmpty(),
+          "a blank redirectReason is refused");
     }
   }
 
@@ -577,6 +636,9 @@ class McpWindowDeclaredActionsTest {
       assertTrue(Pattern.compile("McpActionsView\\s*\\.\\s*buildResponse\\s*\\([^;]*\\b"
           + declared.group(1) + "\\b").matcher(body).find(),
           "view:\"actions\" must receive the declared actions to merge");
+      assertTrue(Pattern.compile("McpActionsView\\s*\\.\\s*buildResponse\\s*\\([^;]*"
+          + "McpDeclaredActions\\s*\\.\\s*excludedOf\\s*\\(").matcher(body).find(),
+          "and the actions the customization excludes, so they are not listed");
     }
 
     @Test

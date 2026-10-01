@@ -36,11 +36,13 @@ final class PaymentActionHandlerSupport {
   private static final String DELETE_ACTION = "deletePayment";
 
   /**
-   * The PIS actions this support serves to the SPA and excludes from agents (ETP-5558, product
-   * decision): a bank-initiated payment ends in an authorization only a person can give.
+   * The PIS actions this support serves to the SPA, plus the invoice's PSD2 button, all excluded
+   * from agents (ETP-5558, product decision): a bank-initiated payment ends in an authorization
+   * only a person can give.
    */
   static final Set<String> AGENT_EXCLUDED_ACTIONS = Set.of(PIS_SUPPLIER_ACCOUNTS_ACTION,
-      PIS_TEMPLATES_ACTION, PIS_STATUS_ACTION, PIS_CANCEL_ACTION, PIS_RETRY_ACTION);
+      PIS_TEMPLATES_ACTION, PIS_STATUS_ACTION, PIS_CANCEL_ACTION, PIS_RETRY_ACTION,
+      "psd2GenerateBankPayment");
 
   private static final String FIELD_PAYMENT_ID = "paymentId";
   private static final String FIELD_SCHEDULE_ID = "scheduleId";

@@ -1977,9 +1977,13 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   the refusal is the MCP's, the SPA keeps them. `redirect` maps a button to the action to use: the
   button stays listed (the catalogue is complete, IMP-21) as `invokable:false` with
   `notInvokableReason` and `useInstead`, and `neo_action` on it is refused 405 with a hint naming the
-  replacement. A button is matched under **every** name `neo_action` fires it by — its field name
+  replacement. `redirectReason` (optional) gives a redirect its own reason; without it the redirect
+  uses `reason`. A button is matched under **every** name `neo_action` fires it by — its field name
   and its DB column name (`NeoButtonActionHelper.findButtonColumn` accepts both), so
-  `action:"EM_Psd2_Generate_Bank_Payment"` is refused exactly like `psd2GenerateBankPayment`. An
+  `action:"EM_Psd2_Generate_Bank_Payment"` is refused exactly like `psd2GenerateBankPayment`. A
+  button whose field curation left out (it cannot fire, so `findButtonColumn` does not see it) is
+  matched against the tab's own button columns, so its alias gets the 405 and the replacement
+  instead of a bare 404 *Action not found*. An
   unusable `MCP_CONFIG` refuses **every** `neo_action` on the entity (fails closed, like `verbs`),
   and discovery says so: `view:"actions"` lists every entry `invokable:false` with
   `notInvokableReason` (`invokableCount: 0`), and `neo_discover` adds `actionsInvokable:false` +
@@ -1987,10 +1991,11 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
 - **Excluded from agents, in code.** `NeoHandler#agentExcludedActions()` (default empty) names
   actions the handler serves to the SPA that an agent must never run. `neo_action` refuses them
   (405 `method_not_allowed`) before the handler runs, whatever `MCP_CONFIG` says, and they are never
-  advertised. Both invoice headers return the five PIS actions
-  (`PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS`); the `MCP_CONFIG.actions` row is a second
-  guard, and the only one for the `psd2GenerateBankPayment` button. Any other undeclared action
-  stays callable, as the UI offers it.
+  advertised (neither as a declared action nor as a button). The check runs over every name of the
+  call, aliases included. Both invoice headers return the five PIS actions and the
+  `psd2GenerateBankPayment` button (`PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS`); the
+  `MCP_CONFIG.actions` row is a second guard. Any other undeclared action stays callable, as the UI
+  offers it.
 - **Validation before dispatch.** `McpToolRouter.handleAction` calls `McpDeclaredActions.precheck`
   before `NeoExtensionDispatcher`: hidden/redirected → 405; a declared action whose parameters do
   not match its contract → **422 `validation_error`** with the contract's correction keys
@@ -2471,15 +2476,18 @@ a hidden verb. The shared `NeoMethodPolicy.buildMcpNotEnabledMessage` is not cha
 
 | Entity | Hidden | Why |
 |---|---|---|
-| `payment-in/finPayment` | create, update | the UI never creates a collection by hand (`hideCreate`), and a draft collection header shows only *Eliminar* and *Confirmar* (*Guardar* disabled, no field editable); use `registerPayment` on `sales-invoice/header` — with `paymentId` to edit a draft |
-| `payment-out/header` | create, update | idem for payments; `registerPayment` on `purchase-invoice/header` |
+| `payment-in/finPayment` | create, update, delete | the UI never creates a collection by hand (`hideCreate`); a draft collection header shows only *Eliminar* and *Confirmar* (*Guardar* disabled, no field editable); and the generic delete of a draft fails on its payment details (422 *"…relacionado con otros elementos existentes"*, measured live). Use `registerPayment` on `sales-invoice/header` (with `paymentId` to edit a draft) and `deletePayment` with `paymentId` to delete one |
+| `payment-out/header` | create, update, delete | idem for payments, on `purchase-invoice/header` |
 | `payment-in/finPaymentScheduleDetail`, `payment-out/lines` | create, update, delete | the allocation of a payment to invoice schedules; the UI only writes it through the invoice actions |
 | `payment-out/bankPayments` | create, update, delete | PIS needs a person to authorize at the bank (SCA) and is excluded from MCP |
 | `product/transactionAdjustments` | create | its parent cannot be identified, so creates were already refused (`parent_unresolvable`); declared here so `neo_discover` and `neo_schema` stop advertising a `POST` that always fails |
 
-Delete of the two payment headers is deliberately **kept**: the UI offers *Eliminar* on a draft,
-and `neo_delete` there is the same delete (the invoice action `deletePayment` is the alternative the
-invoice panel uses). Update was hidden after checking the *Cobro* / *Pago* windows on a draft.
+Delete of the two payment headers is hidden too. The UI's *Eliminar* never uses the generic delete:
+the payment windows run the `eTPRRemovePayment` action (`ReactivatePaymentHandler`, which removes the
+payment↔schedule join rows first) and the invoice panel runs `deletePayment`. The generic delete
+removes only the header, so on a draft with payment details it fails on the foreign key. REST
+`DELETE` on a payment header takes that same generic path (`ReactivatePaymentHandler` only intercepts
+actions), so it fails the same way; it is not changed here, and the SPA does not call it.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -2759,8 +2767,9 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 
 | call | REST `/sws/neo/<invoice spec>/header/<id>/action/<name>` | MCP `neo_action` |
 |---|---|---|
-| any PIS action (`pisTemplates`, `cancelPisPayment`, …), `psd2GenerateBankPayment` (by field or DB column name) | served | **405** — the PIS actions by `agentExcludedActions()` in code, and all of them by `MCP_CONFIG.actions` (a person must authorize at the bank) |
-| `aPRMAddpayment` / `EM_APRM_Addpayment` | Classic button path | **405**, hint `registerPayment` |
+| any PIS action (`pisTemplates`, `cancelPisPayment`, …), `psd2GenerateBankPayment` (by field or DB column name) | served | **405** — by `agentExcludedActions()` in code and again by `MCP_CONFIG.actions` (a person must authorize at the bank) |
+| `aPRMAddpayment` / `EM_APRM_Addpayment` | Classic button path (field not included: 404) | **405** with its own `redirectReason`, hint `registerPayment` |
+| `DELETE` / `neo_delete` on a draft payment header | generic delete; **fails** on the payment-detail FK (known, not fixed; the SPA deletes through `eTPRRemovePayment` / `deletePayment`) | **405** — `MCP_CONFIG.verbs` hides it, `instead` = `deletePayment` |
 | `cloneRecord`, `createShipment`, `post`, `unpost`, `EM_Aeatsii_Send`, `EM_Tbai_Xmlgenerator` | served | **callable but not discoverable**: the header handlers serve them with no contract, so `neo_schema`/`neo_discover` do not list them (the two buttons' fields are not included) and their parameters are not validated. Known gap, tracked in the ETP-5558 follow-ups |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
