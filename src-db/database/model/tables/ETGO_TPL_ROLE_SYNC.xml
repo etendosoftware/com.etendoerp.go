@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_TPL_ROLE_SYNC">
+    <table name="ETGO_TPL_ROLE_SYNC" primaryKey="ETGO_TPL_ROLE_SYNC_PK">
+      <column name="ETGO_TPL_ROLE_SYNC_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ROLE_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="FINGERPRINT" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ALGO_VERSION" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[1]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="SYNCED_AT" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="PERSONAL_ROLES" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ROWS_CHANGED" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_TRSYNC_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_TRSYNC_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_TRSYNC_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ROLE" name="ETGO_TRSYNC_ROLE_FK" onDelete="cascade">
+        <reference local="AD_ROLE_ID" foreign="AD_ROLE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_TRSYNC_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <index name="ETGO_TRSYNC_ROLE_UQ" unique="true">
+        <index-column name="AD_ROLE_ID"/>
+      </index>
+      <check name="ETGO_TRSYNC_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+    </table>
+  </database>
