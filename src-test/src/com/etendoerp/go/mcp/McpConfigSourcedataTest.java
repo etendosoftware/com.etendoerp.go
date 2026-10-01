@@ -139,6 +139,84 @@ class McpConfigSourcedataTest {
   }
 
   @Test
+  @DisplayName("every authored verbs and actions section passes its validator")
+  void verbsAndActionsSectionsValidate() throws IOException, JSONException {
+    McpConfigSections.resetForTests();
+    List<String> failures = new ArrayList<>();
+    for (String[] row : authoredPayloads()) {
+      JSONObject body = new JSONObject(row[1]);
+      if (body.has(McpVerbsSection.NAME)) {
+        McpVerbsSection.declaration().validate(body.getJSONObject(McpVerbsSection.NAME))
+            .forEach(p -> failures.add(row[0] + ": verbs: " + p));
+      }
+      if (body.has(McpActionsSection.NAME)) {
+        McpActionsSection.validate(body.getJSONObject(McpActionsSection.NAME))
+            .forEach(p -> failures.add(row[0] + ": actions: " + p));
+      }
+    }
+    assertTrue(failures.isEmpty(), "authored MCP_CONFIG sections are invalid:\n  "
+        + String.join("\n  ", failures));
+  }
+
+  /** sales-invoice/header and purchase-invoice/header. */
+  private static final List<String> INVOICE_HEADERS =
+      List.of("7240CAF07810439B85DE61E70BE8DC0B", "0D654005B02741A29A0491FD5AFEA6E8");
+  /** payment-in/finPayment and payment-out/header. */
+  private static final List<String> PAYMENT_HEADERS =
+      List.of("26AAEE85345F4D549907007E8821360A", "65BF1DFD362B4F1CB6FEC60DB7030CF5");
+
+  private static JSONObject payloadOf(String entityId) throws IOException, JSONException {
+    for (String[] row : authoredPayloads()) {
+      if (row[0].equals("ETGO_SF_ENTITY.xml#" + entityId)) {
+        return new JSONObject(row[1]);
+      }
+    }
+    fail("no MCP_CONFIG authored for ETGO_SF_ENTITY " + entityId);
+    return null;
+  }
+
+  /**
+   * ETP-5558, product decision: a bank-initiated (PIS) payment ends in an authorization only a
+   * person can give, so no PIS action — and not the PSD2 button either — is offered to or run by
+   * an agent. The handler keeps serving them to the SPA; this row is the only thing that keeps them
+   * off the MCP, so its content is asserted, not just its shape.
+   */
+  @Test
+  @DisplayName("the invoice headers hide every PIS action and send the APRM button to registerPayment")
+  void invoiceHeadersHidePis() throws IOException, JSONException {
+    for (String id : INVOICE_HEADERS) {
+      JSONObject actions = payloadOf(id).getJSONObject(McpActionsSection.NAME);
+      List<String> hidden = new ArrayList<>();
+      for (int i = 0; i < actions.getJSONArray(McpActionsSection.KEY_HIDDEN).length(); i++) {
+        hidden.add(actions.getJSONArray(McpActionsSection.KEY_HIDDEN).getString(i));
+      }
+      for (String pis : List.of("pisSupplierAccounts", "pisTemplates", "pisPaymentStatus",
+          "cancelPisPayment", "retryPisPayment", "psd2GenerateBankPayment")) {
+        assertTrue(hidden.contains(pis), id + " must hide " + pis);
+      }
+      assertTrue("registerPayment".equals(actions.getJSONObject(McpActionsSection.KEY_REDIRECT)
+          .optString("aPRMAddpayment")), id + " must redirect aPRMAddpayment to registerPayment");
+    }
+  }
+
+  /**
+   * ETP-5558: a draft payment header shows only Delete and Confirm in the UI — Save is disabled and
+   * no field is editable — so MCP hides update on both payment headers and keeps delete.
+   */
+  @Test
+  @DisplayName("the payment headers hide create and update through MCP, and keep delete")
+  void paymentHeadersHideUpdateKeepDelete() throws IOException, JSONException {
+    for (String id : PAYMENT_HEADERS) {
+      JSONObject verbs = payloadOf(id).getJSONObject(McpVerbsSection.NAME);
+      assertFalse(verbs.optBoolean(McpVerbsSection.KEY_CREATE, true), id + " create");
+      assertFalse(verbs.optBoolean(McpVerbsSection.KEY_UPDATE, true), id + " update");
+      assertTrue(verbs.optBoolean(McpVerbsSection.KEY_DELETE, true), id + " keeps delete");
+      assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains("paymentId"),
+          id + ": the replacement must say how a draft is edited");
+    }
+  }
+
+  @Test
   @DisplayName("the authored rows are actually present — the regex has not stopped matching")
   void payloadsAreFound() throws IOException {
     // Without this, a change to the export format (or a bad regex) would turn the test above into
