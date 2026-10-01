@@ -3406,6 +3406,70 @@ class NeoCrudHandlerTest {
       }
     }
 
+    /**
+     * ETP-5009 (W1): {@code GET …?id=X} with no path id is a read by id as well — core fetches it
+     * by id, ignoring the where clause — so the predicates are skipped for it exactly as for the
+     * path form, and the id is still handed to core.
+     */
+    @Test
+    @DisplayName("GET with a query-string id and no path id does not resolve read predicates")
+    void getByQueryIdDoesNotResolveReadPredicates() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> qp = new HashMap<>();
+      qp.put("id", "REC-QUERY");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, qp);
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+        dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(any()), never());
+        assertNull(params.get("whereAndFilterClause"));
+        assertEquals("REC-QUERY", params.get("id"));
+      }
+    }
+
+    /**
+     * A blank {@code ?id=} names no record, so the request stays a list read and the predicates
+     * still apply — the skip must not widen into "any request carrying an id key".
+     */
+    @Test
+    @DisplayName("GET with a blank query-string id still applies read predicates")
+    void getWithBlankQueryIdAppliesReadPredicates() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      NeoHandler customization = mock(NeoHandler.class);
+      when(customization.readPredicates(any())).thenReturn(List.of("e.hidden = false"));
+      Map<String, String> qp = new HashMap<>();
+      qp.put("id", " ");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, qp);
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+               Mockito.mockStatic(NeoExtensionDispatcher.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+            .thenReturn(customization);
+
+        Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+        dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(any()));
+        assertNotNull(params.get("whereAndFilterClause"));
+        assertTrue(params.get("whereAndFilterClause").contains("e.hidden = false"));
+      }
+    }
+
     @Test
     @DisplayName("Non-GET request does not resolve read predicates")
     void nonGetDoesNotResolveReadPredicates() throws Exception {

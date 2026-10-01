@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -243,5 +244,93 @@ public class NeoContextTest {
         .build();
     String str = ctx.toString();
     assertTrue(str.contains("SELECTOR"));
+  }
+
+  // ── ETP-5009: getReadId / isReadById ──────────────────────────────────────
+
+  private static NeoContext readCtx(String method, String recordId, String queryId) {
+    Map<String, String> params = new HashMap<>();
+    if (queryId != null) {
+      params.put("id", queryId);
+    }
+    return NeoContext.builder()
+        .specName("product")
+        .entityName("product")
+        .httpMethod(method)
+        .recordId(recordId)
+        .queryParams(params)
+        .build();
+  }
+
+  @Test
+  public void testReadIdIsThePathIdWhenOnlyThePathNamesOne() {
+    NeoContext ctx = readCtx("GET", "PATH-1", null);
+
+    assertEquals("PATH-1", ctx.getReadId());
+    assertTrue(ctx.isReadById());
+  }
+
+  /** The W1 case: {@code GET product/product?id=X} has no path id and is still a read by id. */
+  @Test
+  public void testReadIdFallsBackToTheQueryIdWhenThereIsNoPathId() {
+    NeoContext ctx = readCtx("GET", null, "QUERY-1");
+
+    assertEquals("QUERY-1", ctx.getReadId());
+    assertTrue(ctx.isReadById());
+  }
+
+  /** The path id is authoritative (ETP-5195), exactly as buildDalParams hands it to core. */
+  @Test
+  public void testPathIdWinsOverAConflictingQueryId() {
+    NeoContext ctx = readCtx("GET", "PATH-1", "QUERY-1");
+
+    assertEquals("PATH-1", ctx.getReadId());
+    assertTrue(ctx.isReadById());
+  }
+
+  @Test
+  public void testBlankPathAndBlankQueryIdIsAListRead() {
+    NeoContext ctx = readCtx("GET", "", "  ");
+
+    assertFalse(ctx.isReadById());
+  }
+
+  @Test
+  public void testBlankQueryIdWithoutPathIdIsAListRead() {
+    NeoContext ctx = readCtx("GET", null, " ");
+
+    assertEquals(" ", ctx.getReadId());
+    assertFalse(ctx.isReadById());
+  }
+
+  @Test
+  public void testNoIdAnywhereIsAListRead() {
+    NeoContext ctx = readCtx("GET", null, null);
+
+    assertNull(ctx.getReadId());
+    assertFalse(ctx.isReadById());
+  }
+
+  @Test
+  public void testNullQueryParamsAndNoPathIdYieldsNoReadId() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("product").entityName("product").httpMethod("GET").build();
+
+    assertNull(ctx.getReadId());
+    assertFalse(ctx.isReadById());
+  }
+
+  /** Only a GET is a read: a write naming an id, by path or query, is never a read by id. */
+  @Test
+  public void testNonGetWithAnIdIsNotAReadById() {
+    for (String method : new String[] {"POST", "PUT", "PATCH", "DELETE"}) {
+      assertFalse(method + " with path id", readCtx(method, "PATH-1", null).isReadById());
+      assertFalse(method + " with query id", readCtx(method, null, "QUERY-1").isReadById());
+    }
+  }
+
+  @Test
+  public void testNonGetStillExposesTheReadId() {
+    assertEquals("QUERY-1", readCtx("DELETE", null, "QUERY-1").getReadId());
   }
 }

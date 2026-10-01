@@ -35,6 +35,7 @@ import static org.mockito.Mockito.when;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -1259,5 +1260,104 @@ public class ProductDefaultsHandlerTest {
   @Test
   public void testReadPredicatesIsEmptyForANullContext() {
     assertTrue(new ProductDefaultsHandler().readPredicates(null).isEmpty());
+  }
+
+  // ── ETP-5009 (W1): GET product/product?id=X is a read by id too ──────────────────────────
+  //
+  // Core fetches the query-string form by id exactly like the path form, so the list read
+  // predicate never reaches it. Gating the post-filter on the path id alone let a hidden product
+  // be read with GET …/product/product?id=<hidden id>; it is gated on NeoContext#isReadById.
+
+  private static NeoContext queryIdGetCtx(String queryId, JSONObject previousBody,
+      OBContext obContext) {
+    return NeoContext.builder()
+        .specName("product").entityName("product")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .queryParams(Map.of("id", queryId))
+        .obContext(obContext).previousResult(NeoResponse.ok(previousBody)).build();
+  }
+
+  @Test
+  public void testAfterHandleHidesSystemCategoryProductOnAQueryStringIdGetAndAdjustsRowCounts()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<SystemCategoryIds> categoryMock =
+            Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve(CLIENT1)).thenReturn(Set.of("cat-system"));
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      JSONArray data = new JSONArray();
+      data.put(new JSONObject().put("id", PRODUCT_ID).put("productCategory", "cat-system"));
+      JSONObject body = dataResponse(data);
+      body.getJSONObject("response").put("totalRows", 1);
+      body.getJSONObject("response").put("endRow", 1);
+
+      NeoResponse result = new ProductDefaultsHandler().afterHandle(
+          queryIdGetCtx(PRODUCT_ID, body, obContextWithClient(CLIENT1)));
+
+      assertNotNull(result);
+      JSONObject response = result.getBody().getJSONObject("response");
+      assertEquals(0, response.getJSONArray("data").length());
+      assertEquals(0, response.getInt("totalRows"));
+      assertEquals(0, response.getInt("endRow"));
+      categoryMock.verify(() -> SystemCategoryIds.resolve(CLIENT1));
+    }
+  }
+
+  /**
+   * A visible product read by {@code ?id=} keeps its row and its counts — and, being a read by
+   * id, it is annotated with {@code etgoHasCost} like the path form is.
+   */
+  @Test
+  public void testAfterHandleKeepsAVisibleProductOnAQueryStringIdGet() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<SystemCategoryIds> categoryMock =
+            Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve(CLIENT1)).thenReturn(Set.of("cat-system"));
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubCostingCriteria(dal, Collections.singletonList(mock(Costing.class)));
+
+      JSONArray data = new JSONArray();
+      data.put(new JSONObject().put("id", PRODUCT_ID).put("productCategory", "cat-normal"));
+      JSONObject body = dataResponse(data);
+      body.getJSONObject("response").put("totalRows", 1);
+      body.getJSONObject("response").put("endRow", 1);
+
+      NeoResponse result = new ProductDefaultsHandler().afterHandle(
+          queryIdGetCtx(PRODUCT_ID, body, obContextWithClient(CLIENT1)));
+
+      assertNotNull(result);
+      JSONObject response = result.getBody().getJSONObject("response");
+      assertEquals(1, response.getJSONArray("data").length());
+      assertEquals(1, response.getInt("totalRows"));
+      assertEquals(1, response.getInt("endRow"));
+      JSONObject row = response.getJSONArray("data").getJSONObject(0);
+      assertEquals(PRODUCT_ID, row.getString("id"));
+      assertTrue(row.getBoolean("etgoHasCost"));
+    }
+  }
+
+  /** A blank {@code ?id=} names no record: it stays a list read, neither filtered nor annotated. */
+  @Test
+  public void testAfterHandleTreatsABlankQueryStringIdAsAListGet() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<SystemCategoryIds> categoryMock =
+            Mockito.mockStatic(SystemCategoryIds.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      JSONObject listBody = productListBody("cat-normal", "cat-system");
+      NeoResponse result = new ProductDefaultsHandler().afterHandle(
+          queryIdGetCtx(" ", listBody, obContextWithClient(CLIENT1)));
+
+      assertNull(result);
+      assertEquals(2, listBody.getJSONObject("response").getJSONArray("data").length());
+      categoryMock.verifyNoInteractions();
+      verify(dal, never()).createCriteria(Costing.class);
+    }
   }
 }

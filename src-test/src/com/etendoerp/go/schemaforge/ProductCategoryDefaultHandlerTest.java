@@ -26,6 +26,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -421,6 +422,53 @@ public class ProductCategoryDefaultHandlerTest {
 
       assertNull(new ProductCategoryDefaultHandler().afterHandle(
           getCtx("cat-normal", categoryBody("cat-normal"))));
+    }
+  }
+
+  // ── ETP-5009 (W1): the query-string ?id= form is a read by id too ────────────────────────
+
+  private static NeoContext queryIdGetCtx(String queryId, JSONObject previousBody) {
+    return NeoContext.builder()
+        .specName("product-category").entityName("productCategory")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .queryParams(Map.of("id", queryId)).obContext(obContextWithClient("CLIENT1"))
+        .previousResult(NeoResponse.ok(previousBody)).build();
+  }
+
+  @Test
+  public void testAfterHandleHidesASystemCategoryOnAQueryStringIdGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve("CLIENT1")).thenReturn(Set.of("cat-sys"));
+
+      NeoResponse result = new ProductCategoryDefaultHandler().afterHandle(
+          queryIdGetCtx("cat-sys", categoryBody("cat-sys")));
+
+      assertNotNull(result);
+      assertEquals(0, result.getBody().getJSONObject("response").getJSONArray("data").length());
+    }
+  }
+
+  @Test
+  public void testAfterHandleLeavesAVisibleCategoryOnAQueryStringIdGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      categoryMock.when(() -> SystemCategoryIds.resolve("CLIENT1")).thenReturn(Set.of("cat-sys"));
+      JSONObject body = categoryBody("cat-normal");
+
+      assertNull(new ProductCategoryDefaultHandler().afterHandle(
+          queryIdGetCtx("cat-normal", body)));
+      assertEquals(1, body.getJSONObject("response").getJSONArray("data").length());
+    }
+  }
+
+  @Test
+  public void testAfterHandleTreatsABlankQueryStringIdAsAListGet() throws JSONException {
+    try (MockedStatic<SystemCategoryIds> categoryMock =
+        Mockito.mockStatic(SystemCategoryIds.class)) {
+      assertNull(new ProductCategoryDefaultHandler().afterHandle(
+          queryIdGetCtx(" ", categoryBody("cat-sys"))));
+      categoryMock.verifyNoInteractions();
     }
   }
 
