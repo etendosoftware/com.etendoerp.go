@@ -56,6 +56,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
@@ -1793,6 +1794,12 @@ public class McpToolRouter {
     NeoActionContract declared = McpDeclaredActions.precheck(sfEntity, actionName, parameters);
     String httpMethod = declared != null ? declared.getHttpMethod()
         : NeoActionContract.DEFAULT_HTTP_METHOD;
+    // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
+    // the same check the REST action path runs (NeoHookDispatcher).
+    NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
+    if (foreignRecord != null) {
+      return McpHookExecutor.neoResponseToMcpResult(foreignRecord);
+    }
 
     // The body object is shared with executeButtonActionCore on purpose, so a handler that
     // normalizes or injects the action value is honoured by the process call that follows —

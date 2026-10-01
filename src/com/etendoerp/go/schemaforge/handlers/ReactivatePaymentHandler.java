@@ -49,6 +49,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentPropDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -260,7 +261,28 @@ public class ReactivatePaymentHandler implements NeoHandler {
     return null;
   }
 
+  /**
+   * 404 unless the record the action is posted to is a payment of the current tenant (ETP-5558).
+   * The action path checks this before any customization runs ({@code NeoActionRecordGuard}); this
+   * repeats it where the payment is mutated, so the handler does not depend on being reached only
+   * through that path.
+   */
+  private static NeoResponse requireOwnedPayment(NeoContext context) {
+    OBContext.setAdminMode(true);
+    try {
+      return NeoActionRecordGuard.loadOwned(FIN_Payment.class, context.getRecordId()) != null
+          ? null
+          : NeoResponse.error(404, "Payment not found: " + context.getRecordId());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   private NeoResponse handleReactivate(NeoContext context) {
+    NeoResponse notOwned = requireOwnedPayment(context);
+    if (notOwned != null) {
+      return notOwned;
+    }
     try {
       clearTransferErrorFlag(context.getRecordId());
       JSONObject params = new JSONObject();
@@ -302,7 +324,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
     }
     OBContext.setAdminMode(true);
     try {
-      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+      FIN_Payment payment = NeoActionRecordGuard.loadOwned(FIN_Payment.class, paymentId);
       if (payment == null || !StringUtils.equals(PAYMENT_STATUS_ERROR, payment.getStatus())) {
         return;
       }
@@ -320,6 +342,10 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   private NeoResponse handleConfirm(NeoContext context) {
+    NeoResponse notOwned = requireOwnedPayment(context);
+    if (notOwned != null) {
+      return notOwned;
+    }
     try {
       JSONObject params = new JSONObject();
       params.put(FIN_PAYMENT_ID_KEY, context.getRecordId());
@@ -409,7 +435,8 @@ public class ReactivatePaymentHandler implements NeoHandler {
    */
   private NeoResponse handleRemove(NeoContext context) {
     try {
-      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
+      FIN_Payment payment = NeoActionRecordGuard.loadOwned(FIN_Payment.class,
+          context.getRecordId());
       if (payment == null) {
         return NeoResponse.error(404, "Payment not found: " + context.getRecordId());
       }
