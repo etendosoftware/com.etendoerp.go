@@ -151,6 +151,12 @@ final class McpSupportInternals {
         item.put("actions", new JSONArray(declared.keySet()));
         item.put("actionsHint", "Run these with neo_action (id = the record each acts on); "
             + "neo_schema with view:\"actions\" returns their parameters next to the AD buttons.");
+        McpActionsSection.View config = McpActionsSection.forEntity(entity);
+        if (config.isUnusable()) {
+          // neo_action refuses every action of the entity, so discovery must say so.
+          item.put("actionsInvokable", false);
+          item.put("actionsNotInvokableReason", "Not run through MCP: " + config.getReason());
+        }
       }
     }
     // Entity-level agent guidance (ETP-4278), additive to the spec-level and

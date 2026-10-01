@@ -23,6 +23,7 @@ import java.sql.ResultSet;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -113,6 +114,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(true));
     contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
     return contracts;
+  }
+
+  /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
+  @Override
+  public Set<String> agentExcludedActions() {
+    return PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS;
   }
 
   @Override

@@ -115,6 +115,14 @@ class PaymentActionContractsTest {
         .contains("writeoffLimit"), "the cap must be stated where the agent decides");
     assertTrue(props.getJSONObject("conversionRate").getString("description")
         .contains("currencies differ"));
+    // The service multiplies actual_payment by conversionRate INTO the account currency
+    // (PaymentCurrencyConverter.convertedAmount), so the amount is in the invoice currency.
+    String amount = props.getJSONObject("actual_payment").getString("description");
+    assertTrue(amount.contains("invoice currency"), amount);
+    assertFalse(amount.contains("in the financial account's currency"), amount);
+    assertTrue(amount.contains("conversionRate"), amount);
+    String credit = props.getJSONObject("creditSources").getString("description");
+    assertFalse(credit.contains("{kind, use, id}"), "the keys are paymentId / psdId: " + credit);
   }
 
   @Test
@@ -130,6 +138,12 @@ class PaymentActionContractsTest {
     numeric.put("actual_payment", 121);
     assertNull(NeoActionContract.validate(contracts, "registerPayment", numeric),
         "an agent sending a JSON number for an amount must not be refused");
+
+    JSONObject words = new JSONObject(spaBody.toString());
+    words.put("actual_payment", "ten");
+    NeoResponse notNumeric = NeoActionContract.validate(contracts, "registerPayment", words);
+    assertTrue(notNumeric.getBody().getJSONObject("error").getString("message")
+        .contains("a number or numeric string"), "the refusal says both shapes are accepted");
 
     JSONObject pis = new JSONObject(spaBody.toString());
     pis.put("pis", true);
@@ -196,6 +210,19 @@ class PaymentActionContractsTest {
     assertEquals("GET", sales.get("currencyOptions").getHttpMethod(),
         "currencyOptions only answers GET; the MCP must call it that way");
     assertEquals("POST", sales.get("registerPayment").getHttpMethod());
+  }
+
+  @Test
+  @DisplayName("both invoice headers exclude exactly the five PIS actions from agents, in code")
+  void headersExcludePis() {
+    assertEquals(PIS, new SalesInvoiceHeaderHandler().agentExcludedActions());
+    assertEquals(PIS, new PurchaseInvoiceHeaderHandler().agentExcludedActions());
+  }
+
+  @Test
+  @DisplayName("a handler that excludes nothing says so")
+  void defaultExcludesNothing() {
+    assertTrue(new CurrencyOptionsHandler().agentExcludedActions().isEmpty());
   }
 
   private static List<String> names(NeoActionContract c) {

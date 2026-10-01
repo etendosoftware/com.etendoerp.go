@@ -1335,7 +1335,8 @@ public class McpToolRouter {
     Map<String, NeoActionContract> declaredActions = McpDeclaredActions.of(sfEntity);
     if (!declaredActions.isEmpty() && McpDeclaredActions.replacesSchema(sfEntity)) {
       return wrapAsTextContent(
-          McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions));
+          McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions,
+              McpActionsSection.forEntity(sfEntity)));
     }
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 

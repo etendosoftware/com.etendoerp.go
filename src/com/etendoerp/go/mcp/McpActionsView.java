@@ -131,6 +131,7 @@ final class McpActionsView {
     for (NeoActionContract contract : declared.values()) {
       actions.put(contract.toJson());
     }
+    withdrawAllIfUnusable(actions, config);
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
@@ -151,6 +152,19 @@ final class McpActionsView {
    */
   static JSONObject buildDeclaredResponse(String specName, String entityName,
       Map<String, NeoActionContract> contracts) throws JSONException {
+    return buildDeclaredResponse(specName, entityName, contracts, null);
+  }
+
+  /**
+   * {@link #buildDeclaredResponse(String, String, Map)} that also reports an unusable
+   * {@code MCP_CONFIG} (ETP-5558): {@code neo_action} then refuses every action, so none is listed
+   * as invokable.
+   *
+   * @param config the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
+   */
+  static JSONObject buildDeclaredResponse(String specName, String entityName,
+      Map<String, NeoActionContract> contracts, McpActionsSection.View config)
+      throws JSONException {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
@@ -158,9 +172,10 @@ final class McpActionsView {
     for (NeoActionContract contract : contracts.values()) {
       actions.put(contract.toJson());
     }
+    withdrawAllIfUnusable(actions, config);
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
-    response.put(KEY_INVOKABLE_COUNT, actions.length());
+    response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
     response.put("hint", "Call neo_action with this spec and entity, id = the record each action "
         + "acts on (its idDescription says which), action = one of the names above and "
         + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "
@@ -171,11 +186,29 @@ final class McpActionsView {
   /** Mark a button as one to leave for {@code instead}: listed, not invokable, and why. */
   private static void redirect(JSONObject button, String instead, String reason)
       throws JSONException {
-    button.remove(McpSchemaFieldBuilder.KEY_INVOKE_VIA);
-    button.put(McpSchemaFieldBuilder.KEY_INVOKABLE, false);
-    button.put(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, "Not run through MCP: " + reason + ". Use '" + instead
+    withdraw(button, "Not run through MCP: " + reason + ". Use '" + instead
         + "' (listed below) instead.");
     button.put("useInstead", instead);
+  }
+
+  /**
+   * An unusable {@code MCP_CONFIG} makes {@code neo_action} refuse every action of the entity
+   * (ETP-5558), so the catalogue must not call any of them invokable.
+   */
+  private static void withdrawAllIfUnusable(JSONArray actions, McpActionsSection.View config)
+      throws JSONException {
+    if (config == null || !config.isUnusable()) {
+      return;
+    }
+    for (int i = 0; i < actions.length(); i++) {
+      withdraw(actions.getJSONObject(i), "Not run through MCP: " + config.getReason());
+    }
+  }
+
+  private static void withdraw(JSONObject action, String reason) throws JSONException {
+    action.remove(McpSchemaFieldBuilder.KEY_INVOKE_VIA);
+    action.put(McpSchemaFieldBuilder.KEY_INVOKABLE, false);
+    action.put(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, reason);
   }
 
   /** @return how many of the catalog's actions {@code neo_action} can actually run (IMP-21). */

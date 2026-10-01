@@ -167,6 +167,23 @@ public interface NeoHandler {
   }
 
   /**
+   * Names the actions this handler serves to the SPA but that an agent must never run
+   * (ETP-5558), e.g. a bank-initiated payment that ends in an authorization only a person can give.
+   *
+   * <p>Read by the MCP only: {@code neo_action} refuses them (405) before the handler runs, and
+   * they are never advertised. REST and the SPA ignore it. The handler is the authority because it
+   * is the one that serves them; a configuration row may add a second guard but must not be the
+   * only one.</p>
+   *
+   * <p>Returns an empty set by default: nothing is excluded.</p>
+   *
+   * @return the excluded action names
+   */
+  default Set<String> agentExcludedActions() {
+    return Collections.emptySet();
+  }
+
+  /**
    * Declares the input parameters this handler accepts when generating a report, i.e. the body
    * keys it actually reads.
    *

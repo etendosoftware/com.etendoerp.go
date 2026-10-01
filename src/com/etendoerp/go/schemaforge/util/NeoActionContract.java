@@ -66,7 +66,7 @@ public final class NeoActionContract {
   /** JSON Schema type for a true/false parameter. */
   public static final String TYPE_BOOLEAN = "boolean";
   /**
-   * A number. Accepts a JSON number or a numeric string, because the SPA sends amounts as strings
+   * A number or numeric string. Accepts a JSON number or a numeric string, because the SPA sends amounts as strings
    * ({@code "121"}) and an agent naturally sends {@code 121}; both reach the handler, which parses
    * with {@code BigDecimal} (ETP-5558).
    */
@@ -532,7 +532,7 @@ public final class NeoActionContract {
         case TYPE_BOOLEAN:
           return value instanceof Boolean ? null : "a boolean";
         case TYPE_NUMBER:
-          return isNumeric(value) ? null : "a number";
+          return isNumeric(value) ? null : "a number or numeric string";
         case TYPE_DATE:
           return value instanceof String && DATE.matcher((String) value).matches() ? null
               : "a date in yyyy-MM-dd format";

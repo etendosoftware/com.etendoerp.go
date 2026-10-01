@@ -5,6 +5,7 @@ import javax.servlet.http.HttpServletResponse;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
@@ -34,6 +35,13 @@ final class PaymentActionHandlerSupport {
   private static final String CONFIRM_ACTION = "confirmPayment";
   private static final String DELETE_ACTION = "deletePayment";
 
+  /**
+   * The PIS actions this support serves to the SPA and excludes from agents (ETP-5558, product
+   * decision): a bank-initiated payment ends in an authorization only a person can give.
+   */
+  static final Set<String> AGENT_EXCLUDED_ACTIONS = Set.of(PIS_SUPPLIER_ACCOUNTS_ACTION,
+      PIS_TEMPLATES_ACTION, PIS_STATUS_ACTION, PIS_CANCEL_ACTION, PIS_RETRY_ACTION);
+
   private static final String FIELD_PAYMENT_ID = "paymentId";
   private static final String FIELD_SCHEDULE_ID = "scheduleId";
   private static final String FIELD_AMOUNT = "actual_payment";
@@ -56,8 +64,8 @@ final class PaymentActionHandlerSupport {
    * left out: a bank-initiated payment ends in an authorization only a person can give, so PIS is
    * excluded from the agent surface (product decision). The MCP validates every call against
    * these contracts before the handler runs, so an undeclared key such as {@code pis} is refused
-   * (422); the undeclared PIS actions themselves are refused by the invoice headers'
-   * {@code MCP_CONFIG.actions} (405).</p>
+   * (422); the PIS actions themselves are refused (405) through {@link #AGENT_EXCLUDED_ACTIONS},
+   * which both invoice headers return from {@code agentExcludedActions()}.</p>
    *
    * @param isReceipt {@code true} for collections (sales invoices), {@code false} for payments
    * @return the contracts, in presentation order
@@ -83,9 +91,12 @@ final class PaymentActionHandlerSupport {
             "Id of the invoice installment (FIN_Payment_Schedule) being paid: "
                 + installments + "."),
         Param.required(FIELD_AMOUNT, NeoActionContract.TYPE_NUMBER,
-            "Amount of the " + money + ", in the financial account's currency. Less than the "
-                + "outstanding amount is a partial " + money + "; more is an overpayment and then "
-                + "overpaymentAction decides what happens with the excess."),
+            "Amount of the " + money + ", in the invoice currency (the same currency as the "
+                + "installment's outstanding amount). When the account is in another currency, "
+                + "the account " + (isReceipt ? "receives" : "pays") + " this amount × "
+                + "conversionRate. Less than the outstanding amount is a partial " + money
+                + "; more is an overpayment and then overpaymentAction decides what happens "
+                + "with the excess."),
         Param.required(FIELD_DATE, NeoActionContract.TYPE_DATE,
             "Date of the " + money + " (yyyy-MM-dd)."),
         Param.required(FIELD_ACCOUNT, NeoActionContract.TYPE_STRING,
@@ -106,7 +117,7 @@ final class PaymentActionHandlerSupport {
             "Id of an existing DRAFT " + money + " to edit in place instead of creating a new "
                 + "one (same id and document number). A processed " + money + " cannot be edited."),
         Param.array("creditSources", NeoActionContract.TYPE_OBJECT, false,
-            "Existing credit of the business partner to apply, each as {kind, use, id}: "
+            "Existing credit of the business partner to apply, each item either "
                 + "{\"kind\":\"credit\",\"paymentId\":<payment with credit>,\"use\":<amount>} "
                 + "for accumulated credit, or {\"kind\":\"abono\",\"psdId\":<credit-note "
                 + "detail>,\"use\":<amount>} for a credit note. invoiceCreditSources lists both "

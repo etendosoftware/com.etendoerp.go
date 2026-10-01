@@ -116,6 +116,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     return contracts;
   }
 
+  /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
+  @Override
+  public Set<String> agentExcludedActions() {
+    return PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,

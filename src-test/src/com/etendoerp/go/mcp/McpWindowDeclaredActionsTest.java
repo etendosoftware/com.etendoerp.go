@@ -22,14 +22,18 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -41,9 +45,21 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.CurrencyOptionsHandler;
+import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
@@ -71,6 +87,8 @@ class McpWindowDeclaredActionsTest {
 
   private MockedStatic<NeoExtensionIndex> indexMock;
   private MockedStatic<NeoHandlerLookup> lookupMock;
+  private MockedStatic<NeoButtonActionHelper> buttonMock;
+  private MockedStatic<ModelProvider> modelMock;
   private NeoHandler handler;
 
   @BeforeEach
@@ -82,10 +100,41 @@ class McpWindowDeclaredActionsTest {
     lookupMock = mockStatic(NeoHandlerLookup.class);
     lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString())).thenReturn(handler);
     when(handler.actionContracts()).thenReturn(contracts());
+    // The AD buttons neo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
+    // by DB column name or by field name. The DAL names each column the way neo_schema does.
+    buttonMock = mockStatic(NeoButtonActionHelper.class);
+    ModelProvider provider = mock(ModelProvider.class);
+    Entity dal = mock(Entity.class);
+    modelMock = mockStatic(ModelProvider.class);
+    modelMock.when(ModelProvider::getInstance).thenReturn(provider);
+    when(provider.getEntityByTableName("C_Invoice")).thenReturn(dal);
+    for (String[] b : new String[][] { { "DocAction", "documentAction" },
+        { "EM_APRM_Addpayment", "aPRMAddpayment" },
+        { "EM_Psd2_Generate_Bank_Payment", "psd2GenerateBankPayment" } }) {
+      Column column = buttonColumn(b[0]);
+      Property property = mock(Property.class);
+      when(property.getName()).thenReturn(b[1]);
+      when(dal.getPropertyByColumnName(b[0])).thenReturn(property);
+      buttonMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), eq(b[0])))
+          .thenReturn(column);
+      buttonMock.when(() -> NeoButtonActionHelper.findButtonColumn(anyString(), eq(b[1])))
+          .thenReturn(column);
+    }
+  }
+
+  private static Column buttonColumn(String dbName) {
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_Invoice");
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbName);
+    when(column.getTable()).thenReturn(table);
+    return column;
   }
 
   @AfterEach
   void tearDown() {
+    modelMock.close();
+    buttonMock.close();
     lookupMock.close();
     indexMock.close();
     McpConfigCache.invalidateAll();
@@ -289,6 +338,167 @@ class McpWindowDeclaredActionsTest {
       assertThrows(McpRoutingException.class,
           () -> McpDeclaredActions.precheck(entity("W", "{\"actions\":{\"hidden\":[\"x\"]}}"),
               "documentAction", new JSONObject()));
+    }
+  }
+
+  // ── reject cycle 1: the same action under another spelling, fail closed, honest discovery ──
+
+  @Nested
+  @DisplayName("neo_action through handleAction (the real path)")
+  class RealPath {
+
+    private MockedStatic<McpToolRouterSupport> supportMock;
+    private SFEntity current;
+
+    @BeforeEach
+    void route() {
+      supportMock = mockStatic(McpToolRouterSupport.class);
+      supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
+          .thenCallRealMethod();
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn("spec-route");
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(SPEC)).thenReturn(spec);
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), eq(ENTITY)))
+          .thenAnswer(inv -> current);
+    }
+
+    @AfterEach
+    void close() {
+      supportMock.close();
+    }
+
+    private McpRoutingException refused(String mcpConfig, String action) throws Exception {
+      current = entity("W", mcpConfig);
+      JSONObject args = new JSONObject().put("entity", ENTITY).put("id", "INV-1")
+          .put("action", action);
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> new McpToolRouter().handleAction(SPEC, args));
+      buttonMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(any(), anyString(),
+          anyString(), any()), never());
+      return e;
+    }
+
+    @Test
+    @DisplayName("a hidden button called by its DB column name is refused, and never fired")
+    void hiddenButtonByColumnName() throws Exception {
+      JSONObject env = refused(HIDE_PIS, "EM_Psd2_Generate_Bank_Payment").toEnvelope();
+      assertEquals(405, env.getInt(McpConstants.KEY_STATUS));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("authorize at the bank"));
+    }
+
+    @Test
+    @DisplayName("a redirected button called by its DB column name is refused with the action to use")
+    void redirectedButtonByColumnName() throws Exception {
+      JSONObject env = refused(HIDE_PIS, "EM_APRM_Addpayment").toEnvelope();
+      assertEquals(405, env.getInt(McpConstants.KEY_STATUS));
+      assertTrue(env.getString(McpConstants.KEY_HINT).contains("registerPayment"));
+    }
+
+    @Test
+    @DisplayName("a button the configuration lists by DB column name is refused by its field name")
+    void configuredByColumnNameCalledByFieldName() throws Exception {
+      String byColumn = "{\"actions\":{\"hidden\":[\"EM_Psd2_Generate_Bank_Payment\"],"
+          + "\"reason\":\"PIS needs a person to authorize at the bank\"}}";
+      assertEquals(405, refused(byColumn, "psd2GenerateBankPayment").toEnvelope()
+          .getInt(McpConstants.KEY_STATUS));
+    }
+
+    @Test
+    @DisplayName("an action the customization excludes from agents is refused in code — even with"
+        + " no MCP_CONFIG.actions row")
+    void excludedActionRefusedWithoutTheRow() throws Exception {
+      when(handler.agentExcludedActions()).thenReturn(Set.of("cancelPisPayment"));
+      JSONObject env = refused(null, "cancelPisPayment").toEnvelope();
+      assertEquals(405, env.getInt(McpConstants.KEY_STATUS));
+      assertEquals("method_not_allowed", env.getString(McpConstants.KEY_ERROR));
+      assertTrue(env.getString(McpConstants.KEY_DETAIL).contains("not available through MCP"));
+    }
+
+    @Test
+    @DisplayName("undeclared actions the UI offers stay callable: cloneRecord, createShipment, post,"
+        + " unpost")
+    void undeclaredUiActionsStillPass() throws Exception {
+      when(handler.agentExcludedActions()).thenReturn(Set.of("cancelPisPayment"));
+      for (String action : List.of("cloneRecord", "createShipment", "post", "unpost")) {
+        assertNull(McpDeclaredActions.precheck(entity("W", HIDE_PIS), action, new JSONObject()),
+            action);
+      }
+    }
+
+    @Test
+    @DisplayName("an AD button of that entity still passes, under either spelling")
+    void adButtonStillPasses() throws Exception {
+      assertNull(McpDeclaredActions.precheck(entity("W", null), "DocAction", new JSONObject()));
+      assertNull(McpDeclaredActions.precheck(entity("W", null), "documentAction",
+          new JSONObject()));
+    }
+
+    @Test
+    @DisplayName("an entity that declares nothing is not judged: legacy buttons keep their path")
+    void undeclaringEntityUnchanged() throws Exception {
+      when(handler.actionContracts()).thenReturn(Map.of());
+      assertNull(McpDeclaredActions.precheck(entity("W", null), "somethingElse",
+          new JSONObject()));
+    }
+  }
+
+  @Nested
+  @DisplayName("an unusable MCP_CONFIG is reported where the actions are advertised")
+  class UnusableConfig {
+
+    private static final String BROKEN = "{\"actions\":{\"hidden\":[\"x\"]}}";
+
+    @Test
+    @DisplayName("view:\"actions\" lists them as not invokable, with the reason")
+    void viewIsHonest() throws Exception {
+      SFEntity e = entity("W", BROKEN);
+      JSONObject view = McpActionsView.buildResponse(SPEC, ENTITY, buttons(),
+          McpDeclaredActions.of(e), McpActionsSection.forEntity(e));
+      assertEquals(0, view.getInt("invokableCount"));
+      JSONArray actions = view.getJSONArray("actions");
+      for (int i = 0; i < actions.length(); i++) {
+        JSONObject a = actions.getJSONObject(i);
+        assertFalse(a.has("invokeVia"), a.toString());
+        assertTrue(a.getString("notInvokableReason").contains(McpActionsSection.UNUSABLE_REASON),
+            a.toString());
+      }
+    }
+
+    @Test
+    @DisplayName("neo_discover says the declared actions cannot be run")
+    void discoverIsHonest() throws Exception {
+      JSONObject item = McpSupportInternals.buildDiscoverEntity(entity("W", BROKEN));
+      assertFalse(item.getBoolean("actionsInvokable"));
+      assertTrue(item.getString("actionsNotInvokableReason")
+          .contains(McpActionsSection.UNUSABLE_REASON));
+    }
+  }
+
+  @Nested
+  @DisplayName("currencyOptions")
+  class CurrencyOptions {
+
+    @Test
+    @DisplayName("the handler serves it on the method its contract declares, and refuses POST")
+    void servedOverTheDeclaredMethod() throws Exception {
+      String declared = new SalesInvoiceHeaderHandler().actionContracts().get("currencyOptions")
+          .getHttpMethod();
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+          MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        NeoResponse served = new CurrencyOptionsHandler().handle(ctx(declared));
+        NeoResponse post = new CurrencyOptionsHandler().handle(ctx("POST"));
+
+        assertEquals(405, post.getHttpStatus(), "the handler only answers GET");
+        assertEquals(404, served.getHttpStatus(),
+            "past the method gate: the (missing) invoice is looked up");
+      }
+    }
+
+    private NeoContext ctx(String method) {
+      return McpHookExecutor.buildActionHookContext(SPEC, ENTITY, "INV-404", "currencyOptions",
+          new JSONObject(), null, null, method);
     }
   }
 

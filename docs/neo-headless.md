@@ -1977,8 +1977,20 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   the refusal is the MCP's, the SPA keeps them. `redirect` maps a button to the action to use: the
   button stays listed (the catalogue is complete, IMP-21) as `invokable:false` with
   `notInvokableReason` and `useInstead`, and `neo_action` on it is refused 405 with a hint naming the
-  replacement. An unusable `MCP_CONFIG` refuses **every** `neo_action` on the entity (fails closed,
-  like `verbs`).
+  replacement. A button is matched under **every** name `neo_action` fires it by — its field name
+  and its DB column name (`NeoButtonActionHelper.findButtonColumn` accepts both), so
+  `action:"EM_Psd2_Generate_Bank_Payment"` is refused exactly like `psd2GenerateBankPayment`. An
+  unusable `MCP_CONFIG` refuses **every** `neo_action` on the entity (fails closed, like `verbs`),
+  and discovery says so: `view:"actions"` lists every entry `invokable:false` with
+  `notInvokableReason` (`invokableCount: 0`), and `neo_discover` adds `actionsInvokable:false` +
+  `actionsNotInvokableReason`.
+- **Excluded from agents, in code.** `NeoHandler#agentExcludedActions()` (default empty) names
+  actions the handler serves to the SPA that an agent must never run. `neo_action` refuses them
+  (405 `method_not_allowed`) before the handler runs, whatever `MCP_CONFIG` says, and they are never
+  advertised. Both invoice headers return the five PIS actions
+  (`PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS`); the `MCP_CONFIG.actions` row is a second
+  guard, and the only one for the `psd2GenerateBankPayment` button. Any other undeclared action
+  stays callable, as the UI offers it.
 - **Validation before dispatch.** `McpToolRouter.handleAction` calls `McpDeclaredActions.precheck`
   before `NeoExtensionDispatcher`: hidden/redirected → 405; a declared action whose parameters do
   not match its contract → **422 `validation_error`** with the contract's correction keys
@@ -1995,7 +2007,7 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
 
 | Action | Kind | Parameters (required in **bold**) |
 |---|---|---|
-| `registerPayment` | write | **`scheduleId`**, **`actual_payment`** (number), **`payment_date`**, **`fin_financial_account_id`**, **`process`** (draft\|confirm), `fin_paymentmethod_id`, `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
+| `registerPayment` | write | **`scheduleId`**, **`actual_payment`** (number, in the **invoice** currency; a foreign account receives `actual_payment × conversionRate`), **`payment_date`**, **`fin_financial_account_id`**, **`process`** (draft\|confirm), `fin_paymentmethod_id`, `paymentId` (edit a draft), `creditSources[{kind:"credit",paymentId,use}\|{kind:"abono",psdId,use}]`, `overpaymentAction` (leave-credit\|refund), `conversionRate` (required when invoice and account currencies differ), `writeoffDifference` (capped by the account's `writeoffLimit`) |
 | `confirmPayment` | write | **`paymentId`** |
 | `deletePayment` | write | **`paymentId`** |
 | `invoicePayments` | read | — |
@@ -2006,10 +2018,11 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
 
 **PIS is excluded (product decision).** `pisSupplierAccounts`, `pisTemplates`, `pisPaymentStatus`,
 `cancelPisPayment` and `retryPisPayment` are not declared, and the `pis` key of `registerPayment` is
-not declared either (so the contract refuses it, 422). Both invoice headers carry
-`MCP_CONFIG.actions` hiding the five PIS actions and the `psd2GenerateBankPayment` button and
-redirecting `aPRMAddpayment` (Classic's *Add Payment*) to `registerPayment` — the only thing that
-keeps the undeclared PIS actions off `neo_action`, which `McpConfigSourcedataTest` asserts.
+not declared either (so the contract refuses it, 422). The five PIS actions are refused in code
+(`agentExcludedActions`, above). Both invoice headers also carry
+`MCP_CONFIG.actions` hiding them and the `psd2GenerateBankPayment` button and redirecting
+`aPRMAddpayment` (Classic's *Add Payment*) to `registerPayment`; `McpConfigSourcedataTest` asserts
+that content.
 
 **`process` is required for agents, and only for agents.** The handler reads `paymentId`,
 `conversionRate` and `writeoffDifference` only on its advanced path, which a body takes only when it
@@ -2746,8 +2759,9 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 
 | call | REST `/sws/neo/<invoice spec>/header/<id>/action/<name>` | MCP `neo_action` |
 |---|---|---|
-| any PIS action (`pisTemplates`, `cancelPisPayment`, …), `psd2GenerateBankPayment` | served | **405** — hidden by `MCP_CONFIG.actions` (a person must authorize at the bank) |
-| `aPRMAddpayment` | Classic button path | **405**, hint `registerPayment` |
+| any PIS action (`pisTemplates`, `cancelPisPayment`, …), `psd2GenerateBankPayment` (by field or DB column name) | served | **405** — the PIS actions by `agentExcludedActions()` in code, and all of them by `MCP_CONFIG.actions` (a person must authorize at the bank) |
+| `aPRMAddpayment` / `EM_APRM_Addpayment` | Classic button path | **405**, hint `registerPayment` |
+| `cloneRecord`, `createShipment`, `post`, `unpost`, `EM_Aeatsii_Send`, `EM_Tbai_Xmlgenerator` | served | **callable but not discoverable**: the header handlers serve them with no contract, so `neo_schema`/`neo_discover` do not list them (the two buttons' fields are not included) and their parameters are not validated. Known gap, tracked in the ETP-5558 follow-ups |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
 | `currencyOptions` | `GET` only | called as `GET` (the contract says so) |
 | `registerPayment` with `paymentId`, `conversionRate` or `writeoffDifference` but no `process` (nor `creditSources` / `overpaymentAction` / `fin_paymentmethod_id`) | **known quirk, not fixed:** the simple path runs and silently ignores those keys — a NEW payment instead of editing the draft, the cross-currency account refused, no write-off | **422** `missingParameters:["process"]` — `process` is required in the contract |
