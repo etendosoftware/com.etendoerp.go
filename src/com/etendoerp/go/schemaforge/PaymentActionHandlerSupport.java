@@ -315,11 +315,10 @@ final class PaymentActionHandlerSupport {
           }
         }
         JSONObject deleted = DELETE_ACTION.equals(fieldName)
-            ? PaymentAgentSupport.describeDraft(call.body().optString(FIELD_PAYMENT_ID, null),
-                invoiceId)
+            ? describeDraftQuietly(call.body().optString(FIELD_PAYMENT_ID, null), invoiceId, log)
             : null;
         NeoResponse result = dispatchMutating(fieldName, call.isReceipt(), invoiceId, call.body());
-        return PaymentAgentSupport.enrich(fieldName, result, invoiceId, call.body(), deleted);
+        return enrichQuietly(call, result, deleted, log);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -332,6 +331,37 @@ final class PaymentActionHandlerSupport {
       log.error("Error in payment action '{}' for invoice {}: {}", fieldName, invoiceId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while processing the payment");
+    }
+  }
+
+  /**
+   * The draft a delete is about to remove, for the agent's answer. A failure here only costs the
+   * description: the delete itself still runs (ETP-5558).
+   */
+  private static JSONObject describeDraftQuietly(String paymentId, String invoiceId, Logger log) {
+    try {
+      return PaymentAgentSupport.describeDraft(paymentId, invoiceId);
+    } catch (Exception e) {
+      log.warn("Could not describe draft {} before deleting it: {}", paymentId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The agent's richer answer, never at the cost of the mutation (ETP-5558): the payment is
+   * already written when this runs, so a failure while reading its outcome must not reach the
+   * caller's catch — that would roll a completed payment back, or report it as failed and invite a
+   * duplicate. The plain result goes back instead, marked {@code enriched:false}.
+   */
+  private static NeoResponse enrichQuietly(MutatingCall call, NeoResponse result,
+      JSONObject deleted, Logger log) {
+    try {
+      return PaymentAgentSupport.enrich(call.fieldName(), result, call.invoiceId(), call.body(),
+          deleted);
+    } catch (Exception e) {
+      log.warn("Payment action '{}' succeeded for invoice {} but its outcome could not be added: {}",
+          call.fieldName(), call.invoiceId(), e.getMessage());
+      return PaymentAgentSupport.markNotEnriched(result);
     }
   }
 

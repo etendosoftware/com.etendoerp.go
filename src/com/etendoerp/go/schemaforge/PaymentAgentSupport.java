@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -117,10 +118,12 @@ final class PaymentAgentSupport {
     List<FIN_PaymentSchedule> candidates;
     if (StringUtils.isNotBlank(editId)) {
       FIN_Payment draft = PaymentOwnership.invoicePayment(editId, invoice.getId());
-      if (draft == null) {
+      candidates = draft == null ? List.of() : schedulesPaidBy(draft, invoice.getId());
+      if (candidates.isEmpty()) {
+        // Not a draft paying an installment of this invoice: the same 404 as an unknown id, not
+        // the "no pending installment" of a fresh payment.
         return NeoResponse.error(404, PaymentRegistrationService.MSG_PAYMENT_NOT_FOUND);
       }
-      candidates = schedulesPaidBy(draft, invoice.getId());
     } else {
       candidates = pendingSchedules(invoice);
     }
@@ -325,6 +328,26 @@ final class PaymentAgentSupport {
     return result;
   }
 
+  /**
+   * The plain result of a successful action whose outcome could not be added, saying so with
+   * {@code enriched:false} so the agent re-reads instead of assuming the fields are missing.
+   * An empty body (the delete's 204) passes through unchanged.
+   */
+  static NeoResponse markNotEnriched(NeoResponse result) {
+    JSONObject body = result == null ? null : result.getBody();
+    if (body == null) {
+      return result;
+    }
+    try {
+      JSONObject response = body.optJSONObject(KEY_RESPONSE);
+      JSONObject data = response == null ? null : response.optJSONObject(KEY_DATA);
+      (data != null ? data : body).put("enriched", false);
+    } catch (JSONException e) {
+      // Best effort: the result itself is what matters.
+    }
+    return result;
+  }
+
   // ─── helpers ───────────────────────────────────────────────────────────────
 
   private static JSONObject invoiceState(String invoiceId) throws JSONException {
@@ -359,8 +382,8 @@ final class PaymentAgentSupport {
         pending.add(schedule);
       }
     }
-    pending.sort((a, b) -> a.getDueDate() == null || b.getDueDate() == null ? 0
-        : a.getDueDate().compareTo(b.getDueDate()));
+    pending.sort(Comparator.comparing(FIN_PaymentSchedule::getDueDate,
+        Comparator.nullsLast(Comparator.naturalOrder())));
     return pending;
   }
 
