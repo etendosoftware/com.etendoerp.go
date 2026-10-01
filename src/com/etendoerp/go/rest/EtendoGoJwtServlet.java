@@ -3364,6 +3364,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
+    if (!paidUpgrade) {
+      openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
+    }
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
     onboardingCostingScheduleService.activateSchedule(clientId);
@@ -3371,6 +3374,44 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, "finalize", "done", "Environment ready");
     sendFinalResult(writer, true, "Environment created successfully");
     return true;
+  }
+
+  /**
+   * ETP-5575 — opens a demo's fiscal periods through the end of its trial, pooled or classic. The
+   * chain only opens through the month the tenant was built, so a signup at the end of a month, or
+   * a pooled tenant built in an earlier month, could not post during the rest of its trial.
+   *
+   * <p>Runs after the onboarding commit, in its own transaction, and never fails the onboarding:
+   * the tenant is already committed with the chain's window, so on any failure (the commit
+   * included, which is why it sits inside the try) this step rolls back only itself and the
+   * tenant keeps today's behaviour. The started/done markers make a step that never finished
+   * visible in the logs.
+   */
+  void openDemoTrialPeriodsBestEffort(String clientId, String orgId,
+      OnboardingProvisioningChain.AdminContext adminContext) {
+    log.info("ETP-5575 demo period window started for client {}", clientId);
+    try {
+      onboardingPeriodControlService.openDemoTrialWindow(clientId, orgId,
+          adminContext.adminUserId, adminContext.adminRoleId, resolveTrialStart(clientId),
+          tenantEnvironmentLifecycleService.configuration().getTrialDays());
+      EtendoGoDalHelper.commitDalChanges("demo period window", log);
+      log.info("ETP-5575 demo period window done for client {}", clientId);
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.error("ETP-5575 demo period window failed for client {}", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+    }
+  }
+
+  /**
+   * The demo's stored trial start ({@code ETGO_DemoTrialStartedAt}), which {@code markDemoReady}
+   * keeps from the first successful onboarding, so a resumed demo keeps its original window. Falls
+   * back to now when it cannot be read.
+   */
+  private Instant resolveTrialStart(String clientId) {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        tenantEnvironmentLifecycleService.resolve(clientId);
+    Instant startedAt = snapshot != null ? snapshot.getTrialStartedAt() : null;
+    return startedAt != null ? startedAt : Instant.now();
   }
 
   /**

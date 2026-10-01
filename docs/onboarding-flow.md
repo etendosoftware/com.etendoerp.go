@@ -183,7 +183,34 @@ for the original ticket analysis.
 
 ### `OnboardingPeriodControlService`
 Step 3. Opens the initial fiscal calendar / period control for the new
-client/org so documents can be posted from day one.
+client/org so documents can be posted from day one. The chain opens every period
+through the month the tenant is **built** and leaves later periods never-opened.
+
+**Demo trial window (ETP-5575).** A demo needs more: its trial lasts
+`etendo.go.demo.trial.days` / `ETGO_DEMO_TRIAL_DAYS` (default 15), so a signup at
+the end of a month could not post the next month, and a pooled tenant kept the
+window of its build month. `openDemoTrialWindow` widens it to the whole trial:
+every never-opened period whose start is on or before `ETGO_DemoTrialStartedAt` +
+trial days is opened.
+
+- **Where.** `EtendoGoJwtServlet.openDemoTrialPeriodsBestEffort`, right after the
+  onboarding commit and before `completeCommittedOnboarding`, for every non-paid
+  onboarding — pooled and classic alike. Paid (productive) onboardings are not
+  affected.
+- **Best effort.** It runs in its own transaction with the commit inside the try:
+  any failure rolls back only this step, the tenant keeps the chain's window, and
+  the onboarding still succeeds. Log markers: `ETP-5575 demo period window
+  started|done|failed for client <id>` — a `started` without `done`/`failed`
+  means the step never finished.
+- **Open-only.** Only `N` (never opened) control rows are flipped to open; rows a
+  user closed (`C`) or closed permanently (`P`) are never touched. Every control
+  row of the period is considered, including the duplicated copy `AD_ORG_READY`
+  inserts, because posting needs any open row but costing reads any non-open row
+  as closed. `C_Period.OpenClose` is then recomputed from the controls.
+- **No year creation.** If the trial end falls beyond the calendar's last period,
+  what exists is opened and a WARN is logged (follow-up: ETP-5586).
+- **Existing demos** were widened through October 2026 by the corrective data-fix
+  `R44-demo-periods-open-through-oct-2026` (etendo_schema_forge).
 
 ### `OnboardingSequenceGeneratorService`
 Generates `AD_SEQUENCE` records for all document types that require a number
@@ -487,7 +514,9 @@ After it, the servlet runs its existing calls: owner marking (`resolveAdminConte
 upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
 `warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
 data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
-commit, the `environment-ready` email and costing activation. The stream skips the `organization`
+commit, the demo trial window (ETP-5575: re-evaluates the periods of a pooled demo built in an
+earlier month, see `OnboardingPeriodControlService`), the `environment-ready` email and costing
+activation. The stream skips the `organization`
 and `dataset`…`baseline` steps.
 
 ### Where `POOL-…` stays visible after a claim (known gap, not renamed yet)
