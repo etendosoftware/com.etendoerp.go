@@ -352,17 +352,21 @@ final class PaymentAgentSupport {
 
   private static JSONObject invoiceState(String invoiceId) throws JSONException {
     JSONObject state = new JSONObject();
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    if (invoice == null) {
+    // A fresh read, not session.refresh(): Core updates these amounts while processing, and a
+    // scalar query reads what was written without touching the cached entity.
+    Object[] row = OBDal.getInstance().getSession()
+        .createQuery("select i.documentNo, i.outstandingAmount, i.totalPaid, i.paymentComplete"
+            + " from Invoice i where i.id = :id", Object[].class)
+        .setParameter("id", invoiceId)
+        .uniqueResult();
+    if (row == null) {
       return state;
     }
-    // Core updates the invoice amounts while processing; read what was written, not the cache.
-    OBDal.getInstance().getSession().refresh(invoice);
-    state.put(KEY_ID, invoice.getId());
-    state.put("documentNo", invoice.getDocumentNo());
-    state.put(KEY_OUTSTANDING, invoice.getOutstandingAmount());
-    state.put("totalPaid", invoice.getTotalPaid());
-    state.put("paymentComplete", Boolean.TRUE.equals(invoice.isPaymentComplete()));
+    state.put(KEY_ID, invoiceId);
+    state.put("documentNo", row[0]);
+    state.put(KEY_OUTSTANDING, row[1]);
+    state.put("totalPaid", row[2]);
+    state.put("paymentComplete", Boolean.TRUE.equals(row[3]));
     return state;
   }
 

@@ -10,6 +10,8 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Transaction;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -34,6 +36,10 @@ final class PaymentActionHandlerSupport {
   private static final String PIS_RETRY_ACTION = "retryPisPayment";
   private static final String CONFIRM_ACTION = "confirmPayment";
   private static final String DELETE_ACTION = "deletePayment";
+  private static final String MSG_PAYMENT_NOT_SAVED =
+      "The payment was not saved; nothing was registered — it is safe to retry";
+  private static final String MSG_DRAFT_NOT_DELETED =
+      "The draft was not deleted; nothing changed — it is safe to retry";
 
   /**
    * The PIS actions this support serves to the SPA, plus the invoice's PSD2 button, all excluded
@@ -317,6 +323,13 @@ final class PaymentActionHandlerSupport {
         JSONObject deleted = DELETE_ACTION.equals(fieldName)
             ? describeDraftQuietly(call.body().optString(FIELD_PAYMENT_ID, null), invoiceId, log)
             : null;
+        if (isMarkedRollback()) {
+          // describeDraft failed in a way that dooms the transaction: running the delete now would
+          // be undone at commit while the agent is told it happened.
+          OBDal.getInstance().rollbackAndClose();
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              MSG_DRAFT_NOT_DELETED);
+        }
         NeoResponse result = dispatchMutating(fieldName, call.isReceipt(), invoiceId, call.body());
         return enrichQuietly(call, result, deleted, log);
       } finally {
@@ -359,10 +372,25 @@ final class PaymentActionHandlerSupport {
       return PaymentAgentSupport.enrich(call.fieldName(), result, call.invoiceId(), call.body(),
           deleted);
     } catch (Exception e) {
+      if (isMarkedRollback()) {
+        // The failure doomed the transaction (Hibernate marks it rollback-only), so the commit
+        // would silently undo the payment: say so instead of answering a 2xx.
+        log.error("Payment action '{}' for invoice {} rolled back: reading its outcome failed: {}",
+            call.fieldName(), call.invoiceId(), e.getMessage(), e);
+        OBDal.getInstance().rollbackAndClose();
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            DELETE_ACTION.equals(call.fieldName()) ? MSG_DRAFT_NOT_DELETED : MSG_PAYMENT_NOT_SAVED);
+      }
       log.warn("Payment action '{}' succeeded for invoice {} but its outcome could not be added: {}",
           call.fieldName(), call.invoiceId(), e.getMessage());
       return PaymentAgentSupport.markNotEnriched(result);
     }
+  }
+
+  /** Whether the current transaction can no longer commit (Hibernate marked it rollback-only). */
+  private static boolean isMarkedRollback() {
+    Transaction tx = OBDal.getInstance().getSession().getTransaction();
+    return tx != null && tx.getStatus() == TransactionStatus.MARKED_ROLLBACK;
   }
 
   /** The service call behind each mutating action; runs inside the caller's admin session. */
