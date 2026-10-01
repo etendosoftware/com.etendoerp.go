@@ -366,4 +366,79 @@ class NeoHookDispatcherTest {
     assertSame(hookResponse, result);
     assertEquals(false, defaultActionCalled.get());
   }
+  // ── ETP-5558: the record-ownership guard on the REST action path ──
+
+  /** A customized entity whose handler would answer, so a skipped guard shows up as its answer. */
+  private NeoHandler customizedHeader(SFEntity entity) throws Exception {
+    NeoHandler handler = mock(NeoHandler.class);
+    when(handler.handle(Mockito.any(NeoContext.class)))
+        .thenReturn(NeoResponse.ok(new JSONObject().put("source", "hook")));
+    when(entity.getJavaQualifier()).thenReturn("guardedQualifier");
+    when(servlet.findEntity(eq("spec-id-1"), eq("Header"))).thenReturn(entity);
+    servletSupportStatic.when(() -> NeoServletSupport.lookupHandler("guardedQualifier"))
+        .thenReturn(handler);
+    return handler;
+  }
+
+  private static NeoSubEndpointDispatcher.ActionDispatchParams paramsFor(String recordId)
+      throws Exception {
+    return new NeoSubEndpointDispatcher.ActionDispatchParams(recordId, new JSONObject());
+  }
+
+  @Test
+  @DisplayName("ETP-5558: an action on another tenant's record is a 404 before anything runs")
+  void foreignRecordIsRefusedBeforeTheCustomization() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    NeoHandler handler = customizedHeader(entity);
+    NeoResponse notFound = NeoResponse.error(404, "Record not found");
+
+    try (MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class)) {
+      guard.when(() -> NeoActionRecordGuard.refusalFor(entity, "foreign-1")).thenReturn(notFound);
+
+      NeoResponse result = dispatcher.dispatchWithHooks(spec, "Header", NeoEndpointType.ACTION,
+          "eTPRRemovePayment", "POST", paramsFor("foreign-1"), defaultAction);
+
+      assertSame(notFound, result);
+      verify(handler, never()).handle(Mockito.any(NeoContext.class));
+      assertEquals(false, defaultActionCalled.get(), "the AD button must not run either");
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5558: an action on an own record runs as before")
+  void ownRecordRunsAsBefore() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    customizedHeader(entity);
+
+    try (MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class)) {
+      guard.when(() -> NeoActionRecordGuard.refusalFor(entity, "own-1")).thenReturn(null);
+
+      NeoResponse result = dispatcher.dispatchWithHooks(spec, "Header", NeoEndpointType.ACTION,
+          "eTPRRemovePayment", "POST", paramsFor("own-1"), defaultAction);
+
+      assertEquals("hook", result.getBody().getString("source"));
+      guard.verify(() -> NeoActionRecordGuard.refusalFor(entity, "own-1"));
+    }
+  }
+
+  @Test
+  @DisplayName("ETP-5558: the guard is not consulted outside ACTION or without action params")
+  void guardOnlyOnActionsWithParams() throws Exception {
+    SFEntity entity = mock(SFEntity.class);
+    customizedHeader(entity);
+
+    try (MockedStatic<NeoActionRecordGuard> guard = Mockito.mockStatic(NeoActionRecordGuard.class)) {
+      guard.when(() -> NeoActionRecordGuard.refusalFor(Mockito.any(), Mockito.any()))
+          .thenReturn(NeoResponse.error(404, "Record not found"));
+
+      NeoResponse selector = dispatcher.dispatchWithHooks(spec, "Header",
+          NeoEndpointType.SELECTOR, "warehouse", "GET", paramsFor("foreign-1"), defaultAction);
+      NeoResponse noParams = dispatcher.dispatchWithHooks(spec, "Header",
+          NeoEndpointType.ACTION, "docAction", "POST", defaultAction);
+
+      assertEquals("hook", selector.getBody().getString("source"));
+      assertEquals("hook", noParams.getBody().getString("source"));
+      guard.verify(() -> NeoActionRecordGuard.refusalFor(Mockito.any(), Mockito.any()), never());
+    }
+  }
 }

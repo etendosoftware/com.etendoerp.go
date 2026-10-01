@@ -50,6 +50,7 @@ import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
@@ -61,6 +62,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
 /**
@@ -1300,4 +1302,74 @@ public class ReactivatePaymentHandlerTest {
     }
   }
 
+  // ── ETP-5558 (a1a863f83): the handler re-checks the payment belongs to the tenant ──
+
+  /**
+   * Runs {@code fieldName} on another tenant's ETGOERR-flagged payment, called on the handler
+   * directly — as if the action path's guard had been bypassed.
+   */
+  private static NeoResponse runOnForeignPayment(String fieldName, FIN_Payment[] paymentOut,
+      OBDal[] dalOut, MockedStatic<NeoButtonActionHelper> buttons,
+      MockedStatic<PaymentRemovalUtil> removal) {
+    Client other = mock(Client.class);
+    when(other.getId()).thenReturn("client-other");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getClient()).thenReturn(other);
+    when(payment.getStatus()).thenReturn("ETGOERR");
+    paymentOut[0] = payment;
+
+    try (MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<FIN_Utility> util = Mockito.mockStatic(FIN_Utility.class)) {
+      OBDal instance = mock(OBDal.class);
+      dalOut[0] = instance;
+      dal.when(OBDal::getInstance).thenReturn(instance);
+      OBContext session = mock(OBContext.class);
+      when(session.getReadableClients()).thenReturn(new String[] { "client-own" });
+      when(session.getReadableOrganizations()).thenReturn(new String[] { "org-own" });
+      ctx.when(OBContext::getOBContext).thenReturn(session);
+      when(instance.get(FIN_Payment.class, "pay-foreign")).thenReturn(payment);
+      util.when(() -> FIN_Utility.invoicePaymentStatus(payment)).thenReturn("PPM");
+      return new ReactivatePaymentHandler().handle(actionCtx(fieldName, "pay-foreign"));
+    }
+  }
+
+  private static void assertForeignPaymentRefused(String fieldName) {
+    FIN_Payment[] payment = new FIN_Payment[1];
+    OBDal[] dal = new OBDal[1];
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class)) {
+      NeoResponse result = runOnForeignPayment(fieldName, payment, dal, buttons, removal);
+
+      assertEquals(fieldName, 404, result.getHttpStatus());
+      try {
+        assertEquals("Payment not found: pay-foreign",
+            result.getBody().getJSONObject("error").getString("message"));
+      } catch (JSONException e) {
+        throw new AssertionError(e);
+      }
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any()), never());
+      removal.verifyNoInteractions();
+      verify(payment[0], never()).setStatus(anyString());
+      verify(dal[0], never()).save(Mockito.any());
+    }
+  }
+
+  @Test
+  public void reactivateRefusesAnotherTenantsPayment() {
+    // Also covers clearTransferErrorFlag: the ETGOERR flag of a foreign payment is never cleared.
+    assertForeignPaymentRefused("etprReactivatePayment");
+  }
+
+  @Test
+  public void confirmRefusesAnotherTenantsPayment() {
+    assertForeignPaymentRefused("aPRMProcessPayment");
+  }
+
+  @Test
+  public void removeRefusesAnotherTenantsPayment() {
+    assertForeignPaymentRefused("eTPRRemovePayment");
+  }
 }
