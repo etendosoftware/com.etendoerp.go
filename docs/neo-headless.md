@@ -4328,9 +4328,15 @@ no tenant predicate. So `POST …/payment-in/finPayment/<another tenant's id>/ac
 removed that tenant's payment. `NeoActionRecordGuard.refusalFor(entity, recordId)` now runs once for
 every action of every entity, before the customization and before the AD button:
 
-- **Where.** REST: `NeoHookDispatcher.dispatchWithHooks` for `NeoEndpointType.ACTION`. MCP:
+- **Where.** REST: `NeoHookDispatcher.dispatchWithHooks` (the `ActionDispatchParams` overload) for
+  `NeoEndpointType.ACTION`, so `GET` and `POST /sws/neo/<spec>/<entity>/<id>/action/<name>` alike. MCP:
   `McpToolRouter.handleAction`, after `McpDeclaredActions.precheck` (so a hidden or redirected
-  action keeps its 405) and before `NeoExtensionDispatcher`.
+  action keeps its 405 / 422) and before `NeoExtensionDispatcher` / `executeButtonActionCore`.
+- **Surfaces.** Every ACTION on every spec and entity: AD buttons run by the default button path,
+  handler-served actions, declared or not. CRUD, DEFAULTS, SELECTOR and CALLOUT are not covered by
+  this guard (CRUD already goes through NEO's tenant-scoped queries). Admin mode exempts nothing:
+  the readable clients and organizations come from the role at login, and admin mode does not
+  widen them.
 - **Rule: structure only.** The id is looked up in the table of the entity's own AD tab. If a row
   with that id exists there and `TenantOwnership.isVisibleToCurrentTenant` says the session cannot
   read it, the action is refused with **404 "Record not found"**, the same text as an unknown
@@ -4352,7 +4358,9 @@ every action of every entity, before the customization and before the AD button:
     (for the invoice payment actions, `PaymentOwnership`, §4.12.1.3).
 - **Defense in depth.** `ReactivatePaymentHandler` loads the payment through owned loads
   (`NeoActionRecordGuard.loadOwned`, delegating to `TenantOwnership.loadOwned`) for reactivate,
-  process, remove and `clearTransferErrorFlag`. It no longer relies only on the guard.
+  process, remove and `clearTransferErrorFlag`. It no longer relies only on the guard: called
+  directly on another tenant's payment, `etprReactivatePayment`, `aPRMProcessPayment` and
+  `eTPRRemovePayment` answer 404 *"Payment not found: <id>"*.
 - **REST changes, by accepted exception:** only an action on another tenant's (or an unreadable
   organization's) record now answers 404 instead of running. Every action on the caller's own
   records is unchanged, and the SPA only ever sends ids it read through NEO.
