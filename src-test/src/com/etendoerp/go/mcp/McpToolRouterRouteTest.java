@@ -947,6 +947,74 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("entity"));
     }
+
+    // ── ETP-5558: neo_defaults on an entity whose create MCP_CONFIG.verbs hides ──
+
+    private static final String HIDE_CREATE = "{\"verbs\":{\"create\":false,"
+        + "\"reason\":\"Payments are registered from the invoice\","
+        + "\"instead\":\"neo_action(spec:'sales-invoice', entity:'header', "
+        + "action:'registerPayment')\"}}";
+
+    private JSONObject defaultsFor(SFEntity entity) throws Exception {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+      try {
+        setupSpecLookup(mockSpec());
+        setupEntityLookup(entity, mockTab());
+        obContextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+        supportMock.when(() -> McpToolRouterSupport.requireVerbNotHidden(any(), any(),
+            anyString())).thenCallRealMethod();
+        defaultsMock.when(() -> NeoDefaultsService.resolveDefaults(any(), isNull()))
+            .thenReturn(NeoResponse.ok(new JSONObject().put("documentNo", "<auto>")));
+        return router.route("neo_defaults", buildCrudArgs(), READ_SCOPES);
+      } finally {
+        McpConfigCache.invalidateAll();
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5558: a create hidden by MCP_CONFIG.verbs answers the 405 neo_create gives")
+    void defaultsRefusedWhenCreateIsHidden() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(HIDE_CREATE);
+      when(entity.isPost()).thenReturn(true);
+
+      JSONObject result = defaultsFor(entity);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      JSONObject expected = McpRoutingException.verbHidden(SPEC_NAME, ENTITY_NAME, "POST",
+          "Payments are registered from the invoice",
+          "neo_action(spec:'sales-invoice', entity:'header', action:'registerPayment')")
+          .toEnvelope();
+      JSONObject actual = new JSONObject(text);
+      assertEquals(405, actual.getInt(McpConstants.KEY_STATUS));
+      assertEquals("method_not_allowed", actual.getString(McpConstants.KEY_ERROR));
+      assertEquals(expected.getString(McpConstants.KEY_DETAIL),
+          actual.getString(McpConstants.KEY_DETAIL));
+      assertEquals(expected.getString(McpConstants.KEY_HINT),
+          actual.getString(McpConstants.KEY_HINT));
+      assertTrue(actual.getString(McpConstants.KEY_DETAIL)
+          .contains("Payments are registered from the invoice"), text);
+      assertTrue(actual.getString(McpConstants.KEY_HINT).contains("registerPayment"), text);
+      defaultsMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
+    }
+
+    @Test
+    @DisplayName("ETP-5558: a raw ISPOST off with no verbs section keeps the old neo_defaults")
+    void defaultsUnchangedWhenOnlyTheFlagIsOff() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.isPost()).thenReturn(false);
+
+      JSONObject result = defaultsFor(entity);
+
+      assertFalse(result.has("isError"), result.toString());
+      defaultsMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), isNull()));
+      supportMock.verify(() -> McpToolRouterSupport.requireVerbNotHidden(any(), any(),
+          eq("POST")));
+      supportMock.verify(() -> McpToolRouterSupport.requireMethodEnabled(any(), any(),
+          anyString()), never());
+    }
   }
 
   // ── Process tools ─────────────────────────────────────────────────────
