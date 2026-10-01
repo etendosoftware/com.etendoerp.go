@@ -21,7 +21,29 @@ import java.util.Objects;
 
 /** Immutable, deliberately limited operational facts; never carries request bodies or secrets. */
 public final class InternalAlertEvent {
+  /** Result an alert reports. */
   public enum Status { OK, ERROR }
+
+  /** Which environment the alert is about: its type, client (optional) and provisioning path. */
+  public static final class Target {
+    private final String environmentType;
+    private final String clientId;
+    private final String path;
+
+    /**
+     * Identifies the environment an alert is about.
+     *
+     * @param environmentType environment type token, e.g. {@code DEMO} or {@code PRODUCTIVE}
+     * @param clientId client the attempt built, or {@code null} when none exists yet
+     * @param path provisioning path token, e.g. {@code POOL} or {@code CLASSIC}
+     */
+    public Target(String environmentType, String clientId, String path) {
+      this.environmentType = environmentType;
+      this.clientId = clientId;
+      this.path = path;
+    }
+  }
+
   private final String event;
   private final Status status;
   private final String attemptId;
@@ -31,21 +53,31 @@ public final class InternalAlertEvent {
   private final String stage;
   private final String failureCategory;
 
-  public InternalAlertEvent(String event, Status status, String attemptId,
-      String environmentType, String clientId, String stage, String failureCategory) {
-    this(event, status, attemptId, environmentType, clientId, "UNKNOWN", stage, failureCategory);
-  }
-  public InternalAlertEvent(String event, Status status, String attemptId,
-      String environmentType, String clientId, String path, String stage, String failureCategory) {
-    this.path = token(path, "path");
+  /**
+   * Builds an event from operational tokens only; anything that is not a short identifier is
+   * rejected, so request bodies, messages or secrets can never reach an alert.
+   *
+   * @param event event name token
+   * @param status reported result
+   * @param attemptId provisioning attempt token
+   * @param target environment the attempt is about
+   * @param stage last stage the attempt reached
+   * @param failureCategory failure class name, or {@code null}
+   * @throws IllegalArgumentException when a value is not a valid token
+   */
+  public InternalAlertEvent(String event, Status status, String attemptId, Target target,
+      String stage, String failureCategory) {
+    Objects.requireNonNull(target, "target");
+    this.path = token(target.path, "path");
     this.event = token(event, "event");
     this.status = Objects.requireNonNull(status, "status");
     this.attemptId = token(attemptId, "attemptId");
-    this.environmentType = token(environmentType, "environmentType");
-    this.clientId = optionalToken(clientId);
+    this.environmentType = token(target.environmentType, "environmentType");
+    this.clientId = optionalToken(target.clientId);
     this.stage = token(stage, "stage");
     this.failureCategory = optionalToken(failureCategory);
   }
+
   private static String token(String value, String field) {
     if (value == null || !value.matches("[A-Za-z0-9_.:-]{1,128}")) {
       throw new IllegalArgumentException("Invalid internal alert " + field);

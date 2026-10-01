@@ -30,14 +30,29 @@ public class InternalAlertService {
   private final TransactionalEmailService emailService;
   private final Supplier<InternalAlertConfig> configSupplier;
 
+  /** Sends through the transactional email service with the runtime configuration. */
   public InternalAlertService() {
     this(new TransactionalEmailService(), InternalAlertConfig::fromRuntime);
   }
+
+  /**
+   * Sends through the given service with the given configuration source.
+   *
+   * @param emailService sender of the alert email
+   * @param configSupplier configuration, resolved on every send
+   */
   public InternalAlertService(TransactionalEmailService emailService,
       Supplier<InternalAlertConfig> configSupplier) {
     this.emailService = emailService;
     this.configSupplier = configSupplier;
   }
+
+  /**
+   * Sends {@code event} best-effort in its own committed transaction. Never throws: a failed
+   * delivery is logged, so an alert can never change the outcome it reports.
+   *
+   * @param event the event to alert; call only after the business transaction settled
+   */
   public void sendAfterTransaction(InternalAlertEvent event) {
     OBContext previous = null;
     boolean contextChanged = false;

@@ -27,8 +27,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 /** Executes the real contract and shared email pipeline with an in-memory provider only. */
 public class InternalAlertEmailContractTest {
   private static InternalAlertEvent event(InternalAlertEvent.Status status, String attempt) {
-    return new InternalAlertEvent("environment-provisioning", status, attempt, "PRODUCTIVE",
-        "client-1", "POOL", "pooled_dataset", "OBException");
+    return new InternalAlertEvent("environment-provisioning", status, attempt,
+        new InternalAlertEvent.Target("PRODUCTIVE", "client-1", "POOL"), "pooled_dataset",
+        "OBException");
   }
   private static InternalAlertConfig config(String language) {
     return new InternalAlertConfig(true, List.of("ops@example.test", "builds@example.test"),
@@ -97,8 +98,8 @@ public class InternalAlertEmailContractTest {
   @Test public void freeformErrorsAndHtmlCannotEnterOperationalMetadata() {
     for (String bad : List.of("<script>alert(1)</script>", "password=secret", "API key: secret", "broken\nheader")) {
       assertThrows(IllegalArgumentException.class, () -> new InternalAlertEvent(
-          "environment-provisioning", InternalAlertEvent.Status.ERROR, "attempt-1", "DEMO",
-          null, "CLASSIC", "dataset", bad));
+          "environment-provisioning", InternalAlertEvent.Status.ERROR, "attempt-1",
+          new InternalAlertEvent.Target("DEMO", null, "CLASSIC"), "dataset", bad));
     }
   }
   private static class FakeProvider implements EmailProviderAdapter {

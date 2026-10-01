@@ -10,6 +10,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -59,6 +60,49 @@ public class CheckoutRequestProvisioningStatusTest {
     assertEquals(CheckoutRequestStore.DERIVED_STATUS_STALLED,
         store.deriveProvisioningStatus(request));
     assertTrue(store.isProvisioningRetryAllowed(request));
+  }
+
+  @Test
+  public void deterministicFailureIsNotRetryable() {
+    CheckoutRequest request = request("PROVISIONING", CheckoutRequestStore.encodeFailureReason(
+        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "The company name 'Acme' is taken"),
+        new Date());
+
+    assertEquals(CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED,
+        store.deriveProvisioningStatus(request));
+    assertFalse("Retrying a name collision would fail the same way forever",
+        store.isProvisioningRetryAllowed(request));
+  }
+
+  @Test
+  public void failureCodeRoundTripsThroughThePersistedReason() {
+    String persisted = CheckoutRequestStore.encodeFailureReason(
+        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "raw  cause\nwith SQL");
+
+    assertEquals("CLIENT_NAME_IN_USE: raw cause with SQL", persisted);
+    assertEquals(CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE,
+        CheckoutRequestStore.failureCode(persisted));
+  }
+
+  @Test
+  public void failureWithoutCodeReadsAsGenericRetryableFailure() {
+    assertEquals(CheckoutRequestStore.FAILURE_CODE_PROVISIONING_FAILED,
+        CheckoutRequestStore.encodeFailureReason(null, null).split(":")[0]);
+    assertEquals("A reason written before codes existed keeps its old, retryable meaning",
+        CheckoutRequestStore.FAILURE_CODE_PROVISIONING_FAILED,
+        CheckoutRequestStore.failureCode("warehouse setup failed"));
+    assertNull(CheckoutRequestStore.failureCode("  "));
+  }
+
+  @Test
+  public void safeDescriptionNeverEchoesThePersistedCause() {
+    String description = CheckoutRequestStore.safeFailureDescription(
+        CheckoutRequestStore.failureCode("PROVISIONING_FAILED: ERROR duplicate key ad_client_name"));
+
+    assertFalse(description.contains("duplicate key"));
+    assertEquals(CheckoutRequestStore.safeFailureDescription(
+        CheckoutRequestStore.FAILURE_CODE_PROVISIONING_FAILED),
+        CheckoutRequestStore.safeFailureDescription("SOME_UNKNOWN_CODE"));
   }
 
   private static CheckoutRequest request(String status, String failureReason,

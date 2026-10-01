@@ -1,7 +1,9 @@
 /* Etendo License. */
 package com.etendoerp.go.onboarding;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -48,6 +50,26 @@ class OnboardingCompanyProfileTransferServiceTest {
       dalStatic.verifyNoInteractions();
       contextStatic.verifyNoInteractions();
     }
+  }
+
+  /**
+   * ETP-5548: onboarding seeds the legal name with the demo's own name. That default is not a
+   * company identity the user chose, so it must not put the old name on the new environment.
+   */
+  @Test
+  void aLegalNameLeftAtTheDemoDefaultIsNotCustomized() {
+    Organization source = mock(Organization.class);
+    Client demoClient = mock(Client.class);
+    when(source.getClient()).thenReturn(demoClient);
+    when(demoClient.getName()).thenReturn("DotsDemo");
+    when(source.getName()).thenReturn("DotsDemo");
+
+    when(source.getSocialName()).thenReturn("dotsdemo ");
+    assertFalse(OnboardingCompanyProfileTransferService.isCustomizedSocialName(source));
+    when(source.getSocialName()).thenReturn(null);
+    assertFalse(OnboardingCompanyProfileTransferService.isCustomizedSocialName(source));
+    when(source.getSocialName()).thenReturn("Dots Consulting SL");
+    assertTrue(OnboardingCompanyProfileTransferService.isCustomizedSocialName(source));
   }
 
   @Test
@@ -134,9 +156,9 @@ class OnboardingCompanyProfileTransferServiceTest {
           SOURCE_CLIENT_ID, TARGET_CLIENT_ID, TARGET_ORG_ID);
 
       verify(sourceOrgQuery, times(2)).setNamedParameter("clientId", SOURCE_CLIENT_ID);
-      verify(sourceOrg, times(2)).getName();
-      verify(sourceOrg, times(2)).getSocialName();
-      verify(targetOrg, times(2)).setName("Demo Company SL");
+      // ETP-5548: the productive organization keeps the name typed on the purchase; only a legal
+      // name the user edited in the demo travels.
+      verify(targetOrg, never()).setName(anyString());
       verify(targetOrg, times(2)).setSocialName("Demo Trade");
       verify(targetOrg, times(2)).setEtgoBusinessType("FL");
       verify(targetInfo, times(2)).setTaxID("B12345678");

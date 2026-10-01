@@ -15,12 +15,39 @@ transactional email best-effort. Email delivery failure is audited by the
 transactional email safety store and does not roll back the already committed
 environment.
 
-Client resolution keeps the first name lookup for same-account resume and
-cross-account collision checks. When no client exists and `InitialClientSetup`
-creates one, onboarding uses the exact `AD_Client_ID` that setup stores in the
-request session for all later provisioning and paid-upgrade side effects. It
-does not look up the new client by name a second time; a successful setup that
-does not return that ID fails closed before provisioning continues.
+Client resolution never uses the company name (ETP-5548). The classic path
+creates the client under a **provisioning name** (`ProvisioningClientName`,
+`PEND-<32 hex>`: the checkout `requestId` without hyphens for a paid attempt,
+the account id for the free first environment; 37 characters like the pool's
+`POOL-<id>`, so every name the chain derives still fits its 60-character
+column) and looks it up by that name, so a retry of the
+same attempt resumes its own half-built client (ETP-4428 reconcile model) and
+nothing else. The company name may match any other environment — another
+account's, or this account's demo, which is never converted. Only after every
+step that names something after the client, and in the final transaction,
+`applyRequestedClientName` renames the client and every name derived from it
+(admin role, trees, ledger, chart of accounts, calendar — the same rewrite a
+pooled claim does) to the company name; a failure rolls the rename back, so the
+client keeps the provisioning name for the retry. A client under a provisioning
+name is never listed by `/environments`, and a requested company name of that
+exact shape is refused (400). The organization is created with the company name
+directly; a free retry that resumes the attempt under a different company name
+renames it too (its legal name only while it still equals the old name).
+The admin username is the account email, then `<email>+<company slug>`, then
+`<email>+<company slug>2`, `…3` while the previous one is taken by any user,
+active or not — two environments of one account whose names reduce to the same
+slug ("Acme", "Acme!") would otherwise fail `@DuplicateClientUser@` after
+payment, and on the pool path burn a pooled tenant per attempt.
+
+One rule is enforced on the name itself: an account cannot have two
+**productive** environments with the same company name (case and blanks
+ignored) — refused before checkout (409 `CLIENT_NAME_IN_USE`) and again at
+onboarding with the same non-retryable code.
+
+When no client exists and `InitialClientSetup` creates one, onboarding uses the
+exact `AD_Client_ID` that setup stores in the request session for all later
+provisioning and paid-upgrade side effects; a successful setup that does not
+return that ID fails closed before provisioning continues.
 
 **Do not hardcode the step count in prose** — the list below is the source of
 truth; keep it (and this list ONLY) in sync with
@@ -469,8 +496,9 @@ it up, running `CostingBackground` for an empty tenant.
 
 `PooledTenantClaimService.claim`, first thing in `executeOnboardingProvisioning`. It answers
 `null` — classic path, transparently — when the flag is off, the request is not EUR/ES/es_ES, the
-company name already resolves to a client (resume and collision handling, ETP-4428, stay
-classic), the name starts with `POOL-`, the pool is empty, or taking/personalizing the tenant fails.
+name starts with `POOL-`, the pool is empty, or taking/personalizing the tenant fails. The servlet
+does not attempt a claim when the attempt left a half-built classic client to resume (found by its
+provisioning name, see Overview). The company name plays no part: it may match another client.
 A personalization failure rolls back, marks the row `FAILED` and falls back.
 
 The row is taken with `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`, **inside
@@ -479,6 +507,11 @@ skipped, not waited for), and a failure anywhere later rolls the claim back and 
 `READY` again. The claim then applies only:
 
 - `AD_Client` name / value / description, `AD_Org` name / value / `SocialName` ← company name;
+- the names the build derived from the placeholder — `AD_Role` "POOL-… Admin" (name and
+  description), the client's 17 `AD_Tree` names/descriptions, the ledger (`C_AcctSchema`), the
+  chart of accounts (`C_Element` name/description) and the fiscal calendar — with `POOL-<id>`
+  replaced by the company name (`PooledTenantClaimService.renamePlaceholderDerivedNames`, ETP-5548;
+  native SQL scoped by `AD_Client_ID`, inside the claim transaction);
 - admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
   description, email, password hash, **active**;
 - the signup address onto the pooled fiscal location's street line.
@@ -499,18 +532,19 @@ timings for the row claim, tenant personalization, and the complete claim. The s
 tenant selection and residual onboarding time through commit. These entries make pool and classic
 runs directly comparable without changing the NDJSON response or the provisioning transaction.
 
-### Where `POOL-…` stays visible after a claim (known gap, not renamed yet)
+### Where `POOL-…` stays visible after a claim
 
-Everything derived from the client name at provisioning time keeps the placeholder:
+Until ETP-5548 the claim renamed only the client, organization and admin user, so a claimed tenant
+showed "POOL-… Admin" as its role (account menu, roles screens) and kept the placeholder in its
+ledger, chart of accounts, calendar and trees. The claim now rewrites all of them (see the list
+above). A scan of every text column of a `READY` pooled tenant finds the placeholder only in those
+tables plus `AD_Client`, `AD_Org` and the admin `AD_User`, which the claim sets directly.
 
-- `AD_Role` "POOL-… Admin" (`InitialClientSetup.insertRoles`: client name + " Admin") — shown by
-  the roles screens;
-- the client's `AD_Tree` names ("POOL-… <tree>", `InitialClientSetup.insertTrees`);
-- the ledger (`C_AcctSchema`) name and the chart of accounts `C_Element` name/description,
-  rebranded to the client name by `OnboardingAccountingWiringService.rebrandImportedChartNames`;
-- the fiscal calendar name, rebranded by `OnboardingPeriodControlService`;
-- anything else `OnboardingSourceMoniker.replace` rewrote with the client name during the build;
-- the `ETGO_TENANT_POOL` row itself and the server log lines of the build.
+What still carries it: the `ETGO_TENANT_POOL` row itself and the server log lines of the build.
+Tenants claimed before ETP-5548 keep the placeholder in those derived names until the schema_forge
+data-fix `R43-pool-claim-placeholder-names` (`cli/src/data-fixes/sql/`) rewrites them: same tables
+and lengths as the claim, matched on the exact `POOL-<pool row id>` of a `CLAIMED` row whose client
+is already renamed, so `READY` tenants keep their placeholder.
 
 A pooled tenant is also a real client before it is claimed: instance-wide sweeps
 (`CostingCadenceStartup`, usage aggregation, the corrective data-fix runner) see it like any other

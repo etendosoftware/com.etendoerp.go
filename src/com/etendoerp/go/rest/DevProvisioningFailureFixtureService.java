@@ -26,6 +26,7 @@ public final class DevProvisioningFailureFixtureService {
   private final CheckoutRequestStore checkoutRequests;
   private final TenantPoolStore pool;
 
+  /** Uses the real checkout request store and tenant pool. */
   public DevProvisioningFailureFixtureService() {
     this(new CheckoutRequestStore(), new TenantPoolStore());
   }
@@ -36,12 +37,24 @@ public final class DevProvisioningFailureFixtureService {
     this.pool = pool;
   }
 
+  /**
+   * Tells whether the fixture exists in this runtime; it only does in a local one.
+   *
+   * @return whether this runtime is local
+   */
   public static boolean isEnabled() {
     return "local".equalsIgnoreCase(GoRuntimeProperties.readValue(
         ENVIRONMENT_PROPERTY, ENVIRONMENT_ENV, ""));
   }
 
-  /** Creates a paid request and arms the real pooled finish step to fail once. */
+  /**
+   * Creates a paid request and arms the real pooled finish step to fail once.
+   *
+   * @param account account that owns the fixture request
+   * @param clientName company name of the request; a generated one when blank
+   * @return the request id, company name, cleanup token and {@code retryAllowed}
+   * @throws JSONException when the response cannot be built
+   */
   public JSONObject create(Account account, String clientName) throws JSONException {
     requireEnabled();
     String name = StringUtils.defaultIfBlank(clientName, "E2E Pool Failure " + UUID.randomUUID());
@@ -70,7 +83,13 @@ public final class DevProvisioningFailureFixtureService {
     return result;
   }
 
-  /** Restores the reserved pool row; cleanup is idempotent and account-scoped. */
+  /**
+   * Restores the reserved pool row; cleanup is idempotent and account-scoped.
+   *
+   * @param account account that owns the fixture request
+   * @param cleanupToken request id returned by {@link #create}
+   * @return {@code true} once the reservation is restored or was already gone
+   */
   public boolean cleanup(Account account, String cleanupToken) {
     requireEnabled();
     if (!isFixtureRequest(cleanupToken)) {
@@ -96,15 +115,35 @@ public final class DevProvisioningFailureFixtureService {
     return true;
   }
 
+  /**
+   * Tells whether the pooled finish step must fail for this onboarding: only while the fixture's
+   * reservation exists.
+   *
+   * @param requestId checkout request id of the onboarding
+   * @return whether the pooled finish step must fail for this request
+   */
   public boolean shouldFail(String requestId) {
     return isFixtureRequest(requestId) && pool.findFixtureReservation(requestId) != null;
   }
 
+  /**
+   * Tells whether a checkout request id belongs to the local failure fixture.
+   *
+   * @param requestId checkout request id
+   * @return whether the id names a fixture request in a local runtime
+   */
   public static boolean isFixtureRequest(String requestId) {
     return isEnabled() && StringUtils.startsWith(requestId, "e2e-fixture-");
   }
 
-  /** Returns the reserved client only for the authenticated owner of this fixture. */
+  /**
+   * Returns the reserved client only for the authenticated owner of this fixture.
+   *
+   * @param requestId fixture request id
+   * @param accountId authenticated account id
+   * @param accountEmail authenticated account email
+   * @return the reserved client id, or {@code null} for any other request or account
+   */
   public String reservedClientId(String requestId, String accountId, String accountEmail) {
     if (!isFixtureRequest(requestId)
         || checkoutRequests.find(requestId, accountId, accountEmail) == null) return null;

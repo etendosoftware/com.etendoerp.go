@@ -29,8 +29,8 @@ import org.openbravo.dal.service.OBDal;
 /** Alert delivery owns an independent settled transaction; no real provider is constructed. */
 public class InternalAlertServiceTest {
   private static InternalAlertEvent event(InternalAlertEvent.Status status) {
-    return new InternalAlertEvent("environment-provisioning", status, "attempt-1", "PRODUCTIVE",
-        "client-1", "POOL", "committed", null);
+    return new InternalAlertEvent("environment-provisioning", status, "attempt-1",
+        new InternalAlertEvent.Target("PRODUCTIVE", "client-1", "POOL"), "committed", null);
   }
   private static InternalAlertConfig config(boolean enabled) {
     return new InternalAlertConfig(enabled, List.of("ops@example.test"),

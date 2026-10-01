@@ -32,6 +32,15 @@ public final class InternalAlertConfig {
   private final Set<InternalAlertEvent.Status> statuses;
   private final String language;
 
+  /**
+   * Validates and freezes an alert configuration.
+   *
+   * @param enabled whether alerts are sent at all
+   * @param recipients one to ten valid addresses
+   * @param statuses results that are alerted; at least one
+   * @param language language of the alert email
+   * @throws IllegalArgumentException when a recipient is invalid or a list is out of bounds
+   */
   public InternalAlertConfig(boolean enabled, List<String> recipients,
       Set<InternalAlertEvent.Status> statuses, String language) {
     List<String> addresses = new ArrayList<>();
@@ -50,6 +59,13 @@ public final class InternalAlertConfig {
     this.statuses = Collections.unmodifiableSet(EnumSet.copyOf(statuses));
     this.language = language;
   }
+
+  /**
+   * Reads the configuration from the {@code etendo.go.internalAlerts.*} properties or their
+   * {@code ETGO_INTERNAL_ALERTS_*} environment variables, with safe defaults.
+   *
+   * @return the configuration in effect now
+   */
   public static InternalAlertConfig fromRuntime() {
     String enabled = read("enabled", "ENABLED", "true");
     String statusValue = read("statuses", "STATUSES", "OK,ERROR");
@@ -66,7 +82,32 @@ public final class InternalAlertConfig {
     return ConfigPropertyReader.readConfigValue("etendo.go.internalAlerts." + property,
         "ETGO_INTERNAL_ALERTS_" + env, fallback);
   }
-  public boolean accepts(InternalAlertEvent.Status status) { return enabled && statuses.contains(status); }
-  public List<String> getRecipients() { return recipients; }
-  public String getLanguage() { return language; }
+
+  /**
+   * Tells whether an event with {@code status} must be sent under this configuration.
+   *
+   * @param status result of the event
+   * @return whether an event with that result must be sent
+   */
+  public boolean accepts(InternalAlertEvent.Status status) {
+    return enabled && statuses.contains(status);
+  }
+
+  /**
+   * Returns the addresses every alert is sent to.
+   *
+   * @return the configured recipients, unmodifiable
+   */
+  public List<String> getRecipients() {
+    return recipients;
+  }
+
+  /**
+   * Returns the language the alert email is rendered in.
+   *
+   * @return the language of the alert email
+   */
+  public String getLanguage() {
+    return language;
+  }
 }
