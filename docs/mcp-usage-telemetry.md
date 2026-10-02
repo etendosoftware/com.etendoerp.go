@@ -74,10 +74,12 @@ builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
 same tenant the business code used; `doPost` clears it in its `finally`, next to the session key,
 because servlet threads are pooled. The binding happens before the context is built, so a call that
 fails inside the tool (an `error` row) is still attributed. Every `tools/call` enters
-`executeInContext`, `neo_discover` and `neo_feedback` included, so the fallback to the token's own
-values only applies when resolution itself finds nothing (a role on client `0`, or no transactional
-org) — the row then keeps `0`, exactly like the context. Before ETP-5594 every row was written with
-`0`/`0`.
+`executeInContext`, `neo_discover` and `neo_feedback` included. When resolution finds nothing (a
+role on client `0`, or no transactional org), the tenant bound is still `0` — the same value the
+`OBContext` was built with — so the row records `0` for that column. The fallback to the token's
+own values applies only when nothing was bound at all, i.e. a request that never entered
+`executeInContext`. Before ETP-5594 only calls made with a wildcard token (client `0`) were recorded
+as `0`/`0`; calls whose token already carried a concrete client were attributed correctly.
 
 Two names deviate from the design table on purpose:
 
