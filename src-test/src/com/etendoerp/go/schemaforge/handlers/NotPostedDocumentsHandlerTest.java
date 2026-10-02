@@ -418,8 +418,8 @@ public class NotPostedDocumentsHandlerTest {
 
   /**
    * The 5 document types globally excluded by product decision (ETP-4452) must resolve to their
-   * real {@code tableId} via {@link NotPostedDocumentsHandler#DOCUMENT_TYPE_TO_TABLE_ID} (the
-   * defensive fix) AND be dropped from the grid because their table is in
+   * real {@code tableId} via {@link NotPostedDocumentsHandler#tableIdForLabel} (the
+   * defensive fix; ETP-5591 replaced the old label → table map) AND be dropped from the grid because their table is in
    * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS} (the exclusion, ETP-4948:
    * extracted out of this handler into a shared utility). Before the fix these labels were absent
    * from the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
@@ -1073,5 +1073,20 @@ public class NotPostedDocumentsHandlerTest {
     assertTrue(hql[0].contains(", e.account.id from FIN_Finacc_Transaction e"));
     assertEquals("p", states.get("d1").status());
     assertEquals("acc-9", states.get("d1").financialAccountId());
+  }
+
+  /**
+   * ETP-5591 review (W1) — bulk.posting emits "Work Effort" from its production search, so the
+   * rows are M_Production (325) records, not S_TimeExpense (486). They must resolve to 325 and be
+   * dropped with the other globally excluded production rows, never posted against table 486.
+   */
+  @Test
+  public void buildRowDropsWorkEffortRowAsProduction() throws Exception {
+    assertEquals("325", NotPostedDocumentsHandler.tableIdForLabel("Work Effort"));
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Work Effort");
+    row.put("documentId", "we-1");
+
+    assertNull(new NotPostedDocumentsHandler().buildRow(row));
   }
 }

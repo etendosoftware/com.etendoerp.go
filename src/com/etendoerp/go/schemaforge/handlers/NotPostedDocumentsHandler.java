@@ -159,7 +159,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("RVS", "319");                                   // M_InOut
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("SI",  "318");                                   // C_Invoice
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("T",   "4D8C3B3C31D1410DA046140C9F024D17");      // FIN_Finacc_Transaction
-    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("WE",  "486");                                   // S_TimeExpense
+    // ETP-5591 — WE was mapped to 486 (S_TimeExpense), but bulk.posting emits "Work Effort" rows
+    // from DocumentSearchService#searchProduction, i.e. M_Production records (325), the same table
+    // as BMP. Mapped to 325 so those rows resolve to their real table and are excluded with BMP
+    // (ETP-4452) instead of being posted against the wrong table.
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("WE",  "325");                                   // M_Production
   }
 
   private static final String KEY_TABLE_ID = "tableId";
