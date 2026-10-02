@@ -191,14 +191,39 @@ class NeoActionRecordGuardTest {
   }
 
   @Test
-  @DisplayName("a lookup that throws passes, and the admin mode is still restored")
-  void throwingLookupPasses() {
+  @DisplayName("a lookup that throws is refused like an unknown id (fails closed), admin mode restored")
+  void throwingLookupIsRefused() throws Exception {
     when(dal.get(FIN_Payment.ENTITY_NAME, RECORD))
         .thenThrow(new IllegalArgumentException("not a key of this table"));
 
-    assertNull(NeoActionRecordGuard.refusalFor(paymentEntity(), RECORD));
+    assertRecordNotFound(NeoActionRecordGuard.refusalFor(paymentEntity(), RECORD));
     contextMock.verify(() -> OBContext.setAdminMode(true));
     contextMock.verify(OBContext::restorePreviousMode);
+  }
+
+  @Test
+  @DisplayName("an ownership decision that throws on the row is refused too, admin mode restored")
+  void throwingOwnershipDecisionIsRefused() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getClient()).thenThrow(new IllegalStateException("lazy proxy detached"));
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenReturn(payment);
+
+    assertRecordNotFound(NeoActionRecordGuard.refusalFor(paymentEntity(), RECORD));
+    contextMock.verify(OBContext::restorePreviousMode);
+  }
+
+  @Test
+  @DisplayName("the refusal for a failed lookup cannot be told apart from an unknown id's")
+  void failedLookupLeaksNothing() throws Exception {
+    payment(OTHER_CLIENT, OWN_ORG);
+    NeoResponse foreign = NeoActionRecordGuard.refusalFor(paymentEntity(), RECORD);
+    when(dal.get(FIN_Payment.ENTITY_NAME, RECORD)).thenThrow(new IllegalArgumentException(
+        "could not load FIN_Payment pay-1 of client secret-client"));
+    NeoResponse failed = NeoActionRecordGuard.refusalFor(paymentEntity(), RECORD);
+
+    assertEquals(foreign.getHttpStatus(), failed.getHttpStatus());
+    assertEquals(foreign.getBody().toString(), failed.getBody().toString());
+    assertFalse(failed.getBody().toString().contains("secret"), failed.getBody().toString());
   }
 
   @Test

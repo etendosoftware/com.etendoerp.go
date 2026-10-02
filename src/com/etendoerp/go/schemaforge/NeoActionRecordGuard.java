@@ -86,7 +86,8 @@ public final class NeoActionRecordGuard {
   }
 
   /**
-   * Whether {@code recordId} is a row of the entity's tab table that the current tenant cannot read.
+   * Whether {@code recordId} is a row of the entity's tab table that the current tenant cannot read
+   * — or whether that cannot be decided because the lookup failed (fails closed).
    */
   static boolean isForeignRecord(SFEntity entity, String recordId) {
     if (entity == null || StringUtils.isBlank(recordId)) {
@@ -110,13 +111,24 @@ public final class NeoActionRecordGuard {
           + "tenant", entity.getName(), recordId, dalEntity.getName());
       return true;
     } catch (RuntimeException e) {
-      // An id that is not a key of this table (wrong shape for its primary key) is not a row of
-      // it; the handler answers for it, as it did before this check existed.
-      log.debug("Record {} of entity '{}' not resolvable for the ownership check: {}", recordId,
-          entity.getName(), e.getMessage());
-      return false;
+      // Fails CLOSED: a lookup that throws cannot prove the record is the tenant's, and letting the
+      // action run on an undecided ownership is the hole this guard closes. Every NEO tab table has
+      // a string key, so a well-formed id never lands here; an id that is simply not a row of the
+      // table returns null above and still passes. The refusal reads like an unknown id, so nothing
+      // leaks; the log names the request, not the exception's message, which may carry data.
+      log.warn("Action on spec '{}', entity '{}', record {} refused: the ownership lookup failed "
+          + "({})", specNameOf(entity), entity.getName(), recordId, e.getClass().getSimpleName());
+      return true;
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String specNameOf(SFEntity entity) {
+    try {
+      return entity.getETGOSFSpec() != null ? entity.getETGOSFSpec().getName() : null;
+    } catch (RuntimeException e) {
+      return null;
     }
   }
 }

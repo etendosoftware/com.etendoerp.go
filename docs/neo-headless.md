@@ -4539,17 +4539,23 @@ every action of every entity, before the customization and before the AD button:
   - no tab, or a tab whose table has no DAL entity (report and tab-less specs);
   - an id that is not a row of that table, such as a report-spec action whose `id` is a financial
     account (those handlers resolve their own ids through `TenantOwnership.loadOwned`);
-  - a lookup that throws (an id of the wrong shape for the key); the handler answers for it as
-    before.
   - It is checked only on the URL record id. Ids inside the parameters stay the handler's job
     (for the invoice payment actions, `PaymentOwnership`, §4.12.1.3).
+- **Fails closed.** A lookup or ownership decision that throws (the DAL load, or reading the row's
+  client and organization) cannot prove the record is the caller's, so the action is refused with
+  the same **404 "Record not found"** as an unknown id — nothing about the failure reaches the
+  caller. The guard logs a WARN naming the spec, the entity and the id, and the exception's class
+  only (its message may carry data). Admin mode is restored either way. It used to pass such a
+  request through with a DEBUG line, so an undecidable ownership let the action run. Every table
+  behind a NEO tab has a string key, so a well-formed id never lands here; an id that is simply not
+  a row of the table still passes, as above.
 - **Defense in depth.** `ReactivatePaymentHandler` loads the payment through owned loads
   (`NeoActionRecordGuard.loadOwned`, delegating to `TenantOwnership.loadOwned`) for reactivate,
   process, remove and `clearTransferErrorFlag`. It no longer relies only on the guard: called
   directly on another tenant's payment, `etprReactivatePayment`, `aPRMProcessPayment` and
   `eTPRRemovePayment` answer 404 *"Payment not found: <id>"*.
 - **REST changes, by accepted exception:** only an action on another tenant's (or an unreadable
-  organization's) record now answers 404 instead of running. Every action on the caller's own
+  organization's) record, or one whose ownership lookup fails, now answers 404 instead of running. Every action on the caller's own
   records is unchanged, and the SPA only ever sends ids it read through NEO.
 
 ---
