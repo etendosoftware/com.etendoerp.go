@@ -44,7 +44,8 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *   <li>{@code Convertquotation} → calls {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder}
  *       with {@code recalculatePrices=false} so that unit prices agreed in the quotation are
  *       preserved in the new sales order (default Etendo behaviour would re-fetch prices from
- *       the active price list, overwriting the quoted amounts).</li>
+ *       the active price list, overwriting the quoted amounts), then reactivates the order so it
+ *       is left in Draft (ETP-5528, see {@link #handleConvertQuotation}).</li>
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code currencyOptions} → {@link CurrencyOptionsHandler}</li>
  *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
@@ -68,6 +69,8 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
+  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  private static final String DOC_STATUS_COMPLETED = "CO";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -124,19 +127,60 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * {@code recalculatePrices=true} (the default when the parameter is absent from the HTTP
    * request), causing all order-line prices to be re-fetched from the active price list and
    * the quoted amounts to be lost.
+   *
+   * <p><b>ETP-5528 — the order is left in Draft.</b> Core always completes the order it creates
+   * ({@code c_order_post1}). Until ETP-5528 the SPA then reactivated it from the browser with a
+   * second request ({@code QuotationConfirmModal}, ETP-3570), which is why an order created through
+   * the MCP ({@code neo_action Convertquotation}) stayed Completed while the same action in the UI
+   * ended in Draft. The reactivation now runs here, through the same {@code C_Order_Post 'RE'} the
+   * UI request reaches ({@link OrderDocActionSupport}), so both channels share one flow. The UI's own
+   * call is guarded by {@code documentStatus === 'CO'}, so against an order that is already Draft
+   * it simply does not fire — no double reactivation.
+   *
+   * <p>Best-effort only for failures the procedure REPORTS (an {@code AD_PInstance} result other
+   * than 1, or no access to {@code C_Order_Post}): the conversion is kept, the order stays
+   * Completed, the failure is logged and {@code documentStatus} in the response says which state the
+   * order is in. An exception thrown on the way (the flush, {@code CallProcess} wrapping an
+   * {@code SQLException}, a statement timeout) is NOT swallowed: it leaves the PostgreSQL
+   * transaction aborted, so the conversion would be rolled back at commit anyway, and answering 200
+   * with a {@code salesOrderId} that never gets persisted would lie to the client. It propagates to
+   * the catch below and the whole request fails as one unit.
    */
   private NeoResponse handleConvertQuotation(String quotationId) {
     try {
       Order newOrder = convertQuotationProcess.convertQuotationIntoSalesOrder(false, quotationId);
       log.info("[ETP-4027] Created sales order {} from quotation {} with quoted prices preserved",
           newOrder.getDocumentNo(), quotationId);
+      reactivateConvertedOrder(newOrder);
       JSONObject result = new JSONObject();
       result.put("salesOrderId", newOrder.getId());
+      result.put(FIELD_DOCUMENT_STATUS, newOrder.getDocumentStatus());
       return NeoResponse.ok(result);
     } catch (Exception e) {
       log.error("[ETP-4027] handleConvertQuotation failed for quotation {}: {}",
           quotationId, e.getMessage(), e);
       return NeoResponse.error(500, e.getMessage());
+    }
+  }
+
+  /**
+   * Reactivates the order core just completed, leaving it in Draft (ETP-5528).
+   *
+   * <p>A failure the procedure reports is logged and the order is left as the procedure left it.
+   * A thrown exception is deliberately not caught here — see {@link #handleConvertQuotation}.
+   *
+   * @throws Exception when the reactivation call itself fails; the transaction is then unusable
+   */
+  private static void reactivateConvertedOrder(Order order) throws Exception {
+    if (!DOC_STATUS_COMPLETED.equals(order.getDocumentStatus())) {
+      return;
+    }
+    if (OrderDocActionSupport.runDocAction(order, OrderDocActionSupport.DOC_ACTION_REACTIVATE)) {
+      log.info("[ETP-5528] Reactivated sales order {} created from a quotation (status {})",
+          order.getDocumentNo(), order.getDocumentStatus());
+    } else {
+      log.warn("[ETP-5528] C_Order_Post reported a failure reactivating sales order {}; it stays {}",
+          order.getDocumentNo(), order.getDocumentStatus());
     }
   }
 
