@@ -750,6 +750,8 @@ class PaymentAgentSupportTest {
     @DisplayName("register adds method, credit, write-off, the invoice state and a draft note")
     void registerIsEnriched() throws Exception {
       when(payment.isProcessed()).thenReturn(false);
+      // Consumes 30 of another payment's credit and overpays by 5: usedCredit carries the 30.
+      when(payment.getUsedCredit()).thenReturn(new BigDecimal("30"));
       JSONObject body = new JSONObject().put("creditSources", new JSONArray().put(
           new JSONObject().put("kind", "credit").put("paymentId", "pay-credit").put("use", "30")));
 
@@ -760,7 +762,8 @@ class PaymentAgentSupportTest {
       assertEquals("Transfer", data.getJSONObject("paymentMethod").getString("name"));
       assertEquals(0, new BigDecimal("30").compareTo(decimal(data, "creditUsed")));
       assertEquals(0, new BigDecimal("5").compareTo(decimal(data, "creditGenerated")));
-      assertEquals(0, new BigDecimal("3").compareTo(decimal(data, "creditAvailable")));
+      assertEquals(0, new BigDecimal("5").compareTo(decimal(data, "creditAvailable")),
+          "the credit consumed from another payment is not this payment's own credit spent");
       assertEquals(0, new BigDecimal("2.00").compareTo(decimal(data, "writeoffAmount")));
       assertInvoiceState(data.getJSONObject("invoice"));
       assertTrue(data.has("note"));
@@ -780,6 +783,36 @@ class PaymentAgentSupportTest {
     }
 
     @Test
+    @DisplayName("consuming another payment's credit leaves none available, never a negative")
+    void consumingCreditLeavesNoneAvailable() throws Exception {
+      when(payment.isProcessed()).thenReturn(true);
+      when(payment.getGeneratedCredit()).thenReturn(BigDecimal.ZERO);
+      when(payment.getUsedCredit()).thenReturn(new BigDecimal("30"));
+      JSONObject body = new JSONObject().put("creditSources", new JSONArray().put(
+          new JSONObject().put("kind", "credit").put("paymentId", "pay-credit").put("use", "30")));
+
+      JSONObject data = data(PaymentAgentSupport.enrich("registerPayment", result(), INVOICE,
+          body, null));
+
+      assertEquals(0, BigDecimal.ZERO.compareTo(decimal(data, "creditAvailable")));
+    }
+
+    @Test
+    @DisplayName("a credit note funding the payment does not inflate the credit available")
+    void nonCreditFundingDoesNotInflateCredit() throws Exception {
+      when(payment.isProcessed()).thenReturn(true);
+      when(payment.getUsedCredit()).thenReturn(BigDecimal.ZERO);
+      // A credit note (abono) funds the payment without touching its usedCredit.
+      JSONObject body = new JSONObject().put("creditSources", new JSONArray().put(
+          new JSONObject().put("kind", "abono").put("psdId", "psd-1").put("use", "30")));
+
+      JSONObject data = data(PaymentAgentSupport.enrich("registerPayment", result(), INVOICE,
+          body, null));
+
+      assertEquals(0, new BigDecimal("5").compareTo(decimal(data, "creditAvailable")));
+    }
+
+    @Test
     @DisplayName("confirm adds the same fields minus creditUsed")
     void confirmIsEnrichedWithoutCreditUsed() throws Exception {
       when(payment.isProcessed()).thenReturn(true);
@@ -790,7 +823,8 @@ class PaymentAgentSupportTest {
       assertFalse(data.has("creditUsed"));
       assertTrue(data.has("paymentMethod"));
       assertTrue(data.has("creditGenerated"));
-      assertTrue(data.has("creditAvailable"));
+      assertEquals(0, new BigDecimal("3").compareTo(decimal(data, "creditAvailable")),
+          "without creditSources, the 2 used is this payment's own credit refunded");
       assertTrue(data.has("writeoffAmount"));
       assertInvoiceState(data.getJSONObject("invoice"));
     }

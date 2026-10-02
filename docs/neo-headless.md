@@ -2132,8 +2132,9 @@ accepted REST change, since the SPA already never sends an over-limit write-off)
 
 **The enriched answers (agents only).** `registerPayment` and `confirmPayment` keep their
 `response.data` `{id, documentNo, amount, status, processed}` and add `paymentMethod{id, name}`,
-`creditGenerated`, `creditAvailable` (generated minus used; 0 after a refund), `writeoffAmount` (sum
-of the payment details' write-offs) and `invoice{id, documentNo, outstandingAmount, totalPaid,
+`creditGenerated`, `creditAvailable` (the credit this payment leaves: generated minus its own
+credit used, net of credit consumed from other payments; 0 after a refund, never negative),
+`writeoffAmount` (sum of the payment details' write-offs) and `invoice{id, documentNo, outstandingAmount, totalPaid,
 paymentComplete}` (read with a scalar query, after the write). `registerPayment` also adds
 `creditUsed` (Σ `creditSources[].use`). A draft carries `note: "Draft: nothing is applied to the
 invoice until confirmPayment."`. `deletePayment` answers **200**

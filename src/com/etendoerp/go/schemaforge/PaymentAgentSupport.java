@@ -340,20 +340,35 @@ final class PaymentAgentSupport {
       method.put(KEY_NAME, payment.getPaymentMethod().getName());
       data.put("paymentMethod", method);
     }
+    BigDecimal creditUsed = BigDecimal.ZERO;
     if ("registerPayment".equals(action)) {
-      data.put("creditUsed",
-          PaymentCreditConsumer.requestedFunding(body.optJSONArray("creditSources")));
+      creditUsed = PaymentCreditConsumer.requestedFunding(body.optJSONArray("creditSources"));
+      data.put("creditUsed", creditUsed);
     }
     BigDecimal generated = PaymentRegistrationService.nullToZero(payment.getGeneratedCredit());
     data.put("creditGenerated", generated);
-    data.put("creditAvailable",
-        generated.subtract(PaymentRegistrationService.nullToZero(payment.getUsedCredit())));
+    data.put("creditAvailable", creditAvailable(generated, payment.getUsedCredit(), creditUsed));
     data.put("writeoffAmount", writeoffOf(payment));
     data.put("invoice", invoiceState(invoiceId));
     if (!Boolean.TRUE.equals(payment.isProcessed())) {
       data.put("note", "Draft: nothing is applied to the invoice until confirmPayment.");
     }
     return result;
+  }
+
+  /**
+   * The credit this payment leaves available (ETP-5558). {@code usedCredit} mixes two amounts: the
+   * credit this payment consumed from other payments ({@code creditSources}) and its own credit a
+   * refund consumed. Only the second is spent from {@code generated}; subtracting both answered
+   * {@code -X} on a payment that just paid with {@code X} of a customer's credit. A credit note in
+   * {@code creditSources} counts in {@code creditUsed} without touching {@code usedCredit}, hence
+   * the floor on the refunded part too.
+   */
+  private static BigDecimal creditAvailable(BigDecimal generated, BigDecimal usedCredit,
+      BigDecimal creditUsedFromOthers) {
+    BigDecimal refunded = PaymentRegistrationService.nullToZero(usedCredit)
+        .subtract(creditUsedFromOthers).max(BigDecimal.ZERO);
+    return generated.subtract(refunded).max(BigDecimal.ZERO);
   }
 
   /**
