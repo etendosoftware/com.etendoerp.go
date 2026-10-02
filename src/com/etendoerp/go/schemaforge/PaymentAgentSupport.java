@@ -464,6 +464,9 @@ final class PaymentAgentSupport {
     }
   }
 
+  // Scale hardcoded to 2 to mirror the SPA, which rounds these amounts to cents. Wrong for
+  // currencies with 0 or 3 decimals (JPY, KWD). The fix is the currency's standard precision on
+  // both sides, SPA and server, changed together - never on one side alone.
   private static BigDecimal cents(BigDecimal amount) {
     return PaymentRegistrationService.nullToZero(amount).setScale(2, RoundingMode.HALF_UP);
   }
