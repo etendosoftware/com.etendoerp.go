@@ -3922,10 +3922,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // recoverable even if a legacy database omits that value.
       return attempt == null ? 0L : attempt;
     }
+    writeClaimRefusal(response, checkoutRequestStore.find(onboardingRequest.paymentToken,
+        accountId, accountEmail));
+    return null;
+  }
+
+  /**
+   * Explains why a paid request could not be claimed. A failure no retry can fix and an
+   * environment already set up are refused for good, so neither may answer "still running": the
+   * customer would wait and retry forever. Anything else is a claim held by another call.
+   */
+  private void writeClaimRefusal(HttpServletResponse response, CheckoutRequest checkoutRequest)
+      throws IOException {
+    String status = checkoutRequestStore.deriveProvisioningStatus(checkoutRequest);
+    if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED.equals(status)
+        && !checkoutRequestStore.isProvisioningRetryAllowed(checkoutRequest)) {
+      String failureDescription = CheckoutRequestStore.safeFailureDescription(
+          CheckoutRequestStore.failureCode(checkoutRequest.getFailureReason()));
+      writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_RETRY_NOT_ALLOWED",
+          "Setup cannot be retried for this environment",
+          failureDescription + ". Setup cannot be retried; contact support to continue.");
+      return;
+    }
+    if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONED.equals(status)) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_COMPLETED",
+          "This environment is already set up",
+          "This environment is already set up. Open it from your environment list.");
+      return;
+    }
     writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
         "Setup is still running for this environment",
         "Setup is still running for this environment. Refresh its status before trying again.");
-    return null;
   }
 
   /**

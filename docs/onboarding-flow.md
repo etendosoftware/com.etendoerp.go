@@ -42,7 +42,9 @@ payment, and on the pool path burn a pooled tenant per attempt.
 One rule is enforced on the name itself: an account cannot have two
 **productive** environments with the same company name (case and blanks
 ignored) — refused before checkout (409 `CLIENT_NAME_IN_USE`) and again at
-onboarding with the same non-retryable code.
+onboarding with the same non-retryable code. A later onboarding call for that
+purchase is refused with 409 `PROVISIONING_RETRY_NOT_ALLOWED` (not
+`PROVISIONING_ALREADY_IN_PROGRESS`, which is reserved for a run still in flight).
 
 When no client exists and `InitialClientSetup` creates one, onboarding uses the
 exact `AD_Client_ID` that setup stores in the request session for all later

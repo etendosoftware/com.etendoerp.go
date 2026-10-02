@@ -369,6 +369,8 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
 
   /** Wire status returned by the checkout status endpoint when a failed attempt can be retried. */
   public static final String DERIVED_STATUS_PROVISIONING_FAILED = "provisioning_failed";
+  /** Wire status returned once the environment of the request has been set up. */
+  public static final String DERIVED_STATUS_PROVISIONED = "provisioned";
   /** Wire status returned when a provisioning lease expired without a diagnostic reason. */
   public static final String DERIVED_STATUS_STALLED = "stalled";
 
@@ -392,7 +394,7 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public String deriveProvisioningStatus(CheckoutRequest request) {
     if (request == null) return "pending";
     String status = StringUtils.defaultString(request.getCheckoutRequestStatus());
-    if (STATUS_PROVISIONED.equals(status)) return "provisioned";
+    if (STATUS_PROVISIONED.equals(status)) return DERIVED_STATUS_PROVISIONED;
     if (STATUS_PROVISIONING.equals(status)) {
       if (StringUtils.isNotBlank(request.getFailureReason())) {
         return DERIVED_STATUS_PROVISIONING_FAILED;

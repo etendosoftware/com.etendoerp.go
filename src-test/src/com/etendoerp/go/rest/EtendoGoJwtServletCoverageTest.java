@@ -247,6 +247,46 @@ public class EtendoGoJwtServletCoverageTest {
     verify(lifecycle, never()).associateDemoWithProductive(anyString(), anyString());
   }
 
+  /**
+   * ETP-5548: a refused claim says why. A failure no retry can fix and a finished environment are
+   * final, so they must not answer "still running", which invites the customer to keep retrying.
+   */
+  @Test
+  public void refusedClaimExplainsAFinalStateInsteadOfStillRunning() throws Exception {
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    CheckoutRequest nameInUse = mock(CheckoutRequest.class);
+    when(nameInUse.getFailureReason()).thenReturn(CheckoutRequestStore.encodeFailureReason(
+        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "raw cause"));
+    when(store.deriveProvisioningStatus(nameInUse))
+        .thenReturn(CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED);
+    when(store.isProvisioningRetryAllowed(nameInUse)).thenReturn(false);
+    CheckoutRequest provisioned = mock(CheckoutRequest.class);
+    when(store.deriveProvisioningStatus(provisioned))
+        .thenReturn(CheckoutRequestStore.DERIVED_STATUS_PROVISIONED);
+    CheckoutRequest running = mock(CheckoutRequest.class);
+    when(store.deriveProvisioningStatus(running)).thenReturn("provisioning");
+
+    JSONObject notRetryable = claimRefusal(nameInUse);
+    assertEquals("PROVISIONING_RETRY_NOT_ALLOWED", notRetryable.getString("code"));
+    assertTrue(notRetryable.getString("userMessage").startsWith(
+        "The account already has a productive environment with this company name"));
+    assertFalse("The raw cause never reaches the customer",
+        notRetryable.toString().contains("raw cause"));
+    assertEquals("PROVISIONING_ALREADY_COMPLETED", claimRefusal(provisioned).getString("code"));
+    assertEquals("PROVISIONING_ALREADY_IN_PROGRESS", claimRefusal(running).getString("code"));
+  }
+
+  private JSONObject claimRefusal(CheckoutRequest checkoutRequest) throws Exception {
+    ResponseCapture response = mockResponse();
+    Method refusal = EtendoGoJwtServlet.class.getDeclaredMethod("writeClaimRefusal",
+        HttpServletResponse.class, CheckoutRequest.class);
+    refusal.setAccessible(true);
+    refusal.invoke(servlet, response.response, checkoutRequest);
+    assertEquals(409, response.status);
+    return new JSONObject(response.body()).getJSONObject("error");
+  }
+
   private Object prepareOnboardingForPersistedSelection() throws Exception {
     HttpServletRequest request = jsonRequest("/onboarding",
         "{\"clientName\":\"New Productive\",\"currency\":\"EUR\","
