@@ -45,13 +45,19 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
@@ -65,6 +71,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
+import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
@@ -1511,6 +1518,145 @@ public class ReactivatePaymentHandlerTest {
       removal.verify(() -> PaymentRemovalUtil.remove(payment));
       pis.verify(() -> PisDeferredPaymentService.paymentsWithBankTransfer(
           Mockito.anyCollection()), never());
+    }
+  }
+
+  // ── ETP-5558: an action named by its DB column reaches the same branch ──
+  //
+  // neo_schema publishes each button as {name: <property>, action: <DB column>}, and the button
+  // lookup accepts either spelling. Matched on the property name alone, the column spelling skipped
+  // this handler: Reactivate ran without action=RE and Eliminar without the agent's gate.
+
+  private static final String ENTITY_ID = "entity-payment";
+
+  /** An ACTION context carrying the SF entity, as the action path builds it. */
+  private static NeoContext buttonCtx(String fieldName, String recordId, boolean mcpOrigin) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getId()).thenReturn(ENTITY_ID);
+    return NeoContext.builder()
+        .specName("payment-in")
+        .entityName("finPayment")
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(fieldName)
+        .recordId(recordId)
+        .sfEntity(entity)
+        .mcpOrigin(mcpOrigin)
+        .build();
+  }
+
+  /** Makes {@code columnName} resolve to the button whose DAL property is {@code propertyName}. */
+  private static void stubButton(MockedStatic<NeoButtonActionHelper> buttons,
+      MockedStatic<ModelProvider> models, String columnName, String propertyName) {
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("FIN_Payment");
+    Column column = mock(Column.class);
+    when(column.getTable()).thenReturn(table);
+    when(column.getDBColumnName()).thenReturn(columnName);
+    buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, columnName))
+        .thenReturn(column);
+
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(propertyName);
+    Entity dal = mock(Entity.class);
+    when(dal.getPropertyByColumnName(columnName)).thenReturn(property);
+    ModelProvider provider = mock(ModelProvider.class);
+    when(provider.getEntityByTableName("FIN_Payment")).thenReturn(dal);
+    models.when(ModelProvider::getInstance).thenReturn(provider);
+  }
+
+  /**
+   * Runs {@code columnName} on an own payment and returns the parameters the handler passed on to
+   * the button, which must still be called by the name the caller used.
+   */
+  private static JSONObject paramsSentForColumn(String columnName, String propertyName) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getStatus()).thenReturn("RPAP");
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
+      stubButton(buttons, models, columnName, propertyName);
+      OBDal instance = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(instance);
+      when(instance.get(FIN_Payment.class, "pay-1")).thenReturn(payment);
+      buttons.when(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any())).thenReturn(NeoResponse.ok(new JSONObject()));
+
+      NeoResponse result = new ReactivatePaymentHandler()
+          .handle(buttonCtx(columnName, "pay-1", true));
+
+      assertNotNull(result);
+      ArgumentCaptor<JSONObject> params = ArgumentCaptor.forClass(JSONObject.class);
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          Mockito.eq("pay-1"), Mockito.eq(columnName), params.capture()));
+      return params.getValue();
+    }
+  }
+
+  @Test
+  public void reactivateByColumnNameInjectsActionRe() throws JSONException {
+    JSONObject params = paramsSentForColumn("EM_Etpr_Reactivate_Payment", "etprReactivatePayment");
+
+    assertEquals("RE", params.getString("action"));
+  }
+
+  @Test
+  public void confirmByColumnNameInjectsActionP() throws JSONException {
+    JSONObject params = paramsSentForColumn("EM_APRM_Process_Payment", "aPRMProcessPayment");
+
+    assertEquals("P", params.getString("action"));
+    assertEquals("pay-1", params.getString("Fin_Payment_ID"));
+  }
+
+  /** The lowercase column spelling no longer bypasses the agent's refusal on a void payment. */
+  @Test
+  public void mcpRemoveByColumnNameRefusesVoidPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-void", "RPVOID");
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      stubButton(buttons, models, "em_etpr_remove_payment", "eTPRRemovePayment");
+
+      NeoResponse result = runRemove(buttonCtx("em_etpr_remove_payment", "pay-void", true),
+          payment, Set.of(), removal, pis);
+
+      assertEquals(422, result.getHttpStatus());
+      assertTrue(errorMessage(result).contains("RPVOID"));
+      removal.verifyNoInteractions();
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any()), never());
+    }
+  }
+
+  /** A name that is no button of the entity leaves the request to the default path, as before. */
+  @Test
+  public void unknownActionWithEntityIsLeftToDefaultPath() {
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+      buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, "somethingElse"))
+          .thenReturn(null);
+
+      assertNull(new ReactivatePaymentHandler()
+          .handle(buttonCtx("somethingElse", "pay-1", true)));
+    }
+  }
+
+  /** A button this handler does not own, named by its column, is left to the default path too. */
+  @Test
+  public void otherButtonByColumnNameIsLeftToDefaultPath() {
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class)) {
+      stubButton(buttons, models, "Posted", "posted");
+
+      assertNull(new ReactivatePaymentHandler().handle(buttonCtx("Posted", "pay-1", true)));
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any()), never());
     }
   }
 }

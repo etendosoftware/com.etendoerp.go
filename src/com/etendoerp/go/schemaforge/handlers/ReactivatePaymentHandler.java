@@ -37,9 +37,13 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -188,6 +192,9 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * invoice.
    */
   private static final String PIS_STATUS_ACTION_FIELD = "pisPaymentStatus";
+  /** The actions {@link #handle} routes, by the property name it discriminates on. */
+  private static final Set<String> OWN_ACTION_FIELDS = Set.of(REACTIVATE_ACTION_FIELD,
+      CONFIRM_ACTION_FIELD, REMOVE_ACTION_FIELD, PIS_RETRY_ACTION_FIELD, PIS_STATUS_ACTION_FIELD);
   /** Mirrors {@code PisDeferredPaymentService.PAYMENT_STATUS_ERROR}, which is not visible here. */
   private static final String PAYMENT_STATUS_ERROR = "ETGOERR";
   /** A voided payment; the payment window does not offer Eliminar on it. */
@@ -242,7 +249,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }
-    String fieldName = context.getFieldName();
+    String fieldName = canonicalActionName(context);
     if (REACTIVATE_ACTION_FIELD.equals(fieldName)) {
       return handleReactivate(context);
     }
@@ -261,6 +268,40 @@ public class ReactivatePaymentHandler implements NeoHandler {
       return PisPaymentService.handlePisPaymentStatus(context);
     }
     return null;
+  }
+
+  /**
+   * The action's DAL property name, whichever spelling the caller used (ETP-5558). The button
+   * lookup accepts the DB column name as well as the field name — {@code neo_schema} publishes both,
+   * as {@code action} and {@code name} — so matching on the property name alone let the column
+   * spelling skip this handler: Reactivate ran without {@code action = "RE"} and Eliminar without
+   * the agent's gate. A name that resolves to no button is returned as it came.
+   */
+  private static String canonicalActionName(NeoContext context) {
+    String fieldName = context.getFieldName();
+    if (fieldName == null || OWN_ACTION_FIELDS.contains(fieldName)
+        || context.getSfEntity() == null) {
+      return fieldName;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Column button = NeoButtonActionHelper.findButtonColumn(context.getSfEntity().getId(),
+          fieldName);
+      String property = button == null ? null : propertyNameOf(button);
+      return property == null ? fieldName : property;
+    } catch (RuntimeException e) {
+      log.debug("Could not resolve action {} to its button: {}", fieldName, e.getMessage());
+      return fieldName;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String propertyNameOf(Column column) {
+    Entity dal = ModelProvider.getInstance()
+        .getEntityByTableName(column.getTable().getDBTableName());
+    Property property = dal == null ? null : dal.getPropertyByColumnName(column.getDBColumnName());
+    return property == null ? null : property.getName();
   }
 
   /**
