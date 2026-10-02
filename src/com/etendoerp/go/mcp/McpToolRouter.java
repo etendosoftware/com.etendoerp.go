@@ -74,6 +74,7 @@ import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
+import com.etendoerp.go.schemaforge.NeoReadPredicates;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -492,6 +493,19 @@ public class McpToolRouter {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, tabWhere);
         params.put(JsonConstants.USE_ALIAS, "true");
       }
+    }
+
+    // ETP-5009: the customization's read predicates, ANDed in exactly as the REST list GET and
+    // its ?_distinct= fetch do (NeoReadPredicates), so a row a customization excludes from the
+    // query is excluded here too — rather than only from the page its afterHandle was handed.
+    String readPredicate = NeoReadPredicates.resolve(McpHookExecutor.buildReadHookContext(
+        specName, entityName, null, adTab, sfEntity,
+        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy)),
+        NeoExtensionChannel.MCP);
+    if (StringUtils.isNotBlank(readPredicate)) {
+      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
+          params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
+      params.put(JsonConstants.USE_ALIAS, "true");
     }
 
     String result = jsonService.fetch(params);

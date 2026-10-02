@@ -3825,6 +3825,42 @@ The three "cannot decide" guards inside `isStale` — a blank/missing client tok
 
 **The failure mode of the refresh itself.** `NeoAuditTokenRefresh` is best-effort by construction: an unreadable row, an unrecognised response body shape, or a token `toAuditToken` cannot render all leave the response body byte-identical to what it would have been without the refresh, and log a WARN naming the entity and record id (`NeoAuditTokenRefresh.java:168-172`, `:291-295`). It never adds an `updated` key that was not already there, never flushes on the entity's behalf, and never touches `NeoRecordVersion`'s comparison — it only corrects a value the response already publishes. So the refresh degrades to the pre-ETP-5262 behavior on failure (the client may hit one spurious, retriable `stale_record` 409) rather than breaking the write that already succeeded.
 
+#### 5.3.2 Hiding rows from every list read — `NeoHandler#readPredicates` (ETP-5009)
+
+**The rule for handler authors: to keep rows out of an entity's lists, declare a read predicate. Do not post-filter `response.data` in `afterHandle`.**
+
+```java
+@Override
+public List<String> readPredicates(NeoContext context) {
+  return List.of("not exists (select 1 from ProductCategory pc"
+      + " where pc.id = e.productCategory.id and pc.etgoIssystemcategory = true)");
+}
+```
+
+Each string is a complete HQL boolean expression over the alias `e`. `NeoReadPredicates.resolve` parenthesises and ANDs them into the generic list query of every channel:
+
+| Read | Applied | Where |
+|---|---|---|
+| REST list `GET /sws/neo/{spec}/{entity}` (and its `totalRows`, paging, `export=csv\|xlsx`) | yes | `NeoCrudHandler#buildDalParams` → `applyWhereClause`, after the tab where, the parent filter and `_neoWhere` |
+| REST `GET …?_distinct=<field>` (the filter-value picker) | yes | `NeoCrudHandler#handleDistinctFetch` |
+| MCP `neo_list` | yes | `McpToolRouter#handleList`, after the filters and the tab where |
+| Read by id (REST `GET …/{id}`, REST `GET …?id=<id>`, MCP `neo_get`) | **no** | core's `DefaultJsonDataService.fetch` resolves an id with its own `id = :bobId` query and ignores the where clause |
+| A read the handler serves itself from `handle()` | no | the handler owns that query |
+
+So there is no channel divergence to declare: list, count and distinct agree on every channel, and a read by id is unrestricted on every channel. A handler that must also refuse a direct read by id keeps doing that in `afterHandle`, scoped to `context.isReadById()` — `ProductDefaultsHandler#hideSystemCategoryProducts` and `ProductCategoryDefaultHandler#afterHandle` are the reference.
+
+**"Read by id" has one definition: `NeoContext#isReadById()`.** A `GET` whose `NeoContext#getReadId()` is non-blank — the path id when there is one (authoritative, ETP-5195), otherwise the query-string `id`, exactly what `NeoCrudHandler#buildDalParams` hands core. `GET /sws/neo/product/product?id=<id>` is therefore a read by id, not a list read: core fetches it by id just like `GET …/product/<id>`, so the predicate cannot reach it and the post-filter must. `NeoCrudHandler#resolveListReadPredicate` skips the predicates on the same condition, so every `GET` is covered by exactly one of the two mechanisms. Do not gate a post-filter on `getRecordId()` alone — that leaves the `?id=` form unfiltered.
+
+**Why the post-filter was wrong.** Core cuts the page (`LIMIT`/`OFFSET`) and counts `totalRows` before `afterHandle` sees the rows, so removing rows there returns short or empty pages and a wrong count. Worse, the `?_distinct=` fetch short-circuits in `handleWindowEntityCrud` and never reaches `afterHandle` at all, so it kept offering values only the hidden rows carried: the Product window's Categoría filter offered the internal "Discounts" category, and its Tipo filter offered "Servicio", both carried only by the hidden `ETGO_DTO` product — selecting either gave an empty grid. The distinct fetch still runs no pre/post hook; it applies the predicates only.
+
+**Contract.**
+- **Server-side constants only.** The predicate is spliced into the HQL text verbatim — there is no bind-parameter mechanism, the same limitation `_neoWhere` has (§5.3, ETP-5188). Never build one from request input; a value the server resolved itself must be shape-validated before it is inlined.
+- **Stateless.** It is resolved on its own instance through `NeoExtensionDispatcher.resolveOnly` (annotation first, `Java_Qualifier` second, the channel's own resolver), separately from the instance that runs `handle`/`afterHandle`. Per-request state set by those is not visible to it.
+- **Fails closed on a throwing predicate — but not on a failed resolution.** A `readPredicates` implementation that throws is not swallowed: the list answers 500 and `_distinct` answers 500 ("Failed to compute distinct values"), rather than silently returning the rows it was meant to hide. Resolving the customization is a different matter and **fails open**: on REST the `Java_Qualifier` fallback goes through `NeoServletSupport.lookupHandler`, which logs and returns `null` when no handler matches or the CDI lookup throws ("No NeoHandler found with @Named(...)" at WARN, "Failed to lookup handler with qualifier" at ERROR). A `null` customization declares no predicate, so the read proceeds unrestricted — the same outcome as an entity with no customization at all, and the same outcome `handle`/`afterHandle` already get from that lookup. Bind new read predicates with `@NeoExtension` (resolved by `NeoExtensionIndex` first) and watch for those log lines; a hidden row reappearing in a list is the symptom.
+- **Readable client/org filtering is untouched.** The predicate is ANDed onto whatever core and `OBQuery` already apply; it can only narrow a read.
+
+Current implementers: `ProductDefaultsHandler` (products in a system category, ETP-4967) and `ProductCategoryDefaultHandler` (the system categories themselves).
+
 ---
 
 ## 6. Parent-Child Tab Filtering

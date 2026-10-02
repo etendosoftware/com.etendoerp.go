@@ -82,6 +82,41 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares HQL predicates that every list read of this handler's entity must satisfy
+   * (ETP-5009).
+   *
+   * <p><b>Why this exists.</b> A handler that hides rows by post-filtering {@code afterHandle}'s
+   * {@code response.data} only hides them from the page it was handed: core already applied
+   * {@code LIMIT}/{@code OFFSET} and counted {@code totalRows}, so pages come back short, the count
+   * is wrong, and the {@code ?_distinct=} value fetch — which never reaches {@code afterHandle} at
+   * all — keeps offering values only the hidden rows carry (the Product window's filter offered
+   * the internal "Discounts" category). A predicate declared here goes into the query itself, so
+   * list, count, paging and distinct values agree by construction.</p>
+   *
+   * <p><b>Where it is applied.</b> ANDed into the generic list query of every channel: the REST
+   * list {@code GET} (and therefore its count and any CSV/XLSX export of it), the REST
+   * {@code ?_distinct=<field>} value fetch, and MCP {@code neo_list}. It is <b>not</b> applied to
+   * a single-record read by id: core resolves that with its own {@code id = :id} query and ignores
+   * the where clause, so a handler that must also hide a record from a direct read keeps doing so
+   * in {@code afterHandle}. Nor is it applied to a read a handler serves itself from
+   * {@link #handle}.</p>
+   *
+   * <p><b>Contract.</b> Each predicate is a complete HQL boolean expression over the alias
+   * {@code e} (the entity being read). It is spliced into the HQL text verbatim — there is no
+   * bind-parameter mechanism — so it must be a server-side constant or built only from values the
+   * server validated; never from request input. It is resolved on its own instance, separately
+   * from the one that runs {@link #handle}/{@link #afterHandle}, so it must not rely on
+   * per-request state set by those. A predicate that throws fails the read rather than silently
+   * returning the rows it was meant to hide.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @return the predicates to AND into the read; the default is empty (no restriction)
+   */
+  default List<String> readPredicates(NeoContext context) {
+    return Collections.emptyList();
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
