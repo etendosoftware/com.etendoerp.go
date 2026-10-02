@@ -1686,7 +1686,9 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * Verifies that invoice listing merges both query sources, deduplicates rows, and formats output fields.
+   * Verifies that invoice listing merges both query sources, deduplicates rows, and formats output fields,
+   * including {@code currency$_identifier} (ETP-5527): the ISO code, or JSON null when the invoice has no
+   * currency.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -1712,6 +1714,9 @@ public class CreateDraftInvoiceHandlerTest {
       when(invoiceFromLines.getDocumentStatus()).thenReturn("CO");
       when(invoiceFromLines.getGrandTotalAmount()).thenReturn(new BigDecimal("42.50"));
       when(invoiceFromLines.getInvoiceDate()).thenReturn(new GregorianCalendar(2026, 3, 29).getTime());
+      Currency euro = mock(Currency.class);
+      when(euro.getISOCode()).thenReturn("EUR");
+      when(invoiceFromLines.getCurrency()).thenReturn(euro);
 
       Invoice directOnlyInvoice = mock(Invoice.class);
       when(directOnlyInvoice.getId()).thenReturn("inv-2");
@@ -1719,6 +1724,7 @@ public class CreateDraftInvoiceHandlerTest {
       when(directOnlyInvoice.getDocumentStatus()).thenReturn("DR");
       when(directOnlyInvoice.getGrandTotalAmount()).thenReturn(null);
       when(directOnlyInvoice.getInvoiceDate()).thenReturn(null);
+      when(directOnlyInvoice.getCurrency()).thenReturn(null);
 
       when(lineQuery.list()).thenReturn(Collections.singletonList(invoiceFromLines));
       when(directQuery.list()).thenReturn(Arrays.asList(invoiceFromLines, directOnlyInvoice));
@@ -1738,9 +1744,12 @@ public class CreateDraftInvoiceHandlerTest {
       assertEquals(2, data.length());
       assertEquals("inv-1", data.getJSONObject(0).getString("id"));
       assertEquals("2026-04-29", data.getJSONObject(0).getString("invoiceDate"));
+      assertEquals("EUR", data.getJSONObject(0).getString("currency$_identifier"));
       assertEquals("inv-2", data.getJSONObject(1).getString("id"));
       assertEquals(0, data.getJSONObject(1).getInt("grandTotalAmount"));
       assertFalse(data.getJSONObject(1).has("invoiceDate"));
+      assertTrue(data.getJSONObject(1).has("currency$_identifier"));
+      assertTrue(data.getJSONObject(1).isNull("currency$_identifier"));
     }
   }
 
