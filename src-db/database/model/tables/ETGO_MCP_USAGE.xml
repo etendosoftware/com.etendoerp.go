@@ -119,6 +119,6 @@
       <check name="ETGO_MCP_USAGE_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_MCP_USAGE_OUTCOME_CHK"><![CDATA[OUTCOME IN ('ok', 'error')]]></check>
       <check name="ETGO_MCP_USAGE_ROWTYPE_CHK"><![CDATA[ROW_TYPE IN ('tool_call', 'feedback')]]></check>
-      <check name="ETGO_MCP_USAGE_STATUS_CHK"><![CDATA[STATUS IS NULL OR STATUS IN ('R')]]></check>
+      <check name="ETGO_MCP_USAGE_STATUS_CHK"><![CDATA[STATUS IS NULL OR STATUS = 'R']]></check>
     </table>
   </database>
