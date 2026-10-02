@@ -393,7 +393,9 @@ class FinancialAccountMovementActions {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "The movement is already processed.");
     }
-    NeoResponse result = callEndpoint("POST", "process", null, idBody(movement), mcp);
+    // This is the endpoint's own action name, which only shares its spelling with the process
+    // parameter. It stays a literal because a source test checks each endpoint name by reading it.
+    NeoResponse result = callEndpoint("POST", "process", null, idBody(movement), mcp); // NOSONAR
     return isSuccess(result) ? answer(result, movement.getId()) : result;
   }
 

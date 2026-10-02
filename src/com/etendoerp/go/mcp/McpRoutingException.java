@@ -51,6 +51,12 @@ class McpRoutingException extends OBException {
   /** Opens every message that names the offending field, so the three read the same way. */
   private static final String FIELD_PREFIX = "Field '";
 
+  /** Joins a quoted entity (or action) to the quoted spec it belongs to. */
+  private static final String QUOTED_OF = "' of '";
+
+  /** Closes the {@code spec:} argument of a suggested call and opens its {@code entity:}. */
+  private static final String ENTITY_ARG = "', entity:'";
+
   private final int status;
   private final String errorCode;
   private final String field;
@@ -225,13 +231,13 @@ class McpRoutingException extends OBException {
   static McpRoutingException verbHidden(String specName, String entityName, String method,
       String reason, String instead) {
     return new McpRoutingException(
-        "'" + entityName + "' of '" + specName + "' does not accept " + verbName(method)
+        "'" + entityName + QUOTED_OF + specName + "' does not accept " + verbName(method)
             + " through MCP: " + reason + ". Nothing was written.",
         McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
         List.of(),
         instead != null
             ? "Do not retry this call. Use " + instead + " instead."
-            : "Do not retry this call. Call neo_schema(spec:'" + specName + "', entity:'"
+            : "Do not retry this call. Call neo_schema(spec:'" + specName + ENTITY_ARG
                 + entityName + "', view:'actions') and use the action that does this.",
         McpConstants.SEE_ALSO_WRITING);
   }
@@ -548,7 +554,7 @@ class McpRoutingException extends OBException {
         McpConstants.PARAM_PARENT_ID, List.of(),
         parentEntity == null
             ? "Look up the parent record, then pass its id as parentId."
-            : "Call neo_list(spec:'" + specName + "', entity:'" + parentEntity
+            : "Call neo_list(spec:'" + specName + ENTITY_ARG + parentEntity
                 + "') to find the parent first, then repeat this call with parentId:'<thatId>'.",
         McpConstants.SEE_ALSO_READING).withExtras(extras);
   }
@@ -579,7 +585,7 @@ class McpRoutingException extends OBException {
     String why = problem == null ? "the entity declares no field that links it to its parent"
         : problem;
     return new McpRoutingException(
-        "Cannot create '" + entityName + "' of '" + specName + "' through MCP: its parent cannot "
+        "Cannot create '" + entityName + QUOTED_OF + specName + "' through MCP: its parent cannot "
             + "be identified (" + why + "), so the record would be attached to a parent nobody "
             + "chose. Nothing was written.",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_UNRESOLVABLE,
@@ -588,7 +594,7 @@ class McpRoutingException extends OBException {
             ? "Do not retry this create. Call neo_discover to find the parent entity of '"
                 + entityName + "', then neo_schema on it with view:'actions' and use the action "
                 + "that creates this record."
-            : "Do not retry this create. Call neo_schema(spec:'" + specName + "', entity:'"
+            : "Do not retry this create. Call neo_schema(spec:'" + specName + ENTITY_ARG
                 + parentEntity + "', view:'actions') and use the action that creates this record.",
         McpConstants.SEE_ALSO_WRITING);
   }
@@ -608,11 +614,11 @@ class McpRoutingException extends OBException {
   static McpRoutingException actionHidden(String specName, String entityName, String action,
       String reason) {
     return new McpRoutingException(
-        "Action '" + action + "' of '" + entityName + "' (" + specName + ") is not available "
+        "Action '" + action + QUOTED_OF + entityName + "' (" + specName + ") is not available "
             + "through MCP: " + reason + ". Nothing was run.",
         McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
         List.of(),
-        "Do not retry this call. Call neo_schema(spec:'" + specName + "', entity:'" + entityName
+        "Do not retry this call. Call neo_schema(spec:'" + specName + ENTITY_ARG + entityName
             + "', view:'actions') for the actions this entity offers.",
         McpConstants.SEE_ALSO_WRITING);
   }
@@ -630,11 +636,11 @@ class McpRoutingException extends OBException {
   static McpRoutingException actionRedirected(String specName, String entityName, String action,
       String instead, String reason) {
     return new McpRoutingException(
-        "Action '" + action + "' of '" + entityName + "' (" + specName + ") is not run through "
+        "Action '" + action + QUOTED_OF + entityName + "' (" + specName + ") is not run through "
             + "MCP: " + reason + ". Nothing was run.",
         McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
         List.of(),
-        "Do not retry this call. Use neo_action(spec:'" + specName + "', entity:'" + entityName
+        "Do not retry this call. Use neo_action(spec:'" + specName + ENTITY_ARG + entityName
             + "', action:'" + instead + "') instead; neo_schema(view:'actions') gives its "
             + "parameters.",
         McpConstants.SEE_ALSO_WRITING);
@@ -667,7 +673,7 @@ class McpRoutingException extends OBException {
     return new McpRoutingException(message + " Nothing was run.",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
         error.optString(McpConstants.PARAM_FIELD, null), List.of(),
-        "Correct the parameters and retry. neo_schema(spec:'" + specName + "', entity:'"
+        "Correct the parameters and retry. neo_schema(spec:'" + specName + ENTITY_ARG
             + entityName + "', view:'actions') gives the parameter schema of '" + action + "'.",
         McpConstants.SEE_ALSO_WRITING).withExtras(extras);
   }

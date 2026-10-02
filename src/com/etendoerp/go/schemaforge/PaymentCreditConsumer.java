@@ -73,9 +73,12 @@ final class PaymentCreditConsumer {
     }
     for (int i = 0; i < creditSources.length(); i++) {
       JSONObject src = creditSources.optJSONObject(i);
-      BigDecimal use = src == null ? null : parsePositiveAmount(src.optString("use", "0"));
-      String sourceId = src == null ? null
-          : src.optString("credit".equals(src.optString("kind", "")) ? "paymentId" : "psdId", null);
+      if (src == null) {
+        continue;
+      }
+      BigDecimal use = parsePositiveAmount(src.optString("use", "0"));
+      String sourceKey = "credit".equals(src.optString("kind", "")) ? "paymentId" : "psdId";
+      String sourceId = src.optString(sourceKey, null);
       if (use != null && StringUtils.isNotBlank(sourceId)) {
         total = total.add(use);
       }

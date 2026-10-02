@@ -1034,8 +1034,8 @@ final class McpToolRouterSupport {
         + "opened, so no records were created and none need cleaning up. ";
     // ETP-5558: a refusal no body change can fix (the verb is hidden, the parent cannot be
     // identified) must not be met with "fix it and retry" while its own error says "do not retry".
-    body.put(BatchService.FIELD_HINT, NON_RETRYABLE_OP_CODES.contains(
-        fkError == null ? null : fkError.optString(McpConstants.KEY_ERROR, null))
+    String errorCode = fkError == null ? null : fkError.optString(McpConstants.KEY_ERROR, null);
+    body.put(BatchService.FIELD_HINT, NON_RETRYABLE_OP_CODES.contains(errorCode)
             ? persisted + "The operation reported in 'failedAt' can never succeed as written — "
                 + "its 'error' says why and what to use instead. Remove or replace that "
                 + "operation, then retry the rest of the batch."

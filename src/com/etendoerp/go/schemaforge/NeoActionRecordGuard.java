@@ -80,6 +80,11 @@ public final class NeoActionRecordGuard {
   /**
    * {@link TenantOwnership#loadOwned} for the customizations outside this package: the entity, or
    * {@code null} when the id is blank, unknown, or owned by another tenant.
+   *
+   * @param <T>         the entity type
+   * @param entityClass the DAL class of the entity to load
+   * @param id          the record id; may be blank
+   * @return the entity, or {@code null} when it is blank, unknown or another tenant's
    */
   public static <T extends BaseOBObject> T loadOwned(Class<T> entityClass, String id) {
     return TenantOwnership.loadOwned(entityClass, id);

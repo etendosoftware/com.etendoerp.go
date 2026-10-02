@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -84,6 +85,7 @@ class FinancialAccountTransferActions {
   static final String P_FEE_TO = "bankFeeTo";
 
   private static final String KEY_CURRENCY = "currency";
+  private static final String KEY_SOURCE_ACCOUNT_ID = "sourceAccountId";
 
   /** The movements endpoint. A seam so unit tests see the exact body it receives. */
   private final Function<NeoContext, NeoResponse> transactionsEndpoint;
@@ -99,8 +101,18 @@ class FinancialAccountTransferActions {
    */
   @FunctionalInterface
   interface RateLookup {
+    /**
+     * Look the rate up.
+     *
+     * @param fromCurrencyId the source account's currency id
+     * @param toCurrencyId   the destination account's currency id
+     * @param date           the day the rate applies to
+     * @param orgId          the source account's organization id
+     * @return the rate, or {@code null} when the system has none
+     * @throws SQLException if the lookup fails
+     */
     Double rate(String fromCurrencyId, String toCurrencyId, LocalDate date, String orgId)
-        throws Exception;
+        throws SQLException;
   }
 
   FinancialAccountTransferActions() {
@@ -219,7 +231,7 @@ class FinancialAccountTransferActions {
       items.put(item);
     }
     JSONObject data = new JSONObject();
-    data.put("sourceAccountId", source.getId());
+    data.put(KEY_SOURCE_ACCOUNT_ID, source.getId());
     data.put(KEY_CURRENCY, isoOf(source));
     data.put("items", items);
     return NeoResponse.ok(envelope(data));
@@ -258,61 +270,33 @@ class FinancialAccountTransferActions {
     String destinationId = StringUtils.trimToNull(params.optString(P_DESTINATION, null));
     FIN_FinancialAccount destination =
         TenantOwnership.loadOwned(FIN_FinancialAccount.class, destinationId);
-    if (destination == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          "Destination account not found: " + destinationId);
-    }
-    if (StringUtils.equals(destination.getId(), source.getId())) {
-      return unprocessable("The destination must be another account.", P_DESTINATION);
-    }
-    if (Boolean.FALSE.equals(destination.isActive())) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "The destination account is archived; money cannot be transferred to it.");
+    NeoResponse refused = refuseDestination(source, destination, destinationId);
+    if (refused != null) {
+      return refused;
     }
     BigDecimal amount = number(params, P_AMOUNT);
-    if (amount == null || amount.signum() <= 0) {
-      return unprocessable("amount must be greater than zero.", P_AMOUNT);
-    }
     String glItemId = StringUtils.trimToNull(params.optString(P_GL_ITEM_ID, null));
-    if (glItemId == null) {
-      return unprocessable("glItemId is required: a transfer is booked against a G/L item "
-          + "(movementGlItems lists them).", P_GL_ITEM_ID);
-    }
-    if (TenantOwnership.loadOwned(GLItem.class, glItemId) == null) {
-      return unprocessable(P_GL_ITEM_ID + " '" + glItemId + "' was not found.", P_GL_ITEM_ID);
-    }
     String description = params.optString(P_DESCRIPTION, "");
-    if (description.length() > FinancialAccountMovementActions.DESCRIPTION_MAX_LENGTH) {
-      return unprocessable("description has " + description.length() + " characters; at most "
-          + FinancialAccountMovementActions.DESCRIPTION_MAX_LENGTH + " are allowed.",
-          P_DESCRIPTION);
+    refused = refuseAmountGlItemOrDescription(amount, glItemId, description);
+    if (refused != null) {
+      return refused;
     }
     BigDecimal feeFrom = number(params, P_FEE_FROM);
     BigDecimal feeTo = number(params, P_FEE_TO);
-    for (Object[] fee : new Object[][] { { P_FEE_FROM, feeFrom }, { P_FEE_TO, feeTo } }) {
-      BigDecimal value = (BigDecimal) fee[1];
-      if (params.has((String) fee[0]) && (value == null || value.signum() < 0)) {
-        return unprocessable(fee[0] + " must be zero or more.", (String) fee[0]);
-      }
+    refused = refuseFees(params, feeFrom, feeTo);
+    if (refused != null) {
+      return refused;
     }
     LocalDate date = today.get();
-    BigDecimal rate = null;
-    if (!sameCurrency(source, destination)) {
-      rate = params.has(P_CONVERSION_RATE) ? number(params, P_CONVERSION_RATE) : systemRate(
-          source, destination, date);
-      if (rate == null || rate.signum() <= 0) {
-        return unprocessable(params.has(P_CONVERSION_RATE)
-            ? "conversionRate must be greater than zero."
-            : "There is no conversion rate from " + isoOf(source) + " to "
-                + isoOf(destination) + " for " + date + "; send conversionRate.",
-            P_CONVERSION_RATE);
-      }
+    BigDecimal rate = rateFor(source, destination, params, date);
+    if (!sameCurrency(source, destination) && (rate == null || rate.signum() <= 0)) {
+      return rateRefusal(source, destination, params, date);
     }
 
     // The body FundsTransferModal.handleConfirm sends.
     boolean withFee = signum(feeFrom) > 0 || signum(feeTo) > 0;
     JSONObject body = new JSONObject();
-    body.put("sourceAccountId", source.getId());
+    body.put(KEY_SOURCE_ACCOUNT_ID, source.getId());
     body.put(P_DESTINATION, destination.getId());
     body.put(P_AMOUNT, amount.toPlainString());
     body.put("transferDate", date.toString());
@@ -339,9 +323,88 @@ class FinancialAccountTransferActions {
     if (result == null || result.getHttpStatus() < 200 || result.getHttpStatus() >= 300) {
       return result;
     }
+    return transferred(source, destination, amount, date, rate);
+  }
+
+  /** The refusal for a destination the modal would not offer, or {@code null} when it is one. */
+  private static NeoResponse refuseDestination(FIN_FinancialAccount source,
+      FIN_FinancialAccount destination, String destinationId) throws JSONException {
+    if (destination == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Destination account not found: " + destinationId);
+    }
+    if (StringUtils.equals(destination.getId(), source.getId())) {
+      return unprocessable("The destination must be another account.", P_DESTINATION);
+    }
+    if (Boolean.FALSE.equals(destination.isActive())) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "The destination account is archived; money cannot be transferred to it.");
+    }
+    return null;
+  }
+
+  /** The refusal for a missing amount or G/L item, or a description too long; else null. */
+  private static NeoResponse refuseAmountGlItemOrDescription(BigDecimal amount, String glItemId,
+      String description) throws JSONException {
+    if (amount == null || amount.signum() <= 0) {
+      return unprocessable("amount must be greater than zero.", P_AMOUNT);
+    }
+    if (glItemId == null) {
+      return unprocessable("glItemId is required: a transfer is booked against a G/L item "
+          + "(movementGlItems lists them).", P_GL_ITEM_ID);
+    }
+    if (TenantOwnership.loadOwned(GLItem.class, glItemId) == null) {
+      return unprocessable(P_GL_ITEM_ID + " '" + glItemId + "' was not found.", P_GL_ITEM_ID);
+    }
+    if (description.length() > FinancialAccountMovementActions.DESCRIPTION_MAX_LENGTH) {
+      return unprocessable("description has " + description.length() + " characters; at most "
+          + FinancialAccountMovementActions.DESCRIPTION_MAX_LENGTH + " are allowed.",
+          P_DESCRIPTION);
+    }
+    return null;
+  }
+
+  /** The refusal for a bank fee sent but negative or not a number, or {@code null}. */
+  private static NeoResponse refuseFees(JSONObject params, BigDecimal feeFrom, BigDecimal feeTo)
+      throws JSONException {
+    for (Object[] fee : new Object[][] { { P_FEE_FROM, feeFrom }, { P_FEE_TO, feeTo } }) {
+      BigDecimal value = (BigDecimal) fee[1];
+      if (params.has((String) fee[0]) && (value == null || value.signum() < 0)) {
+        return unprocessable(fee[0] + " must be zero or more.", (String) fee[0]);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The rate between two currencies: the caller's when sent, else the system's for the day.
+   * {@code null} between accounts of the same currency.
+   */
+  private BigDecimal rateFor(FIN_FinancialAccount source, FIN_FinancialAccount destination,
+      JSONObject params, LocalDate date) throws SQLException {
+    if (sameCurrency(source, destination)) {
+      return null;
+    }
+    return params.has(P_CONVERSION_RATE) ? number(params, P_CONVERSION_RATE)
+        : systemRate(source, destination, date);
+  }
+
+  private static NeoResponse rateRefusal(FIN_FinancialAccount source,
+      FIN_FinancialAccount destination, JSONObject params, LocalDate date) throws JSONException {
+    return unprocessable(params.has(P_CONVERSION_RATE)
+        ? "conversionRate must be greater than zero."
+        : "There is no conversion rate from " + isoOf(source) + " to "
+            + isoOf(destination) + " for " + date + "; send conversionRate.",
+        P_CONVERSION_RATE);
+  }
+
+  /** The answer to a transfer the movements endpoint booked. */
+  private static NeoResponse transferred(FIN_FinancialAccount source,
+      FIN_FinancialAccount destination, BigDecimal amount, LocalDate date, BigDecimal rate)
+      throws JSONException {
     JSONObject data = new JSONObject();
     data.put("transferred", true);
-    data.put("sourceAccountId", source.getId());
+    data.put(KEY_SOURCE_ACCOUNT_ID, source.getId());
     data.put(P_DESTINATION, destination.getId());
     data.put(P_AMOUNT, amount);
     data.put("date", date.toString());
@@ -364,7 +427,7 @@ class FinancialAccountTransferActions {
   }
 
   private BigDecimal systemRate(FIN_FinancialAccount from, FIN_FinancialAccount to,
-      LocalDate date) throws Exception {
+      LocalDate date) throws SQLException {
     Double rate = rates.rate(currencyId(from), currencyId(to), date, orgIdOf(from));
     return rate == null ? null : BigDecimal.valueOf(rate);
   }

@@ -326,9 +326,9 @@ final class PaymentAgentSupport {
       answer.put("invoice", invoiceState(invoiceId));
       return NeoResponse.ok(answer);
     }
-    JSONObject data = result.getBody() == null ? null
-        : result.getBody().optJSONObject(KEY_RESPONSE) == null ? null
-            : result.getBody().getJSONObject(KEY_RESPONSE).optJSONObject(KEY_DATA);
+    JSONObject resultBody = result.getBody();
+    JSONObject response = resultBody == null ? null : resultBody.optJSONObject(KEY_RESPONSE);
+    JSONObject data = response == null ? null : response.optJSONObject(KEY_DATA);
     FIN_Payment payment = data == null ? null
         : OBDal.getInstance().get(FIN_Payment.class, data.optString(KEY_ID, null));
     if (payment == null) {

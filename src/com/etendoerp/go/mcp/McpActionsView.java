@@ -49,6 +49,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  */
 final class McpActionsView {
 
+  /** Opens every withdrawal note: the action exists, it is just not run through MCP. */
+  private static final String NOT_RUN_THROUGH_MCP = "Not run through MCP: ";
+
   private McpActionsView() {
   }
 
@@ -273,7 +276,7 @@ final class McpActionsView {
       }
     }
     if (config.isUnusable()) {
-      withdraw(button, "Not run through MCP: " + config.getReason());
+      withdraw(button, NOT_RUN_THROUGH_MCP + config.getReason());
     }
     return true;
   }
@@ -358,7 +361,7 @@ final class McpActionsView {
   /** Mark a button as one to leave for {@code instead}: listed, not invokable, and why. */
   private static void redirect(JSONObject button, String instead, String reason)
       throws JSONException {
-    withdraw(button, "Not run through MCP: " + reason + ". Use '" + instead
+    withdraw(button, NOT_RUN_THROUGH_MCP + reason + ". Use '" + instead
         + "' (listed below) instead.");
     button.put("useInstead", instead);
   }
@@ -373,7 +376,7 @@ final class McpActionsView {
       return;
     }
     for (int i = 0; i < actions.length(); i++) {
-      withdraw(actions.getJSONObject(i), "Not run through MCP: " + config.getReason());
+      withdraw(actions.getJSONObject(i), NOT_RUN_THROUGH_MCP + config.getReason());
     }
   }
 

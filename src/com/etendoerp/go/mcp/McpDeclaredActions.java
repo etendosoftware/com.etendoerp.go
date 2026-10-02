@@ -170,32 +170,50 @@ final class McpDeclaredActions {
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
     Set<String> names = namesOf(action, button);
     for (String name : names) {
-      if (excluded.contains(name)) {
-        throw McpRoutingException.actionHidden(specName, entityName, action,
-            "its customization keeps it for people only");
-      }
-      if (config.isHidden(name)) {
-        throw McpRoutingException.actionHidden(specName, entityName, action, config.getReason());
-      }
-      String redirect = config.redirectOf(name);
-      if (redirect != null) {
-        throw McpRoutingException.actionRedirected(specName, entityName, action, redirect,
-            config.getRedirectReason());
-      }
-      requireAllowedValue(specName, entityName, action, config.allowedValuesOf(name), parameters);
+      refuseUnlessRunnable(specName, entityName, action, name, excluded, config, parameters);
     }
     NeoActionContract contract = describing(declared, names);
     if (contract != null) {
-      NeoResponse invalid = NeoActionContract.validate(declared, contract.getName(), parameters);
-      if (invalid != null) {
-        JSONObject body = invalid.getBody();
-        JSONObject err = body == null ? null : body.optJSONObject("error");
-        throw McpRoutingException.actionParametersInvalid(specName, entityName, action,
-            err != null ? err : new JSONObject());
-      }
+      requireValidParameters(specName, entityName, action, declared, contract, parameters);
       return contract;
     }
     return null;
+  }
+
+  /**
+   * Refuses the call when {@code name} — one spelling of the requested action — is excluded by
+   * the customization, hidden or redirected by {@code MCP_CONFIG.actions}, or given a value the
+   * configuration does not allow.
+   */
+  private static void refuseUnlessRunnable(String specName, String entityName, String action,
+      String name, Set<String> excluded, McpActionsSection.View config, JSONObject parameters)
+      throws JSONException {
+    if (excluded.contains(name)) {
+      throw McpRoutingException.actionHidden(specName, entityName, action,
+          "its customization keeps it for people only");
+    }
+    if (config.isHidden(name)) {
+      throw McpRoutingException.actionHidden(specName, entityName, action, config.getReason());
+    }
+    String redirect = config.redirectOf(name);
+    if (redirect != null) {
+      throw McpRoutingException.actionRedirected(specName, entityName, action, redirect,
+          config.getRedirectReason());
+    }
+    requireAllowedValue(specName, entityName, action, config.allowedValuesOf(name), parameters);
+  }
+
+  /** Refuses the call (422) when its parameters do not satisfy the declared contract. */
+  private static void requireValidParameters(String specName, String entityName, String action,
+      Map<String, NeoActionContract> declared, NeoActionContract contract, JSONObject parameters)
+      throws JSONException {
+    NeoResponse invalid = NeoActionContract.validate(declared, contract.getName(), parameters);
+    if (invalid != null) {
+      JSONObject body = invalid.getBody();
+      JSONObject err = body == null ? null : body.optJSONObject("error");
+      throw McpRoutingException.actionParametersInvalid(specName, entityName, action,
+          err != null ? err : new JSONObject());
+    }
   }
 
   /**

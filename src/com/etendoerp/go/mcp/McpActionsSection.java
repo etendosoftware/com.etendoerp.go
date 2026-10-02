@@ -118,33 +118,8 @@ final class McpActionsSection {
           + KEY_VALUES + ", or remove the section");
     }
     validateValues(body, problems);
-    if (body.has(KEY_HIDDEN)) {
-      JSONArray hidden = body.optJSONArray(KEY_HIDDEN);
-      if (hidden == null || hidden.length() == 0) {
-        problems.add(KEY_HIDDEN + " must be a non-empty array of action names");
-      } else {
-        for (int i = 0; i < hidden.length(); i++) {
-          Object name = hidden.opt(i);
-          if (!(name instanceof String) || StringUtils.isBlank((String) name)) {
-            problems.add(KEY_HIDDEN + "[" + i + "] must be a non-blank action name");
-          }
-        }
-      }
-    }
-    if (body.has(KEY_REDIRECT)) {
-      JSONObject redirect = body.optJSONObject(KEY_REDIRECT);
-      if (redirect == null || redirect.length() == 0) {
-        problems.add(KEY_REDIRECT + " must be a non-empty object {button: action}");
-      } else {
-        for (Iterator<?> it = redirect.keys(); it.hasNext();) {
-          String key = String.valueOf(it.next());
-          Object target = redirect.opt(key);
-          if (!(target instanceof String) || StringUtils.isBlank((String) target)) {
-            problems.add(KEY_REDIRECT + "." + key + " must name the action to use instead");
-          }
-        }
-      }
-    }
+    validateHidden(body, problems);
+    validateRedirect(body, problems);
     if (body.has(KEY_REDIRECT_REASON)
         && !(body.opt(KEY_REDIRECT_REASON) instanceof String
             && StringUtils.isNotBlank(body.optString(KEY_REDIRECT_REASON)))) {
@@ -154,6 +129,41 @@ final class McpActionsSection {
       problems.add(KEY_REASON + " is required, so every hidden or redirected action is auditable");
     }
     return problems;
+  }
+
+  private static void validateHidden(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_HIDDEN)) {
+      return;
+    }
+    JSONArray hidden = body.optJSONArray(KEY_HIDDEN);
+    if (hidden == null || hidden.length() == 0) {
+      problems.add(KEY_HIDDEN + " must be a non-empty array of action names");
+      return;
+    }
+    for (int i = 0; i < hidden.length(); i++) {
+      Object name = hidden.opt(i);
+      if (!(name instanceof String) || StringUtils.isBlank((String) name)) {
+        problems.add(KEY_HIDDEN + "[" + i + "] must be a non-blank action name");
+      }
+    }
+  }
+
+  private static void validateRedirect(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_REDIRECT)) {
+      return;
+    }
+    JSONObject redirect = body.optJSONObject(KEY_REDIRECT);
+    if (redirect == null || redirect.length() == 0) {
+      problems.add(KEY_REDIRECT + " must be a non-empty object {button: action}");
+      return;
+    }
+    for (Iterator<?> it = redirect.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      Object target = redirect.opt(key);
+      if (!(target instanceof String) || StringUtils.isBlank((String) target)) {
+        problems.add(KEY_REDIRECT + "." + key + " must name the action to use instead");
+      }
+    }
   }
 
   private static void validateValues(JSONObject body, List<String> problems) {
