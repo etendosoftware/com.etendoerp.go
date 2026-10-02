@@ -384,6 +384,20 @@ class McpConfigSourcedataTest {
     assertResolvesCleanly(FA_ACCOUNT);
   }
 
+  private static final String PERIOD_DOCUMENTS = "E04EDCE14C7E4E6C865F5C18847819CB";
+
+  @Test
+  @DisplayName("the per-document-type open/close the calendar no longer offers is hidden, pointing"
+      + " at the period's own")
+  void perDocumentOpenCloseIsHidden() throws IOException, JSONException {
+    JSONObject actions = payloadOf(PERIOD_DOCUMENTS).getJSONObject(McpActionsSection.NAME);
+    assertEquals(new TreeSet<>(List.of("openClose", "processNow")),
+        setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN)));
+    assertTrue(actions.getString(McpActionsSection.KEY_REASON)
+        .contains("entity:'periodControl'"), actions.toString());
+    assertResolvesCleanly(PERIOD_DOCUMENTS);
+  }
+
   @Test
   @DisplayName("the authored rows are actually present — the regex has not stopped matching")
   void payloadsAreFound() throws IOException {

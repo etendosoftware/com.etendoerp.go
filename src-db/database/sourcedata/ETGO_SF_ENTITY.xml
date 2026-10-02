@@ -5009,6 +5009,7 @@ Manual movements of the account (a deposit or a withdrawal booked against a G/L 
 <!--E04EDCE14C7E4E6C865F5C18847819CB-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--E04EDCE14C7E4E6C865F5C18847819CB-->  <JAVA_QUALIFIER><![CDATA[period-control-doc-openclose]]></JAVA_QUALIFIER>
 <!--E04EDCE14C7E4E6C865F5C18847819CB-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--E04EDCE14C7E4E6C865F5C18847819CB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["openClose","processNow"],"reason":"the calendar has no per-document-type open/close since ETP-4948: the period's own openClose (neo_action(spec:'open-close-period-control', entity:'periodControl', id:'<periodId>', action:'openClose')) opens or closes every document type at once"}}]]></MCP_CONFIG>
 <!--E04EDCE14C7E4E6C865F5C18847819CB--></ETGO_SF_ENTITY>
 
 <!--E24C7489E4764489A8DCB07DD5348DF8--><ETGO_SF_ENTITY>
