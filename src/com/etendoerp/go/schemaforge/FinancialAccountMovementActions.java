@@ -62,8 +62,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
  * account.</p>
  *
  * <p><b>One set of business rules.</b> Every write is handed to
- * {@link FinancialAccountTransactionsHandler} — the handler behind the SPA's endpoint — with the
- * very body the SPA's {@code NewTransactionModal} and {@code MovementRowKebab} send, so validation,
+ * {@link FinancialAccountTransactionsHandler} — the handler behind the SPA's endpoint, resolved
+ * and run as REST runs it ({@link FinancialAccountTransactionsEndpoint}) — with the very body the SPA's {@code NewTransactionModal} and {@code MovementRowKebab} send, so validation,
  * processing ({@code FIN_TransactionProcess}) and removal ({@code TransactionRemovalUtil}) are the
  * same code. What this class adds is what the SPA decides before it calls, and an agent cannot:</p>
  * <ul>
@@ -134,7 +134,7 @@ class FinancialAccountMovementActions {
   private final Function<NeoContext, NeoResponse> transactionsEndpoint;
 
   FinancialAccountMovementActions() {
-    this(context -> new FinancialAccountTransactionsHandler().handle(context));
+    this(FinancialAccountTransactionsEndpoint::call);
   }
 
   FinancialAccountMovementActions(Function<NeoContext, NeoResponse> transactionsEndpoint) {
@@ -571,13 +571,14 @@ class FinancialAccountMovementActions {
       queryParams.put("action", action);
     }
     return transactionsEndpoint.apply(NeoContext.builder()
-        .specName("financial-account-transactions")
-        .entityName("financial-account-transactions")
+        .specName(FinancialAccountTransactionsEndpoint.SPEC)
+        .entityName(FinancialAccountTransactionsEndpoint.SPEC)
         .httpMethod(method)
         .queryParams(queryParams)
         .requestBody(body)
         .endpointType(NeoEndpointType.CRUD)
         .mcpOrigin(mcp)
+        .obContext(OBContext.getOBContext())
         .build());
   }
 

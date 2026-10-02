@@ -2197,6 +2197,16 @@ Funds transfers are declared next to them (§4.12.1.5). *Add payment* from the a
 `NewMovementWizard`, which no screen mounts since ETP-4500, so the UI does not offer it and the MCP
 does not either. Posting stays on `financial-account/transaction` (`post` / `unpost`, §4.12.6).
 
+**Same pipeline as the SPA's request.** The movement and transfer actions (§4.12.1.5) reach the
+endpoint through `FinancialAccountTransactionsEndpoint`: the spec's customization is resolved from
+its `Java_Qualifier` by `NeoExtensionDispatcher` (so an `@NeoExtension` or a replaced bean serves
+the agent as it serves the SPA) and run by `NeoServletSupport.handleWithHooks` — the same
+`handle`, error short-circuit, `afterHandle` and audit-token refresh `NeoRequestRouter` runs for
+REST, traced on the MCP channel for an agent. They used to call
+`new FinancialAccountTransactionsHandler().handle(...)` directly. A spec without a customization
+answers 500 *not configured* instead of falling to generic CRUD. The SPA's own request does not
+go through this class and is unchanged.
+
 ##### 4.12.1.5 Funds transfers — declared actions on `financial-account/account` (ETP-5558)
 
 The Movements tab's *Transferir* (`FundsTransferModal`) moves money between two of the company's

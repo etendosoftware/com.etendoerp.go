@@ -3,6 +3,7 @@ package com.etendoerp.go.schemaforge;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -88,6 +89,23 @@ class NeoServletSupport {
    */
   static NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
       NeoCrudHandler crudHandler, NeoExtensionChannel channel) {
+    // A lambda, not crudHandler::handleDefault: the reference is only dereferenced when the
+    // default step actually runs, as before.
+    return handleWithHooks(javaQualifier, context, ctx -> crudHandler.handleDefault(ctx),
+        channel);
+  }
+
+  /**
+   * The same pipeline with the default step supplied by the caller (ETP-5558): for a caller that
+   * has no {@link NeoCrudHandler} — it needs the servlet — but must still run a customization the
+   * way REST does (resolution through {@link NeoExtensionDispatcher}, error short-circuit,
+   * {@code afterHandle}, audit-token refresh, an exception answered as 500). The account's movement
+   * and transfer actions call the {@code financial-account-transactions} endpoint through here.
+   *
+   * @param defaultStep what runs when there is no customization, or when it declines
+   */
+  static NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
+      Function<NeoContext, NeoResponse> defaultStep, NeoExtensionChannel channel) {
     try {
       NeoExtensionRequest request = NeoExtensionRequest.builder()
           .qualifier(javaQualifier)
@@ -109,7 +127,7 @@ class NeoServletSupport {
         if (StringUtils.isNotBlank(javaQualifier)) {
           log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
         }
-        return crudHandler.handleDefault(context);
+        return defaultStep.apply(context);
       }
 
       NeoResponse preResult = preDispatch.response();
@@ -125,7 +143,7 @@ class NeoServletSupport {
         return runPostHook(request, handler, preResult);
       }
 
-      NeoResponse defaultResult = crudHandler.handleDefault(context);
+      NeoResponse defaultResult = defaultStep.apply(context);
 
       // Mirrors the pre-hook branch above: afterHandle is a post-CRUD side effect and must
       // NOT run when the default CRUD write itself failed (e.g. invalid "updated" concurrency

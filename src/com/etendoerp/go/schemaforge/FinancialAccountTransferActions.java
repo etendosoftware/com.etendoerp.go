@@ -47,11 +47,12 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
  * account} (ETP-5558): what the Movements tab's *Transferir* ({@code FundsTransferModal}) lets a
  * person do.
  *
- * <p>The write is handed to {@link FinancialAccountTransactionsHandler#handle} as {@code
- * ?action=transfer} with the body the modal sends, so the transfer itself stays Classic's
- * ({@code FundsTransferActionHandler.createTransfer}): a withdrawal in the source, a deposit in the
- * destination, optional bank fees, all processed. What this class adds is what the modal settles
- * before it calls:</p>
+ * <p>The write is handed to the SPA's {@code financial-account-transactions} endpoint as {@code
+ * ?action=transfer} with the body the modal sends — through {@link
+ * FinancialAccountTransactionsEndpoint}, so its customization is resolved and run as REST runs it.
+ * The transfer itself stays Classic's ({@code FundsTransferActionHandler.createTransfer}): a
+ * withdrawal in the source, a deposit in the destination, optional bank fees, all processed. What
+ * this class adds is what the modal settles before it calls:</p>
  * <ul>
  *   <li>the destination must be an active account the tenant can read, other than the source
  *       (the modal's dropdown lists only those);</li>
@@ -98,7 +99,7 @@ class FinancialAccountTransferActions {
   }
 
   FinancialAccountTransferActions() {
-    this(context -> new FinancialAccountTransactionsHandler().handle(context),
+    this(FinancialAccountTransactionsEndpoint::call,
         NeoExchangeRateService::rate, LocalDate::now);
   }
 
@@ -320,13 +321,14 @@ class FinancialAccountTransferActions {
       body.put(P_FEE_TO, orZero(feeTo).toPlainString());
     }
     NeoResponse result = transactionsEndpoint.apply(NeoContext.builder()
-        .specName("financial-account-transactions")
-        .entityName("financial-account-transactions")
+        .specName(FinancialAccountTransactionsEndpoint.SPEC)
+        .entityName(FinancialAccountTransactionsEndpoint.SPEC)
         .httpMethod("POST")
         .queryParams(Map.of("action", "transfer"))
         .requestBody(body)
         .endpointType(NeoEndpointType.CRUD)
         .mcpOrigin(mcp)
+        .obContext(OBContext.getOBContext())
         .build());
     if (result == null || result.getHttpStatus() < 200 || result.getHttpStatus() >= 300) {
       return result;
