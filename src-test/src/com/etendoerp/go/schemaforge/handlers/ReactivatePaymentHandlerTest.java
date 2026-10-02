@@ -42,6 +42,8 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -77,6 +79,20 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * behavior fixing the "cannot be deleted, see Linked Items" FK violation on applied payments.
  */
 public class ReactivatePaymentHandlerTest {
+
+  /**
+   * The tenant re-check reads the thread's {@link OBContext}; a context another test class left on
+   * the shared worker thread made every own payment look foreign (404). Start and end clean.
+   */
+  @Before
+  public void clearContextBefore() {
+    OBContext.setOBContext((OBContext) null);
+  }
+
+  @After
+  public void clearContextAfter() {
+    OBContext.setOBContext((OBContext) null);
+  }
 
   private static NeoContext getCtx(String recordId, String method) {
     return NeoContext.builder()
