@@ -39,6 +39,8 @@ public class GoSessionAuthenticatorTest {
   private static final String APP_URL = APP_ORIGIN + "/sws/neo/foo";
   private static final String RAW_TOKEN = "opaque-session-token";
   private static final String CSRF = "csrf-token-1234567890";
+  private static final String CSRF_TOKEN_INVALID = "CSRF validation failed";
+  private static final String ORIGIN_NOT_ALLOWED = "Origin not allowed";
 
   @Test
   public void noCookieYieldsNoSession() {
@@ -107,6 +109,24 @@ public class GoSessionAuthenticatorTest {
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
 
     assertEquals(GoSessionAuthResult.Status.CSRF_FAILED, result.getStatus());
+    assertEquals(CSRF_TOKEN_INVALID, result.getRefusalMessage());
+  }
+
+  /**
+   * ETP-5550 — a tab still holding the CSRF token of a session another tab rotated away. The exact
+   * message is the contract the client reads to re-read the session and retry once.
+   */
+  @Test
+  public void validSessionOnUnsafeMethodWithAStaleCsrfFailsTheToken() {
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
+    GoSessionService service = mock(GoSessionService.class);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
+    HttpServletRequest req = mockRequest("POST", RAW_TOKEN, APP_ORIGIN, "csrf-of-a-rotated-session");
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(GoSessionAuthResult.Status.CSRF_FAILED, result.getStatus());
+    assertEquals(CSRF_TOKEN_INVALID, result.getRefusalMessage());
   }
 
   @Test
@@ -119,6 +139,20 @@ public class GoSessionAuthenticatorTest {
     GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
 
     assertEquals(GoSessionAuthResult.Status.CSRF_FAILED, result.getStatus());
+    assertEquals(ORIGIN_NOT_ALLOWED, result.getRefusalMessage());
+  }
+
+  /** A cross-site request is refused for its origin, so the client never retries it. */
+  @Test
+  public void foreignOriginWinsOverAMissingCsrf() {
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
+    GoSessionService service = mock(GoSessionService.class);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
+    HttpServletRequest req = mockRequest("POST", RAW_TOKEN, "https://evil.example.test", null);
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(ORIGIN_NOT_ALLOWED, result.getRefusalMessage());
   }
 
   @Test
