@@ -2237,6 +2237,18 @@ person undoes it, with a transfer back; both pairs of movements remain.
 `MCP_CONFIG.actions` on the account now **redirects** Classic's *Funds Transfer* button
 (`aprmFundsTrans`) to `transferFunds` instead of hiding it.
 
+**The rate is the source account's organization's (declared divergence).** The conversion-rate
+lookup admits the rates of organization `0` and of one organization, so whose organization it is
+decides which organization-specific rates count. `transferDestinations` and the default rate of
+`transferFunds` ask `NeoExchangeRateService.rate(from, to, today, <source account's org>)`: the
+money leaves from that account. `validate-exchange-rate`, and so the SPA's transfer modal that
+prefills from it, keeps the session's organization, unchanged. The two agree whenever the session
+works in the account's organization or only organization-`0` rates exist; where they differ, the
+agent's default rate is the account's organization's and the modal's is the session's. A caller's
+explicit `conversionRate` wins on both. Note, on both sides alike: the query does not rank an
+organization's own rate above organization `0`'s — among the eligible rows it takes the tenant's
+before the system's, then the latest `validfrom`.
+
 ##### 4.12.1.6 Period open/close — `open-close-period-control/periodControl` (ETP-5587)
 
 The calendar's *Abrir/Cerrar período* opens a dialog with one required choice and posts
@@ -3087,6 +3099,12 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `transferDate` | whatever the body says | today, always — the modal offers no other |
 | an unreadable `glItemId` | ignored, the transfer runs without a G/L item | **422** |
 | success | `{transferred, sourceAccountId, destinationAccountId}` | plus `amount`, `date`, `conversionRate`, `amountReceived`, `hint` |
+
+##### REST and MCP on the funds-transfer rate (ETP-5558, declared)
+
+| call | REST / SPA (`validate-exchange-rate`, the transfer modal's prefill) | MCP (`transferDestinations`, `transferFunds` without `conversionRate`) |
+|---|---|---|
+| organization of the rate lookup | the session's | the SOURCE account's (§4.12.1.5) |
 
 ##### REST and MCP on period open/close (ETP-5587, declared)
 

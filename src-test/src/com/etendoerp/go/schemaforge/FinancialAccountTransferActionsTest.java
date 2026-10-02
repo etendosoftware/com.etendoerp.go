@@ -76,6 +76,8 @@ class FinancialAccountTransferActionsTest {
   private final List<NeoContext> calls = new ArrayList<>();
   private NeoResponse endpointAnswer;
   private Double systemRate;
+  /** The organization each rate lookup was asked for, in order. */
+  private final List<String> rateOrgs = new ArrayList<>();
   private final List<FIN_FinancialAccount> candidates = new ArrayList<>();
   private final Set<String> outsideTree = new java.util.HashSet<>();
   private FinancialAccountTransferActions actions;
@@ -96,8 +98,9 @@ class FinancialAccountTransferActionsTest {
     actions = new FinancialAccountTransferActions(context -> {
       calls.add(context);
       return endpointAnswer;
-    }, (from, to, date) -> {
+    }, (from, to, date, orgId) -> {
       assertEquals(TODAY, date, "the rate is today's, as the modal prefills it");
+      rateOrgs.add(orgId);
       return systemRate;
     }, () -> TODAY) {
       @Override
@@ -131,7 +134,9 @@ class FinancialAccountTransferActionsTest {
     when(c.getStandardPrecision()).thenReturn(2L);
     when(a.getCurrency()).thenReturn(c);
     when(a.getClient()).thenReturn(mock(Client.class));
-    when(a.getOrganization()).thenReturn(mock(Organization.class));
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-" + id);
+    when(a.getOrganization()).thenReturn(org);
     ownershipMock.when(() -> TenantOwnership.loadOwned(FIN_FinancialAccount.class, id))
         .thenReturn(a);
     return a;
@@ -223,6 +228,7 @@ class FinancialAccountTransferActionsTest {
       assertFalse(items.getJSONObject(0).has("conversionRate"));
       assertEquals(USD_DEST, items.getJSONObject(1).getString("id"));
       assertEquals(1.1, items.getJSONObject(1).getDouble("conversionRate"), 1e-9);
+      assertEquals(List.of("org-" + SOURCE), rateOrgs, "the listed rate, too, is the source's");
       assertTrue(calls.isEmpty(), "a read never reaches the movements endpoint");
     }
 
@@ -271,6 +277,8 @@ class FinancialAccountTransferActionsTest {
       NeoResponse r = actions.handle(transferCtx(ten().put("destinationAccountId", USD_DEST)));
       assertEquals("1.1", onlyCall().getRequestBody().getString("conversionRate"));
       assertEquals("11.00", data(r).getString("amountReceived"));
+      assertEquals(List.of("org-" + SOURCE), rateOrgs,
+          "the rate is the SOURCE account's organization's, not the session's or the destination's");
     }
 
     @Test

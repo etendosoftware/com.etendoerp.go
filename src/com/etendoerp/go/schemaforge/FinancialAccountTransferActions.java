@@ -92,10 +92,15 @@ class FinancialAccountTransferActions {
   /** "Today", as the modal's {@code todayCalendarISO}. A seam for unit tests. */
   private final java.util.function.Supplier<LocalDate> today;
 
-  /** The system rate from one currency to another on a day, or {@code null}. */
+  /**
+   * The system rate from one currency to another on a day, for an organization, or {@code null}.
+   * The organization is the SOURCE account's: the lookup is organization-sensitive (an
+   * organization's own rates are eligible next to organization 0's), and the money leaves from it.
+   */
   @FunctionalInterface
   interface RateLookup {
-    Double rate(String fromCurrencyId, String toCurrencyId, LocalDate date) throws Exception;
+    Double rate(String fromCurrencyId, String toCurrencyId, LocalDate date, String orgId)
+        throws Exception;
   }
 
   FinancialAccountTransferActions() {
@@ -207,7 +212,8 @@ class FinancialAccountTransferActions {
       item.put(KEY_CURRENCY, isoOf(candidate));
       item.put("sameCurrency", sameCurrency);
       if (!sameCurrency) {
-        Double rate = rates.rate(currencyId(source), currencyId(candidate), today.get());
+        Double rate = rates.rate(currencyId(source), currencyId(candidate), today.get(),
+            orgIdOf(source));
         item.put(P_CONVERSION_RATE, rate != null ? rate : JSONObject.NULL);
       }
       items.put(item);
@@ -359,8 +365,12 @@ class FinancialAccountTransferActions {
 
   private BigDecimal systemRate(FIN_FinancialAccount from, FIN_FinancialAccount to,
       LocalDate date) throws Exception {
-    Double rate = rates.rate(currencyId(from), currencyId(to), date);
+    Double rate = rates.rate(currencyId(from), currencyId(to), date, orgIdOf(from));
     return rate == null ? null : BigDecimal.valueOf(rate);
+  }
+
+  private static String orgIdOf(FIN_FinancialAccount account) {
+    return account.getOrganization() == null ? null : account.getOrganization().getId();
   }
 
   // ── helpers ────────────────────────────────────────────────────────────

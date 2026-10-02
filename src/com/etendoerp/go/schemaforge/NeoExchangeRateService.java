@@ -113,11 +113,25 @@ class NeoExchangeRateService {
    */
   static Double rate(String fromCurrencyId, String toCurrencyId, java.time.LocalDate date)
       throws java.sql.SQLException {
+    return rate(fromCurrencyId, toCurrencyId, date,
+        OBContext.getOBContext().getCurrentOrganization().getId());
+  }
+
+  /**
+   * {@link #rate(String, String, java.time.LocalDate)} for a given organization instead of the
+   * session's (ETP-5558): the lookup admits the rates of organization {@code 0} and of {@code
+   * orgId}, so whose organization it is decides which organization-specific rates are eligible.
+   * The funds-transfer agent action asks with the SOURCE account's organization; the endpoint, and
+   * the SPA modal that calls it, keep the session's.
+   *
+   * @param orgId the organization whose rates are admitted next to organization {@code 0}
+   */
+  static Double rate(String fromCurrencyId, String toCurrencyId, java.time.LocalDate date,
+      String orgId) throws java.sql.SQLException {
     if (fromCurrencyId.equals(toCurrencyId)) {
       return 1.0;
     }
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
     Connection conn = OBDal.getInstance().getConnection();
     Double directRate = queryRate(conn, fromCurrencyId, toCurrencyId, clientId, orgId, date);
     if (directRate != null) {
