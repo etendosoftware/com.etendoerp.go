@@ -102,6 +102,7 @@ import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
+import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
@@ -200,6 +201,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PATH_SESSION = "/session";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
   private static final String HEADER_ORIGIN = "Origin";
@@ -253,6 +255,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
+  // ETP-5426: the optional sample-data step. "warning" is its failure status: the tenant is
+  // already committed and usable, so a sample-data failure never becomes a provisioning "error".
+  private static final String PROGRESS_SAMPLE_DATA = "sampleData";
+  private static final String PROGRESS_DONE = "done";
+  private static final String PROGRESS_WARNING = "warning";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
@@ -296,7 +303,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
-      "fiscalIdValue", FIELD_ADDRESS, "sector" };
+      "fiscalIdValue", FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -351,6 +358,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingForceTestModeService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
+  OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
@@ -2619,7 +2627,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (form != null) {
       for (String field : ONBOARDING_DRAFT_FORM_FIELDS) {
         Object value = form.opt(field);
-        if (value instanceof String) {
+        // Every draft field is text except the sample-data opt-in (ETP-5426), a checkbox. Dropping
+        // a Boolean here would silently lose the choice across a logout, not fail.
+        if (value instanceof String
+            || (value instanceof Boolean && FIELD_INCLUDE_SAMPLE_DATA.equals(field))) {
           cleanForm.put(field, value);
         }
       }
@@ -3369,6 +3380,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
+    // ETP-5426: after the commit (a failure here can no longer undo the tenant) and before the
+    // costing schedule is activated (so the background costing never races the import).
+    importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
+        paidUpgrade);
     onboardingCostingScheduleService.activateSchedule(clientId);
     sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
     sendProgress(writer, "finalize", "done", "Environment ready");
@@ -3399,6 +3414,42 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
       log.error("ETP-5575 demo period window failed for client {}", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+    }
+  }
+
+  /**
+   * ETP-5426 — imports the optional sample data into the tenant just committed, when the request
+   * opted in and is eligible (see {@link OnboardingSampleDataService#isEligible}).
+   *
+   * <p>Runs in its own transaction, after the onboarding commit, so it applies equally to a tenant
+   * claimed from the pool and to a classic one. Best effort by contract: any failure is rolled
+   * back — discarding only the sample data — and reported as a {@code warning} progress line; the
+   * onboarding still ends with a successful result.
+   */
+  void importSampleDataBestEffort(PrintWriter writer, String clientId, String orgId,
+      OnboardingProvisioningChain.AdminContext adminContext, OnboardingRequestData request,
+      boolean paidUpgrade) {
+    if (!OnboardingSampleDataService.isEligible(request.includeSampleData, paidUpgrade,
+        request.countryCode, request.currencyIso)) {
+      if (request.includeSampleData) {
+        log.info("Sample data requested but not eligible for client {} (paid={}, country={}, "
+            + "currency={}); skipping", clientId, paidUpgrade, request.countryCode,
+            request.currencyIso);
+      }
+      return;
+    }
+    sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_IN_PROGRESS, "Loading sample data...");
+    try {
+      onboardingSampleDataService.importSampleData(clientId, orgId, adminContext.adminUserId,
+          adminContext.adminRoleId);
+      EtendoGoDalHelper.commitDalChanges("onboarding sample data", log);
+      sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_DONE, "Sample data loaded");
+    } catch (Exception e) { // NOSONAR — best effort by contract: the tenant must survive any failure.
+      log.error("Sample data import failed for client {}; the tenant is kept without it",
+          clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding sample data", e, log);
+      sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_WARNING,
+          "Sample data could not be loaded");
     }
   }
 
@@ -3968,6 +4019,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      // ETP-5426: opt-in, off unless the form explicitly sends true.
+      data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -5211,6 +5264,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Resolved only from the account-scoped checkout row; onboarding never trusts a browser value.
     private String demoClientId;
     private String upgradeAction;
+    // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
+    // OnboardingSampleDataService.isEligible accepts the request.
+    private boolean includeSampleData;
   }
 
 }
