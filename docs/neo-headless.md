@@ -2656,6 +2656,11 @@ resolve through `McpFieldView`, never through a `Restrictions.eq` on the column.
 
 ##### The `verbs` section (ETP-5558)
 
+> **An unusable `MCP_CONFIG` fails closed.** If any section of an entity's payload does not parse or
+> validate, every MCP write and every MCP action of that entity is hidden, and `neo_discover` /
+> `neo_schema` report it as `configError`. The shipped rows are covered by `McpConfigSourcedataTest`;
+> a tenant-local edit of the column is not, and takes effect, broken or not, on the next read.
+
 ```json
 {
   "verbs": {
