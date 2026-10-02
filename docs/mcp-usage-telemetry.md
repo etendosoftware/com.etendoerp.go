@@ -62,6 +62,8 @@ a `fields` array is a projection list, whose entries are field names too. The er
 | `Client_Name`, `Client_Version` | VARCHAR(200) | from the MCP `initialize` handshake |
 | `Row_Type` | VARCHAR(200), NOT NULL | `tool_call` / `feedback` (check constraint) |
 | `Payload` | TEXT | null on every `tool_call` row; reserved for B3 feedback reports |
+| `Status` | VARCHAR(60) | review state: `NULL` = pending, `R` = reviewed (check `ETGO_MCP_USAGE_STATUS_CHK`) |
+| `Reviewed_By` | VARCHAR(60) | free-text name or handle of the reviewer; no FK, no reference |
 
 Indexes: `etgo_mcp_usage_cli_created (ad_client_id, created)` and `etgo_mcp_usage_session
 (session_key)`.
@@ -147,9 +149,20 @@ make mcp-usage HOST=etendo-go-experimental MARK_REVIEWED=1     # same thing from
 Dumps land in `schema_forge/mcp-usage/<ssh-alias>-<timestamp>.jsonl`, a folder whose contents are
 gitignored — this is real telemetry and does not belong in a commit. Override with `--out`.
 
-**`isactive = 'N'` means reviewed.** The table has no review column, so `isactive` is repurposed as
-one. This is safe because the writer always inserts `'Y'` (see `INSERT_SQL` in `McpUsageLogger`) and
-nothing in the module ever reads the column back — flipping it is inert for the runtime. It is a
+**Review columns (ETP-5594).** `Status` and `Reviewed_By` belong to whoever reviews the rows, never
+to the writer: `McpUsageLogger` names its columns explicitly and leaves both out, so every new row is
+inserted with `Status = NULL`, which means **pending** (`McpUsageLoggerInsertSqlTest` guards this).
+`Status = 'R'` means **reviewed**. Both columns are plain strings (AD reference String), like
+`Outcome` and `Row_Type`; the allowed values live only in the check constraint
+`ETGO_MCP_USAGE_STATUS_CHK` (`STATUS IS NULL OR STATUS IN ('R')`), so adding a state later is one
+edit to that `IN` list. `Reviewed_By` is typed by the reviewer — a name or a handle, not an
+`AD_User` reference.
+
+**Legacy marker: `isactive = 'N'` means reviewed.** Until the review columns existed, `isactive` was
+repurposed as one, and `scripts/mcp-usage-dump.sh` still uses it (filter and `--mark-reviewed`); it
+will move to `Status` in a later change. Until then the two markers are independent — the script
+neither reads nor writes `Status`. Repurposing `isactive` is safe because the writer always inserts
+`'Y'` (see `INSERT_SQL` in `McpUsageLogger`) and nothing in the module ever reads the column back — flipping it is inert for the runtime. It is a
 convention, not a constraint: if the table is ever surfaced as an AD window, the standard grid hides
 `'N'` rows and any user can flip them back.
 

@@ -89,6 +89,14 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="STATUS" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="REVIEWED_BY" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_MCP_USAGE_AD_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -111,5 +119,6 @@
       <check name="ETGO_MCP_USAGE_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_MCP_USAGE_OUTCOME_CHK"><![CDATA[OUTCOME IN ('ok', 'error')]]></check>
       <check name="ETGO_MCP_USAGE_ROWTYPE_CHK"><![CDATA[ROW_TYPE IN ('tool_call', 'feedback')]]></check>
+      <check name="ETGO_MCP_USAGE_STATUS_CHK"><![CDATA[STATUS IS NULL OR STATUS IN ('R')]]></check>
     </table>
   </database>
