@@ -53,6 +53,13 @@ public class McpSessionManager {
    * executes the callable, then commits and closes the Hibernate session on success
    * or rolls back on failure. The previous OBContext is always restored in the finally
    * block to avoid leaking state across tool calls.
+   * <p>
+   * Side effect for telemetry (ETP-5594): the effective client and org this call runs under are
+   * bound with {@link McpUsageTelemetry#setCurrentTenant(String, String)} and deliberately NOT
+   * cleared here, because the usage row is recorded after this method returns. The caller's request
+   * scope MUST call {@link McpUsageTelemetry#clearCurrentTenant()} in a {@code finally} — today that
+   * is {@link McpServlet#doPost}. A new caller outside that servlet must do the same, or a pooled
+   * thread will carry this tenant into the next request.
    *
    * @param userId      Etendo AD_User_ID (from OAuth2 token)
    * @param roleId      Etendo AD_Role_ID (from OAuth2 token)
