@@ -91,6 +91,11 @@ public class McpSessionManager {
         }
       }
 
+      // Telemetry only (ETP-5594): the usage row must carry the tenant the call runs under, not
+      // the token's "0" wildcard. Bound before createContext so a call that fails there is still
+      // attributed; cleared by McpServlet.doPost once the row has been recorded.
+      McpUsageTelemetry.setCurrentTenant(effectiveClient, effectiveOrg);
+
       // Set OBContext using the same method as NeoServlet.authenticateJwt
       OBContext context = SecureWebServicesUtils.createContext(
           userId, roleId, effectiveOrg, warehouseId, effectiveClient);
