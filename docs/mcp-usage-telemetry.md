@@ -155,11 +155,20 @@ inserted with `Status = NULL`, which means **pending** (`McpUsageLoggerInsertSql
 `Status = 'R'` means **reviewed**. Both columns are plain strings (AD reference String), like
 `Outcome` and `Row_Type`; the allowed values live only in the check constraint
 `ETGO_MCP_USAGE_STATUS_CHK`, written as `STATUS IS NULL OR STATUS = 'R'`. Adding a state later is
-one edit to that check: change `= 'R'` to `IN ('R', 'X')`. Do not write a one-value `IN ('R')`:
-PostgreSQL stores it as `=`, DBSM reads it back as `STATUS = 'R'`, the text no longer matches the
-XML, and every `update.database` then drops and re-creates the check (an exclusive lock plus a full
-scan of this growing table). A multi-value `IN` round-trips. `Reviewed_By` is typed by the
-reviewer — a name or a handle, not an `AD_User` reference.
+one edit to that check, and the exact text matters. **Write the check exactly as DBSM exports it**:
+DBSM compares the check text, so any other spelling of the same condition stops matching the XML
+and every `update.database` drops and re-creates the check (an exclusive lock plus a full scan of
+this growing table). For a second state that form is, parentheses included:
+
+```
+STATUS IS NULL OR (STATUS IN ('R', 'X'))
+```
+
+Two spellings that look equivalent do **not** round-trip: `STATUS IS NULL OR STATUS IN ('R', 'X')`
+(next to the `OR`, PostgreSQL pretty-prints the `IN` inside parentheses) and a one-value
+`STATUS IN ('R')` (PostgreSQL stores it as `=`). Confirm any change by running `export.database`
+after `update.database`: the diff must be empty. `Reviewed_By` is typed by the reviewer — a name or
+a handle, not an `AD_User` reference.
 
 **Legacy marker: `isactive = 'N'` means reviewed.** Until the review columns existed, `isactive` was
 repurposed as one, and `scripts/mcp-usage-dump.sh` still uses it (filter and `--mark-reviewed`); it
