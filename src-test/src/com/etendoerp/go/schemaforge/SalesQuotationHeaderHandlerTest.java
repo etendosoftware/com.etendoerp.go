@@ -380,6 +380,73 @@ public class SalesQuotationHeaderHandlerTest {
     verify(createRejectReasonHandler).handle(ctx);
   }
 
+  // ── ETP-5535: DocAction = RJ is routed to the reject flow ────────────────
+
+  /**
+   * Table-driven: which requests count as "run the DocAction button with RJ". The value is read
+   * from the three places action requests carry it (root {@code docAction}, root
+   * {@code documentAction}, {@code fieldValues.documentAction}) and the button is named by its
+   * column or its field. Anything else — another value, the SPA's {@code fieldValues: {}}, a GET,
+   * a CRUD request, another action — must stay on the pre-ETP-5535 path.
+   */
+  @Test
+  public void testIsRejectDocAction_table() throws Exception {
+    Object[][] cases = {
+        { "root docAction RJ", "POST", NeoEndpointType.ACTION, "DocAction",
+            "{\"docAction\":\"RJ\"}", true },
+        { "root documentAction RJ", "POST", NeoEndpointType.ACTION, "DocAction",
+            "{\"documentAction\":\"RJ\"}", true },
+        { "fieldValues.documentAction RJ", "POST", NeoEndpointType.ACTION, "documentAction",
+            "{\"fieldValues\":{\"documentAction\":\"RJ\"}}", true },
+        { "value CO", "POST", NeoEndpointType.ACTION, "DocAction",
+            "{\"docAction\":\"CO\"}", false },
+        { "SPA empty fieldValues", "POST", NeoEndpointType.ACTION, "DocAction",
+            "{\"fieldValues\":{}}", false },
+        { "GET", "GET", NeoEndpointType.ACTION, "DocAction",
+            "{\"docAction\":\"RJ\"}", false },
+        { "non-ACTION endpoint", "POST", NeoEndpointType.CRUD, "DocAction",
+            "{\"documentAction\":\"RJ\"}", false },
+        { "rejectQuotation action name", "POST", NeoEndpointType.ACTION, "rejectQuotation",
+            "{\"docAction\":\"RJ\"}", false },
+    };
+    for (Object[] c : cases) {
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod((String) c[1]).endpointType((NeoEndpointType) c[2])
+          .fieldName((String) c[3]).recordId(QUOTATION_ID)
+          .requestBody(new JSONObject((String) c[4]))
+          .build();
+      assertEquals((String) c[0], c[5], SalesQuotationHeaderHandler.isRejectDocAction(ctx));
+    }
+  }
+
+  /**
+   * DocAction with RJ is answered by {@link RejectQuotationHandler#reject} — the flow the UI's
+   * Reject button runs — and never reaches the total-discount sync (which recalculates on every
+   * DocAction) nor the action router.
+   */
+  @Test
+  public void testHandle_docActionRJ_delegatesToRejectAndSkipsTotalDiscount() throws Exception {
+    TotalDiscountService svc = mock(TotalDiscountService.class);
+    RejectQuotationHandler rejectQuotationHandler = mock(RejectQuotationHandler.class);
+    SalesQuotationHeaderHandler handler = fullyWiredHandler(svc,
+        mock(NeoCloneRecordHandler.class), mock(CurrencyOptionsHandler.class),
+        mock(CreateDraftInvoiceHandler.class), rejectQuotationHandler,
+        mock(CreateRejectReasonHandler.class));
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("documentStatus", "CJ"));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("DocAction")
+        .recordId(QUOTATION_ID)
+        .requestBody(new JSONObject("{\"docAction\":\"RJ\",\"rejectReason\":\"rr-1\"}"))
+        .build();
+    when(rejectQuotationHandler.reject(ctx)).thenReturn(expected);
+
+    assertSame(expected, handler.handle(ctx));
+    verify(rejectQuotationHandler).reject(ctx);
+    verify(rejectQuotationHandler, never()).handle(any());
+    Mockito.verifyNoInteractions(svc);
+  }
+
   // ── ETP-4027: Convertquotation interception in handle() ──────────────────
 
   /**

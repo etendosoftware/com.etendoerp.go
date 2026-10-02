@@ -20,10 +20,14 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
@@ -32,6 +36,7 @@ import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the Sales Quotation header entity.
@@ -51,7 +56,13 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
  *   <li>{@code rejectQuotation} → {@link RejectQuotationHandler}</li>
  *   <li>{@code createRejectReason} → {@link CreateRejectReasonHandler}</li>
+ *   <li>{@code DocAction} with value {@code RJ} → {@link RejectQuotationHandler#reject} (ETP-5535,
+ *       see {@link #isRejectDocAction})</li>
  * </ul>
+ *
+ * <p>ETP-5535: {@code rejectQuotation} and {@code createRejectReason} are declared through
+ * {@link #actionContracts()}, so {@code neo_schema(view:"actions")} lists them next to the AD
+ * buttons. Before that they were reachable over MCP but undiscoverable.
  *
  * <p>Total discount is synced on two paths:
  * <ul>
@@ -71,6 +82,13 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   private static final Logger log = LogManager.getLogger(SalesQuotationHeaderHandler.class);
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String DOC_STATUS_COMPLETED = "CO";
+  private static final String ACTION_DOC_ACTION = "DocAction";
+  private static final String FIELD_DOCUMENT_ACTION = "documentAction";
+  private static final String PARAM_DOC_ACTION = "docAction";
+  private static final String DOC_ACTION_REJECT = "RJ";
+
+  /** The named actions published to agents, in presentation order (ETP-5535). */
+  private static final Map<String, NeoActionContract> ACTION_CONTRACTS = buildActionContracts();
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -100,6 +118,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
+    // ETP-5535: ahead of the total-discount sync, which recalculates on every DocAction — a
+    // rejection does not touch the lines, exactly as the UI's rejectQuotation does not.
+    if (isRejectDocAction(context)) {
+      return rejectQuotationHandler.reject(context);
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
 
@@ -115,6 +138,71 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
         rejectQuotationHandler,
         createRejectReasonHandler,
         createDraftInvoiceHandler);
+  }
+
+  /**
+   * The quotation's handler-served actions (ETP-5535). Published by {@code neo_schema} next to the
+   * AD buttons; each request is still judged by its own handler, so what the React modals send is
+   * accepted exactly as before.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return ACTION_CONTRACTS;
+  }
+
+  private static Map<String, NeoActionContract> buildActionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(RejectQuotationHandler.CONTRACT.getName(), RejectQuotationHandler.CONTRACT);
+    contracts.put(CreateRejectReasonHandler.CONTRACT.getName(), CreateRejectReasonHandler.CONTRACT);
+    return Collections.unmodifiableMap(contracts);
+  }
+
+  /**
+   * Whether the request runs the {@code DocAction} button with the value {@code RJ} (Reject)
+   * (ETP-5535).
+   *
+   * <p>The button's value list offers "Reject", so an agent reads it as the way to reject a
+   * quotation. Through {@code C_Order_Post} that cannot work for any caller: core requires
+   * {@code C_Reject_Reason_ID} on the header ({@code @NoRejectReason@}), and {@code rejectReason}
+   * is read-only, so nothing can set it first. The request is routed instead to the flow the UI
+   * uses, {@link RejectQuotationHandler#reject}, which takes the reason in the same body. Both the
+   * MCP and the REST action reach this handler, so both channels get it.</p>
+   *
+   * <p>The value is read where the action requests carry it: {@code docAction} at the root (the
+   * {@code actionParameter} {@code neo_schema} advertises for the button), {@code documentAction}
+   * at the root, or {@code fieldValues.documentAction}. The button is named by its column
+   * ({@code DocAction}) or its field ({@code documentAction}), as {@code findButtonColumn} accepts
+   * both. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
+   * {@code SendToEvaluationModal} sends {@code fieldValues: {}} — is not affected.</p>
+   *
+   * @param context the request
+   * @return {@code true} for a POST ACTION on the DocAction button asking for {@code RJ}
+   */
+  static boolean isRejectDocAction(NeoContext context) {
+    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())
+        || !"POST".equals(context.getHttpMethod())) {
+      return false;
+    }
+    String action = context.getFieldName();
+    if (!ACTION_DOC_ACTION.equals(action) && !FIELD_DOCUMENT_ACTION.equals(action)) {
+      return false;
+    }
+    return DOC_ACTION_REJECT.equals(requestedDocAction(context.getRequestBody()));
+  }
+
+  private static String requestedDocAction(JSONObject body) {
+    if (body == null) {
+      return null;
+    }
+    JSONObject fieldValues = body.optJSONObject("fieldValues");
+    String nested = fieldValues != null
+        ? StringUtils.trimToNull(fieldValues.optString(FIELD_DOCUMENT_ACTION, null)) : null;
+    if (nested != null) {
+      return nested;
+    }
+    String root = StringUtils.trimToNull(body.optString(PARAM_DOC_ACTION, null));
+    return root != null ? root
+        : StringUtils.trimToNull(body.optString(FIELD_DOCUMENT_ACTION, null));
   }
 
   /**

@@ -153,6 +153,37 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the DAL property names this customization resolves server-side on create, so a
+   * caller does not have to send them even though AD marks the column mandatory (ETP-5535).
+   *
+   * <p><b>Why the customization declares it.</b> {@code neo_schema(view:"create")} learns what the
+   * server fills from two generic sources: the values {@code neo_defaults} resolves without any
+   * input, and the selector policies' own wrapper fields. Neither can see a value the server derives
+   * <em>from another field of the same body</em> — the create callout cascade, or the
+   * customization's own pre-hook — because that derivation only runs once the caller has sent its
+   * source. Without this declaration the schema lists the field as {@code required}, the agent goes
+   * looking for a value the server would have chosen for it, and the server's choice and the
+   * agent's can then disagree. The customization is the only place that knows the derivation
+   * exists, so it is the one that says so.</p>
+   *
+   * <p>Reader: {@code neo_schema(view:"create")} moves the names to {@code optional} with
+   * {@code serverDefaulted:true}. The {@code neo_create} mandatory pre-check does not skip them: it
+   * runs after the create callout cascade and before this customization's pre-hook, so a field the
+   * cascade derived is not missing there, and one it could not derive is reported with a precise
+   * 422 rather than left to the DAL's NOT NULL check. A caller may still send a value; it is
+   * honoured as on any other field.</p>
+   *
+   * <p>Consequently, declare only fields the <b>create callout cascade</b> derives. A field filled
+   * only by this customization's own {@code handle()} would still be refused by the pre-check on
+   * {@code neo_create}, which runs first.</p>
+   *
+   * @return the property names resolved server-side on create; empty by default
+   */
+  default Set<String> serverResolvedCreateFields() {
+    return Collections.emptySet();
+  }
+
+  /**
    * Declares whether this handler serves ACTION sub-endpoint requests
    * ({@code POST /{spec}/{entity}/{id}/action/{name}}), i.e. whether the entity it backs has
    * an {@code /action} route at all.
