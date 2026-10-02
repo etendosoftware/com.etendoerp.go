@@ -388,6 +388,8 @@ final class McpConstants {
   static final String KEY_ACTION_VALUES = "actionValues";
   /** {@code neo_schema} key naming the parameter the chosen value must go under. */
   static final String KEY_ACTION_PARAMETER = "actionParameter";
+  /** The body object the SPA's process dialog posts a button's parameters under (ETP-5587). */
+  static final String KEY_FIELD_VALUES = "fieldValues";
 
   static final String LABEL_SPEC_NAME = "Spec name";
   static final String LABEL_ENTITY_NAME = "Entity name within the spec";

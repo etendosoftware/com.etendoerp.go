@@ -130,7 +130,8 @@ final class McpActionsView {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
-    JSONArray actions = apply(applyConfig(fields, config, excluded));
+    JSONArray actions = withoutDescribedButtons(apply(applyConfig(fields, config, excluded)),
+        declared);
     for (NeoActionContract contract : declared.values()) {
       actions.put(contract.toJson());
     }
@@ -176,6 +177,73 @@ final class McpActionsView {
       }
     }
     return shaped;
+  }
+
+  /**
+   * Describe the AD buttons a declared contract stands for by that contract (ETP-5587), leaving
+   * every other field untouched.
+   *
+   * <p>A button's {@code actionValues} come from its AD reference list and its
+   * {@code actionParameter} is always {@code docAction} — right for a document action, wrong for a
+   * button whose customization declares what it reads. {@code periodControl.openClose} advertised
+   * {@code docAction} with C/N/O/P while its handler reads {@code openClose} and the SPA offers
+   * O/C/P only, so every agent call was refused. Such a button carries the contract's
+   * {@code parameters} schema instead, in every projection; the actions view lists the contract
+   * itself in its place ({@link #buildResponse}).</p>
+   *
+   * @param fields   the schema field array; described buttons are rewritten in place
+   * @param declared the declared contracts the MCP offers, by name
+   * @return {@code fields}, for chaining
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONArray describeDeclaredButtons(JSONArray fields,
+      Map<String, NeoActionContract> declared) throws JSONException {
+    if (fields == null || declared == null || declared.isEmpty()) {
+      return fields;
+    }
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.getJSONObject(i);
+      NeoActionContract contract = describedBy(field, declared);
+      if (contract != null) {
+        field.remove(McpConstants.KEY_ACTION_VALUES);
+        field.remove(McpConstants.KEY_ACTION_PARAMETER);
+        field.put(McpConstants.PARAM_PARAMETERS,
+            contract.toJson().getJSONObject(McpConstants.PARAM_PARAMETERS));
+        field.put("declaredAction", contract.getName());
+      }
+    }
+    return fields;
+  }
+
+  /** @return the declared contract that stands for this button, or {@code null} */
+  private static NeoActionContract describedBy(JSONObject field,
+      Map<String, NeoActionContract> declared) {
+    if (!TYPE_BUTTON.equals(field.optString("type", null))) {
+      return null;
+    }
+    for (String name : namesOf(field)) {
+      NeoActionContract contract = declared.get(name);
+      if (contract != null) {
+        return contract;
+      }
+    }
+    return null;
+  }
+
+  /** The actions view lists a declared contract once: the button it describes is left out. */
+  private static JSONArray withoutDescribedButtons(JSONArray buttons,
+      Map<String, NeoActionContract> declared) throws JSONException {
+    if (declared == null || declared.isEmpty()) {
+      return buttons;
+    }
+    JSONArray kept = new JSONArray();
+    for (int i = 0; i < buttons.length(); i++) {
+      JSONObject button = buttons.getJSONObject(i);
+      if (describedBy(button, declared) == null) {
+        kept.put(button);
+      }
+    }
+    return kept;
   }
 
   /** @return {@code false} when the button must be left out; otherwise shapes it in place */

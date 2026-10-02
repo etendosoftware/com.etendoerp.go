@@ -94,24 +94,26 @@ public final class NeoActionContract {
   private final List<Param> params;
   private final String idDescription;
   private final String httpMethod;
+  private final boolean fieldValuesBody;
 
   /** The method an action is called with unless it declares another — what the MCP always used. */
   public static final String DEFAULT_HTTP_METHOD = "POST";
 
   private NeoActionContract(String name, String description, boolean mutating,
       List<Param> params) {
-    this(name, description, mutating, params, null, DEFAULT_HTTP_METHOD);
+    this(name, description, mutating, params, null, DEFAULT_HTTP_METHOD, false);
   }
 
-  @SuppressWarnings("java:S107") // one value object: the six fields are the contract itself
+  @SuppressWarnings("java:S107") // one value object: the seven fields are the contract itself
   private NeoActionContract(String name, String description, boolean mutating,
-      List<Param> params, String idDescription, String httpMethod) {
+      List<Param> params, String idDescription, String httpMethod, boolean fieldValuesBody) {
     this.name = name;
     this.description = description;
     this.mutating = mutating;
     this.params = List.copyOf(params);
     this.idDescription = idDescription;
     this.httpMethod = httpMethod;
+    this.fieldValuesBody = fieldValuesBody;
   }
 
   /**
@@ -126,7 +128,8 @@ public final class NeoActionContract {
    * @return a copy carrying the method
    */
   public NeoActionContract withHttpMethod(String method) {
-    return new NeoActionContract(name, description, mutating, params, idDescription, method);
+    return new NeoActionContract(name, description, mutating, params, idDescription, method,
+        fieldValuesBody);
   }
 
   /** @return the HTTP method the action is called with; {@link #DEFAULT_HTTP_METHOD} unless declared */
@@ -143,12 +146,35 @@ public final class NeoActionContract {
    * @return a copy carrying the description
    */
   public NeoActionContract withIdDescription(String idDescription) {
-    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod);
+    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
+        fieldValuesBody);
   }
 
   /** @return what the {@code id} argument identifies, or {@code null} when not declared */
   public String getIdDescription() {
     return idDescription;
+  }
+
+  /**
+   * The same contract, read by its customization from the {@code fieldValues} object of the
+   * request body (ETP-5558, ETP-5587).
+   *
+   * <p>For an action behind an AD button whose parameters the SPA collects in its process dialog:
+   * the SPA posts them as {@code {"fieldValues": {...}}}, and the customization reads them there
+   * ({@code PeriodOpenCloseHandler} reads {@code fieldValues.openClose}). The agent still passes
+   * the declared parameters flat; {@code neo_action} wraps them, so the customization receives the
+   * body the SPA sends instead of answering "Missing required parameter".</p>
+   *
+   * @return a copy whose parameters travel under {@code fieldValues}
+   */
+  public NeoActionContract withFieldValuesBody() {
+    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
+        true);
+  }
+
+  /** @return {@code true} when the parameters travel under {@code fieldValues} in the body */
+  public boolean isFieldValuesBody() {
+    return fieldValuesBody;
   }
 
   /**

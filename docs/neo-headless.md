@@ -2031,6 +2031,18 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   `currencyOptions` answers only `GET`.
 - **`number`** is a new parameter type: a JSON number or a numeric string, because the SPA sends
   amounts as strings and an agent sends numbers; the handler parses both with `BigDecimal`.
+- **A contract can describe an AD button (ETP-5587).** A button's catalogue entry is otherwise built
+  from its AD reference list, always under `actionParameter: "docAction"` — right for a document
+  action, wrong for a button whose customization reads something else. When a declared contract is
+  named like the button (its field name or DB column), the contract describes it: every projection
+  of `neo_schema` replaces the button's `actionParameter`/`actionValues` with the contract's
+  `parameters` schema and adds `declaredAction`, `view:"actions"` lists the contract once instead
+  of the button and the contract, and `neo_action` judges and runs the call under the contract's
+  name whichever spelling the agent typed. A contract built with
+  `NeoActionContract#withFieldValuesBody()` also says its customization reads the parameters from
+  `fieldValues`, the object the SPA's process dialog posts them in: the agent passes them flat and
+  `neo_action` sends `{"fieldValues": {...}}` (`McpToolRouter.actionBody`). Without the flag the
+  parameters go as sent, as before. First user: `periodControl.openClose` (§4.12.1.6).
 
 **The contracts** (`PaymentActionHandlerSupport.actionContracts(isReceipt)`, published by
 `SalesInvoiceHeaderHandler` and `PurchaseInvoiceHeaderHandler` together with
@@ -2214,6 +2226,38 @@ person undoes it, with a transfer back; both pairs of movements remain.
 
 `MCP_CONFIG.actions` on the account now **redirects** Classic's *Funds Transfer* button
 (`aprmFundsTrans`) to `transferFunds` instead of hiding it.
+
+##### 4.12.1.6 Period open/close — `open-close-period-control/periodControl` (ETP-5587)
+
+The calendar's *Abrir/Cerrar período* opens a dialog with one required choice and posts
+`{"fieldValues": {"openClose": "O"|"C"|"P"}}` to `/periodControl/<periodId>/action/openClose`
+(`PeriodsExpandablePanel`, mirroring `processOverrides.openClose` of the window's decisions).
+`PeriodOpenCloseHandler` reads `fieldValues.openClose`, writes a `C_PeriodControl_Log` row and runs
+AD Process 167, which opens or closes **every** document type of the period in one transaction.
+
+Through MCP the button could not be pressed: `neo_schema` advertised it under `docAction` with the
+reference list's C/N/O/P, the handler answered 400 *Missing required parameter: openClose* to
+`{docAction}` and to a flat `{openClose}` alike, and firing it by its column name (`OpenClose`)
+skipped the handler and failed in the OBUIAPP process behind it (*Process execution failed:
+OB.OpenClose.openClose*). The handler now declares the button as a contract
+(`PeriodOpenCloseHandler.OPEN_CLOSE`, `withFieldValuesBody`, §4.12.1.3):
+
+| Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
+|---|---|---|---|
+| `openClose` | write | **`openClose`**: `O` open, `C` close, `P` close permanently | the dialog's three options; `N` (never opened) is in the reference list but not offered |
+
+`id` = the period id. `neo_action(spec:'open-close-period-control', entity:'periodControl',
+id:'<periodId>', action:'openClose', parameters:{openClose:'O'})` reaches the handler with the SPA's
+body; `OpenClose` works as an alias; `docAction`, or a value outside O/C/P, is a **422** before
+anything runs. REST is unchanged.
+
+**What the calendar does not offer is hidden.** The per-document-type open/close
+(`documents.openClose`, AD Process 168) left the UI in ETP-4948, because the period's own action
+already covers every document type; `MCP_CONFIG.actions` on `documents` hides it and its
+`processNow`, pointing at `periodControl.openClose`. `periodControl.processNow` (*Open/Close All*,
+the hidden `Processing` column, also Process 167) stays `discarded`, and is not a parity gap: the
+calendar has no separate *open/close all* button, and `openClose` already runs Process 167, which
+does exactly that for the period.
 
 #### 4.12.2 `neo_discover` → `primaryEntity` — the root entity of a window spec (IMP-9)
 
@@ -2685,6 +2729,7 @@ The shape and the rules are in §4.12.1.3.
 | `sales-invoice/header`, `purchase-invoice/header` | the five PIS actions, `psd2GenerateBankPayment` | redirect `aPRMAddpayment` → `registerPayment` | PIS needs a person to authorize at the bank (SCA); Classic's *Add Payment* is not the Etendo GO payment flow |
 | `payment-in/finPayment`, `payment-out/header` | `psd2GenerateBankPayment`, `aPRMAddScheduledpayments`, `aprmExecutepayment`, `aPRMReversePayment`, `aPRMReconcilePayment`, `aeatsiiSend`, `etblkpBulkposting`, `posted`, `retryPisPayment`, `pisPaymentStatus` | `aPRMProcessPayment: ["P"]` | agents get exactly the window's three buttons, all with `parameters:{}`: *Confirmar* (`aPRMProcessPayment`), *Reactivar* (`etprReactivatePayment`) and *Eliminar* (`eTPRRemovePayment`). *Eliminar* is offered with the UI's own gate: the trash icon and the row action call it at every status except `RPVOID` and except when `pisLocked`, so `ReactivatePaymentHandler` refuses an agent with **422** in those two cases (same `isLifecycleLockedByTransfer` predicate the GET emits as `pisLocked`). On a processed payment it reactivates and then deletes it, and it gives **no** consumed credit back — exactly as in the UI; the invoice's `deletePayment` still deletes a draft and does give the credit back. `retryPisPayment` / `pisPaymentStatus` (served by `ReactivatePaymentHandler` on the payment record) are PIS, hidden like every PIS action under the fiscal/bank-integration criterion (§4.12.9). Payments are created and allocated through `registerPayment` on the invoice header. `values` keeps the catalogue honest but is **not** a safety boundary: `ReactivatePaymentHandler` always sends `action:"P"` for `aPRMProcessPayment` and ignores what the agent passes |
 | `financial-account/transaction` | `etprReactivateTransaction`, `etprRemoveTransaction`, `posted`, `etblkpBulkposting` | — | the UI's movements are reactivated, deleted and recorded through the account's movement flow; for agents, the account's `reactivateMovement` / `deleteMovement` / `createMovement` (§4.12.1.4). What stays for agents is `post` / `unpost` — `neo_action(spec:'financial-account', entity:'transaction', id:<transactionId>, action:'post'\|'unpost', parameters:{})`, served by the `document-posting` qualifier (`DocumentPostingService`, as the SPA's kebab). They are handler-served, not declared contracts, so `view:"actions"` does not list them |
+| `open-close-period-control/documents` | `openClose`, `processNow` | — | the calendar has no per-document-type open/close since ETP-4948; the period's own `openClose` (§4.12.1.6) opens or closes every document type at once |
 | `financial-account/account` | `aPRMImportBankFile`, `aPRMMatchTransactions`, `aPRMMatchTransactionsForce`, `aPRMReconcile`, `aprmAddMultiplePayments`, `pSD2GetBankstatement`, `pSD2GetConsent`, `psd2ReconnectFa`, `psd2GetConnections`, `psd2RefreshConnections` | `aprmFundsTrans` → `transferFunds` (§4.12.1.5) | the window offers none of its Core buttons: statements go through `bank-statements`, reconciliation through `bank-reconciliation`, manual movements through the entity's own declared movement actions (§4.12.1.4); PSD2 consent and reconnection need SCA. It has no `verbs` section: create, update and delete stay (the SPA uses them) |
 
 `McpConfigSourcedataTest` asserts this content.
@@ -3032,6 +3077,15 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `transferDate` | whatever the body says | today, always — the modal offers no other |
 | an unreadable `glItemId` | ignored, the transfer runs without a G/L item | **422** |
 | success | `{transferred, sourceAccountId, destinationAccountId}` | plus `amount`, `date`, `conversionRate`, `amountReceived`, `hint` |
+
+##### REST and MCP on period open/close (ETP-5587, declared)
+
+| call | REST `/sws/neo/open-close-period-control/periodControl/<id>/action/openClose` | MCP `neo_action` |
+|---|---|---|
+| body shape | taken as sent: the SPA posts `{fieldValues:{openClose}}`; a flat `{openClose}` is a 400 | the agent passes `{openClose}` flat and the MCP wraps it under `fieldValues` (the contract says so) |
+| `OpenClose` (DB column name) | Classic button path, not the handler (fails in `OB.OpenClose.openClose`) | the contract's alias: run as `openClose` by the handler |
+| `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
+| `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 

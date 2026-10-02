@@ -1386,6 +1386,9 @@ public class McpToolRouter {
     McpActionsSection.View actionsConfig = McpActionsSection.forEntity(sfEntity);
     Set<String> excludedActions = McpDeclaredActions.excludedOf(sfEntity);
     fieldsArray = McpActionsView.applyConfig(fieldsArray, actionsConfig, excludedActions);
+    // ETP-5587: a button its customization declares a contract for is described by that contract
+    // (the parameter it reads, the values the SPA offers), not by its AD reference list.
+    McpActionsView.describeDeclaredButtons(fieldsArray, declaredActions);
 
     // IMP-28 clause 4: computed off the full field array, before any view/fields narrowing
     // below, so a caller passing fields:[...] does not skew what the entity as a whole
@@ -1801,6 +1804,11 @@ public class McpToolRouter {
     NeoActionContract declared = McpDeclaredActions.precheck(sfEntity, actionName, parameters);
     String httpMethod = declared != null ? declared.getHttpMethod()
         : NeoActionContract.DEFAULT_HTTP_METHOD;
+    // ETP-5587: a contract that describes an AD button is run under its declared name, whichever
+    // spelling the agent typed — the customization discriminates on that name.
+    if (declared != null) {
+      actionName = declared.getName();
+    }
     // ETP-5558: another tenant's record is a 404 before the customization or the button sees it,
     // the same check the REST action path runs (NeoHookDispatcher).
     NeoResponse foreignRecord = NeoActionRecordGuard.refusalFor(sfEntity, recordId);
@@ -1811,7 +1819,7 @@ public class McpToolRouter {
     // The body object is shared with executeButtonActionCore on purpose, so a handler that
     // normalizes or injects the action value is honoured by the process call that follows —
     // the same contract the REST path gives handlers.
-    JSONObject actionParams = parameters != null ? parameters : new JSONObject();
+    JSONObject actionParams = actionBody(declared, parameters);
     // ETP-5415: routed through NeoExtensionDispatcher. The action name is carried in the context
     // by buildActionHookContext; the dispatcher does not route on it, so a handler that serves
     // several buttons still discriminates internally, exactly as today.
@@ -1856,6 +1864,27 @@ public class McpToolRouter {
     }
 
     return wrapAsTextContent(actionResult);
+  }
+
+  /**
+   * The request body a {@code neo_action} call reaches the customization and the button with: the
+   * call's parameters, wrapped under {@code fieldValues} when the declared contract says its
+   * customization reads them there — the body the SPA's process dialog posts (ETP-5587).
+   *
+   * @param declared   the action's declared contract, or {@code null}
+   * @param parameters the call's parameters, may be {@code null}
+   * @return the body; never {@code null}
+   * @throws JSONException if the body cannot be built
+   */
+  static JSONObject actionBody(NeoActionContract declared, JSONObject parameters)
+      throws JSONException {
+    JSONObject flat = parameters != null ? parameters : new JSONObject();
+    if (declared == null || !declared.isFieldValuesBody()) {
+      return flat;
+    }
+    JSONObject body = new JSONObject();
+    body.put(McpConstants.KEY_FIELD_VALUES, flat);
+    return body;
   }
 
   // ── neo_generate_amortization_plan ────────────────────────────────────

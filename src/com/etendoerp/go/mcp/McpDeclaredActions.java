@@ -147,8 +147,9 @@ final class McpDeclaredActions {
    * @param entity     the SchemaForge entity
    * @param action     the requested action
    * @param parameters the call's parameters, may be {@code null}
-   * @return the action's contract when it is declared (the caller reads its HTTP method), else
-   *         {@code null}
+   * @return the action's contract when it is declared, under the name typed or as the
+   *         description of the button the name fires (the caller reads its name, HTTP method and
+   *         body shape), else {@code null}
    * @throws McpRoutingException when the call must not run
    * @throws JSONException       if a refusal cannot be built
    */
@@ -165,7 +166,8 @@ final class McpDeclaredActions {
     Map<String, NeoActionContract> declared = declaredBy(customization);
     Set<String> excluded = excludedBy(customization);
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
-    for (String name : namesOf(action, button)) {
+    Set<String> names = namesOf(action, button);
+    for (String name : names) {
       if (excluded.contains(name)) {
         throw McpRoutingException.actionHidden(specName, entityName, action,
             "its customization keeps it for people only");
@@ -180,9 +182,9 @@ final class McpDeclaredActions {
       }
       requireAllowedValue(specName, entityName, action, config.allowedValuesOf(name), parameters);
     }
-    NeoActionContract contract = declared.get(action);
+    NeoActionContract contract = describing(declared, names);
     if (contract != null) {
-      NeoResponse invalid = NeoActionContract.validate(declared, action, parameters);
+      NeoResponse invalid = NeoActionContract.validate(declared, contract.getName(), parameters);
       if (invalid != null) {
         JSONObject body = invalid.getBody();
         JSONObject err = body == null ? null : body.optJSONObject("error");
@@ -190,6 +192,23 @@ final class McpDeclaredActions {
             err != null ? err : new JSONObject());
       }
       return contract;
+    }
+    return null;
+  }
+
+  /**
+   * The declared contract a call is judged by: the one named as typed, else the one that describes
+   * the AD button the call names under its other spelling (ETP-5587). A customization that
+   * declares {@code openClose} describes the {@code OpenClose} button too — firing the button by
+   * its DB column name used to skip the customization and fail in the process behind it.
+   */
+  private static NeoActionContract describing(Map<String, NeoActionContract> declared,
+      Set<String> names) {
+    for (String name : names) {
+      NeoActionContract contract = declared.get(name);
+      if (contract != null) {
+        return contract;
+      }
     }
     return null;
   }
