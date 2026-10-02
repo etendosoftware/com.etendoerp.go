@@ -4489,6 +4489,9 @@ process id directly, independent of any window grant" shape, same accepted idemp
 (a re-run's window-button-derived `reconcileProcessAccess` deletes-then-the-standalone-step-
 immediately-reinserts the row on the very next `update.database`, since it isn't in that method's
 own button-derived desired set — the end state is correct, it just isn't a strict no-op).
+**Superseded by ETP-5565:** the standalone ids are now part of `reconcileProcessAccess`'s desired
+set and `reconcileStandaloneClassicProcessAccess` no longer exists, so a re-run is a strict no-op
+(see §8d.1).
 
 ---
 
@@ -4699,6 +4702,8 @@ explicitly for this ticket on an otherwise genuinely ambiguous resolution. The s
 reconciliation is now two-sided: it inserts/corrects every grant the matrix calls for AND removes
 (hard `DELETE`) any existing grant a role has for a window the matrix does NOT call for — so the
 old smoke-test pairs are cleaned up on the next `update.database`, not just added to.
+**Superseded by ETP-5565 (§8d.1):** removals are now soft deletes (`IsActive='N'`), because a
+`DELETE` never reaches production through the deploy delta.
 `TemplateRoleWindowAccess` is unit-tested directly (`TemplateRoleWindowAccessTest`, `src-test/`)
 since it has zero DB/SQL dependencies — no Gradle classpath workaround needed, unlike the
 `ModuleScript` itself which stays DB-only.
@@ -4737,6 +4742,10 @@ same generic way it propagates `AD_Window_Access` — confirmed by inspecting it
 own access (this script's only job) is sufficient — `UserRoleCompositionService` needed no
 changes at all for personal roles to inherit these new grants, the same way they already inherit
 window access.
+**Superseded by ETP-5565 (§8d.1):** this holds only for compositions made after the template
+change. Core propagates on Hibernate events and this script writes with plain JDBC, so personal
+roles composed before a template change never received it; `TemplateRoleAccessStartup` and the
+composition hook now realign them.
 
 **ETP-5116 — `reconcileStandaloneProcessAccess`, a second, genuinely separate process-access
 mechanism (not layered on `reconcileProcessAccess` above).** `reconcileProcessAccess` can only
@@ -4762,6 +4771,11 @@ granting across all four templates (`ALL_STANDALONE_PROCESS_IDS`) — so it can 
 it itself owns, never a row `reconcileProcessAccess` wrote. Insert-side idempotency reuses
 `upsertObuiappProcessAccess` as-is (insert if missing, reactivate if inactive, no-op if already
 active), the same guarantee every other reconciliation in this class already relies on.
+
+**Superseded by ETP-5565:** `reconcileStandaloneProcessAccess`, `removeStaleStandaloneProcessAccess`
+and `ALL_STANDALONE_PROCESS_IDS` were removed. The standalone ids are added to
+`reconcileProcessAccess`'s desired set instead, so one stale removal covers both kinds of grant and
+the old delete-then-reinsert cycle (which duplicated rows on production) is gone. See §8d.1.
 
 **Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
 ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
@@ -4990,7 +5004,8 @@ out of scope for this pass. Admin needs no explicit row, same bypass rationale a
 **"Documentos no contabilizados", "Informe Antigüedad de Cobros" and "Informe Antigüedad de
 Pagos" are off this list — resolved by this ETP-5116 pass, but via the new standalone-process
 mechanism above, NOT `AD_Window_Access`.** All three target a real `OBUIAPP_Process_Access` grant
-with no backing window at all; see `reconcileStandaloneProcessAccess` above and
+with no backing window at all; see `reconcileStandaloneProcessAccess` above (folded into
+`reconcileProcessAccess` by ETP-5565, §8d.1) and
 `TemplateRoleWindowAccess`'s own javadoc for the per-role breakdown (Financiero holds all three;
 Ventas only the Receivables schedule; Compras only the Payables one).
 
@@ -5013,7 +5028,8 @@ Ventas only the Receivables schedule; Compras only the Payables one).
 > `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only ever DERIVES process access from a
 > role's FULL window grants — it has no path to a standalone process id that isn't reachable as a
 > button on any granted window. This pass built exactly that missing mechanism
-> (`reconcileStandaloneProcessAccess`, documented above) and Financiero now holds the grant.
+> (`reconcileStandaloneProcessAccess`, documented above; folded into `reconcileProcessAccess` by
+> ETP-5565, §8d.1) and Financiero now holds the grant.
 > **A fresh ETP-5116 investigation found Informe Antigüedad de Cobros/Pagos hit the exact same
 > gap, and both are now closed the same way:** `AgingReportHandler`'s own access gate was ALSO
 > found to be a real bug — hardcoded to the receivables OBUIAPP process regardless of the
@@ -5080,6 +5096,90 @@ Result locally, 0→4: 132/96/76 → 67/52/46 OBUIAPP process / process / window
 the distinct items plus 4 window rows where a lower template grants full access over a read-only
 higher one. The access set is identical to assigning the templates one per call, `InheritedFrom`
 included. The summary line counts the kept rows as `skipped`.
+
+### 8d.1 Template changes reach existing personal roles (ETP-5565)
+
+**Problem.** Core's `RoleInheritanceManager` copies a template's access rows onto every role that
+inherits it, but only on Hibernate events. `EnsureSystemRoleTemplatesScript` maintains the four
+templates with plain JDBC, so a template change never reached the personal roles composed before
+it: existing users kept removed grants and lacked new ones (ETP-5116 QA, CP-1). Production adds a
+second layer: `update.database` runs on a deploy clone, and the data delta (`etendo-go-architecture`
+`diff_to_upsert.py`) carries access rows of client `0` only, as INSERT/UPDATE upserts; DELETEs go
+to a contract file that is never applied. So the script's hard deletes never reached the
+production templates, and personal roles (tenant clients) never travel at all.
+
+**Fix, three parts:**
+
+1. **Template removals are soft deletes** (`IsActive='N'`) in `EnsureSystemRoleTemplatesScript`;
+   a returning grant reactivates the row. An UPDATE travels in the delta, a DELETE does not. **Do
+   not revert to `DELETE`.** The standalone process grants are now part of
+   `reconcileProcessAccess`'s desired set (the separate `reconcileStandalone*` passes are gone):
+   the old pass deleted and re-inserted them on every run, and because `obuiapp_process_access`
+   has no natural key the delta shipped every re-insert as a new row, piling up one duplicate per
+   build on production. `dedupeObuiappProcessAccess` deactivates those duplicates (oldest row
+   survives).
+2. **`TemplateRoleAccessStartup`** (`com.etendoerp.go.startup`, a `SessionAwareStartup`) runs on
+   the live database at startup and every 10 minutes. It fingerprints each system template's
+   active grants (one query, independent of the number of users) and compares with
+   `ETGO_TPL_ROLE_SYNC`. Only when a template changed, a personal role holds an inactive or
+   source-less inherited copy, or an inactive template row is older than 7 days does it take the
+   `ETGO_TPL_ROLE_LEASE` lease (one task at a time), purge those old inactive template rows, and
+   sweep the affected personal roles in chunks of 100, each holding its owners'
+   `UserRoleWriteLock`s. The lease lasts 10 minutes and is renewed before every chunk; a task that
+   lost it aborts the tick. It is released at the end of every tick, also on failure, and the
+   reason of a failed tick is kept in `ETGO_TPL_ROLE_LEASE.Last_Error` (cleared by the next good
+   one). Fingerprints advance only when every chunk succeeded; otherwise the next tick retries
+   (there is no separate retry loop). The purge is a hard `DELETE`, but it runs on the live
+   database only, after the grace period, so it never shows up in a deploy delta and does not
+   contradict part 1. When fingerprints changed it also logs a classification of the changed
+   templates' process grants (button on a full window / standalone / button only on a read-only
+   window / unexplained), plus one line per grant in the last two categories (expected: none),
+   readable on production with `aws logs filter-log-events
+   --log-group-name /ecs/etendo-production --filter-pattern '"TemplateRoleAccessStartup"'`. A
+   tick that did work logs one summary line (`N template(s) changed, M personal role(s) swept
+   (F failed chunk(s)), rows removed/updated/inserted ...`); an idle startup logs `templates
+   unchanged, personal roles in sync`, and idle periodic ticks log nothing. The
+   deploy applies the delta before the new containers start, so the first startup of a release
+   already sees the new templates; the first startup after ETP-5565 finds the table empty and
+   heals all existing drift.
+3. **Composition hook.** `UserRoleCompositionService#assignTemplateRoles` runs the same sweep on
+   the personal role after a composition that added or removed an inheritance. Core copies
+   inactive template rows too and lets them win by precedence, so without it a soft-deleted grant
+   of one template could hide another template's active grant.
+
+**The sweep rule** (`TemplateAccessPropagationService`): for each personal role and element (window,
+classic process, OBUIAPP process), look at the role's active inheritances of active system templates
+holding an ACTIVE grant on it. None → the inherited row is removed. Otherwise the row is active, its
+level is the most permissive among them and its `Inherited_From` is the highest-`SeqNo` one among
+those granting that level, so the source always justifies the level (the same end state composition
+guarantees, `AbstractTemplateAssignmentIntegrationTest`). Manual rows (`Inherited_From` null) are
+never touched and block an inherited insert. **A manual row wins even when it is inactive:** the
+insert checks for any row of the element, active or not, so an inactive manual row on a personal
+role keeps a template grant for that element from ever reaching the role (the user has no access
+to it until the manual row is reactivated or deleted). This is deliberate, not a sweep failure;
+when a template grant "does not arrive" for one user, look for such a row first. On
+`obuiapp_process_access`, which has no unique key,
+duplicate inherited copies of one process are collapsed to the oldest first. Roles that also inherit
+a non-system-template role (and template roles themselves) are skipped. An orphan inherited window
+row takes its `AD_Tab_Access` / `AD_Field_Access` children with it (no cascade on those FKs). The
+sweep recomputes from the templates, never replays a diff, so it is idempotent and
+order-independent.
+
+**`ETGO_TPL_ROLE_SYNC` / `ETGO_TPL_ROLE_LEASE` rows must never travel:** keep both tables out of
+every dataset, out of `ad_tables_clone.txt` and out of source data. Their rows belong to each live
+database; the startup seeds the lease row itself. `Lease_Until` is written and compared in UTC
+(`now() AT TIME ZONE 'UTC'`), because it is a timestamp without time zone and each JVM (or psql)
+session converts `now()` to its own time zone.
+
+**Known limits.** A composition done outside Etendo GO (Etendo Classic's Role window, core's
+"Recalculate Permissions") while an inactive template row exists is corrected by the next tick,
+not immediately. Rolling back to an image older than ETP-5565 leaves personal roles aligned to the
+newer templates until the next forward deploy. The Jenkins `failure {}` rollback drops the two
+tables while new-image tasks may still run; the startup logs the failure and skips. A task never
+overwrites a fingerprint stored by a NEWER `ALGO_VERSION` (so blue and green tasks of two releases
+cannot ping-pong); the flip side, from `ALGO_VERSION` 2 on, is that an older-version task treats
+those fingerprints as unchanged, so a template change made while only older-version tasks run
+(e.g. after a `dml_rollback`) is not swept until a newer-version task starts.
 
 ---
 
@@ -6021,6 +6121,10 @@ The module includes unit tests that run without a backend:
 | `UserRoleCompositionServiceOverlapIntegrationTest` | 1181 | Real-DB proof (13 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard`, all 7 triggers plus BUG-2 (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition. **Triggers 1-5 (B6 rounds 1-5):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (triggers 1-2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4); removing the template that justified a previously-widened access level correctly downgrades the row instead of staying stuck at full (trigger 5, `InheritedFrom` bookkeeping). **Triggers 6-7 (B6 rounds 6-7):** removing one of FOUR overlapping templates (2 remaining templates still overlapping on a window) no longer duplicate-INSERTs (trigger 6); updating a template's own access level in place never deletes an already-correctly-sourced dependent row (trigger 7, the `onUpdate`/`UPDATED_GRANT` path). **BUG-2 + coverage gaps (round 8):** downgrading one of two overlapping templates' own access never downgrades a dependent when the other still grants full (`testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess`); a single inheritance event touching 3 windows at once resolves each window's most-permissive-wins independently (`testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently`); two guard-triggering template updates inside one shared flush do not cause Hibernate reentrancy (`testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy`). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
 | `UserRoleCompositionServiceRealAccessControlIntegrationTest` (B5, ETP-4906) | 228 | Real-DB proof (3 tests, `WeldBaseTest`) that `WindowAccessOverlapCorruptionGuard`'s protection produces the CORRECT effective access outcome, not just a crash-free one, against real ETP-4878 seed-data templates: a Sales-only composed role has no access to Purchase Invoice; a Purchasing-only composed role has no access to Sales Invoice; and a Sales-only role is read-only on "Categoría del producto", then adding Finance upgrades it to full (most-permissive-wins) — the same scenario §8d's four outcomes (no-access ×2, read-only, full) are meant to cover end-to-end. |
 | `UserRoleCompositionServiceOverlapReverificationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
+| `TemplateAccessPropagationServiceIntegrationTest` (ETP-5565) | -- | Real-DB proof (14 tests) of §8d.1's sweep rule, rolled back after each test: every combination after a template removal (narrowed, removed, manual row kept, inactive copy reactivated, a second sweep changes nothing), most-permissive level with highest-`SeqNo` source (also on equal levels), additions inserted unless a manual row exists (an inactive one included), OBUIAPP rows without duplicates and duplicate inherited copies collapsed to the oldest (copies from non-system roles untouched), template deactivation changes the fingerprint, inactive grants do not, roles inheriting a non-system template skipped, stale-copy detection, purge limited to inactive template rows past the grace period, the process-grant diagnostic, owner resolution. |
+| `TemplateRoleAccessStartupTest` (ETP-5565) | -- | Unit test (10 tests, mocked service and store) of the tick: unchanged templates take no lease, an empty sync table sweeps every template's inheritors and stores fingerprints, only changed templates are swept, a fingerprint from a newer `ALGO_VERSION` counts as unchanged, a busy lease skips the tick, a failed chunk keeps the old fingerprints and releases the lease with an error, stale copies are swept without a fingerprint change, purge runs under the lease before the sweep, owners are locked before their chunk, `tickSafely` never throws. |
+| `TemplateRoleSyncStoreIntegrationTest` (ETP-5565) | -- | Real-DB proof (5 tests) of the lease SQL (take once, holder-only renew/release, expired takeover, missing row seeded) and that an older `ALGO_VERSION` never overwrites a newer fingerprint. Restores the real lease row afterwards and skips itself when a live task holds the lease. |
+| `CompositionSweepIntegrationTest` (ETP-5565) | -- | Real-DB proof (1 test) of the composition hook: composing two templates where the higher-`SeqNo` one holds soft-deleted rows ends with the lower one's active grant (sourced from it) instead of core's inactive copy, and with no copy at all of an element no template grants actively. |
 | `SFAssignUserRolesTest` | -- | Unit test proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 4-arg overload — the exact wiring the tenant-boundary check depends on. **ETP-4830 addition:** a companion regression proves the webhook ALSO resolves the caller's own `AD_User_ID` (via `OBContext.getOBContext().getUser()`, stubbed on the mock context) and forwards it as the 4th argument — the wiring `enforceOwnerProtection` depends on; every pre-existing test in this file leaves `mockContext.getUser()` unstubbed (defaults to `null`), confirming `callerUserId=null` for those and that the owner-protection check stays a no-op unless a real caller identity is resolved. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
 | `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. **ETP-5402 additions (3 cases, 15 tests total):** every role has an empty `reports` array when no grants exist; a classic `tax-report` grant surfaces as `"full"` on the Finance template ONLY (Sales/Purchasing/Inventory unaffected); an "Informes financieros" pseudo-window grant surfaces all 5 financial-family reports — needed a NEW local keyed-by-role `WindowAccess`/classic-`ProcessAccess` stub helper pair, since this test class had none before (unlike `SFRolesOverviewTest`, which already had one). |
