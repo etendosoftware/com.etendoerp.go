@@ -1656,6 +1656,8 @@ class ToolRegistryGenerateToolsTest {
   class WriteCatalogTests {
 
     private static final String SPEC_MONITOR = "monitor-verifactu";
+    private static final String SPEC_FINANCIAL_ACCOUNT = "financial-account";
+    private static final String NEO_DELETE = "neo_delete";
 
     @SuppressWarnings("unchecked")
     private List<String> specEnumOf(List<McpToolDefinition> tools, String toolName) {
@@ -1859,9 +1861,71 @@ class ToolRegistryGenerateToolsTest {
         // drifted from neo_create in both directions. The assertion follows the flag rather than
         // hardcoding today's value, so flipping it back on does not fail a test that was never
         // about the flag.
-        assertEquals(McpConstants.BATCH_TOOL_ENABLED, names.contains("neo_batch"),
+        assertEquals(McpConstants.batchToolEnabled(), names.contains("neo_batch"),
             "neo_batch must be published exactly while its flag is on");
       }
+    }
+
+    /**
+     * Stubs a financial-account spec whose entity enables every CRUD verb, grants GET/POST/PUT and
+     * sets DELETE window access to {@code deleteGranted}, then generates the catalog. A second,
+     * always-deletable spec keeps {@code neo_delete} registered so the denied case asserts on the
+     * enum rather than on the tool's absence.
+     */
+    private List<McpToolDefinition> generateWithFinancialAccountDelete(boolean deleteGranted) {
+      SFSpec financialAccount = createWindowSpecWithWindow(SPEC_FINANCIAL_ACCOUNT, "fa-window");
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      when(salesOrder.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(financialAccount, salesOrder));
+
+      for (String method : List.of("GET", "POST", "PUT")) {
+        accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(financialAccount, method))
+            .thenReturn(true);
+      }
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(financialAccount, "DELETE"))
+          .thenReturn(deleteGranted);
+
+      try (MockedStatic<McpToolRouterSupport> supportMock =
+          mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(any())).thenReturn(false);
+        for (SFSpec spec : List.of(financialAccount, salesOrder)) {
+          for (String method : List.of("POST", "PUT", "DELETE")) {
+            supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, method))
+                .thenReturn(true);
+          }
+        }
+        return registry.generateTools(scopesOf("neo:read", "neo:write"));
+      }
+    }
+
+    /**
+     * CA4 (ETP-5474): a spec whose entity enables DELETE is offered by {@code neo_delete} when the
+     * role holds DELETE access on its window.
+     */
+    @Test
+    @DisplayName("neo_delete offers a DELETE-enabled spec when the role may delete on its window")
+    void testDeleteEnumIncludesSpecWhenDeleteAccessGranted() {
+      List<McpToolDefinition> tools = generateWithFinancialAccountDelete(true);
+
+      assertTrue(specEnumOf(tools, NEO_DELETE).contains(SPEC_FINANCIAL_ACCOUNT),
+          "financial-account must be a neo_delete target when DELETE access is granted");
+    }
+
+    /**
+     * CA4 (ETP-5474): the same spec is withheld from {@code neo_delete} — while staying readable
+     * and updatable — when the role lacks DELETE access on its window.
+     */
+    @Test
+    @DisplayName("neo_delete withholds a DELETE-enabled spec when the role may not delete on its window")
+    void testDeleteEnumExcludesSpecWhenDeleteAccessDenied() {
+      List<McpToolDefinition> tools = generateWithFinancialAccountDelete(false);
+
+      assertFalse(specEnumOf(tools, NEO_DELETE).contains(SPEC_FINANCIAL_ACCOUNT),
+          "financial-account must not be a neo_delete target without DELETE access");
+      assertTrue(specEnumOf(tools, NEO_DELETE).contains(SPEC_SALES_ORDER),
+          "the other deletable spec keeps neo_delete registered");
+      assertTrue(specEnumOf(tools, "neo_list").contains(SPEC_FINANCIAL_ACCOUNT));
+      assertTrue(specEnumOf(tools, "neo_update").contains(SPEC_FINANCIAL_ACCOUNT));
     }
   }
 

@@ -24,6 +24,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -37,6 +38,36 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 final class ReconciliationWriteoffSupport {
 
   private ReconciliationWriteoffSupport() {
+  }
+
+  /**
+   * The invoice leg of {@code reconcileGroup}: pays each selected unpaid invoice (creating the
+   * payment and auto-creating its transaction) and appends the new transaction ids to
+   * {@code operationIds}, so the standard reconcile matches them to the line. A no-op returning
+   * {@code null} when no invoice is selected. {@code invoiceSpecs} is the caller's already-parsed
+   * {@code invoices} array (parsed once, in {@code reconcileGroup}); the remaining options are read
+   * from {@code body}.
+   *
+   * <p>{@code paymentMethodId} is the single method chosen in the reconciliation modal, applied to
+   * every invoice payment created here — an already-existing transaction (operationIds) keeps its
+   * own. {@code writeoffDifference} (ETP-4797) is opt-in, off by default: it writes off the
+   * shortfall when the line settles the invoice for less than its outstanding amount, so the
+   * invoice is fully paid instead of keeping a residual balance; the UI only offers it for a single
+   * selected invoice.
+   *
+   * <p>Moved here from {@code reconcileGroup} (ETP-5472) to keep that method under the Sonar
+   * cognitive-complexity limit (java:S3776) once it gained the up-front operation-id check.
+   *
+   * @return {@code null} on success or when there is nothing to pay, else the error to return
+   */
+  static NeoResponse payInvoicesFromBody(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      JSONArray invoiceSpecs, JSONObject body, List<String> operationIds, BigDecimal tolerance)
+      throws Exception {
+    if (invoiceSpecs == null || invoiceSpecs.length() == 0) {
+      return null;
+    }
+    return payInvoices(account, line, invoiceSpecs, operationIds, tolerance,
+        body.optString("paymentMethodId", null), body.optBoolean("writeoffDifference", false));
   }
 
   /**

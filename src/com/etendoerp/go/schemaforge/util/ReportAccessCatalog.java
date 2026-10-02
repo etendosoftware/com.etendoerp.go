@@ -98,7 +98,7 @@ public final class ReportAccessCatalog {
    * artifacts/} directory name / {@code REPORT_PREVIEW_IMAGES} key, except for the {@code
    * aging-receivable}/{@code aging-payable} split above), a fallback display name (the
    * frontend's {@code menu.json} is expected to override it, same convention as {@code
-   * SFRolesOverview}'s {@code PROXY_MATRIX_ROWS}), which access mechanism to resolve it
+   * RoleAccessMatrix}'s {@code PROXY_MATRIX_ROWS}), which access mechanism to resolve it
    * through, the anchor id in that mechanism's own id-space, and the hardcoded category it
    * belongs to (a report row's category cannot be derived from the classic {@code AD_Menu}
    * tree the way a real window's can, so it is a human-assigned constant here).

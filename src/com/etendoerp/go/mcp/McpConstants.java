@@ -191,10 +191,72 @@ final class McpConstants {
    * is untouched and keeps serving its callers (the OCR purchase-invoice ingest), so
    * {@code BatchService} stays live either way.
    *
-   * <p>To re-enable: flip to {@code true}. The tool then reappears in {@code tools/list} and routes
-   * again; nothing else has to change.
+   * <p><b>Re-enabled 2026-09-28 (ETP-5415).</b> The convergence this flag was waiting on is the
+   * work this ticket did, so the list above is now mostly historical. What closed it:
+   *
+   * <ul>
+   *   <li><b>the entity pre-hook</b> — already false when this text was written
+   *       ({@code BatchService} has called {@code handleWithHooks} since ETP-4254), and now
+   *       dispatched unconditionally: the blank-qualifier early return that guarded it was the
+   *       last copy of one removed from every other path, and it made {@code @NeoExtension}
+   *       work everywhere except here;</li>
+   *   <li><b>line-price derivation</b>, <b>FK-sentinel cleanup</b> and <b>image-field
+   *       validation</b> — added to the {@code neo_batch} body transforms
+   *       ({@code McpToolRouter#preprocessBatchOperation}), in {@code neo_create}'s own order.
+   *       Those transforms also moved from a pass over the whole operations array to one run per
+   *       operation from inside the batch loop: before the batch starts, a {@code $ref} is an
+   *       unresolved placeholder and a {@code parentRef}'s parent does not exist, so every
+   *       parent-dependent injection abstained in silence and a batched line persisted at price
+   *       0 while the identical single create priced correctly;</li>
+   *   <li><b>the spec name</b> — {@code BatchService} built its {@code NeoContext} with the
+   *       spec's UUID where every other path passes its name, so a customization branching on
+   *       {@code getSpecName()} saw a different value here and {@code @NeoExtension} could not
+   *       match at all (D10).</li>
+   * </ul>
+   *
+   * <p><b>Still divergent, and deliberately not fixed here:</b> {@code neo_create} does not run
+   * {@code injectCommercialAmounts}, which {@code neo_batch} gets through the shared path. That is
+   * a defect on the <em>create</em> side, it is independent of this flag, and folding it in is its
+   * own step — a create path that silently persists a zero gross amount is a data bug worth
+   * landing on its own evidence rather than inside a re-enablement.
+   *
+   * <p>The guard against this drifting again is {@code NeoExtensionParityTest} (E4), which asserts
+   * over the execution trace that one customization is reached by every channel. It cannot see a
+   * missing generic pipeline step — only that the customization ran — so the list above still has
+   * to be read by a human when either write path changes.
+   *
+   * <p>To switch off again: flip to {@code false}. The tool disappears from {@code tools/list} and
+   * stops routing; nothing else has to change.
    */
-  static final boolean BATCH_TOOL_ENABLED = false;
+  private static final boolean BATCH_TOOL_ENABLED_VALUE = true;
+
+  /**
+   * Whether {@code neo_batch} is published and routable.
+   *
+   * <p><b>A method, not the constant, and that is the whole point.</b> A {@code static final
+   * boolean} initialised to a literal is a <i>compile-time constant</i>: javac inlines its value
+   * into every use site and deletes the dead branch. Recompiling this file alone therefore changes
+   * nothing — the callers keep the value they were built against, and the only symptom is the
+   * feature not behaving as the source says.
+   *
+   * <p>That is not hypothetical. Flipping the value to {@code true} and rebuilding produced
+   * {@code McpConstants.class} at 13:13 and {@code ToolRegistry.class} still at 12:51, with
+   * {@code buildBatchTool()} present as a declaration and called from nowhere: the tool was absent
+   * from {@code tools/list} while the source said it was on.
+   *
+   * <p>The dangerous shape is the next one, not that one. An incremental build can refresh
+   * <i>some</i> use sites and not others, leaving the tool published by {@link ToolRegistry} and
+   * refused by {@code McpToolRouter} — or the reverse. That failure depends on compilation order,
+   * survives a restart, and looks nothing like a flag.
+   *
+   * <p>A method call is not inlined into the caller's bytecode, so every reader sees whatever this
+   * file was last compiled with. Read it through here, never through the field.
+   *
+   * @return {@code true} while the tool is enabled
+   */
+  static boolean batchToolEnabled() {
+    return BATCH_TOOL_ENABLED_VALUE;
+  }
   /**
    * How many names an {@code available} list may carry before it is truncated (ETP-5184). Twenty
    * is enough for the agent to spot its own typo; a wide entity has 150+ properties and dumping

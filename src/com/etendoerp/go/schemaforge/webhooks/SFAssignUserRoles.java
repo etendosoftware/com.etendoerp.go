@@ -148,11 +148,21 @@ public class SFAssignUserRoles extends BaseWebhookService {
           .assignTemplateRoles(userId, templateRoleIds, currentRole, callerUserId);
       responseVars.put(RESPONSE_VAR_RESULT, success(result).toString());
     } catch (OBException e) {
-      // Expected domain-validation rejection — see class javadoc for why this is a 200
-      // success:false result, not the bridge's 500 error path.
-      responseVars.put(RESPONSE_VAR_RESULT,
-          WebhookFailureResponses.failure(e.getMessage()).toString());
+      // ETP-5278 — a lost race is checked first, so it is never reported as a domain rejection.
+      if (!WebhookFailureResponses.rejectConcurrentRoleWrite(e, responseVars,
+          RESPONSE_VAR_RESULT, "SFAssignUserRoles", userId)) {
+        // Expected domain-validation rejection — see class javadoc for why this is a 200
+        // success:false result, not the bridge's 500 error path.
+        responseVars.put(RESPONSE_VAR_RESULT,
+            WebhookFailureResponses.failure(e.getMessage()).toString());
+      }
     } catch (Exception e) {
+      // ETP-5278 — a lost race (StaleState, lock timeout, …) is answered as
+      // CONCURRENT_MODIFICATION instead of the bridge's generic 500.
+      if (WebhookFailureResponses.rejectConcurrentRoleWrite(e, responseVars,
+          RESPONSE_VAR_RESULT, "SFAssignUserRoles", userId)) {
+        return;
+      }
       log.error("Unexpected error in SFAssignUserRoles for user {}", userId, e);
       responseVars.put("error", e.getMessage());
     }

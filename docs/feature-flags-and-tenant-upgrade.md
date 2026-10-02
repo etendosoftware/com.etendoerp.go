@@ -731,6 +731,7 @@ Checklist for the follow-up that replaces local configuration with Mixpanel Feat
   "currencyCode": "EUR",
   "currencyId": "…", "currencyStandardPrecision": 2,
   "yourCompanyDocumentImageId": "…",
+  "brandingUpdated": "2026-09-29T10:15:30Z",
   "organization": { "...": "..." },
   "accountId": "A1B2C3…",
   "accountEmail": "user@example.com"
