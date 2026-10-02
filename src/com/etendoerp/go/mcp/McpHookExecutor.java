@@ -420,10 +420,22 @@ final class McpHookExecutor {
    */
   static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
       String actionName, JSONObject params, Tab adTab, SFEntity sfEntity) {
+    return buildActionHookContext(specName, entityName, recordId, actionName, params, adTab,
+        sfEntity, "POST");
+  }
+
+  /**
+   * Same as {@link #buildActionHookContext(String, String, String, String, JSONObject, Tab,
+   * SFEntity)} under the HTTP method a declared action is served on (ETP-5558: {@code
+   * currencyOptions} only answers {@code GET}).
+   */
+  @SuppressWarnings("java:S107") // the seven context values plus the method; a builder would only rename them
+  static NeoContext buildActionHookContext(String specName, String entityName, String recordId,
+      String actionName, JSONObject params, Tab adTab, SFEntity sfEntity, String httpMethod) {
     return NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
-        .httpMethod("POST")
+        .httpMethod(httpMethod)
         .recordId(recordId)
         .requestBody(params)
         .adTab(adTab)

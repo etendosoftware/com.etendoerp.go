@@ -124,6 +124,8 @@ final class McpConstants {
    * made {@code neo_list} on a child entity return every row in the table.</p>
    */
   static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
+  /** {@code neo_selectors} on a column that is not a selector of the entity (ETP-5558). */
+  static final String ERROR_UNKNOWN_SELECTOR_COLUMN = "unknown_selector_column";
   /** Machine-detectable code for a top-level argument the tool does not declare (IMP-40). */
   static final String ERROR_UNKNOWN_ARGUMENT = "unknown_argument";
 
@@ -161,6 +163,14 @@ final class McpConstants {
    * no global list — so a child call without {@code parentId} has no correct answer to give.
    */
   static final String ERROR_PARENT_REQUIRED = "parent_required";
+  /**
+   * Machine-detectable error code for a child write that named a parent the entity cannot be
+   * linked to (ETP-5558). Distinct from {@link #ERROR_PARENT_REQUIRED}: the agent did pass
+   * {@code parentId}, but no field of the entity points at the parent record, so the id has
+   * nowhere to go. Writing on without it is what attached a {@code payment-out} line to an
+   * unrelated collection.
+   */
+  static final String ERROR_PARENT_UNRESOLVABLE = "parent_unresolvable";
   /**
    * Machine-detectable error code for a tool that exists in this build but is switched off
    * (ETP-5335). Distinct from {@link #ERROR_NOT_FOUND}: the agent did not misspell anything and
@@ -378,6 +388,8 @@ final class McpConstants {
   static final String KEY_ACTION_VALUES = "actionValues";
   /** {@code neo_schema} key naming the parameter the chosen value must go under. */
   static final String KEY_ACTION_PARAMETER = "actionParameter";
+  /** The body object the SPA's process dialog posts a button's parameters under (ETP-5587). */
+  static final String KEY_FIELD_VALUES = "fieldValues";
 
   static final String LABEL_SPEC_NAME = "Spec name";
   static final String LABEL_ENTITY_NAME = "Entity name within the spec";

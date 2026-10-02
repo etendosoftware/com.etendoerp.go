@@ -75,6 +75,11 @@ class PaymentCreditConsumerTest {
   private static final String MSG_NOT_ELIGIBLE = "not an eligible negative-total invoice";
 
   private MockedStatic<OBDal> obDalMock;
+  /**
+   * ETP-5558: request ids now go through {@link TenantOwnership}; tenancy is covered by
+   * {@code PaymentOwnershipTest}, so here every row is visible.
+   */
+  private MockedStatic<TenantOwnership> tenantMock;
   private MockedStatic<FIN_AddPayment> finAddPaymentMock;
 
   private OBDal dal;
@@ -94,6 +99,9 @@ class PaymentCreditConsumerTest {
     docType = mock(DocumentType.class);
 
     obDalMock = mockStatic(OBDal.class);
+    tenantMock = mockStatic(TenantOwnership.class, org.mockito.Answers.CALLS_REAL_METHODS);
+    tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(
+        org.mockito.ArgumentMatchers.any())).thenReturn(true);
     obDalMock.when(OBDal::getInstance).thenReturn(dal);
     when(dal.get(FIN_PaymentScheduleDetail.class, PSD_ID)).thenReturn(psd);
 
@@ -107,6 +115,12 @@ class PaymentCreditConsumerTest {
     RectificativeSupport.setColumnPresentForTests(true);
 
     when(payment.getId()).thenReturn(PAYMENT_ID);
+    // ETP-5558: a credit note is spendable only by its own business partner's payment.
+    org.openbravo.model.common.businesspartner.BusinessPartner partner =
+        mock(org.openbravo.model.common.businesspartner.BusinessPartner.class);
+    when(partner.getId()).thenReturn("bp-1");
+    when(payment.getBusinessPartner()).thenReturn(partner);
+    when(invoice.getBusinessPartner()).thenReturn(partner);
     when(psd.getId()).thenReturn(PSD_ID);
     when(psd.getInvoicePaymentSchedule()).thenReturn(schedule);
     when(schedule.getInvoice()).thenReturn(invoice);
@@ -116,6 +130,7 @@ class PaymentCreditConsumerTest {
 
   @AfterEach
   void tearDown() {
+    tenantMock.close();
     RectificativeSupport.setColumnPresentForTests(null);
     closeQuietly(finAddPaymentMock);
     closeQuietly(obDalMock);
