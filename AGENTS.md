@@ -24,6 +24,8 @@ For XML sourcedata, keep records sorted by ascending UUID. The workflow in `.git
 ## Testing Guidelines
 Tests are standard `*Test.java` classes, usually colocated by package path with the code they verify. The current suite uses JUnit 4-style assertions and `@Test`, with JUnit 5 runtime support and Mockito for isolated logic tests. Add or update tests for every behavior change; Sonar runs on PRs, so avoid leaving new branches untested.
 
+Before adding a test class, find the existing ones for the class (`make find-tests FILE=<Class>` from `etendo_schema_forge`) and extend them; a new class needs a justification. Every new or modified test class declares `@covers <fully.qualified.Class>` in its Javadoc and is named by behavior, never by ticket. `.github/workflows/test-hygiene.yml` (`scripts/check-test-hygiene.py`) annotates violations and blocks from 2026-10-10. Full protocol: `docs/testing/test-reuse-policy.md` in `etendo_schema_forge`.
+
 ## Commit & Pull Request Guidelines
 Recent history follows `Feature ETP-1234: Short imperative summary`. Keep that format unless the branch already uses a different convention. Pull requests should link the ticket, summarize functional impact, call out any `src-db` or `referencedata` changes, and include test evidence. If the change affects API behavior or onboarding flows, include example requests or screenshots when they help review.
 
