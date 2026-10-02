@@ -2015,7 +2015,9 @@ payments by hand through the route BUG-1 corrupted data with (FR-1 of the ETP-55
   `notInvokableReason` (`invokableCount: 0`), and `neo_discover` adds `actionsInvokable:false` +
   `actionsNotInvokableReason`.
 - **Excluded from agents, in code.** `NeoHandler#agentExcludedActions()` (default empty) names
-  actions the handler serves to the SPA that an agent must never run. `neo_action` refuses them
+  actions the handler serves to the SPA that an agent must never run. If `agentExcludedActions()`
+  throws, the MCP fails closed: every action of the entity is treated as excluded (refused,
+  never advertised) and a WARN names the spec, the entity and only the exception's class. `neo_action` refuses them
   (405 `method_not_allowed`) before the handler runs, whatever `MCP_CONFIG` says, and they are never
   advertised (neither as a declared action nor as a button). The check runs over every name of the
   call, aliases included. Both invoice headers return the five PIS actions and the

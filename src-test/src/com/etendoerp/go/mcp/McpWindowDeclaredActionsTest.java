@@ -296,6 +296,24 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
+    @DisplayName("a customization whose excluded list throws withholds every action (fails closed)")
+    void throwingExclusionsWithholdEverything() throws Exception {
+      when(handler.agentExcludedActions()).thenThrow(new IllegalStateException("bean not ready"));
+      SFEntity e = entity("W", null);
+      JSONObject view = McpActionsView.buildResponse(SPEC, ENTITY, buttons(),
+          McpDeclaredActions.of(e), McpActionsSection.forEntity(e),
+          McpDeclaredActions.excludedOf(e));
+      assertEquals(0, view.getInt("actionCount"), view.toString());
+      assertTrue(McpDeclaredActions.of(e).isEmpty(), "no declared action is offered either");
+      for (String action : List.of("documentAction", "DocAction", "registerPayment",
+          "anythingElse")) {
+        McpRoutingException refused = assertThrows(McpRoutingException.class,
+            () -> McpDeclaredActions.precheck(e, action, new JSONObject()), action);
+        assertEquals(405, refused.toEnvelope().getInt(McpConstants.KEY_STATUS), action);
+      }
+    }
+
+    @Test
     @DisplayName("with nothing declared and nothing configured, the response is as before")
     void unchangedWithoutDeclarations() throws Exception {
       JSONObject view = McpActionsView.buildResponse(SPEC, ENTITY, buttons(), Map.of(),

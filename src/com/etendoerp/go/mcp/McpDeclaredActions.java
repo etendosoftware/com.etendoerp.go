@@ -16,7 +16,9 @@
  */
 package com.etendoerp.go.mcp;
 
+import java.util.AbstractSet;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -80,7 +82,7 @@ final class McpDeclaredActions {
     if (declared.isEmpty()) {
       return declared;
     }
-    Set<String> excluded = excludedBy(customization);
+    Set<String> excluded = excludedBy(customization, entity);
     McpActionsSection.View config = McpActionsSection.forEntity(entity);
     Map<String, NeoActionContract> offered = new LinkedHashMap<>();
     for (Map.Entry<String, NeoActionContract> e : declared.entrySet()) {
@@ -164,7 +166,7 @@ final class McpDeclaredActions {
     }
     NeoHandler customization = customizationOf(entity);
     Map<String, NeoActionContract> declared = declaredBy(customization);
-    Set<String> excluded = excludedBy(customization);
+    Set<String> excluded = excludedBy(customization, entity);
     Column button = declared.containsKey(action) ? null : buttonOf(entity, action);
     Set<String> names = namesOf(action, button);
     for (String name : names) {
@@ -218,14 +220,41 @@ final class McpDeclaredActions {
    * ({@code NeoHandler#agentExcludedActions()}).
    *
    * @param entity the SchemaForge entity
-   * @return the names, empty when none or the customization cannot be resolved
+   * @return the names, empty when none or the customization cannot be resolved; {@link #ALL} when
+   *         the customization could not say (fails closed)
    */
   static Set<String> excludedOf(SFEntity entity) {
-    return excludedBy(customizationOf(entity));
+    return excludedBy(customizationOf(entity), entity);
   }
 
-  /** Looked up quietly, like {@link #declaredBy}. */
-  private static Set<String> excludedBy(NeoHandler handler) {
+  /**
+   * Every action name: what a customization whose {@code agentExcludedActions()} threw excludes
+   * (ETP-5558). Its consumers only ask {@code contains}, so every action of the entity is then
+   * refused by {@code neo_action} and left out of {@code neo_schema} and {@code neo_discover}.
+   */
+  static final Set<String> ALL = new AbstractSet<>() {
+    @Override
+    public boolean contains(Object o) {
+      return true;
+    }
+
+    @Override
+    public Iterator<String> iterator() {
+      return Collections.emptyIterator();
+    }
+
+    @Override
+    public int size() {
+      return 0;
+    }
+  };
+
+  /**
+   * Fails CLOSED: a customization that cannot say which actions it keeps for people may be keeping
+   * any of them (a bank-initiated payment), so all of them are withheld from agents until it can.
+   * The log names the entity, not the exception's message, which may carry data.
+   */
+  private static Set<String> excludedBy(NeoHandler handler, SFEntity entity) {
     if (handler == null) {
       return Collections.emptySet();
     }
@@ -233,9 +262,12 @@ final class McpDeclaredActions {
       Set<String> excluded = handler.agentExcludedActions();
       return excluded != null ? excluded : Collections.emptySet();
     } catch (RuntimeException e) {
-      log.warn("Could not read the agent-excluded actions of {}: {}",
-          handler.getClass().getName(), e.getMessage());
-      return Collections.emptySet();
+      SFSpec spec = entity == null ? null : entity.getETGOSFSpec();
+      log.warn("Every action of spec '{}', entity '{}' withheld from agents: {} could not list "
+          + "its agent-excluded actions ({})", spec == null ? null : spec.getName(),
+          entity == null ? null : entity.getName(), handler.getClass().getName(),
+          e.getClass().getSimpleName());
+      return ALL;
     }
   }
 
