@@ -587,7 +587,23 @@ public class NotPostedDocumentsHandlerTest {
 
       assertEquals("org-1", result.get("_org"));
       JSONArray statuses = new JSONArray(result.get("accounting_status"));
-      assertEquals(5, statuses.length()); // N, E, C, i, p
+      assertEquals(6, statuses.length()); // N, E, C, i, p, NC (ETP-5591)
+    }
+  }
+
+  /** ETP-5591 — "Cost Not Calculated" is selectable and reaches the datasource as its UUID. */
+  @Test
+  public void buildDsParamsTranslatesCostNotCalculatedKey() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      mockOrgContext(ctxMock, "org-1");
+      Map<String, String> params = new HashMap<>();
+      params.put("accountingStatus", "NC");
+
+      Map<String, String> result = new NotPostedDocumentsHandler().buildDsParams(params);
+
+      JSONArray statuses = new JSONArray(result.get("accounting_status"));
+      assertEquals(1, statuses.length());
+      assertEquals("EF3E057A84CD4BE88A9EF57BE9598DA3", statuses.getString(0));
     }
   }
 

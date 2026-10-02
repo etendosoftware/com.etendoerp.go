@@ -105,14 +105,18 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    *   AD = No Accounting Date   Y  = Posted
    *   D  = Document Disabled    NO = No Related PO
    *   l  = Pending Refresh      c  = Not Convertible (no rate)
-   *   b  = Not Balanced         NC = Cost Not Calculated
-   *   T  = Table Disabled
+   *   b  = Not Balanced         T  = Table Disabled
+   *
+   * <p>ETP-5591: {@code NC} (Cost Not Calculated) joined the curated set. It was excluded since
+   * ETP-4355, which hid every goods receipt/shipment whose posting stopped on an uncalculated
+   * cost (1176 rows on the local sandbox) from the page meant to surface exactly that.
    */
   private static final String[][] ACCOUNTING_STATUS_FILTER_OPTIONS = {
       { "N",   "Unposted"        },
       { "E,C", "Error"           },   // E = Error, C = Error-No-Cost (unified)
       { "i",   "Invalid Account" },
       { "p",   "Period Closed"   },
+      { "NC",  "Cost Not Calculated" },
   };
 
   /**
@@ -181,10 +185,10 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   /**
    * Default statuses sent when the user applies no accounting-status filter (empty selection =
-   * "show all unposted").  Covers the four options exposed in the UI filter.
+   * "show all unposted").  Covers the five options exposed in the UI filter.
    */
   private static final List<String> DEFAULT_ACCOUNTING_STATUS_KEYS =
-      Arrays.asList("N", "E", "C", "i", "p");
+      Arrays.asList("N", "E", "C", "i", "p", "NC");
 
   static {
     ACCOUNTING_STATUS_KEY_TO_ID.put("N",  "D16B6411F4CB4708AE05E7F6E109920E"); // Unposted
