@@ -333,38 +333,8 @@ class NeoBuiltInEndpointHandler {
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     String tableName = segments[0];
     String recordId = segments[1];
-    boolean isZip = segments.length >= 3 && ATTACHMENTS_SEGMENT_ZIP.equals(segments[2]);
-    boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
-    boolean isCount = segments.length >= 3 && ATTACHMENTS_SEGMENT_COUNT.equals(segments[2]);
-
-    if (isZip) {
-      if (!"GET".equals(method)) {
-        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Attachments zip endpoint only supports GET");
-        return;
-      }
-      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId, response);
-      return;
-    }
-
-    if (isMain) {
-      if (!"GET".equals(method)) {
-        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Attachments main endpoint only supports GET");
-        return;
-      }
-      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
-      return;
-    }
-
-    if (isCount) {
-      // Same (servlet-level) authorization as the list GET below: reads are not tier-checked.
-      if (!"GET".equals(method)) {
-        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Attachments count endpoint only supports GET");
-        return;
-      }
-      servlet.writeResponse(response, NeoAttachmentsHelper.handleCount(tableName, recordId));
+    if (segments.length >= 3 && isGetOnlySubresource(segments[2])) {
+      handleAttachmentsGetOnlySubresource(segments[2], tableName, recordId, method, response);
       return;
     }
 
@@ -386,6 +356,39 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Attachments record endpoint supports GET (list) and POST (upload)");
+  }
+
+  /**
+   * Whether {@code segment} names one of the read-only record sub-resources
+   * ({@code zip}, {@code main}, {@code count}). Any other third segment keeps
+   * falling through to the record list/upload handling.
+   */
+  private static boolean isGetOnlySubresource(String segment) {
+    return ATTACHMENTS_SEGMENT_ZIP.equals(segment)
+        || ATTACHMENTS_SEGMENT_MAIN.equals(segment)
+        || ATTACHMENTS_SEGMENT_COUNT.equals(segment);
+  }
+
+  /**
+   * Handles the GET-only record sub-resources
+   * {@code /attachments/{tableName}/{recordId}/zip|main|count}; any other verb gets
+   * {@code 405 "Attachments <subresource> endpoint only supports GET"}.
+   */
+  private void handleAttachmentsGetOnlySubresource(String subresource, String tableName,
+      String recordId, String method, HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Attachments " + subresource + " endpoint only supports GET");
+      return;
+    }
+    if (ATTACHMENTS_SEGMENT_ZIP.equals(subresource)) {
+      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId, response);
+    } else if (ATTACHMENTS_SEGMENT_MAIN.equals(subresource)) {
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
+    } else {
+      // count — same (servlet-level) authorization as the list GET: reads are not tier-checked.
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleCount(tableName, recordId));
+    }
   }
 
   /**
