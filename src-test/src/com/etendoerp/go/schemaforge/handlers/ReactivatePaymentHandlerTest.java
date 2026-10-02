@@ -1307,11 +1307,11 @@ public class ReactivatePaymentHandlerTest {
 
   /**
    * Runs {@code fieldName} on another tenant's ETGOERR-flagged payment, called on the handler
-   * directly — as if the action path's guard had been bypassed.
+   * directly — as if the action path's guard had been bypassed. The caller keeps the
+   * {@link NeoButtonActionHelper} and {@link PaymentRemovalUtil} static mocks open around it.
    */
   private static NeoResponse runOnForeignPayment(String fieldName, FIN_Payment[] paymentOut,
-      OBDal[] dalOut, MockedStatic<NeoButtonActionHelper> buttons,
-      MockedStatic<PaymentRemovalUtil> removal) {
+      OBDal[] dalOut) {
     Client other = mock(Client.class);
     when(other.getId()).thenReturn("client-other");
     FIN_Payment payment = mock(FIN_Payment.class);
@@ -1341,7 +1341,7 @@ public class ReactivatePaymentHandlerTest {
     try (MockedStatic<NeoButtonActionHelper> buttons =
              Mockito.mockStatic(NeoButtonActionHelper.class);
         MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class)) {
-      NeoResponse result = runOnForeignPayment(fieldName, payment, dal, buttons, removal);
+      NeoResponse result = runOnForeignPayment(fieldName, payment, dal);
 
       assertEquals(fieldName, 404, result.getHttpStatus());
       try {

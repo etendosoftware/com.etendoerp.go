@@ -520,8 +520,7 @@ class McpWindowDeclaredActionsTest {
 
     // ── ETP-5558 (a1a863f83): the record-ownership guard on the MCP action path ──
 
-    private JSONObject actOn(String recordId, NeoResponse guardAnswer,
-        MockedStatic<NeoExtensionDispatcher> dispatch) throws Exception {
+    private JSONObject actOn(String recordId, NeoResponse guardAnswer) throws Exception {
       current = entity("W", null);
       // McpToolRouterSupport is statically mocked on this path, private helpers included, so the
       // conversion is asserted by its arguments (a 404 carrying the guard's body) rather than run.
@@ -543,8 +542,7 @@ class McpWindowDeclaredActionsTest {
     void foreignRecordIsRefused() throws Exception {
       try (MockedStatic<NeoExtensionDispatcher> dispatch =
                mockStatic(NeoExtensionDispatcher.class)) {
-        JSONObject result = actOn("INV-FOREIGN", NeoResponse.error(404, "Record not found"),
-            dispatch);
+        JSONObject result = actOn("INV-FOREIGN", NeoResponse.error(404, "Record not found"));
 
         assertTrue(result.getBoolean("isError"), result.toString());
         JSONObject env = new JSONObject(result.getJSONArray("content").getJSONObject(0)
@@ -569,7 +567,7 @@ class McpWindowDeclaredActionsTest {
         dispatch.when(() -> NeoExtensionDispatcher.dispatch(any())).thenReturn(
             new NeoExtensionResult(null, NeoResponse.ok(new JSONObject().put("ran", true)), null));
 
-        JSONObject result = actOn("INV-OWN", null, dispatch);
+        JSONObject result = actOn("INV-OWN", null);
 
         assertFalse(result.has("isError"), result.toString());
         assertTrue(result.toString().contains("ran"), result.toString());
