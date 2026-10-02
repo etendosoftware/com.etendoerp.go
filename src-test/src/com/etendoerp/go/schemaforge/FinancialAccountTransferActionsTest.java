@@ -128,6 +128,7 @@ class FinancialAccountTransferActionsTest {
     Currency c = mock(Currency.class);
     when(c.getId()).thenReturn(currencyId);
     when(c.getISOCode()).thenReturn(iso);
+    when(c.getStandardPrecision()).thenReturn(2L);
     when(a.getCurrency()).thenReturn(c);
     when(a.getClient()).thenReturn(mock(Client.class));
     when(a.getOrganization()).thenReturn(mock(Organization.class));
@@ -269,8 +270,17 @@ class FinancialAccountTransferActionsTest {
     void systemRate() throws Exception {
       NeoResponse r = actions.handle(transferCtx(ten().put("destinationAccountId", USD_DEST)));
       assertEquals("1.1", onlyCall().getRequestBody().getString("conversionRate"));
-      assertEquals(0, new BigDecimal("11.0").compareTo(
-          new BigDecimal(data(r).getString("amountReceived"))));
+      assertEquals("11.00", data(r).getString("amountReceived"));
+    }
+
+    @Test
+    @DisplayName("amountReceived is rounded to the destination's precision (10.0000017 -> 10.00)")
+    void receivedRounded() throws Exception {
+      // Live check of 2026-10-01: 11.70 USD back at today's system rate answered 10.0000017.
+      NeoResponse r = actions.handle(transferCtx(ten().put("destinationAccountId", USD_DEST)
+          .put("amount", "11.70").put("conversionRate", "0.854700999")));
+      assertEquals("10.00", data(r).getString("amountReceived"));
+      assertEquals("11.70", data(r).getString("amount"), "the amount as sent");
     }
 
     @Test

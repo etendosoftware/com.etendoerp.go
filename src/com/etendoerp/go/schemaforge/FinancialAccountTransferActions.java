@@ -338,10 +338,21 @@ class FinancialAccountTransferActions {
     data.put(P_AMOUNT, amount);
     data.put("date", date.toString());
     data.put(P_CONVERSION_RATE, rate != null ? rate : BigDecimal.ONE);
-    data.put("amountReceived", rate != null ? amount.multiply(rate) : amount);
+    data.put("amountReceived", received(destination, rate != null ? amount.multiply(rate) : amount));
     data.put("hint", "listMovements on either account shows the two movements (transferTxnId "
         + "links them). A transfer is not deleted: undo it with a transfer back.");
     return NeoResponse.createdWithData(data);
+  }
+
+  /**
+   * What arrives, rounded to the destination currency's precision as the movement stores it: a
+   * rate like 1/1.17 otherwise answered 10.0000017 for the 10.00 the database holds.
+   */
+  static BigDecimal received(FIN_FinancialAccount destination, BigDecimal raw) {
+    Long precision = destination.getCurrency() == null ? null
+        : destination.getCurrency().getStandardPrecision();
+    return precision == null ? raw
+        : raw.setScale(precision.intValue(), java.math.RoundingMode.HALF_UP);
   }
 
   private BigDecimal systemRate(FIN_FinancialAccount from, FIN_FinancialAccount to,
