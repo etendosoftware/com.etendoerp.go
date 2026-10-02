@@ -933,6 +933,11 @@ public class Fiscal303BoxesHandlerTest {
   /**
    * Difference/IntracommunitySales must populate box 59 (base only, taxBox=0).
    * box[93] must mirror box[59] when box[59] > 0.
+   *
+   * <p>Box 59 has no dedicated correction-pair box, so it is computed with
+   * {@link InvoiceType#ALL} in a single pass (mirrors Classic's
+   * {@code AEAT303Report2014#generatePage3}) rather than {@code ONLY_NORMAL} — this
+   * amount already represents normal + corrective invoices combined.
    */
   @Test
   public void testComputeBoxes_intracommunitySales_mapsToBox59andMirror93() {
@@ -952,7 +957,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
         .thenReturn(amounts("2300.00", "0.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -962,8 +967,52 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
+   * ETP — rectificativa/nota-de-crédito regression: a corrective customer intracommunity-sales
+   * invoice must land in box 59, exactly like the already-worked normal-invoice case above.
+   * Before the fix, {@code fillGroupBoxes} was hardcoded to {@code InvoiceType.ONLY_NORMAL} for
+   * this group, so {@code calculateAmountsMap} was never even invoked with {@code ALL} and the
+   * corrective amount was silently dropped (no error, no log). Asserting the call uses
+   * {@code InvoiceType.ALL} — which folds normal + corrective (positive and negative) into one
+   * amount — is the regression guard: a return to {@code ONLY_NORMAL} makes this mock unmatched
+   * and the box empty.
+   */
+  @Test
+  public void testComputeBoxes_intracommunitySales_correctiveInvoiceIncludedInBox59() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("IntracommunitySales")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // Normal invoice: 2000.00. Corrective (negative) invoice: -300.00. ALL combines both.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("1700.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("1700.00", result.boxes.get(59));
+    assertBd("1700.00", result.boxes.get(93));
+    // Never falls back to the old ONLY_NORMAL-only call for this group.
+    verify(helper, never())
+        .calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+  }
+
+  /**
    * Difference/ExportsAndOperations must populate box 60 (base only, taxBox=0).
    * box[94] must mirror box[60] when box[60] > 0.
+   *
+   * <p>Box 60 has no dedicated correction-pair box either, so it is computed with
+   * {@link InvoiceType#ALL} in a single pass, same as box 59 above.
    */
   @Test
   public void testComputeBoxes_exportsAndOps_mapsToBox60andMirror94() {
@@ -983,13 +1032,48 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
         .thenReturn(amounts("3600.00", "0.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
 
     assertBd("3600.00", result.boxes.get(60));
     assertBd("3600.00", result.boxes.get(94));
+  }
+
+  /**
+   * ETP — rectificativa/nota-de-crédito regression for box 60 (exports), same shape as the
+   * box 59 regression test above: a corrective invoice must be folded into box 60 via
+   * {@code InvoiceType.ALL}, never dropped by a hardcoded {@code ONLY_NORMAL} call.
+   */
+  @Test
+  public void testComputeBoxes_exportsAndOps_correctiveInvoiceIncludedInBox60() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("ExportsAndOperations")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // Normal invoice: 4000.00. Corrective (negative) invoice: -400.00. ALL combines both.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("3600.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("3600.00", result.boxes.get(60));
+    assertBd("3600.00", result.boxes.get(94));
+    verify(helper, never())
+        .calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
   }
 
   /**
