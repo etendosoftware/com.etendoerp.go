@@ -91,7 +91,7 @@ class NeoServletSupport {
       NeoCrudHandler crudHandler, NeoExtensionChannel channel) {
     // A lambda, not crudHandler::handleDefault: the reference is only dereferenced when the
     // default step actually runs, as before.
-    return handleWithHooks(javaQualifier, context, ctx -> crudHandler.handleDefault(ctx),
+    return handleWithDefaultStep(javaQualifier, context, ctx -> crudHandler.handleDefault(ctx),
         channel);
   }
 
@@ -104,7 +104,7 @@ class NeoServletSupport {
    *
    * @param defaultStep what runs when there is no customization, or when it declines
    */
-  static NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
+  static NeoResponse handleWithDefaultStep(String javaQualifier, NeoContext context,
       Function<NeoContext, NeoResponse> defaultStep, NeoExtensionChannel channel) {
     try {
       NeoExtensionRequest request = NeoExtensionRequest.builder()

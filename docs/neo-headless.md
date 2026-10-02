@@ -2202,7 +2202,7 @@ does not either. Posting stays on `financial-account/transaction` (`post` / `unp
 **Same pipeline as the SPA's request.** The movement and transfer actions (§4.12.1.5) reach the
 endpoint through `FinancialAccountTransactionsEndpoint`: the spec's customization is resolved from
 its `Java_Qualifier` by `NeoExtensionDispatcher` (so an `@NeoExtension` or a replaced bean serves
-the agent as it serves the SPA) and run by `NeoServletSupport.handleWithHooks` — the same
+the agent as it serves the SPA) and run by `NeoServletSupport.handleWithDefaultStep` — the same
 `handle`, error short-circuit, `afterHandle` and audit-token refresh `NeoRequestRouter` runs for
 REST, traced on the MCP channel for an agent. They used to call
 `new FinancialAccountTransactionsHandler().handle(...)` directly. A spec without a customization

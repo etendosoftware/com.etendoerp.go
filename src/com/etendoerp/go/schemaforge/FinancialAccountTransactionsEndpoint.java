@@ -28,8 +28,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * {@code handle} directly, which skipped {@link NeoExtensionDispatcher}: no trace, no
  * {@code afterHandle}, no CDI resolution — an {@code @NeoExtension} or a replaced bean would have
  * served the SPA and been bypassed by the agent. Now the spec's customization is resolved by its
- * {@code Java_Qualifier} and run through {@link NeoServletSupport#handleWithHooks}, the pipeline
- * {@code NeoRequestRouter.dispatchReportHandler} runs for the SPA. The SPA's own request does not
+ * {@code Java_Qualifier} and run through {@link NeoServletSupport#handleWithDefaultStep}, the
+ * pipeline {@code NeoRequestRouter.dispatchReportHandler} runs for the SPA. The SPA's own request does not
  * pass here, so it is unchanged.</p>
  */
 final class FinancialAccountTransactionsEndpoint {
@@ -54,7 +54,7 @@ final class FinancialAccountTransactionsEndpoint {
     SFSpec spec = NeoServletSupport.findSpec(SPEC);
     String qualifier = spec == null ? null
         : NeoReportCallability.resolveReportHandlerQualifier(spec);
-    return NeoServletSupport.handleWithHooks(qualifier, context,
+    return NeoServletSupport.handleWithDefaultStep(qualifier, context,
         ctx -> NeoResponse.error(500, MSG_NOT_CONFIGURED),
         context.isMcpOrigin() ? NeoExtensionChannel.MCP : NeoExtensionChannel.REST_SINGLE);
   }
