@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
@@ -76,6 +79,31 @@ final class PaymentOwnership {
       return null;
     }
     return StringUtils.equals(schedule.getInvoice().getId(), invoice.getId()) ? schedule : null;
+  }
+
+  /**
+   * The 404 for an installment or an edited draft that is not this invoice's, or {@code null}.
+   *
+   * @param body       the request body; its {@code paymentId}, when present, is the draft edited
+   * @param invoice    the invoice, already owned by the caller
+   * @param scheduleId the installment the request pays
+   * @return the refusal, or {@code null} when both belong to the invoice
+   */
+  static NeoResponse refusalFor(JSONObject body, Invoice invoice, String scheduleId) {
+    // ETP-5558: the installment must be one of THIS invoice's, readable by the caller.
+    if (scheduleOf(scheduleId, invoice) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
+    }
+    // ETP-5558: the draft being edited is checked HERE, before any side effect — a PIS confirm
+    // instructs the bank transfer long before resolveOrCreatePayment runs, so a foreign or stale
+    // id must not get that far (money would move and only the replay would answer 404).
+    String requestedEditId = body.optString(PaymentRegistrationService.KEY_PAYMENT_ID, null);
+    if (StringUtils.isNotBlank(requestedEditId)
+        && invoicePayment(requestedEditId, invoice.getId()) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          PaymentRegistrationService.MSG_PAYMENT_NOT_FOUND);
+    }
+    return null;
   }
 
   /** @return whether both have a business partner and it is the same one */

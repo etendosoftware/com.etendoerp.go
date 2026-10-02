@@ -1490,7 +1490,13 @@ public class McpToolRouter {
     McpParentScope.publishInto(entitySchema, parentScope);
     McpParentScope.publishConfigError(entitySchema, sfEntity);
 
-    putFiltersAndFields(entitySchema, sfEntity, fieldsArray, unknownFields);
+    McpNamedFilters.publishInto(entitySchema, sfEntity.getNamedFilters());
+
+    entitySchema.put("fields", fieldsArray);
+    entitySchema.put("fieldCount", fieldsArray.length());
+    if (unknownFields.length() > 0) {
+      entitySchema.put("unknownFields", unknownFields);
+    }
 
     // Usage hints
     // IMP-28: `visibility` is the authoritative key for what you may send — `readOnly` is ORed
@@ -1526,27 +1532,6 @@ public class McpToolRouter {
         + McpConstants.RECORD_REF_NOTE);
 
     return wrapAsTextContent(entitySchema);
-  }
-
-  /**
-   * The full dump's named filters, fields and field count, plus the requested names that matched
-   * no field.
-   */
-  private static void putFiltersAndFields(JSONObject entitySchema, SFEntity sfEntity,
-      JSONArray fieldsArray, JSONArray unknownFields) throws JSONException {
-    // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
-    // each keyed by name, so the agent can discover them instead of guessing. Only the
-    // name/label/description are exposed — the HQL where fragment stays server-side.
-    JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
-    if (namedFilters.length() > 0) {
-      entitySchema.put("namedFilters", namedFilters);
-    }
-
-    entitySchema.put("fields", fieldsArray);
-    entitySchema.put("fieldCount", fieldsArray.length());
-    if (unknownFields.length() > 0) {
-      entitySchema.put("unknownFields", unknownFields);
-    }
   }
 
   static String mapColumnTypeStatic(String refId) {
