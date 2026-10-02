@@ -2428,7 +2428,7 @@ reference.
 the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
 agent it meant a raw DAL payload — `{"response":{"status":-4,"errors":{…}}}` — with no stable code to
 branch on. The MCP layer therefore rewrites the failure in place
-(`McpToolRouterSupport.toMcpBatchFailure`) into the same envelope every other MCP error uses, while
+(`McpBatchEnvelope.toMcpBatchFailure`) into the same envelope every other MCP error uses, while
 the REST contract stays untouched:
 
 ```json

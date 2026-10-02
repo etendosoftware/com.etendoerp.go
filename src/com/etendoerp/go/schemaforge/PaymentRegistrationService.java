@@ -559,6 +559,31 @@ public final class PaymentRegistrationService {
   // ─── ADVANCED: draft/confirm + payment method + credit consumption ─────────
 
   /**
+   * The 404 for an installment or an edited draft that is not this invoice's, or {@code null}.
+   *
+   * @param body       the request body; its {@code paymentId}, when present, is the draft edited
+   * @param invoice    the invoice, already owned by the caller
+   * @param scheduleId the installment the request pays
+   * @return the refusal, or {@code null} when both belong to the invoice
+   */
+  private static NeoResponse refuseForeignScheduleOrDraft(JSONObject body, Invoice invoice,
+      String scheduleId) {
+    // ETP-5558: the installment must be one of THIS invoice's, readable by the caller.
+    if (PaymentOwnership.scheduleOf(scheduleId, invoice) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
+    }
+    // ETP-5558: the draft being edited is checked HERE, before any side effect — a PIS confirm
+    // instructs the bank transfer long before resolveOrCreatePayment runs, so a foreign or stale
+    // id must not get that far (money would move and only the replay would answer 404).
+    String requestedEditId = body.optString(KEY_PAYMENT_ID, null);
+    if (StringUtils.isNotBlank(requestedEditId)
+        && PaymentOwnership.invoicePayment(requestedEditId, invoice.getId()) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
+    }
+    return null;
+  }
+
+  /**
    * Two-step modal payment registration. Mirrors the proven Add-Payment sequence:
    * create the payment, consume the selected credit/abono PSDs as negative details,
    * apply the cash-funded portion to the invoice installment, and — when confirming —
@@ -591,17 +616,9 @@ public final class PaymentRegistrationService {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
     }
     String scheduleId = body.optString("scheduleId", null);
-    // ETP-5558: the installment must be one of THIS invoice's, readable by the caller.
-    if (PaymentOwnership.scheduleOf(scheduleId, invoice) == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
-    }
-    // ETP-5558: the draft being edited is checked HERE, before any side effect — a PIS confirm
-    // instructs the bank transfer long before resolveOrCreatePayment runs, so a foreign or stale
-    // id must not get that far (money would move and only the replay would answer 404).
-    String requestedEditId = body.optString(KEY_PAYMENT_ID, null);
-    if (StringUtils.isNotBlank(requestedEditId)
-        && PaymentOwnership.invoicePayment(requestedEditId, invoice.getId()) == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
+    NeoResponse notOwned = refuseForeignScheduleOrDraft(body, invoice, scheduleId);
+    if (notOwned != null) {
+      return notOwned;
     }
     BigDecimal cash;
     try {

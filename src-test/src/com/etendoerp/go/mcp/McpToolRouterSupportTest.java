@@ -2138,7 +2138,7 @@ class McpToolRouterSupportTest {
     @Test
     @DisplayName("replaces the raw DAL detail with the IMP-5 envelope, keeping the failedAt pointer")
     void rewritesTheFailure() throws Exception {
-      JSONObject result = McpToolRouterSupport.toMcpBatchFailure(rawDalFailure());
+      JSONObject result = McpBatchEnvelope.toMcpBatchFailure(rawDalFailure());
 
       JSONObject error = result.getJSONObject("error");
       assertEquals(400, error.getInt("status"));
@@ -2179,7 +2179,7 @@ class McpToolRouterSupportTest {
       body.put("committed", false);
       body.put("error", error);
 
-      JSONObject result = McpToolRouterSupport.toMcpBatchFailure(body);
+      JSONObject result = McpBatchEnvelope.toMcpBatchFailure(body);
 
       JSONObject mapped = result.getJSONObject("error");
       assertEquals(422, mapped.getInt("status"));
@@ -2205,9 +2205,9 @@ class McpToolRouterSupportTest {
       envelope.put("detail", "Cannot create 'lines' of 'payment-out' through MCP: ...");
       envelope.put("hint", "Do not retry this create.");
       envelope.put("field", "parentId");
-      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(envelope, 0, "l0");
+      JSONObject body = McpBatchEnvelope.toMcpBatchPreflightFailure(envelope, 0, "l0");
 
-      JSONObject error = McpToolRouterSupport.toMcpBatchFailure(body).getJSONObject("error");
+      JSONObject error = McpBatchEnvelope.toMcpBatchFailure(body).getJSONObject("error");
 
       assertEquals(422, error.getInt("status"));
       assertEquals("parent_unresolvable", error.getString("error"));
@@ -2233,7 +2233,7 @@ class McpToolRouterSupportTest {
       envelope.put("error", code);
       envelope.put("hint", "Do not retry this call.");
 
-      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(envelope, 2, "l2");
+      JSONObject body = McpBatchEnvelope.toMcpBatchPreflightFailure(envelope, 2, "l2");
 
       String hint = body.getString("hint");
       assertFalse(hint.contains("retry the whole batch"), hint);
@@ -2248,7 +2248,7 @@ class McpToolRouterSupportTest {
       envelope.put("status", 422);
       envelope.put("error", "read_only_field");
 
-      String hint = McpToolRouterSupport.toMcpBatchPreflightFailure(envelope, 0, null)
+      String hint = McpBatchEnvelope.toMcpBatchPreflightFailure(envelope, 0, null)
           .getString("hint");
       assertTrue(hint.contains("retry the whole batch"), hint);
     }
@@ -2258,12 +2258,12 @@ class McpToolRouterSupportTest {
     void passesThroughNonFailures() throws Exception {
       JSONObject committed = new JSONObject();
       committed.put("committed", true);
-      assertTrue(McpToolRouterSupport.toMcpBatchFailure(committed).getBoolean("committed"));
+      assertTrue(McpBatchEnvelope.toMcpBatchFailure(committed).getBoolean("committed"));
 
       JSONObject noError = new JSONObject();
       noError.put("committed", false);
-      assertNull(McpToolRouterSupport.toMcpBatchFailure(noError).optJSONObject("error"));
-      assertNull(McpToolRouterSupport.toMcpBatchFailure(null));
+      assertNull(McpBatchEnvelope.toMcpBatchFailure(noError).optJSONObject("error"));
+      assertNull(McpBatchEnvelope.toMcpBatchFailure(null));
     }
 
     @Test
@@ -2423,7 +2423,7 @@ class McpToolRouterSupportTest {
     @Test
     @DisplayName("carries committed:false, the key an agent is told to branch on")
     void carriesCommitted() throws Exception {
-      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 1, "l1");
+      JSONObject body = McpBatchEnvelope.toMcpBatchPreflightFailure(fkError(), 1, "l1");
 
       // The whole of clause (i): this key was absent, so an agent following neo_batch's own
       // documented contract read false from a missing key by luck rather than by promise.
@@ -2438,7 +2438,7 @@ class McpToolRouterSupportTest {
     @Test
     @DisplayName("claims atomic:true with an empty persisted list — true by construction here")
     void claimsAtomicity() throws Exception {
-      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 0, "h0");
+      JSONObject body = McpBatchEnvelope.toMcpBatchPreflightFailure(fkError(), 0, "h0");
 
       // Stronger than executeBatch can promise: the pre-pass runs before the transaction opens,
       // so nothing can have persisted. IMP-23 §1 found that this is exactly why FK failures
@@ -2452,16 +2452,16 @@ class McpToolRouterSupportTest {
     @Test
     @DisplayName("omits the failedAt id when the operation declared none")
     void omitsBlankOpId() throws Exception {
-      assertFalse(McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 2, null)
+      assertFalse(McpBatchEnvelope.toMcpBatchPreflightFailure(fkError(), 2, null)
           .getJSONObject("failedAt").has("id"));
-      assertFalse(McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 2, "  ")
+      assertFalse(McpBatchEnvelope.toMcpBatchPreflightFailure(fkError(), 2, "  ")
           .getJSONObject("failedAt").has("id"));
     }
 
     @Test
     @DisplayName("matches the outcome keys BatchService itself defines")
     void usesBatchServiceKeys() throws Exception {
-      JSONObject body = McpToolRouterSupport.toMcpBatchPreflightFailure(fkError(), 0, "h0");
+      JSONObject body = McpBatchEnvelope.toMcpBatchPreflightFailure(fkError(), 0, "h0");
 
       // Pins the shared-constant decision rather than the literals: if BatchService renames an
       // outcome key, this fails here instead of drifting silently in a response body.

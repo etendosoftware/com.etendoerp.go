@@ -1490,19 +1490,7 @@ public class McpToolRouter {
     McpParentScope.publishInto(entitySchema, parentScope);
     McpParentScope.publishConfigError(entitySchema, sfEntity);
 
-    // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
-    // each keyed by name, so the agent can discover them instead of guessing. Only the
-    // name/label/description are exposed — the HQL where fragment stays server-side.
-    JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
-    if (namedFilters.length() > 0) {
-      entitySchema.put("namedFilters", namedFilters);
-    }
-
-    entitySchema.put("fields", fieldsArray);
-    entitySchema.put("fieldCount", fieldsArray.length());
-    if (unknownFields.length() > 0) {
-      entitySchema.put("unknownFields", unknownFields);
-    }
+    putFiltersAndFields(entitySchema, sfEntity, fieldsArray, unknownFields);
 
     // Usage hints
     // IMP-28: `visibility` is the authoritative key for what you may send — `readOnly` is ORed
@@ -1538,6 +1526,27 @@ public class McpToolRouter {
         + McpConstants.RECORD_REF_NOTE);
 
     return wrapAsTextContent(entitySchema);
+  }
+
+  /**
+   * The full dump's named filters, fields and field count, plus the requested names that matched
+   * no field.
+   */
+  private static void putFiltersAndFields(JSONObject entitySchema, SFEntity sfEntity,
+      JSONArray fieldsArray, JSONArray unknownFields) throws JSONException {
+    // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
+    // each keyed by name, so the agent can discover them instead of guessing. Only the
+    // name/label/description are exposed — the HQL where fragment stays server-side.
+    JSONArray namedFilters = McpNamedFilters.describe(sfEntity.getNamedFilters());
+    if (namedFilters.length() > 0) {
+      entitySchema.put("namedFilters", namedFilters);
+    }
+
+    entitySchema.put("fields", fieldsArray);
+    entitySchema.put("fieldCount", fieldsArray.length());
+    if (unknownFields.length() > 0) {
+      entitySchema.put("unknownFields", unknownFields);
+    }
   }
 
   static String mapColumnTypeStatic(String refId) {
@@ -1604,7 +1613,7 @@ public class McpToolRouter {
       if (!result.optBoolean("committed", false)) {
         // IMP-15: rewrite the failure in place into the IMP-5 envelope, so an agent gets a stable
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
-        McpToolRouterSupport.toMcpBatchFailure(result);
+        McpBatchEnvelope.toMcpBatchFailure(result);
       }
       return wrapAsTextContent(result);
     } catch (SecurityException e) {
@@ -1668,7 +1677,7 @@ public class McpToolRouter {
    *
    * @param op the operation about to be written
    * @return {@code null} when the body is ready to write, or the full batch outcome envelope built
-   *         by {@link McpToolRouterSupport#toMcpBatchPreflightFailure(JSONObject, int, String)},
+   *         by {@link McpBatchEnvelope#toMcpBatchPreflightFailure(JSONObject, int, String)},
    *         which carries {@code committed:false} and the {@code failedAt} pointer so the agent
    *         reads this rejection exactly as it reads a failure from inside the batch (IMP-5
    *         clause (i))
@@ -1722,7 +1731,7 @@ public class McpToolRouter {
       // single-tool response, and the batch envelope needs the object to nest under 'error'.
       JSONObject gateError = e.toEnvelope();
       gateError.put(McpConstants.KEY_TOOL, TOOL_NEO_BATCH);
-      return McpToolRouterSupport.toMcpBatchPreflightFailure(gateError, op.index(), op.opId());
+      return McpBatchEnvelope.toMcpBatchPreflightFailure(gateError, op.index(), op.opId());
     }
 
     // This runs before any defaults pass has touched the body, so here a present uOM really is
@@ -1732,7 +1741,7 @@ public class McpToolRouter {
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
         value -> value.startsWith(BatchService.REF_PREFIX));
     if (fkError != null) {
-      return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, op.index(), op.opId());
+      return McpBatchEnvelope.toMcpBatchPreflightFailure(fkError, op.index(), op.opId());
     }
     // ETP-5335: same derivation neo_create runs, and it must run here too — neo_batch never
     // reaches handleCreate, so without this a batched document is persisted with a null bill-to
@@ -1762,7 +1771,7 @@ public class McpToolRouter {
     // must not have two shapes depending on which funnel caught it (IMP-5).
     JSONObject imageError = McpImageFieldSupport.validateImageFields(body, adTab, dalEntity);
     if (imageError != null) {
-      return McpToolRouterSupport.toMcpBatchPreflightFailure(imageError, op.index(), op.opId());
+      return McpBatchEnvelope.toMcpBatchPreflightFailure(imageError, op.index(), op.opId());
     }
     return null;
   }

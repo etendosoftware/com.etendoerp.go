@@ -67,11 +67,11 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  *   <li>the date-write rejection descriptors (IMP-16 / IMP-24) — backs
  *       {@code coercePrimitiveFieldValue}'s date branch;</li>
  *   <li>batch/DAL error-message extraction (IMP-15 / IMP-17) — backs
- *       {@code toMcpBatchFailure}.</li>
+ *       {@code toMcpBatchFailure}, now on {@link McpBatchEnvelope} (ETP-5558).</li>
  * </ul>
  *
- * <p>Package-private visibility throughout: every caller lives in {@code McpToolRouterSupport},
- * in the same package.
+ * <p>Package-private visibility throughout: every caller lives in {@code McpToolRouterSupport}
+ * or {@link McpBatchEnvelope}, in the same package.
  */
 final class McpSupportInternals {
 

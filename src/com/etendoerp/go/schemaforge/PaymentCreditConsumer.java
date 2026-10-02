@@ -42,6 +42,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  */
 final class PaymentCreditConsumer {
 
+  /** Opens every refusal of a funding source that is missing or not the caller's. */
+  private static final String MSG_CREDIT_SOURCE_NOT_FOUND = "Credit source not found: ";
+
   private PaymentCreditConsumer() {
   }
 
@@ -130,7 +133,7 @@ final class PaymentCreditConsumer {
     FIN_PaymentScheduleDetail psd = TenantOwnership.loadOwned(FIN_PaymentScheduleDetail.class,
         psdId);
     if (psd == null) {
-      throw new OBException("Credit source not found: " + psdId);
+      throw new OBException(MSG_CREDIT_SOURCE_NOT_FOUND + psdId);
     }
     validateAbonoEligible(payment, psd);
     FIN_AddPayment.updatePaymentDetail(psd, payment, use.negate(), false);
@@ -159,12 +162,12 @@ final class PaymentCreditConsumer {
     Invoice invoice = psd.getInvoicePaymentSchedule() != null
         ? psd.getInvoicePaymentSchedule().getInvoice() : null;
     if (invoice == null) {
-      throw new OBException("Credit source not found: " + psd.getId());
+      throw new OBException(MSG_CREDIT_SOURCE_NOT_FOUND + psd.getId());
     }
     // ETP-5558: a credit note of another business partner is not this payment's to spend.
     if (!PaymentOwnership.sameBusinessPartner(invoice.getBusinessPartner(),
         payment.getBusinessPartner())) {
-      throw new OBException("Credit source not found: " + psd.getId());
+      throw new OBException(MSG_CREDIT_SOURCE_NOT_FOUND + psd.getId());
     }
     boolean negativeTotal = invoice.getGrandTotalAmount() != null
         && invoice.getGrandTotalAmount().signum() < 0;
