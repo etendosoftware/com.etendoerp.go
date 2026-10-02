@@ -1077,6 +1077,97 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
+   * QA (ETP-5596, Alex/REVIEW suggestion S1) — box 59 AND box 60 populated together in the SAME
+   * {@code computeBoxes()} call. Both boxes are filled by two independent {@code fillGroupBoxes}
+   * calls inside {@code fillAdditionalInfoBoxes}; a regression that makes one call overwrite or
+   * clear the other's entry (e.g. accidentally reusing a mutable map/key) would not be caught by
+   * the box-59-only and box-60-only tests above, since each of those only ever populates one of
+   * the two groups.
+   */
+  @Test
+  public void testComputeBoxes_intracomSalesAndExports_bothBoxesPopulatedTogether() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter box59Param = mock(TaxReportParameter.class);
+    TaxRate box59Rate = mock(TaxRate.class);
+    when(box59Rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("IntracommunitySales")))
+        .thenReturn(box59Param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(box59Param)))
+        .thenReturn(Collections.singletonList(box59Rate));
+
+    TaxReportParameter box60Param = mock(TaxReportParameter.class);
+    TaxRate box60Rate = mock(TaxRate.class);
+    when(box60Rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("ExportsAndOperations")))
+        .thenReturn(box60Param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(box60Param)))
+        .thenReturn(Collections.singletonList(box60Rate));
+
+    // Distinct amounts per call so a cross-contamination bug (box 60 picking up box 59's
+    // amount or vice-versa) is visible rather than coincidentally matching.
+    when(helper.calculateAmountsMap(eq(Collections.singletonList(box59Rate)), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("2300.00", "0.00"));
+    when(helper.calculateAmountsMap(eq(Collections.singletonList(box60Rate)), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("3600.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("2300.00", result.boxes.get(59));
+    assertBd("2300.00", result.boxes.get(93));
+    assertBd("3600.00", result.boxes.get(60));
+    assertBd("3600.00", result.boxes.get(94));
+  }
+
+  /**
+   * QA (ETP-5596, Alex/REVIEW suggestion S2) — a normal intracommunity-sales invoice fully offset
+   * by an exact-opposite corrective (net = 0.00). {@code addToBox} skips zero values ({@code
+   * val.compareTo(BigDecimal.ZERO) == 0}) by design — see {@code
+   * testComputeBoxes_sale0pct_mapsToBox150_box152Absent} for the same documented behavior on box
+   * 152 — so box 59 is correctly OMITTED from the map rather than stored as an explicit zero.
+   * Assert the net-zero case via {@code getOrDefault(59, ZERO)} (what a caller reading the box
+   * value must do), not a bare {@code boxes.get(59)}, which would be {@code null} here and is
+   * NOT a bug.
+   */
+  @Test
+  public void testComputeBoxes_intracommunitySales_zeroNetCorrectiveOmitsBoxNotZero() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("IntracommunitySales")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // Normal invoice: 500.00. Corrective (exact opposite): -500.00. ALL nets to exactly 0.00.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("0.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("zero-net box 59 must be omitted from the map, not stored as an explicit 0",
+        result.boxes.get(59));
+    assertBd("0.00", result.boxes.getOrDefault(59, BigDecimal.ZERO));
+    // box 93 mirrors box 59 only when box 59 > 0 (see computeSummaryBoxes) — must also be absent.
+    assertNull(result.boxes.get(93));
+  }
+
+  /**
    * With a 21% sale and a Normal_Operations purchase active simultaneously,
    * box[27] = 210, box[45] = 105, box[46] = 105.
    * Mockito sequential thenReturn handles the two calculateAmountsMap call order:
