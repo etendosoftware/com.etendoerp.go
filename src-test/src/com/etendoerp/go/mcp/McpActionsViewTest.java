@@ -20,12 +20,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+
+import com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link McpActionsView} — the pure re-shaper behind
@@ -161,6 +170,49 @@ class McpActionsViewTest {
 
       assertEquals(1, response.getInt("actionCount"));
       assertEquals(0, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+    }
+
+    /**
+     * ETP-5535: a window entity whose customization declares actions next to its AD buttons gets
+     * them appended after the buttons. The real {@link SalesQuotationHeaderHandler} declaration is
+     * used, so a drift in what the quotation publishes (or its order) shows up here.
+     */
+    @Test
+    @DisplayName("4-arg: declared actions follow the buttons, are counted, and carry a hint")
+    void appendsDeclaredActionsAfterButtons() throws JSONException {
+      Map<String, NeoActionContract> declared =
+          new SalesQuotationHeaderHandler().actionContracts();
+
+      JSONObject response = McpActionsView.buildResponse("sales-quotation", "quotation",
+          sampleFields(), declared);
+
+      JSONArray actions = response.getJSONArray(McpActionsView.KEY_ACTIONS);
+      List<String> names = new ArrayList<>();
+      for (int i = 0; i < actions.length(); i++) {
+        JSONObject action = actions.getJSONObject(i);
+        names.add(action.has("name") ? action.getString("name") : action.getString("action"));
+      }
+      assertEquals(List.of("completeAction", "cancelAction", "rejectQuotation",
+          "createRejectReason"), names);
+      assertTrue(actions.getJSONObject(2).has("parameters"));
+      assertEquals(4, response.getInt("actionCount"));
+      assertEquals(4, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
+      assertTrue(response.getString("declaredActionsHint").contains("neo_action"));
+    }
+
+    /** With nothing declared the 4-arg call is the 3-arg one: no extra entry, no hint. */
+    @Test
+    @DisplayName("4-arg: a null or empty declaration renders exactly the 3-arg response")
+    void nullOrEmptyDeclarationIsTheThreeArgResponse() throws JSONException {
+      String threeArg = McpActionsView.buildResponse("sales-order", "header", sampleFields())
+          .toString();
+      for (Map<String, NeoActionContract> declared : Arrays.asList(
+          null, Collections.<String, NeoActionContract>emptyMap())) {
+        JSONObject response = McpActionsView.buildResponse("sales-order", "header",
+            sampleFields(), declared);
+        assertEquals(threeArg, response.toString(), String.valueOf(declared));
+        assertFalse(response.has("declaredActionsHint"));
+      }
     }
   }
 }

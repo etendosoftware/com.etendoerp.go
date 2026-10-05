@@ -618,7 +618,7 @@ class TemplateRoleWindowAccessTest {
    * {@code EnsureSystemRoleTemplatesScript}'s own per-run reconciliation safe to re-invoke without
    * accumulating state between roles/runs; the DB-level "running the reconciliation twice creates
    * no duplicate row" guarantee itself lives in that class's {@code upsertObuiappProcessAccess}/
-   * {@code removeStaleStandaloneProcessAccess} and is exercised there, not here (this class has no
+   * {@code dedupeObuiappProcessAccess} and is exercised there, not here (this class has no
    * {@code ConnectionProvider} at all — see class javadoc).
    */
   @Test
