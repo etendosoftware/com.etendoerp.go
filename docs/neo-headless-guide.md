@@ -1214,6 +1214,9 @@ procedurename IS NULL` y que no hay otra via. Ver el javadoc de la clase
 - Registra paths para cada spec (Window, Process, Report)
 - Se descubre via CDI (`beans.xml` bean-discovery-mode="all")
 - Incluye schemas, parametros, y responses para cada tipo de spec
+- Agrupa todas las operaciones bajo el tag `Etendo` ("Etendo API endpoints"). `isValid` acepta
+  tambien `EtendoGo`, el tag anterior a ETP-5602, porque es el nombre del flujo
+  `ETAPI_OPENAPI_FLOW` que pide esta documentacion
 
 ---
 
