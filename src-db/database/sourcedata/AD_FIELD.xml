@@ -440,8 +440,8 @@
 <!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <NAME><![CDATA[EM_Etgo_Total_Discount]]></NAME>
-<!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <AD_TAB_ID><![CDATA[186]]></AD_TAB_ID>
 <!--0EE165DC44CC4EE8A5F5D71BD99AB665-->  <AD_COLUMN_ID><![CDATA[801DA2A5D6C4436F8B0F26D0995189C4]]></AD_COLUMN_ID>
@@ -827,9 +827,9 @@
 <!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <NAME><![CDATA[Total Discount %]]></NAME>
-<!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field
-  is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field
+  is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <AD_TAB_ID><![CDATA[F87F1EB7EB404F1F916EBAFAD1A0A334]]></AD_TAB_ID>
 <!--1DCC2F77DB4D496FA140BDA0CDCE3B37-->  <AD_COLUMN_ID><![CDATA[801DA2A5D6C4436F8B0F26D0995189C4]]></AD_COLUMN_ID>
@@ -3329,8 +3329,8 @@
 <!--67C2D1EC33054C6C87F9CE1F04573E97-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--67C2D1EC33054C6C87F9CE1F04573E97-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--67C2D1EC33054C6C87F9CE1F04573E97-->  <NAME><![CDATA[Total Discount %]]></NAME>
-<!--67C2D1EC33054C6C87F9CE1F04573E97-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--67C2D1EC33054C6C87F9CE1F04573E97-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--67C2D1EC33054C6C87F9CE1F04573E97-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--67C2D1EC33054C6C87F9CE1F04573E97-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--67C2D1EC33054C6C87F9CE1F04573E97-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--67C2D1EC33054C6C87F9CE1F04573E97-->  <AD_TAB_ID><![CDATA[290]]></AD_TAB_ID>
 <!--67C2D1EC33054C6C87F9CE1F04573E97-->  <AD_COLUMN_ID><![CDATA[8E5D45740B584747A55632EA47B85C85]]></AD_COLUMN_ID>
@@ -3386,7 +3386,7 @@
 <!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <NAME><![CDATA[EtendoGo Account]]></NAME>
-<!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <DESCRIPTION><![CDATA[EtendoGo platform user account]]></DESCRIPTION>
+<!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <DESCRIPTION><![CDATA[Etendo platform user account]]></DESCRIPTION>
 <!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <AD_TAB_ID><![CDATA[3B148775972C48DA8496753953A76E1D]]></AD_TAB_ID>
 <!--6A75C2223DB74BF084DCCFE1AC98FC18-->  <AD_COLUMN_ID><![CDATA[84DC03E27B774CF4AF82F920AAB572DF]]></AD_COLUMN_ID>
@@ -3498,8 +3498,8 @@
 <!--6F14C768C8DC4463B0E64A1BD1238B38-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--6F14C768C8DC4463B0E64A1BD1238B38-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--6F14C768C8DC4463B0E64A1BD1238B38-->  <NAME><![CDATA[EM_Etgo_Total_Discount]]></NAME>
-<!--6F14C768C8DC4463B0E64A1BD1238B38-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--6F14C768C8DC4463B0E64A1BD1238B38-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--6F14C768C8DC4463B0E64A1BD1238B38-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--6F14C768C8DC4463B0E64A1BD1238B38-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--6F14C768C8DC4463B0E64A1BD1238B38-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--6F14C768C8DC4463B0E64A1BD1238B38-->  <AD_TAB_ID><![CDATA[294]]></AD_TAB_ID>
 <!--6F14C768C8DC4463B0E64A1BD1238B38-->  <AD_COLUMN_ID><![CDATA[801DA2A5D6C4436F8B0F26D0995189C4]]></AD_COLUMN_ID>
@@ -4271,8 +4271,8 @@ Usually, company's internal identifiers for various records (products, customers
 <!--848B202F3D22446EAC30F55CB548D8C5-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--848B202F3D22446EAC30F55CB548D8C5-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--848B202F3D22446EAC30F55CB548D8C5-->  <NAME><![CDATA[Total Discount %]]></NAME>
-<!--848B202F3D22446EAC30F55CB548D8C5-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--848B202F3D22446EAC30F55CB548D8C5-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--848B202F3D22446EAC30F55CB548D8C5-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--848B202F3D22446EAC30F55CB548D8C5-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--848B202F3D22446EAC30F55CB548D8C5-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--848B202F3D22446EAC30F55CB548D8C5-->  <AD_TAB_ID><![CDATA[263]]></AD_TAB_ID>
 <!--848B202F3D22446EAC30F55CB548D8C5-->  <AD_COLUMN_ID><![CDATA[8E5D45740B584747A55632EA47B85C85]]></AD_COLUMN_ID>
@@ -4877,7 +4877,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--98C71197D0744EED96856A497E49F159-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--98C71197D0744EED96856A497E49F159-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--98C71197D0744EED96856A497E49F159-->  <NAME><![CDATA[Show Accounting Fields]]></NAME>
-<!--98C71197D0744EED96856A497E49F159-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo GO, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
+<!--98C71197D0744EED96856A497E49F159-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
 <!--98C71197D0744EED96856A497E49F159-->  <ISCENTRALLYMAINTAINED><![CDATA[Y]]></ISCENTRALLYMAINTAINED>
 <!--98C71197D0744EED96856A497E49F159-->  <AD_TAB_ID><![CDATA[119]]></AD_TAB_ID>
 <!--98C71197D0744EED96856A497E49F159-->  <AD_COLUMN_ID><![CDATA[A0F2D12B5B4A48C2855EE73E3E93E274]]></AD_COLUMN_ID>

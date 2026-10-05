@@ -2920,7 +2920,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--1FBD357BA0224F95BB621C57E74507BD-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--1FBD357BA0224F95BB621C57E74507BD-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--1FBD357BA0224F95BB621C57E74507BD-->  <NAME><![CDATA[Etgo_Account_ID]]></NAME>
-<!--1FBD357BA0224F95BB621C57E74507BD-->  <DESCRIPTION><![CDATA[EtendoGo platform user account]]></DESCRIPTION>
+<!--1FBD357BA0224F95BB621C57E74507BD-->  <DESCRIPTION><![CDATA[Etendo platform user account]]></DESCRIPTION>
 <!--1FBD357BA0224F95BB621C57E74507BD-->  <HELP><![CDATA[]]></HELP>
 <!--1FBD357BA0224F95BB621C57E74507BD-->  <COLUMNNAME><![CDATA[Etgo_Account_ID]]></COLUMNNAME>
 <!--1FBD357BA0224F95BB621C57E74507BD-->  <AD_TABLE_ID><![CDATA[83CB203E99104A7091E2767A136B6ED3]]></AD_TABLE_ID>
@@ -6812,8 +6812,8 @@ END]]></SQLLOGIC>
 <!--4E5E594900C84D10B02E12D254388499-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--4E5E594900C84D10B02E12D254388499-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--4E5E594900C84D10B02E12D254388499-->  <NAME><![CDATA[EM_ETGO_Purchase_Price]]></NAME>
-<!--4E5E594900C84D10B02E12D254388499-->  <DESCRIPTION><![CDATA[Purchase unit price (PriceStd) of the default purchase price-list version, maintained by Etendo GO.]]></DESCRIPTION>
-<!--4E5E594900C84D10B02E12D254388499-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the standard price of the purchase-side (IsSOPriceList=N) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
+<!--4E5E594900C84D10B02E12D254388499-->  <DESCRIPTION><![CDATA[Purchase unit price (PriceStd) of the default purchase price-list version, maintained by Etendo.]]></DESCRIPTION>
+<!--4E5E594900C84D10B02E12D254388499-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the standard price of the purchase-side (IsSOPriceList=N) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
 <!--4E5E594900C84D10B02E12D254388499-->  <COLUMNNAME><![CDATA[EM_ETGO_Purchase_Price]]></COLUMNNAME>
 <!--4E5E594900C84D10B02E12D254388499-->  <AD_TABLE_ID><![CDATA[208]]></AD_TABLE_ID>
 <!--4E5E594900C84D10B02E12D254388499-->  <AD_REFERENCE_ID><![CDATA[12]]></AD_REFERENCE_ID>
@@ -7640,7 +7640,7 @@ END]]></SQLLOGIC>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <NAME><![CDATA[EM_ETGO_Personal_Owner_ID]]></NAME>
-<!--56DB925F1F5B497CBC7950B6126049EC-->  <HELP><![CDATA[Etendo GO internal marker: the user this personal composition role was created for. Set once on creation, never changed; demote restores the role by it. Foreign key with on delete set null: a deleted user's role loses its owner (ETP-5502).]]></HELP>
+<!--56DB925F1F5B497CBC7950B6126049EC-->  <HELP><![CDATA[Etendo internal marker: the user this personal composition role was created for. Set once on creation, never changed; demote restores the role by it. Foreign key with on delete set null: a deleted user's role loses its owner (ETP-5502).]]></HELP>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <COLUMNNAME><![CDATA[EM_ETGO_Personal_Owner_ID]]></COLUMNNAME>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_TABLE_ID><![CDATA[156]]></AD_TABLE_ID>
 <!--56DB925F1F5B497CBC7950B6126049EC-->  <AD_REFERENCE_ID><![CDATA[18]]></AD_REFERENCE_ID>
@@ -11006,8 +11006,8 @@ END]]></SQLLOGIC>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <NAME><![CDATA[EM_Etgo_Total_Discount]]></NAME>
-<!--801DA2A5D6C4436F8B0F26D0995189C4-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--801DA2A5D6C4436F8B0F26D0995189C4-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--801DA2A5D6C4436F8B0F26D0995189C4-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--801DA2A5D6C4436F8B0F26D0995189C4-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <COLUMNNAME><![CDATA[EM_Etgo_Total_Discount]]></COLUMNNAME>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <AD_TABLE_ID><![CDATA[259]]></AD_TABLE_ID>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <AD_REFERENCE_ID><![CDATA[22]]></AD_REFERENCE_ID>
@@ -11206,7 +11206,7 @@ END]]></SQLLOGIC>
 <!--84DC03E27B774CF4AF82F920AAB572DF-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--84DC03E27B774CF4AF82F920AAB572DF-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--84DC03E27B774CF4AF82F920AAB572DF-->  <NAME><![CDATA[EtendoGo Account]]></NAME>
-<!--84DC03E27B774CF4AF82F920AAB572DF-->  <DESCRIPTION><![CDATA[EtendoGo platform user account]]></DESCRIPTION>
+<!--84DC03E27B774CF4AF82F920AAB572DF-->  <DESCRIPTION><![CDATA[Etendo platform user account]]></DESCRIPTION>
 <!--84DC03E27B774CF4AF82F920AAB572DF-->  <HELP><![CDATA[]]></HELP>
 <!--84DC03E27B774CF4AF82F920AAB572DF-->  <COLUMNNAME><![CDATA[Etgo_Account_ID]]></COLUMNNAME>
 <!--84DC03E27B774CF4AF82F920AAB572DF-->  <AD_TABLE_ID><![CDATA[59D8B0E845164D05BB90839CC98B25C7]]></AD_TABLE_ID>
@@ -11484,7 +11484,7 @@ END]]></SQLLOGIC>
 <!--870AD3030E334C3CB5BED17CB44C2A1B-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--870AD3030E334C3CB5BED17CB44C2A1B-->  <NAME><![CDATA[EM_ETGO_Pending Count]]></NAME>
 <!--870AD3030E334C3CB5BED17CB44C2A1B-->  <DESCRIPTION><![CDATA[Number of items still awaiting reconciliation on this financial account.]]></DESCRIPTION>
-<!--870AD3030E334C3CB5BED17CB44C2A1B-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Counts unmatched bank-statement lines for bank and card accounts, plus unreconciled processed transactions for cash accounts, so list views can sort and filter on it without a per-request aggregate query.]]></HELP>
+<!--870AD3030E334C3CB5BED17CB44C2A1B-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Counts unmatched bank-statement lines for bank and card accounts, plus unreconciled processed transactions for cash accounts, so list views can sort and filter on it without a per-request aggregate query.]]></HELP>
 <!--870AD3030E334C3CB5BED17CB44C2A1B-->  <COLUMNNAME><![CDATA[EM_ETGO_Pending_Count]]></COLUMNNAME>
 <!--870AD3030E334C3CB5BED17CB44C2A1B-->  <AD_TABLE_ID><![CDATA[B129E53BC0E747879F7BA17F0AECEC32]]></AD_TABLE_ID>
 <!--870AD3030E334C3CB5BED17CB44C2A1B-->  <AD_REFERENCE_ID><![CDATA[11]]></AD_REFERENCE_ID>
@@ -12192,8 +12192,8 @@ END]]></SQLLOGIC>
 <!--8E5D45740B584747A55632EA47B85C85-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--8E5D45740B584747A55632EA47B85C85-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--8E5D45740B584747A55632EA47B85C85-->  <NAME><![CDATA[EM_Etgo_Total_Discount]]></NAME>
-<!--8E5D45740B584747A55632EA47B85C85-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--8E5D45740B584747A55632EA47B85C85-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--8E5D45740B584747A55632EA47B85C85-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--8E5D45740B584747A55632EA47B85C85-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--8E5D45740B584747A55632EA47B85C85-->  <COLUMNNAME><![CDATA[EM_Etgo_Total_Discount]]></COLUMNNAME>
 <!--8E5D45740B584747A55632EA47B85C85-->  <AD_TABLE_ID><![CDATA[318]]></AD_TABLE_ID>
 <!--8E5D45740B584747A55632EA47B85C85-->  <AD_REFERENCE_ID><![CDATA[22]]></AD_REFERENCE_ID>
@@ -12271,8 +12271,8 @@ END]]></SQLLOGIC>
 <!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <NAME><![CDATA[EM_ETGO_Stock]]></NAME>
-<!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <DESCRIPTION><![CDATA[Total on-hand stock (SUM of QtyOnHand across all locators/warehouses), maintained by Etendo GO.]]></DESCRIPTION>
-<!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <HELP><![CDATA[Read-only aggregate kept up to date by the Etendo GO stored-computed-column engine. Sums M_Storage_Detail.QtyOnHand for the product so the figure can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
+<!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <DESCRIPTION><![CDATA[Total on-hand stock (SUM of QtyOnHand across all locators/warehouses), maintained by Etendo.]]></DESCRIPTION>
+<!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <HELP><![CDATA[Read-only aggregate kept up to date by the Etendo stored-computed-column engine. Sums M_Storage_Detail.QtyOnHand for the product so the figure can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
 <!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <COLUMNNAME><![CDATA[EM_ETGO_Stock]]></COLUMNNAME>
 <!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <AD_TABLE_ID><![CDATA[208]]></AD_TABLE_ID>
 <!--8FC9A2CD267543C994F4F8F8BF8A02CC-->  <AD_REFERENCE_ID><![CDATA[22]]></AD_REFERENCE_ID>
@@ -14054,7 +14054,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <NAME><![CDATA[EM_ETGO_Show_Acct_Fields]]></NAME>
-<!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo GO, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
+<!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <COLUMNNAME><![CDATA[EM_ETGO_Show_Acct_Fields]]></COLUMNNAME>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <AD_TABLE_ID><![CDATA[156]]></AD_TABLE_ID>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <AD_REFERENCE_ID><![CDATA[20]]></AD_REFERENCE_ID>
@@ -14171,7 +14171,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <NAME><![CDATA[ETGO Account]]></NAME>
-<!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <DESCRIPTION><![CDATA[EtendoGo platform user account]]></DESCRIPTION>
+<!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <DESCRIPTION><![CDATA[Etendo platform user account]]></DESCRIPTION>
 <!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <HELP><![CDATA[]]></HELP>
 <!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <COLUMNNAME><![CDATA[ETGO_Account_ID]]></COLUMNNAME>
 <!--A1C2D3E4F5B6C7D8E9F0A1B2C3D4E5F6-->  <AD_TABLE_ID><![CDATA[C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8]]></AD_TABLE_ID>
@@ -20917,8 +20917,8 @@ Usually, company's internal identifiers for various records (products, customers
 <!--E307979CE47A48BAAA63F411BDBD0A29-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--E307979CE47A48BAAA63F411BDBD0A29-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--E307979CE47A48BAAA63F411BDBD0A29-->  <NAME><![CDATA[EM_ETGO_Sale_Price]]></NAME>
-<!--E307979CE47A48BAAA63F411BDBD0A29-->  <DESCRIPTION><![CDATA[Sales unit price (PriceStd) of the default sales price-list version, maintained by Etendo GO.]]></DESCRIPTION>
-<!--E307979CE47A48BAAA63F411BDBD0A29-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the standard price of the sales-side (IsSOPriceList=Y) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
+<!--E307979CE47A48BAAA63F411BDBD0A29-->  <DESCRIPTION><![CDATA[Sales unit price (PriceStd) of the default sales price-list version, maintained by Etendo.]]></DESCRIPTION>
+<!--E307979CE47A48BAAA63F411BDBD0A29-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the standard price of the sales-side (IsSOPriceList=Y) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
 <!--E307979CE47A48BAAA63F411BDBD0A29-->  <COLUMNNAME><![CDATA[EM_ETGO_Sale_Price]]></COLUMNNAME>
 <!--E307979CE47A48BAAA63F411BDBD0A29-->  <AD_TABLE_ID><![CDATA[208]]></AD_TABLE_ID>
 <!--E307979CE47A48BAAA63F411BDBD0A29-->  <AD_REFERENCE_ID><![CDATA[12]]></AD_REFERENCE_ID>
@@ -22301,7 +22301,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--F25B30DF074D41C8B827934397AD81A4-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--F25B30DF074D41C8B827934397AD81A4-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--F25B30DF074D41C8B827934397AD81A4-->  <NAME><![CDATA[Account]]></NAME>
-<!--F25B30DF074D41C8B827934397AD81A4-->  <DESCRIPTION><![CDATA[EtendoGo platform user account]]></DESCRIPTION>
+<!--F25B30DF074D41C8B827934397AD81A4-->  <DESCRIPTION><![CDATA[Etendo platform user account]]></DESCRIPTION>
 <!--F25B30DF074D41C8B827934397AD81A4-->  <HELP><![CDATA[]]></HELP>
 <!--F25B30DF074D41C8B827934397AD81A4-->  <COLUMNNAME><![CDATA[ETGO_ACCOUNT_ID]]></COLUMNNAME>
 <!--F25B30DF074D41C8B827934397AD81A4-->  <AD_TABLE_ID><![CDATA[FC7C9995350741E1BBB1FB76EE9B3623]]></AD_TABLE_ID>
@@ -22697,8 +22697,8 @@ Usually, company's internal identifiers for various records (products, customers
 <!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <NAME><![CDATA[EM_ETGO_Tbai_Status]]></NAME>
-<!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <DESCRIPTION><![CDATA[Outcome of the latest TicketBAI submission of this invoice, maintained by Etendo GO.]]></DESCRIPTION>
-<!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the ESTADO of the most recent TBAI_SyncInvoice row of the invoice, so the fiscal status can be listed, sorted and filtered without a per-row fetch. 'Pendiente' means no resolved submission yet.]]></HELP>
+<!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <DESCRIPTION><![CDATA[Outcome of the latest TicketBAI submission of this invoice, maintained by Etendo.]]></DESCRIPTION>
+<!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the ESTADO of the most recent TBAI_SyncInvoice row of the invoice, so the fiscal status can be listed, sorted and filtered without a per-row fetch. 'Pendiente' means no resolved submission yet.]]></HELP>
 <!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <COLUMNNAME><![CDATA[EM_ETGO_Tbai_Status]]></COLUMNNAME>
 <!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <AD_TABLE_ID><![CDATA[318]]></AD_TABLE_ID>
 <!--F580979CD28F42B8BFD32B2BC9E65DAD-->  <AD_REFERENCE_ID><![CDATA[10]]></AD_REFERENCE_ID>
@@ -23256,7 +23256,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <NAME><![CDATA[EM_ETGO_Payment Intent]]></NAME>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <DESCRIPTION><![CDATA[Serialized request describing the payment to create once the bank confirms the transfer.]]></DESCRIPTION>
-<!--FA0850D2A55444749FE7CD443A3BF317-->  <HELP><![CDATA[JSON snapshot of the Etendo Go payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo Go does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from Etendo Go.]]></HELP>
+<!--FA0850D2A55444749FE7CD443A3BF317-->  <HELP><![CDATA[JSON snapshot of the Etendo payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from Etendo.]]></HELP>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <COLUMNNAME><![CDATA[EM_ETGO_Payment_Intent]]></COLUMNNAME>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <AD_TABLE_ID><![CDATA[96A56B61A35441E8877536646345EA6A]]></AD_TABLE_ID>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <AD_REFERENCE_ID><![CDATA[14]]></AD_REFERENCE_ID>
