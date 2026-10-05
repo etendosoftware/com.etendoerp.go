@@ -77,6 +77,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * one the user still holds (or refuses the request, {@code 401}, when none is left) — once, here,
  * so every {@link SurfacePolicy} gets it for free rather than each cookie-consuming call site
  * wiring it in on its own.
+ *
+ * <p>ETP-5270 — a legacy JWT gets the same check. Its role is a signed claim and cannot be rebound,
+ * so a token whose role was revoked is refused ({@code 401}) rather than authorized with it.
  */
 public class EnvironmentRequestAuthenticator {
 
@@ -247,7 +250,7 @@ public class EnvironmentRequestAuthenticator {
     }
   }
 
-  private static Resolution fromJwt(DecodedJWT jwt) {
+  private Resolution fromJwt(DecodedJWT jwt) {
     // The switch retires exactly this credential, and only this one is counted as a legacy
     // use: the counter is what says when turning the switch off is safe.
     if (!GoLegacyBearer.isEnabled()) {
@@ -259,6 +262,10 @@ public class EnvironmentRequestAuthenticator {
     if (identity.isIncomplete()) {
       return Resolution.refused(Status.UNAUTHENTICATED, MSG_MISSING_CLAIMS, AuthScheme.JWT);
     }
+    // ETP-5270 — the claim is the role at login; a signature still valid says nothing about
+    // whether an admin has revoked it since. Throws SessionRoleRevokedException, answered 401
+    // with its own message by authenticate()/identify(), like a cookie with no role left.
+    sessionRoleReconciler.requireHeldRole(identity.userId, identity.roleId, identity.clientId);
     return Resolution.of(identity);
   }
 

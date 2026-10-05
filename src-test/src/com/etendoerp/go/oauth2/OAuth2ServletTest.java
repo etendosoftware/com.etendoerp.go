@@ -54,11 +54,16 @@ import org.mockito.MockedStatic;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.DalWarehouseResolver;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -78,7 +83,21 @@ public class OAuth2ServletTest {
   private static final String TEST_CLIENT_ID = "etgo-test123456";
   private static final String TEST_CLIENT_DB_ID = "uuid-client-1";
 
-  private final OAuth2Servlet servlet = new OAuth2Servlet();
+  private final OAuth2Servlet servlet = servletWithFakeRoleLookups();
+
+  /**
+   * ETP-5270 — a legacy JWT (the admin token, on the management endpoints and on authorize) now
+   * has its role checked against {@code AD_User_Roles}. The DAL is mocked per test, so both role
+   * lookups are a fake that finds the role held; everything else is the production wiring.
+   */
+  private static OAuth2Servlet servletWithFakeRoleLookups() {
+    GoSessionService sessionService = new GoSessionService(new JdbcGoSessionStore());
+    OAuth2Servlet created = new OAuth2Servlet(sessionService, new EnvironmentRequestAuthenticator(
+        new GoSessionAuthenticator(sessionService), new TenantEnvironmentLifecycleService(),
+        new DalWarehouseResolver(), mock(GoSessionRoleReconciler.class)));
+    created.sessionRoleReconciler = mock(GoSessionRoleReconciler.class);
+    return created;
+  }
 
   // ===================== doGet routing =====================
 

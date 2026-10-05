@@ -46,8 +46,10 @@ import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -96,6 +98,9 @@ public class McpServlet extends HttpServlet {
 
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
+
+  // ETP-5270 — package-visible so tests can swap the database-backed role lookups for a fake.
+  GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
@@ -406,21 +411,30 @@ public class McpServlet extends HttpServlet {
     }
 
     // Fallback: try JWT token
+    com.auth0.jwt.interfaces.DecodedJWT jwt;
     try {
-      com.auth0.jwt.interfaces.DecodedJWT jwt =
-          com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
-      return new AuthIdentity(
-          jwt.getClaim("user").asString(),
-          jwt.getClaim("role").asString(),
-          jwt.getClaim("client").asString(),
-          jwt.getClaim("organization").asString(),
-          LEGACY_JWT_FALLBACK_SCOPES);
+      jwt = com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
     } catch (Exception e) {
       log.warn("Both OAuth2 and JWT authentication failed for MCP request");
       sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
           "Invalid or expired token (OAuth2 and JWT both failed)");
       return null;
     }
+    AuthIdentity identity = new AuthIdentity(
+        jwt.getClaim("user").asString(),
+        jwt.getClaim("role").asString(),
+        jwt.getClaim("client").asString(),
+        jwt.getClaim("organization").asString(),
+        LEGACY_JWT_FALLBACK_SCOPES);
+    // ETP-5270 — the role claim is the role at login; refuse it once an admin has revoked it.
+    try {
+      sessionRoleReconciler.requireHeldRole(identity.userId, identity.roleId, identity.clientId);
+    } catch (SessionRoleRevokedException e) {
+      log.warn("Unauthorized MCP request: {}", e.getMessage());
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return null;
+    }
+    return identity;
   }
 
   /**
@@ -482,6 +496,16 @@ public class McpServlet extends HttpServlet {
       log.warn("Unauthorized MCP request: session has no environment selected");
       sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
           "Session has no environment selected");
+      return null;
+    }
+    // ETP-5270 — the same rebind EnvironmentRequestAuthenticator runs for every other surface
+    // (ETP-5395): a role an admin revoked since the session entered must not reach the tools.
+    // Rebinds `session` in place, so the identity below reads the role the user holds now.
+    try {
+      sessionRoleReconciler.reconcile(session);
+    } catch (SessionRoleRevokedException e) {
+      log.warn("Unauthorized MCP request: {}", e.getMessage());
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
       return null;
     }
     return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
