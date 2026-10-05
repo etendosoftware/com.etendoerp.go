@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1139,6 +1140,41 @@ public class Fiscal303SubmitHandlerTest {
       assertEquals("ALREADY_SUBMITTED", body.getString("errorCode"));
       verify(decl, never()).setDeclarationStatus(anyString());
     }
+  }
+
+  /**
+   * ETP-5546 — a role whose Tax Report window grant is read-only (or absent) gets 403 for
+   * {@code POST /fiscal303/submit}, the single most sensitive write in this handler's scope: it
+   * files the declaration with the AEAT. The gate in {@link AbstractFiscalHandler#handle} runs
+   * before any of {@code handleSubmit}'s own logic, so denial must short-circuit before the
+   * declaration is even looked up — proven the same way
+   * {@link #testHandleSubmit_alreadySubmittedDeclaration_blocksResubmission} already proves its
+   * own trigger: {@link AEAT303SubmissionService} is never constructed.
+   *
+   * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
+   * @covers com.etendoerp.go.schemaforge.Fiscal303BoxesHandler
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_deniedAccess_returnsForbiddenWithoutSubmitting() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+
+    try (MockedConstruction<AEAT303SubmissionService> serviceMock =
+        mockConstruction(AEAT303SubmissionService.class)) {
+      h.handle("submit", "POST", req, res);
+
+      assertTrue("AEAT303SubmissionService must not be constructed when access is denied",
+          serviceMock.constructed().isEmpty());
+    }
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+    verify(res, never()).setStatus(anyInt());
   }
 
   /**

@@ -441,6 +441,34 @@ public class Fiscal303BoxesHandlerTest {
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
   }
 
+  // ── window-access gate (ETP-5546) ─────────────────────────────────────────
+
+  /**
+   * ETP-5546 — a role without the Tax Report window grant gets 403 for GET
+   * {@code /fiscal303/boxes}, the production entity named in the ticket's scope note, before any
+   * routing or computation runs. {@link AbstractFiscalHandlerTest} proves the gate itself
+   * generically via a synthetic stub entity; this proves it on the real production entity.
+   * {@code response.getWriter()} is verified never invoked, since the only way {@code boxes} ever
+   * writes a body is via {@code snapshotOrCompute}/{@code computeBoxes}.
+   *
+   * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
+   */
+  @Test
+  public void testHandleBoxesDeniedAccessReturnsForbiddenWithoutComputing() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+
+    h.handle("boxes", "GET", req, res);
+
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+    verify(res, never()).getWriter();
+  }
+
   // ── no-gaps coverage ─────────────────────────────────────────────────────
 
   /**

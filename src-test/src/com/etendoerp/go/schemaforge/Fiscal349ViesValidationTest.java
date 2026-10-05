@@ -193,6 +193,32 @@ class Fiscal349ViesValidationTest {
     verify(servlet, never()).sendError(eq(resp), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
   }
 
+  /**
+   * ETP-5546 — a role whose Tax Report window grant is read-only (or absent) gets 403 for
+   * {@code POST /fiscal349/validate-vies}, a write (it mutates {@code C_BPartner}'s VIES status).
+   * The gate in {@link AbstractFiscalHandler#handle} runs before any of {@code
+   * handleValidateVies}'s own logic (year/period check, candidate load, VIES network calls), so
+   * denial must short-circuit before any of them run — proven here the same way the file's own
+   * {@code testGatedOutPartnerIsStillPendingAndNeverSentToVies} proves its own trigger: {@link
+   * ViesService#checkVat} (via the handler's {@code checkVat} seam) is never called.
+   *
+   * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
+   */
+  @Test
+  void testPostValidateViesDeniedAccessReturnsForbiddenWithoutValidating() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+
+    handler.handle("validate-vies", "POST", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+    verify(handler, never()).checkVat(anyString());
+    verify(resp, never()).getWriter();
+  }
+
   // ── pendingBpIds ──────────────────────────────────────────────────
 
   /** Only pending rows are collected, and a partner appearing on several rows is checked once. */
