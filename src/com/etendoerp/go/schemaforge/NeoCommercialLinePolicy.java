@@ -36,8 +36,10 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * Commercial document line defaults and synthetic callout fields.
  * <p>
  * The class is {@code public} only so the MCP layer can reach the one injection it shares with the
- * REST create path ({@link #injectProductDerivedUomIfMissing}, IMP-15). Every other member stays
- * package-private on purpose — this is a policy helper for {@code NeoCrudHandler}, not an API.
+ * REST create path ({@link #injectProductDerivedUomIfMissing}, IMP-15).
+ * {@link #injectCommercialAmounts} is also public (ETP-5528) so entity customizations can call it
+ * explicitly (T12). Every other member stays package-private on purpose — this is a policy helper
+ * for {@code NeoCrudHandler}, not an API.
  */
 public final class NeoCommercialLinePolicy {
 
@@ -90,8 +92,19 @@ public final class NeoCommercialLinePolicy {
    * {@code LINE_GROSS_AMOUNT = 0}, so the line "Total" column rendered as 0 even though
    * {@code LINENETAMT} and the header totals were correct. Keeping the sequence in one place
    * is what stops the two call sites from drifting apart again.
+   *
+   * <p>ETP-5528: public so an entity customization can call it explicitly (T12). The MCP
+   * {@code neo_create} pipeline is a separate implementation of the REST one and never reaches this
+   * sequence, so a line an agent created kept {@code LINE_GROSS_AMOUNT = 0} on a net price list —
+   * {@code SL_Order_Amt} publishes {@code grossUnitPrice × qty}, which is 0 there, and the
+   * {@code C_OrderLine} trigger only derives the gross for tax-included lists. The shared MCP path
+   * is deliberately left as it is on {@code develop}; the sales order and sales quotation line
+   * customizations ({@code OrderLineDiscountSupport}) and the sales invoice line customization
+   * ({@code InvoiceLineAmountSupport}) call this on every create.
+   *
+   * @param body the write body, keyed by DAL property name; mutated in place
    */
-  static void injectCommercialAmounts(JSONObject body) {
+  public static void injectCommercialAmounts(JSONObject body) {
     injectLineNetAmountIfMissing(body);
     injectGrossAmountIfMissing(body);
     injectLineGrossAmountIfMissing(body);

@@ -50,6 +50,12 @@ import java.util.stream.Stream;
  * orphan problem was exclusively install's. Hence the split enforced here: the source dataset stays
  * complete, and the onboarding consumer drops these rows at import time.
  *
+ * <p><b>ETP-5426 — opt-in sample data.</b> "Never reaches a tenant" now holds for the base pass
+ * only. A tenant that opts in at signup gets these rows AND their transactional chain through a
+ * second, separate pass ({@link OnboardingDatasetProfile#SAMPLE_DATA}), which keeps exactly the
+ * rows the base pass drops. The ids therefore serve both passes: the base pass excludes them, the
+ * sample-data pass keeps only them. See {@link OnboardingSampleDataDefinition}.
+ *
  * @see OnboardingDatasetNormalizer
  */
 final class OnboardingDemoMasterData {

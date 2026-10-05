@@ -445,9 +445,9 @@ public class McpServlet extends HttpServlet {
       case USE_SESSION:
         return sessionIdentity(request, response, sessionAuth.getRecord());
       case CSRF_REJECTED:
-        log.warn("Forbidden MCP request: CSRF validation failed");
+        log.warn("Forbidden MCP request: {}", sessionAuth.getRefusalMessage());
         sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
-            "CSRF validation failed");
+            sessionAuth.getRefusalMessage());
         return null;
       case SESSION_INVALID:
         log.warn("Unauthorized MCP request: invalid or expired session");

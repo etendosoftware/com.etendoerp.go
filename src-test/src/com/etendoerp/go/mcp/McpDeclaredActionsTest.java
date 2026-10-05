@@ -34,6 +34,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -42,6 +44,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBCriteria;
@@ -51,6 +56,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.ReconciliationHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
@@ -82,6 +88,12 @@ class McpDeclaredActionsTest {
 
   private static final Map<String, NeoActionContract> CONTRACTS =
       new ReconciliationHandler().actionContracts();
+
+  // Guards that handleSchema answers with the declared catalog only when isActionOnlyEntity
+  // is true.
+  private static final Pattern CATALOG_GATE = Pattern.compile(
+      "if\\s*\\(\\s*McpReportActionsSchema\\s*\\.\\s*isActionOnlyEntity\\s*\\([^)]*\\)\\s*\\)"
+          + "\\s*\\{\\s*return[^;]*McpActionsView\\s*\\.\\s*buildDeclaredResponse\\s*\\(");
 
   private static List<String> strings(JSONArray arr) throws Exception {
     List<String> out = new ArrayList<>();
@@ -168,6 +180,92 @@ class McpDeclaredActionsTest {
           Collections.emptyMap());
       assertEquals(0, response.getInt("actionCount"));
       assertEquals(0, response.getJSONArray("actions").length());
+    }
+  }
+
+  // ── neo_schema: catalog-only vs fields + declared actions (ETP-5535) ───
+
+  /**
+   * Rows: case name, declared actions, the ETGO_SF_FIELD rows the lookup answers ({@code null} =
+   * the lookup throws), expected {@code isActionOnlyEntity}, whether the field lookup runs — an
+   * entity declaring nothing (every ordinary window entity) must not pay for the query.
+   */
+  static Stream<Arguments> actionOnlyCases() {
+    List<SFField> oneFieldRow = List.of(mock(SFField.class));
+    return Stream.of(
+        Arguments.of("nothing declared, no fields", Collections.emptyMap(), List.of(), false,
+            false),
+        Arguments.of("declared, no field rows (report entity)", CONTRACTS, List.of(), true, true),
+        Arguments.of("declared, field rows (sales-quotation/quotation)", CONTRACTS, oneFieldRow,
+            false, true),
+        Arguments.of("declared, field lookup throws", CONTRACTS, null, false, true));
+  }
+
+  @Nested
+  @DisplayName("McpReportActionsSchema.isActionOnlyEntity (neo_schema)")
+  class ActionOnlyEntity {
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("com.etendoerp.go.mcp.McpDeclaredActionsTest#actionOnlyCases")
+    @SuppressWarnings("unchecked")
+    void catalogReplacesTheSchemaOnlyWithoutFields(String name,
+        Map<String, NeoActionContract> declared, List<SFField> fieldRows, boolean expected,
+        boolean fieldsQueried) {
+      SFEntity entity = recEntity();
+      when(entity.getId()).thenReturn("entity-1");
+      OBDal dal = mock(OBDal.class);
+      OBCriteria<SFField> criteria = mock(OBCriteria.class);
+      if (fieldRows == null) {
+        when(dal.createCriteria(SFField.class)).thenThrow(new IllegalStateException("boom"));
+      } else {
+        when(dal.createCriteria(SFField.class)).thenReturn(criteria);
+        when(criteria.add(any())).thenReturn(criteria);
+        when(criteria.setMaxResults(Mockito.anyInt())).thenReturn(criteria);
+        when(criteria.list()).thenReturn(fieldRows);
+      }
+
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(dal);
+        assertEquals(expected, McpReportActionsSchema.isActionOnlyEntity(entity, declared), name);
+      }
+      Mockito.verify(dal, Mockito.times(fieldsQueried ? 1 : 0)).createCriteria(SFField.class);
+    }
+  }
+
+  /**
+   * ETP-5535 — the call sites in {@code handleSchema}. It needs an OBContext, a live DAL and an
+   * AD_Tab, so the wiring cannot be reached behaviourally, and reverting either line leaves every
+   * test above passing: back to {@code !declaredActions.isEmpty()} and the sales quotation's
+   * schema is replaced by its one-action catalog; back to the 3-argument {@code buildResponse} and
+   * {@code rejectQuotation} is listed nowhere. That is the case {@link McpSourceScanner} exists for.
+   */
+  @Nested
+  @DisplayName("McpToolRouter.handleSchema wiring (ETP-5535)")
+  class HandleSchemaWiring {
+
+    @Test
+    @DisplayName("the catalog replaces the schema only behind isActionOnlyEntity, and view:"
+        + "\"actions\" receives the declared actions")
+    void handleSchemaGatesTheCatalogAndFeedsTheActionsView() {
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleSchema");
+
+      assertTrue(CATALOG_GATE.matcher(body).find(),
+          "the declared catalog must be returned only when isActionOnlyEntity says so — a "
+              + "window entity with fields keeps its schema");
+      List<String> gate = McpSourceScanner.callArguments(body,
+          "McpReportActionsSchema.isActionOnlyEntity", 0);
+      assertEquals(2, gate.size(), "isActionOnlyEntity(sfEntity, declared)");
+      String declared = gate.get(1);
+
+      int actionsView = body.indexOf("isActionsView");
+      assertTrue(actionsView >= 0, "view:\"actions\" no longer dispatches");
+      List<String> view = McpSourceScanner.callArguments(body, "McpActionsView.buildResponse",
+          actionsView);
+      assertEquals(4, view.size(),
+          "view:\"actions\" must use the 4-argument buildResponse that appends declared actions");
+      assertEquals(declared, view.get(3),
+          "the map passed to isActionOnlyEntity must be the one view:\"actions\" appends");
     }
   }
 

@@ -231,6 +231,47 @@ public class RejectQuotationHandlerTest {
     assertNull(new RejectQuotationHandler().extractReasonId(null));
   }
 
+  /**
+   * ETP-5535, table-driven: a {@code DocAction} button request carries its values in a nested
+   * {@code fieldValues} object, so both keys are read from there too — but only when the root has
+   * neither, so the React modal's root-level body is read exactly as before.
+   */
+  @Test
+  public void testExtractReasonIdReadsFieldValuesAndRootWins() throws JSONException {
+    String[][] cases = {
+        { "{\"fieldValues\":{\"rejectReason\":\"rr-nested\"}}", "rr-nested" },
+        { "{\"fieldValues\":{\"C_Reject_Reason_ID\":\"rr-nested-col\"}}", "rr-nested-col" },
+        { "{\"rejectReason\":\"rr-root\",\"fieldValues\":{\"rejectReason\":\"rr-nested\"}}",
+            "rr-root" },
+    };
+    RejectQuotationHandler handler = new RejectQuotationHandler();
+    for (String[] c : cases) {
+      assertEquals(c[0], c[1], handler.extractReasonId(new JSONObject(c[0])));
+    }
+  }
+
+  /**
+   * ETP-5535: {@link RejectQuotationHandler#reject} is also entered from {@code DocAction = RJ},
+   * whose caller is always an API client. Without a reason the 400 must say where the id comes
+   * from — the {@code rejectReason} field and the {@code createRejectReason} action — instead of
+   * leaving the agent to guess.
+   */
+  @Test
+  public void testRejectWithoutReasonNamesRejectReasonAndCreateRejectReason()
+      throws JSONException {
+    NeoResponse r = new RejectQuotationHandler().reject(NeoContext.builder()
+        .specName(SPEC_SALES_QUOTATION).entityName(ENTITY_HEADER)
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("DocAction").recordId("q-1")
+        .requestBody(new JSONObject("{\"docAction\":\"RJ\",\"fieldValues\":{}}")).build());
+
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+    String message = r.getBody().getJSONObject("error").getString("message");
+    assertTrue(message, message.contains("rejectReason"));
+    assertTrue(message, message.contains("createRejectReason"));
+  }
+
   // ── quotation lookup ──────────────────────────────────────────────────────
 
   /**

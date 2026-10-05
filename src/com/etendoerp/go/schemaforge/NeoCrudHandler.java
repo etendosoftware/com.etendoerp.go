@@ -168,18 +168,6 @@ class NeoCrudHandler {
     Tab adTab = entity.getADTab();
     Map<String, String> queryParams = servlet.extractQueryParams(request);
 
-    // Short-circuit for `?_distinct=<field>` on a list GET: returns the
-    // paginated set of distinct values for the given scalar field, so UI
-    // filter selectors can show all possible options without loading the
-    // entire dataset or inventing them client-side. Runs through the same
-    // tab-where + parent-filter + readable-client/org filtering as the
-    // standard list fetch, just with a different projection.
-    if ("GET".equals(method) && queryParams != null
-        && StringUtils.isNotBlank(queryParams.get(JsonConstants.DISTINCT_PARAMETER))) {
-      servlet.writeResponse(response, handleDistinctFetch(adTab, queryParams));
-      return;
-    }
-
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
         .entityName(pathInfo.entityName)
@@ -191,16 +179,27 @@ class NeoCrudHandler {
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
         .build();
+
+    // Short-circuit for `?_distinct=<field>` on a list GET: returns the
+    // paginated set of distinct values for the given scalar field, so UI
+    // filter selectors can show all possible options without loading the
+    // entire dataset or inventing them client-side. Runs through the same
+    // tab-where + parent-filter + readable-client/org filtering as the
+    // standard list fetch, just with a different projection — and, since
+    // ETP-5009, through the same customization read predicates
+    // (NeoHandler#readPredicates), so it never offers a value only rows the
+    // list hides carry. The pre/post hooks still do not run for it.
+    if ("GET".equals(method) && queryParams != null
+        && StringUtils.isNotBlank(queryParams.get(JsonConstants.DISTINCT_PARAMETER))) {
+      servlet.writeResponse(response, handleDistinctFetch(adTab, queryParams, neoContext));
+      return;
+    }
     if ("POST".equals(method) || "PUT".equals(method) || METHOD_PATCH.equals(method)) {
       neoContext = parseAndAttachRequestBody(neoContext, request, response);
       if (neoContext == null) {
         return;
       }
-      NeoResponse validationError = validateClientWriteRequest(neoContext);
-      if (validationError != null) {
-        servlet.writeResponse(response, validationError);
-        return;
-      }
+      warnOnClientReadOnlyFields(neoContext);
     }
     NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
@@ -245,29 +244,32 @@ class NeoCrudHandler {
   }
 
   /**
-   * Validates the original REST write body before a handler can enrich it with server-owned
-   * values. Filtering later in the CRUD path remains responsible only for the persistence body.
+   * Checks the original REST write body, before a handler can enrich it with server-owned
+   * values, for curated read-only fields the client should not have sent, and logs them.
    *
-   * <p>Passes the HTTP method through to {@link NeoFieldFilter#validateClientWriteRequest(
-   * JSONObject, String)} so a POST (create) can honor the same "entity has a {@code NeoHandler}
-   * that may legitimately supply this value" exemption {@code rejectableOnCreateFields} already
-   * grants later, at {@code filterCreateRequest} (IMP-28 clause 2 / ETP-5537). Without the method,
-   * this earlier check ran before any handler had a chance to run and rejected such a value
-   * unconditionally, pre-empting the exemption the rest of the write path already implements.
-   * PUT/PATCH are unaffected — they never carried that exemption.
+   * <p><b>Temporary (ETP-5556):</b> ETP-5347 rejected such a body with a 422
+   * {@code read_only_field} here, but the UI line grids still send the whole row on every save,
+   * so every line edit failed. Until the UI sends only writable fields, this logs a warning and
+   * lets the write continue: the persistence filters later in the CRUD path
+   * ({@code filterWriteRequest}) drop those fields exactly as they did before ETP-5347. Restore
+   * the 422 by rejecting with {@link NeoReadOnlyFieldResponse} once the clients are fixed.</p>
+   *
+   * <p>The HTTP method is passed through so a POST honors the create-time exemption of
+   * {@code rejectableOnCreateFields} (IMP-28 clause 2 / ETP-5537), which PUT/PATCH never carry.</p>
    */
-  NeoResponse validateClientWriteRequest(NeoContext context) {
-    try {
-      Tab adTab = context.getAdTab();
-      if (adTab == null || adTab.getTable() == null) {
-        return null;
-      }
-      NeoFieldFilter filter = NeoFieldFilter.forEntity(context.getSfEntity(),
-          adTab.getTable().getName());
-      filter.validateClientWriteRequest(context.getRequestBody(), context.getHttpMethod());
-      return null;
-    } catch (ReadOnlyFieldRejectedException e) {
-      return NeoReadOnlyFieldResponse.build(e);
+  void warnOnClientReadOnlyFields(NeoContext context) {
+    Tab adTab = context.getAdTab();
+    if (adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    NeoFieldFilter filter = NeoFieldFilter.forEntity(context.getSfEntity(),
+        adTab.getTable().getName());
+    List<String> readOnlyFields = filter.findClientReadOnlyFields(
+        context.getRequestBody(), context.getHttpMethod());
+    if (!readOnlyFields.isEmpty()) {
+      log.warn("ETP-5556: {} {}/{} sent read-only fields {}; ignoring them instead of rejecting"
+              + " the write",
+          context.getHttpMethod(), context.getSpecName(), context.getEntityName(), readOnlyFields);
     }
   }
 
@@ -475,15 +477,17 @@ class NeoCrudHandler {
         ? context.getQueryParams().get(PARAM_PARENT_ID)
         : null;
 
-    applyWhereClause(params, adTab, parentId);
+    applyWhereClause(params, adTab, parentId, NeoReadPredicates.forRestListGet(context));
     applyPaginationDefaults(params);
     return params;
   }
 
   /**
-   * Builds the HQL where clause from the tab filter and parent filter, and adds it to params.
+   * Builds the HQL where clause from the tab filter, the parent filter, the internal
+   * {@code _neoWhere} predicate and the customization's read predicate, and adds it to params.
    */
-  private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId) {
+  private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId,
+      String readPredicate) {
     StringBuilder where = new StringBuilder();
     // Shared with the MCP read (ETP-5542): one rule for resolving the parent placeholders.
     String tabWhere = NeoParentTabFilterResolver.resolveTabWhere(adTab, parentId);
@@ -499,13 +503,8 @@ class NeoCrudHandler {
         where.append("(").append(parentFilter).append(")");
       }
     }
-    String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
-    if (StringUtils.isNotBlank(neoWhere)) {
-      if (where.length() > 0) {
-        where.append(HQL_AND_OPERATOR);
-      }
-      where.append("(").append(neoWhere).append(")");
-    }
+    NeoReadPredicates.appendAnd(where, params.remove(NeoCrudHelper.NEO_WHERE_PARAM));
+    NeoReadPredicates.appendAnd(where, readPredicate);
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
     }
@@ -1118,8 +1117,16 @@ class NeoCrudHandler {
    * clause and parent filter as the standard list fetch. {@link OBQuery}
    * automatically applies readable-client/organization/active filters from the
    * current {@link OBContext}.
+   *
+   * <p>ETP-5009: also ANDs the entity customization's {@link NeoHandler#readPredicates},
+   * exactly as the list GET does, so the values offered are the values of the rows the list
+   * can actually return — not those of rows a customization excludes from it.
+   *
+   * @param context the request context, from which the customization is resolved; may be
+   *                {@code null}, in which case no read predicate is applied
    */
-  private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams) {
+  private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams,
+      NeoContext context) {
     if (adTab == null || adTab.getTable() == null) {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Distinct query requires a tab with a linked table");
@@ -1170,11 +1177,14 @@ class NeoCrudHandler {
     String projection = NeoDistinctFetchSupport.buildDistinctProjection(prop, resolvedProperty);
     boolean isRelation = !prop.isPrimitive();
 
-    StringBuilder where = new StringBuilder(" as e where ")
-        .append(String.join(HQL_AND_OPERATOR, predicates))
-        .append(" order by ").append(projection).append(" asc");
-
     try {
+      // Inside the try: a customization whose predicate throws fails the fetch (500) instead of
+      // silently offering the values of the rows it was meant to exclude.
+      NeoReadPredicates.addRestTo(predicates, context);
+      StringBuilder where = new StringBuilder(" as e where ")
+          .append(String.join(HQL_AND_OPERATOR, predicates))
+          .append(" order by ").append(projection).append(" asc");
+
       OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
           .createQuery(dalEntityName, where.toString());
       obQuery.setSelectClause("DISTINCT " + projection);
@@ -1207,7 +1217,7 @@ class NeoCrudHandler {
   }
 
   /**
-   * Builds the HQL predicate list for {@link #handleDistinctFetch(Tab, Map)}: the
+   * Builds the HQL predicate list for {@link #handleDistinctFetch(Tab, Map, NeoContext)}: the
    * not-null guard on the projected property, the tab's own HQL where clause
    * (token-resolved), the parent-record filter for child tabs, and the
    * caller-resolved search predicate. Extracted purely to keep
@@ -1234,7 +1244,7 @@ class NeoCrudHandler {
   }
 
   /**
-   * Builds the {@code data} array for {@link #handleDistinctFetch(Tab, Map)}: for a
+   * Builds the {@code data} array for {@link #handleDistinctFetch(Tab, Map, NeoContext)}: for a
    * to-one association property, resolves display identifiers in batch; for a
    * primitive property, emits the raw distinct values as-is. Extracted purely to
    * keep {@code handleDistinctFetch}'s cognitive complexity within the Sonar

@@ -21,8 +21,10 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 import org.apache.logging.log4j.LogManager;
@@ -38,6 +40,15 @@ import org.openbravo.model.common.invoice.Invoice;
  * single-table upsert concern has its own home instead of padding out a header
  * handler that already owns document-type locking, SII/TBAI enrichment, and
  * origin-invoice bookkeeping.
+ *
+ * <p><b>Savepoint contract (ETP-5547).</b> Every write entry point runs its statements under a
+ * JDBC savepoint ({@link JdbcSavepoints}) on the request's shared connection and rolls back to
+ * it when a statement fails, before rethrowing. The callers swallow the exception (the
+ * rate-doc sync is a best-effort side effect of an invoice save), but PostgreSQL marks the whole transaction as
+ * aborted on the first failed statement — without the savepoint the request would still answer
+ * 2xx and then lose every other write at commit time. That is exactly what happened when Core's
+ * {@code c_conversion_rate_document_trg} rejected an UPDATE on a posted invoice with
+ * {@code @20501@}: a confirmed payment and a cloned invoice vanished silently.
  */
 final class ConversionRateDocumentSync {
 
@@ -56,20 +67,33 @@ final class ConversionRateDocumentSync {
    * for a given invoice, so it's the correct — and only needed — join key.
    */
   static void upsert(Invoice invoice, String orgCurrencyId, BigDecimal docRate,
-      BigDecimal foreignAmount) throws java.sql.SQLException {
+      BigDecimal foreignAmount) throws SQLException {
     Connection conn = OBDal.getInstance().getConnection();
-    List<String> existingIds = findConversionRateDocumentIds(conn, invoice.getId(), orgCurrencyId);
-    if (existingIds.isEmpty()) {
-      insertConversionRateDocument(conn, invoice, orgCurrencyId, docRate, foreignAmount);
+    JdbcSavepoints.run(conn, () -> doUpsert(conn, invoice, orgCurrencyId, docRate, foreignAmount));
+  }
+
+  private static void doUpsert(Connection conn, Invoice invoice, String orgCurrencyId,
+      BigDecimal docRate, BigDecimal foreignAmount) throws SQLException {
+    List<ExistingRow> existing = findConversionRateDocuments(conn, invoice.getId(), orgCurrencyId);
+    if (existing.isEmpty()) {
+      insertRow(conn, invoice, orgCurrencyId, docRate, foreignAmount);
       return;
     }
     // Most recent row (ORDER BY created DESC) is updated in place, including its
     // currency — self-healing any stray duplicates left by the pre-ETP-4836 bug by
     // deleting every other row found for this invoice.
-    String keepId = existingIds.get(0);
-    updateConversionRateDocument(conn, keepId, invoice.getCurrency().getId(), docRate, foreignAmount);
-    for (int i = 1; i < existingIds.size(); i++) {
-      String staleId = existingIds.get(i);
+    ExistingRow keep = existing.get(0);
+    String docCurrencyId = invoice.getCurrency().getId();
+    if (keep.matches(docCurrencyId, docRate, foreignAmount)) {
+      // ETP-5547: nothing changed — skip the UPDATE. This hook runs on every header write, so
+      // a no-op UPDATE is both wasted work and one more chance to hit the posted-document trigger.
+      log.debug("[ETP-5547] C_Conversion_Rate_Document {} already up to date for invoice {}",
+          keep.id(), invoice.getId());
+    } else {
+      updateConversionRateDocument(conn, keep.id(), docCurrencyId, docRate, foreignAmount);
+    }
+    for (int i = 1; i < existing.size(); i++) {
+      String staleId = existing.get(i).id();
       deleteConversionRateDocument(conn, staleId);
       log.info("[ETP-4836] Deleted stale duplicate C_Conversion_Rate_Document {} for invoice {}",
           staleId, invoice.getId());
@@ -84,36 +108,61 @@ final class ConversionRateDocumentSync {
    * to another foreign currency correctly replaced the row, but switching back to the org
    * currency silently no-op'd instead of clearing it).
    */
-  static void deleteAllForInvoice(String invoiceId, String orgCurrencyId) throws java.sql.SQLException {
+  static void deleteAllForInvoice(String invoiceId, String orgCurrencyId) throws SQLException {
     Connection conn = OBDal.getInstance().getConnection();
-    List<String> existingIds = findConversionRateDocumentIds(conn, invoiceId, orgCurrencyId);
-    for (String staleId : existingIds) {
-      deleteConversionRateDocument(conn, staleId);
-      log.info("[ETP-4836] Deleted C_Conversion_Rate_Document {} for invoice {} (doc currency"
-          + " now matches org currency)", staleId, invoiceId);
+    JdbcSavepoints.run(conn, () -> {
+      List<ExistingRow> existing = findConversionRateDocuments(conn, invoiceId, orgCurrencyId);
+      for (ExistingRow row : existing) {
+        deleteConversionRateDocument(conn, row.id());
+        log.info("[ETP-4836] Deleted C_Conversion_Rate_Document {} for invoice {} (doc currency"
+            + " now matches org currency)", row.id(), invoiceId);
+      }
+    });
+  }
+
+  /**
+   * An existing {@code C_Conversion_Rate_Document} row, with the values the upsert compares
+   * against before deciding whether an UPDATE is needed.
+   */
+  record ExistingRow(String id, String currencyId, BigDecimal rate, BigDecimal foreignAmount) {
+
+    /** {@code true} when this row already holds exactly the given values (BigDecimal by value). */
+    boolean matches(String otherCurrencyId, BigDecimal otherRate, BigDecimal otherForeignAmount) {
+      return Objects.equals(currencyId, otherCurrencyId)
+          && sameAmount(rate, otherRate)
+          && sameAmount(foreignAmount, otherForeignAmount);
+    }
+
+    private static boolean sameAmount(BigDecimal a, BigDecimal b) {
+      if (a == null || b == null) {
+        return a == null && b == null;
+      }
+      return a.compareTo(b) == 0;
     }
   }
 
-  private static List<String> findConversionRateDocumentIds(Connection conn, String invoiceId,
-      String orgCurrencyId) throws java.sql.SQLException {
+  private static List<ExistingRow> findConversionRateDocuments(Connection conn, String invoiceId,
+      String orgCurrencyId) throws SQLException {
     String sql =
-        "SELECT c_conversion_rate_document_id FROM c_conversion_rate_document"
+        "SELECT c_conversion_rate_document_id, c_currency_id, rate, foreign_amount"
+      + " FROM c_conversion_rate_document"
       + " WHERE c_invoice_id = ? AND c_currency_id_to = ? ORDER BY created DESC";
-    List<String> ids = new ArrayList<>();
+    List<ExistingRow> rows = new ArrayList<>();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, invoiceId);
       ps.setString(2, orgCurrencyId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          ids.add(rs.getString(1));
+          rows.add(new ExistingRow(rs.getString(1), rs.getString(2), rs.getBigDecimal(3),
+              rs.getBigDecimal(4)));
         }
       }
     }
-    return ids;
+    return rows;
   }
 
   private static void updateConversionRateDocument(Connection conn, String recordId,
-      String docCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
+      String docCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws SQLException {
     String userId = OBContext.getOBContext().getUser().getId();
     String sql =
         "UPDATE c_conversion_rate_document"
@@ -136,7 +185,7 @@ final class ConversionRateDocumentSync {
   }
 
   private static void deleteConversionRateDocument(Connection conn, String recordId)
-      throws java.sql.SQLException {
+      throws SQLException {
     String sql = "DELETE FROM c_conversion_rate_document WHERE c_conversion_rate_document_id = ?";
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, recordId);
@@ -144,10 +193,18 @@ final class ConversionRateDocumentSync {
     }
   }
 
-  /** Package-visible: also reused by {@link InvoiceFromOrderSupport} to avoid duplicating
-   * this insert for the order→invoice rate-propagation path (ETP-4027). */
+  /**
+   * Package-visible: also reused by {@link InvoiceFromOrderSupport} to avoid duplicating
+   * this insert for the order→invoice rate-propagation path (ETP-4027). Runs under its own
+   * savepoint (ETP-5547) because that caller also swallows the exception.
+   */
   static void insertConversionRateDocument(Connection conn, Invoice invoice,
-      String orgCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
+      String orgCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws SQLException {
+    JdbcSavepoints.run(conn, () -> insertRow(conn, invoice, orgCurrencyId, docRate, foreignAmount));
+  }
+
+  private static void insertRow(Connection conn, Invoice invoice, String orgCurrencyId,
+      BigDecimal docRate, BigDecimal foreignAmount) throws SQLException {
     String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
     String userId = OBContext.getOBContext().getUser().getId();
     String sql =
