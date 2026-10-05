@@ -712,7 +712,12 @@ cannot resurface as a `StaleStateException` in the onboarding's next flush. Both
 real tenant context by `TenantContextSubscriptionWriteIntegrationTest`.
 
 R37 does the same thing for tenants that predate the subscription model (statement 3 of its
-`@apply`, in the same transaction as the backfilled row), so the fleet converges from both ends onto
+`@apply`, in the same transaction as the backfilled row) — and, more widely than the runtime path,
+for **every tenant that has any `ETGO_SUBSCRIPTION` row**, open or closed. That widening exists
+because develop's data-fix R42 (`20260929T190000Z__R42-paid-provisioning-commercial-metadata`,
+ETP-5548) re-inserts the marker for paid-provisioned tenants, including ones that already have a
+row; R42 always runs before R37 in a tenant's chain, so R37 removes it (design doc §8 and §8.2,
+including the `run.js --fix <R42>` caveat). The fleet therefore converges from both ends onto
 one **observable end condition**: `select count(*) from ad_preference where
 attribute = 'ETGO_TenantPlan'` reaching 0, with the WARN line below silent. Both retirement paths
 remove *every* `ETGO_TenantPlan` row visible at the tenant, whatever its value or `isactive` flag —

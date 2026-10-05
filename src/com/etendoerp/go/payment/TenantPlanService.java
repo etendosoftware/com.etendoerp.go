@@ -45,8 +45,9 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  *
  * <p><b>The marker is retired PER TENANT, not fleet-wide.</b> A tenant leaves the transitional
  * state the moment it gains a live subscription: the R37 backfill data-fix removes its
- * {@value #PREFERENCE_ATTRIBUTE} row in the same transaction as the backfilled subscription, and
- * the runtime path does the same through {@link #retireProductivePreference} right after a
+ * {@value #PREFERENCE_ATTRIBUTE} row in the same transaction as the backfilled subscription (and,
+ * since develop's R42 data-fix re-inserts the marker, that of every tenant with any subscription
+ * row), and the runtime path does the same through {@link #retireProductivePreference} right after a
  * successful subscription write. That makes the cutover a per-tenant state transition with an
  * OBSERVABLE end condition instead of a judgement call:
  *
@@ -150,10 +151,15 @@ public class TenantPlanService {
    *
    * <p>Called right after the tenant's subscription row has been opened successfully, so that a
    * newly paid tenant lands directly in the post-cutover state instead of carrying two answers to
-   * the same question. It is the runtime twin of statement 3 of the R37 backfill data-fix
-   * ({@code 20261005T180000Z__R37-tenant-subscription-backfill.sql}), which does the same thing for
-   * tenants that predate the subscription model — same policy, same scoping, so the fleet converges
-   * from both ends.
+   * the same question. It is the runtime counterpart of statement 3 of the R37 backfill data-fix
+   * ({@code 20261005T180000Z__R37-tenant-subscription-backfill.sql}), so the fleet converges from
+   * both ends. Both remove every marker row of the tenant and both scope by
+   * {@code VISIBLEAT_CLIENT_ID}, but their triggers differ: this method retires only right after it
+   * has opened a row, while R37 retires for every tenant that has ANY subscription row, open or
+   * closed. R37 was widened that way because develop's R42 data-fix
+   * ({@code 20260929T190000Z__R42-paid-provisioning-commercial-metadata.sql}) re-inserts the marker
+   * for paid-provisioned tenants that already have a row — a marker this method never gets a
+   * second chance to see.
    *
    * <p><b>Scoped by {@code VISIBLEAT_CLIENT_ID}, never by {@code AD_CLIENT_ID}.</b>
    * {@code Preferences.setPreferenceValue} stores the row at {@code AD_CLIENT_ID = '0'} and encodes
