@@ -123,6 +123,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * <p>It also owns the specs for {@code applyPaidUpgradeSideEffects} (ETP-5046): which store records
  * a paid tenant's plan, and that the per-tenant retirement of the legacy ETGO_TenantPlan preference
  * can never fail an upgrade that has already been paid for.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletCoverageTest {
 
@@ -2540,7 +2542,8 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(201, attempt.response.status);
     verify(attempt.checkout).createSession(eq("account-1"), eq("owner@example.test"), eq("Acme"),
-        eq("https://app.example.test"), any(), anyBoolean(), anyBoolean(), any());
+        eq("https://app.example.test"), isNull(),
+        argThat(EtendoGoJwtServletCoverageTest::selectsNoDemo));
   }
 
   @Test
@@ -2607,7 +2610,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(tenantPlan.resolvePlan("OTHER-ACCOUNT")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     when(tenantPlan.resolvePlan("OWN-SAME-NAME")).thenReturn(ownPlan);
     when(checkout.createSession(anyString(), anyString(), anyString(), anyString(), any(),
-        anyBoolean(), anyBoolean(), any()))
+        any(HostedCheckoutService.SessionOptions.class)))
         .thenReturn(new JSONObject().put("requestId", "purchase-1"));
     HttpServletRequest request = jsonRequest("/billing/purchases",
         "{\"clientName\":\"" + clientName + "\"}");
