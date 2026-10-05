@@ -82,6 +82,14 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String CRITERIA_PARAM = "criteria";
   private static final String HQL_AND_OPERATOR = " and ";
+  /**
+   * ETP-5568 — query-string keys that would reach the HQL text unchecked. Core reads
+   * {@code whereAndFilterClause} and {@code _where} as raw HQL, and {@code _neoWhere} was the NEO
+   * predicate a client could send until this ticket. A customization that must restrict a list
+   * declares {@link NeoHandler#readPredicates} instead.
+   */
+  private static final List<String> SERVER_OWNED_WHERE_PARAMS = List.of(
+      JsonConstants.WHERE_AND_FILTER_CLAUSE, JsonConstants.WHERE_PARAMETER, "_neoWhere");
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   /**
    * The audit column core's optimistic-locking check reads (ETP-5073 / DOC-04).
@@ -466,6 +474,10 @@ class NeoCrudHandler {
     // query "id" still flows through unchanged, exactly as before.
     if (context.getQueryParams() != null) {
       params.putAll(context.getQueryParams());
+      // ETP-5568: the where clause is the server's alone. Core splices these keys into the HQL
+      // text verbatim, so a value that arrives on the query string is dropped here, before
+      // applyWhereClause builds the real one.
+      SERVER_OWNED_WHERE_PARAMS.forEach(params::remove);
     }
     if (context.getRecordId() != null) {
       params.put(JsonConstants.ID, context.getRecordId());
@@ -483,8 +495,8 @@ class NeoCrudHandler {
   }
 
   /**
-   * Builds the HQL where clause from the tab filter, the parent filter, the internal
-   * {@code _neoWhere} predicate and the customization's read predicate, and adds it to params.
+   * Builds the HQL where clause from the tab filter, the parent filter and the customization's
+   * read predicate, and adds it to params.
    */
   private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId,
       String readPredicate) {
@@ -503,7 +515,6 @@ class NeoCrudHandler {
         where.append("(").append(parentFilter).append(")");
       }
     }
-    NeoReadPredicates.appendAnd(where, params.remove(NeoCrudHelper.NEO_WHERE_PARAM));
     NeoReadPredicates.appendAnd(where, readPredicate);
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());

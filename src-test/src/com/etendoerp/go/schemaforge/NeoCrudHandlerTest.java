@@ -1137,41 +1137,6 @@ class NeoCrudHandlerTest {
     }
 
     @Test
-    @DisplayName("Appends neoWhere clause when present in params")
-    void appendsNeoWhere() throws Exception {
-      Tab adTab = mock(Tab.class);
-      when(adTab.getHqlwhereclause()).thenReturn(null);
-      when(adTab.getTabLevel()).thenReturn(0L);
-
-      Map<String, String> params = new HashMap<>();
-      params.put("_neoWhere", "e.status = 'CO'");
-      invokeApplyWhereClause(params, adTab, null);
-
-      String where = params.get("whereAndFilterClause");
-      assertNotNull(where);
-      assertTrue(where.contains("e.status = 'CO'"));
-      assertNull(params.get("_neoWhere"));
-    }
-
-    @Test
-    @DisplayName("Combines tab where and neoWhere with AND")
-    void combinesTabAndNeoWhere() throws Exception {
-      Tab adTab = mock(Tab.class);
-      when(adTab.getHqlwhereclause()).thenReturn("e.active = true");
-      when(adTab.getTabLevel()).thenReturn(0L);
-
-      Map<String, String> params = new HashMap<>();
-      params.put("_neoWhere", "e.status = 'CO'");
-      invokeApplyWhereClause(params, adTab, null);
-
-      String where = params.get("whereAndFilterClause");
-      assertNotNull(where);
-      assertTrue(where.contains("e.active = true"));
-      assertTrue(where.contains(" and "));
-      assertTrue(where.contains("e.status = 'CO'"));
-    }
-
-    @Test
     @DisplayName("Does not add whereAndFilterClause when nothing applies")
     void noWhereClauseWhenNothingApplies() throws Exception {
       Tab adTab = mock(Tab.class);
@@ -1256,8 +1221,8 @@ class NeoCrudHandlerTest {
     }
 
     @Test
-    @DisplayName("Combines tab where, parent filter and neoWhere with AND")
-    void combinesAllThreeClauses() throws Exception {
+    @DisplayName("Combines tab where and parent filter with AND")
+    void combinesTabWhereAndParentFilter() throws Exception {
       Tab adTab = mock(Tab.class);
       when(adTab.getHqlwhereclause()).thenReturn("e.active = true");
       when(adTab.getTabLevel()).thenReturn(1L);
@@ -1272,14 +1237,10 @@ class NeoCrudHandlerTest {
             .thenReturn(parentFilter);
 
         Map<String, String> params = new HashMap<>();
-        params.put("_neoWhere", "e.qty > 0");
         invokeApplyWhereClause(params, adTab, "ORD-1");
 
-        String where = params.get("whereAndFilterClause");
-        assertNotNull(where);
-        assertTrue(where.contains("e.active = true"));
-        assertTrue(where.contains("e.order.id = 'ORD-1'"));
-        assertTrue(where.contains("e.qty > 0"));
+        assertEquals("(e.active = true) and (e.order.id = 'ORD-1')",
+            params.get("whereAndFilterClause"));
       }
     }
 
@@ -1298,17 +1259,16 @@ class NeoCrudHandlerTest {
     }
 
     @Test
-    @DisplayName("ETP-5009: the read predicate is ANDed after the tab where and neoWhere")
-    void readPredicateAndedAfterTabWhereAndNeoWhere() throws Exception {
+    @DisplayName("ETP-5009: the read predicate is ANDed after the tab where")
+    void readPredicateAndedAfterTabWhere() throws Exception {
       Tab adTab = mock(Tab.class);
       when(adTab.getHqlwhereclause()).thenReturn("e.active = true");
       when(adTab.getTabLevel()).thenReturn(0L);
 
       Map<String, String> params = new HashMap<>();
-      params.put("_neoWhere", "e.status = 'CO'");
       invokeApplyWhereClause(params, adTab, null, "e.hidden = false");
 
-      assertEquals("(e.active = true) and (e.status = 'CO') and (e.hidden = false)",
+      assertEquals("(e.active = true) and (e.hidden = false)",
           params.get("whereAndFilterClause"));
     }
 
@@ -3418,6 +3378,59 @@ class NeoCrudHandlerTest {
 
       assertEquals("0", params.get("_startRow"));
       assertEquals("100", params.get("_endRow"));
+    }
+
+    /**
+     * ETP-5568: core splices whereAndFilterClause (and _where) into the HQL text verbatim, and
+     * _neoWhere used to be ANDed in the same way. None of them may come from the query string:
+     * the where clause is exactly the one the server builds.
+     */
+    @Test
+    @DisplayName("ETP-5568: HQL-carrying query params never reach the where clause")
+    void queryStringCannotInjectHql() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn("e.active = true");
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> qp = new HashMap<>();
+      qp.put("_neoWhere", "1=1) or (1=1");
+      qp.put("whereAndFilterClause", "1=1");
+      qp.put("_where", "1=1");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, qp);
+
+      Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+      assertEquals("(e.active = true)", params.get("whereAndFilterClause"));
+      assertFalse(params.containsKey("_neoWhere"));
+      assertFalse(params.containsKey("_where"));
+    }
+
+    /**
+     * ETP-5568: with no tab where, no parent and no read predicate the server sets no where
+     * clause at all — a client-sent one used to pass straight through to core in that case.
+     */
+    @Test
+    @DisplayName("ETP-5568: a client whereAndFilterClause is dropped when the server sets none")
+    void clientWhereClauseDroppedWhenServerHasNone() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-1");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getHqlwhereclause()).thenReturn(null);
+      when(adTab.getTabLevel()).thenReturn(0L);
+
+      Map<String, String> qp = new HashMap<>();
+      qp.put("whereAndFilterClause", "exists (select 1 from ADUser u where u.password like 'a%')");
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, qp);
+
+      Map<String, String> params = invokeBuildDalParams(context, adTab, "C_Order");
+
+      assertFalse(params.containsKey("whereAndFilterClause"));
     }
 
     /**
