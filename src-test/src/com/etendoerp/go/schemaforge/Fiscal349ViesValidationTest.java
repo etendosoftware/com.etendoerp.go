@@ -65,6 +65,8 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.module.bptaxidkey.ViesService;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Unit tests for the {@code POST /neo/fiscal349/validate-vies} verb of
  * {@link Fiscal349BoxesHandler}.
@@ -92,6 +94,16 @@ class Fiscal349ViesValidationTest {
   private PreparedStatement updatePs;
   private ResultSet selectRs;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal349 sub-route
+   * (including "validate-vies") on the Tax Report window grant before any routing runs. Opened
+   * and closed synchronously around the single {@code handle()} call on the main test thread —
+   * unlike {@link ViesService}, nothing here runs on the worker pool, so a static mock is safe.
+   * Default every test to "granted"; the denial itself is covered in
+   * {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @BeforeEach
   void setUp() throws Exception {
     servlet = mock(NeoServlet.class);
@@ -103,6 +115,10 @@ class Fiscal349ViesValidationTest {
 
     obDalMock = mockStatic(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
 
     connMock = mock(Connection.class);
     selectPs = mock(PreparedStatement.class);
@@ -121,6 +137,7 @@ class Fiscal349ViesValidationTest {
   @AfterEach
   void tearDown() {
     obDalMock.close();
+    accessMock.close();
   }
 
   // ── helpers ───────────────────────────────────────────────────────

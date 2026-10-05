@@ -69,6 +69,7 @@ import org.hibernate.criterion.Criterion;
 
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link Fiscal303BoxesHandler}.
@@ -92,10 +93,26 @@ public class Fiscal303BoxesHandlerTest {
   private Fiscal303BoxesHandler handler;
   private FiscalDeclCrudHandler declHandler;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal303 sub-route on the
+   * Tax Report window grant before any routing runs. Default every test to "granted" so this
+   * file's pre-existing {@code handle()} routing tests keep exercising what they were written
+   * for; the denial itself is covered in {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @org.junit.Before
   public void setUp() {
     handler = new Fiscal303BoxesHandler(null);
     declHandler = new FiscalDeclCrudHandler(null);
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @org.junit.After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── BoxGroupConfig ────────────────────────────────────────────────────────

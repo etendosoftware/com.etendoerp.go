@@ -57,6 +57,7 @@ import org.hibernate.Session;
 import org.hibernate.criterion.Criterion;
 import org.hibernate.query.Query;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -73,6 +74,8 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Unit tests for {@link Fiscal349BoxesHandler}.
  *
@@ -84,10 +87,26 @@ public class Fiscal349BoxesHandlerTest {
   private NeoServlet servlet;
   private Fiscal349BoxesHandler handler;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal349 sub-route on the
+   * Tax Report window grant before any routing runs. Default every test to "granted" so this
+   * file's pre-existing {@code handle()} routing tests keep exercising what they were written
+   * for; the denial itself is covered in {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @Before
   public void setUp() {
     servlet = mock(NeoServlet.class);
     handler = new Fiscal349BoxesHandler(servlet);
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── constructor ───────────────────────────────────────────────────

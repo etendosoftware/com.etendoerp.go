@@ -51,6 +51,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.Query;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -77,6 +78,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for the AEAT 303 telematic submission entity added to {@link Fiscal303BoxesHandler}
@@ -120,9 +122,25 @@ public class Fiscal303SubmitHandlerTest {
 
   private Fiscal303BoxesHandler handler;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal303 sub-route
+   * (including "submit") on the Tax Report window grant before any routing runs. Default every
+   * test to "granted" so this file's submit-flow tests keep exercising what they were written
+   * for; the denial itself is covered in {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @Before
   public void setUp() {
     handler = snapshotStubbed(mock(NeoServlet.class));
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── resolveNrcForSubmission ─────────────────────────────────────────────────
