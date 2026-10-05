@@ -76,6 +76,14 @@ class NeoHookDispatcher {
     SFEntity entity = servlet.findEntity(spec.getId(), entityName);
     String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
 
+    // ETP-5558: before the customization or the AD button sees the record, whatever the entity.
+    if (endpointType == NeoEndpointType.ACTION && actionParams != null) {
+      NeoResponse refusal = NeoActionRecordGuard.refusalFor(entity, actionParams.recordId);
+      if (refusal != null) {
+        return refusal;
+      }
+    }
+
     NeoContext hookCtx = buildHookContext(spec, entityName, endpointType, fieldName,
         httpMethod, entity, actionParams);
 

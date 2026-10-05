@@ -37,9 +37,13 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -49,6 +53,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentPropDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
+import com.etendoerp.go.schemaforge.NeoActionRecordGuard;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -188,8 +193,13 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * invoice.
    */
   private static final String PIS_STATUS_ACTION_FIELD = "pisPaymentStatus";
+  /** The actions {@link #handle} routes, by the property name it discriminates on. */
+  private static final Set<String> OWN_ACTION_FIELDS = Set.of(REACTIVATE_ACTION_FIELD,
+      CONFIRM_ACTION_FIELD, REMOVE_ACTION_FIELD, PIS_RETRY_ACTION_FIELD, PIS_STATUS_ACTION_FIELD);
   /** Mirrors {@code PisDeferredPaymentService.PAYMENT_STATUS_ERROR}, which is not visible here. */
   private static final String PAYMENT_STATUS_ERROR = "ETGOERR";
+  /** A voided payment; the payment window does not offer Eliminar on it. */
+  private static final String PAYMENT_STATUS_VOID = "RPVOID";
   private static final String FIELD_PIS_PAYMENT_ID = "pisPaymentId";
   /**
    * Read-only flag telling the UI that this payment's lifecycle belongs to its bank transfer, so
@@ -240,7 +250,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }
-    String fieldName = context.getFieldName();
+    String fieldName = canonicalActionName(context);
     if (REACTIVATE_ACTION_FIELD.equals(fieldName)) {
       return handleReactivate(context);
     }
@@ -262,6 +272,57 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   /**
+   * The action's DAL property name, whichever spelling the caller used (ETP-5558). The button
+   * lookup accepts the DB column name as well as the field name — {@code neo_schema} publishes both,
+   * as {@code action} and {@code name} — so matching on the property name alone let the column
+   * spelling skip this handler: Reactivate ran without {@code action = "RE"} and Eliminar without
+   * the agent's gate. A name that resolves to no button is returned as it came.
+   */
+  private static String canonicalActionName(NeoContext context) {
+    String fieldName = context.getFieldName();
+    if (fieldName == null || OWN_ACTION_FIELDS.contains(fieldName)
+        || context.getSfEntity() == null) {
+      return fieldName;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Column button = NeoButtonActionHelper.findButtonColumn(context.getSfEntity().getId(),
+          fieldName);
+      String property = button == null ? null : propertyNameOf(button);
+      return property == null ? fieldName : property;
+    } catch (RuntimeException e) {
+      log.debug("Could not resolve action {} to its button: {}", fieldName, e.getMessage());
+      return fieldName;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String propertyNameOf(Column column) {
+    Entity dal = ModelProvider.getInstance()
+        .getEntityByTableName(column.getTable().getDBTableName());
+    Property property = dal == null ? null : dal.getPropertyByColumnName(column.getDBColumnName());
+    return property == null ? null : property.getName();
+  }
+
+  /**
+   * 404 unless the record the action is posted to is a payment of the current tenant (ETP-5558).
+   * The action path checks this before any customization runs ({@code NeoActionRecordGuard}); this
+   * repeats it where the payment is mutated, so the handler does not depend on being reached only
+   * through that path.
+   */
+  private static NeoResponse requireOwnedPayment(NeoContext context) {
+    OBContext.setAdminMode(true);
+    try {
+      return NeoActionRecordGuard.loadOwned(FIN_Payment.class, context.getRecordId()) != null
+          ? null
+          : NeoResponse.error(404, "Payment not found: " + context.getRecordId());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Reactivates the payment through the module's {@code RE} action. For a RECONCILED payment
    * ({@code RPPC}) the delegation is bracketed by {@link ReconciledPaymentReactivation} (ETP-5547):
    * {@code prepare} captures the matched bank-statement line and aligns the payment status with its
@@ -275,6 +336,10 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * user to edit that draft.
    */
   private NeoResponse handleReactivate(NeoContext context) {
+    NeoResponse notOwned = requireOwnedPayment(context);
+    if (notOwned != null) {
+      return notOwned;
+    }
     ReconciledPaymentReactivation.Prepared reconciled = null;
     try {
       clearTransferErrorFlag(context.getRecordId());
@@ -321,7 +386,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
     }
     OBContext.setAdminMode(true);
     try {
-      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+      FIN_Payment payment = NeoActionRecordGuard.loadOwned(FIN_Payment.class, paymentId);
       if (payment == null || !StringUtils.equals(PAYMENT_STATUS_ERROR, payment.getStatus())) {
         return;
       }
@@ -339,6 +404,10 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   private NeoResponse handleConfirm(NeoContext context) {
+    NeoResponse notOwned = requireOwnedPayment(context);
+    if (notOwned != null) {
+      return notOwned;
+    }
     try {
       JSONObject params = new JSONObject();
       params.put(FIN_PAYMENT_ID_KEY, context.getRecordId());
@@ -423,14 +492,22 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * is harmless now.
    *
    * @param context the current NEO request context
-   * @return a 200 on success, a 404 if the payment does not exist, a 400 if the payment is
+   * @return a 200 on success, a 404 if the payment does not exist, a 422 for an agent when the UI
+   *     would not offer Eliminar (see {@link #agentRemovalRefusal}), a 400 if the payment is
    *     tied to a processed Payment Proposal, or a 500 error on unexpected failure
    */
   private NeoResponse handleRemove(NeoContext context) {
     try {
-      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
+      FIN_Payment payment = NeoActionRecordGuard.loadOwned(FIN_Payment.class,
+          context.getRecordId());
       if (payment == null) {
         return NeoResponse.error(404, "Payment not found: " + context.getRecordId());
+      }
+      if (context.isMcpOrigin()) {
+        NeoResponse refused = agentRemovalRefusal(payment);
+        if (refused != null) {
+          return refused;
+        }
       }
 
       FIN_PaymentPropDetail blocking = findProcessedProposalPropDetail(payment);
@@ -474,6 +551,30 @@ public class ReactivatePaymentHandler implements NeoHandler {
       log.error("Error removing payment for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Payment removal failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * The UI's own gate on Eliminar, applied to an agent (ETP-5558): the payment window hides the
+   * button on a void payment ({@code visibleWhen "@status@!='RPVOID'"}) and on one whose lifecycle
+   * belongs to its bank transfer ({@code pisLocked}, the same predicate the GET emits — see
+   * {@link #injectLockFlags}). The SPA enforces both by not offering the button, so the REST path
+   * stays as it was; an agent has no button to withhold, so it gets a 422 instead.
+   *
+   * @return a 422 when the UI would not offer Eliminar on {@code payment}, otherwise {@code null}
+   */
+  private static NeoResponse agentRemovalRefusal(FIN_Payment payment) {
+    String status = payment.getStatus();
+    if (StringUtils.equals(PAYMENT_STATUS_VOID, status)) {
+      return NeoResponse.error(422, "This payment is void (RPVOID) and cannot be deleted: Eliminar "
+          + "is offered at every status except void. Nothing was changed.");
+    }
+    boolean hasBankTransfer = PisDeferredPaymentService
+        .paymentsWithBankTransfer(Set.of(payment.getId())).contains(payment.getId());
+    if (PisDeferredPaymentService.isLifecycleLockedByTransfer(status, hasBankTransfer)) {
+      return NeoResponse.error(422, "This payment belongs to a live bank transfer (pisLocked) and "
+          + "cannot be deleted while the transfer is in progress or executed. Nothing was changed.");
+    }
+    return null;
   }
 
   /**

@@ -2188,4 +2188,145 @@ class ToolRegistryGenerateToolsTest {
       }
     }
   }
+  // ── the catalogue against real MCP_CONFIG.verbs (ETP-5558) ────────────────
+
+  /**
+   * ETP-5558 — a spec whose every entity hides a write verb through {@code MCP_CONFIG.verbs} is not
+   * offered by that write tool. Unlike {@link WriteCatalogTests}, nothing in
+   * {@link McpToolRouterSupport} is stubbed: {@code hasEntityWithMethod} reads the real verbs JSON
+   * through {@link McpMethodPolicy}. Only the DAL lookups and window access are mocked.
+   *
+   * <p>Live context: an agent's {@code neo_delete} offered {@code payment-in}; it was a stale client
+   * schema — the catalogue against DB 5416 excludes payment-in and payment-out from all three write
+   * enums. This locks that in.</p>
+   */
+  @Nested
+  @DisplayName("generateTools — write enums with real MCP_CONFIG.verbs (ETP-5558)")
+  class VerbsCatalogueTests {
+
+    private static final String SPEC_PAYMENT_IN = "payment-in";
+    private static final String HIDE_ALL = "{\"verbs\":{\"create\":false,\"update\":false,"
+        + "\"delete\":false,\"reason\":\"Payments are registered from the invoice\","
+        + "\"instead\":\"neo_action(spec:'sales-invoice', entity:'header', "
+        + "action:'registerPayment')\"}}";
+    private int seq;
+
+    @BeforeEach
+    void resetConfig() {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+    }
+
+    @AfterEach
+    void clearConfig() {
+      McpConfigCache.invalidateAll();
+    }
+
+    /** An AD_Tab-backed entity with every ETGO_SF_ENTITY method flag on. */
+    private SFEntity entity(SFSpec spec, String mcpConfig) {
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getId()).thenReturn("ent-" + (++seq));
+      when(entity.getName()).thenReturn("entity-" + seq);
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(tab.getTabLevel()).thenReturn(seq == 1 ? 0L : 1L);
+      when(entity.getADTab()).thenReturn(tab);
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(mcpConfig);
+      when(entity.isGet()).thenReturn(true);
+      when(entity.isPost()).thenReturn(true);
+      when(entity.isPut()).thenReturn(true);
+      when(entity.isPatch()).thenReturn(true);
+      when(entity.isDelete()).thenReturn(true);
+      return entity;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<McpToolDefinition> catalogue(String... entityConfigs) {
+      SFSpec spec = createWindowSpec(SPEC_PAYMENT_IN);
+      when(spec.getId()).thenReturn("spec-payment-in");
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+      List<SFEntity> entities = new java.util.ArrayList<>();
+      for (String config : entityConfigs) {
+        entities.add(entity(spec, config));
+      }
+      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+      when(entityCriteria.list()).thenReturn(entities);
+      return registry.generateTools(scopesOf("neo:read", "neo:write"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> specEnumOf(List<McpToolDefinition> tools, String toolName) {
+      McpToolDefinition tool = tools.stream().filter(t -> toolName.equals(t.getName()))
+          .findFirst().orElse(null);
+      if (tool == null) {
+        return List.of();
+      }
+      Map<String, Object> props = (Map<String, Object>) tool.getInputSchema().get("properties");
+      List<String> values = (List<String>) ((Map<String, Object>) props.get("spec")).get("enum");
+      return values == null ? List.of() : values;
+    }
+
+    @Test
+    @DisplayName("every entity hiding create, update and delete: absent from all three write enums")
+    void hiddenEverywhereIsAbsent() {
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, HIDE_ALL);
+
+      assertTrue(specEnumOf(tools, "neo_list").contains(SPEC_PAYMENT_IN),
+          "still readable");
+      for (String writeTool : List.of("neo_create", "neo_update", "neo_delete")) {
+        assertFalse(specEnumOf(tools, writeTool).contains(SPEC_PAYMENT_IN),
+            writeTool + " must not offer a spec whose every entity hides the verb");
+      }
+    }
+
+    @Test
+    @DisplayName("one entity leaving create enabled puts the spec back in neo_create only")
+    void oneEntityLeavingCreate() {
+      String createOnly = "{\"verbs\":{\"update\":false,\"delete\":false,"
+          + "\"reason\":\"lines are edited from the header\"}}";
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, createOnly);
+
+      assertTrue(specEnumOf(tools, "neo_create").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "neo_update").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "neo_delete").contains(SPEC_PAYMENT_IN));
+    }
+
+    @Test
+    @DisplayName("one entity leaving update enabled puts the spec back in neo_update only")
+    void oneEntityLeavingUpdate() {
+      String updateOnly = "{\"verbs\":{\"create\":false,\"delete\":false,"
+          + "\"reason\":\"r\"}}";
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, updateOnly);
+
+      assertFalse(specEnumOf(tools, "neo_create").contains(SPEC_PAYMENT_IN));
+      assertTrue(specEnumOf(tools, "neo_update").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "neo_delete").contains(SPEC_PAYMENT_IN));
+    }
+
+    @Test
+    @DisplayName("one entity with no verbs section puts the spec back in neo_delete")
+    void oneEntityLeavingDelete() {
+      String deleteOnly = "{\"verbs\":{\"create\":false,\"update\":false,"
+          + "\"reason\":\"r\"}}";
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, deleteOnly);
+
+      assertFalse(specEnumOf(tools, "neo_create").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "neo_update").contains(SPEC_PAYMENT_IN));
+      assertTrue(specEnumOf(tools, "neo_delete").contains(SPEC_PAYMENT_IN));
+    }
+
+    @Test
+    @DisplayName("neo_defaults no longer advertises itself for payments")
+    void defaultsDescriptionDropsPayments() {
+      McpToolDefinition defaults = catalogue(HIDE_ALL).stream()
+          .filter(t -> "neo_defaults".equals(t.getName())).findFirst().orElse(null);
+      assertNotNull(defaults);
+      // The wording lives in the view parameter's description, next to the tool's own.
+      String advertised = defaults.getDescription() + " " + defaults.getInputSchema();
+      assertFalse(advertised.contains("payments"), advertised);
+      assertTrue(advertised.contains("compliance-heavy specs (invoices, orders)"), advertised);
+    }
+  }
 }

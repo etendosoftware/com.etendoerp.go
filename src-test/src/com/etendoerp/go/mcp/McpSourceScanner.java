@@ -186,6 +186,15 @@ final class McpSourceScanner {
   }
 
   /**
+   * The module {@code src} root, for a guard that has to list a package rather than read one file.
+   *
+   * @return the root path as a string
+   */
+  static String srcRootForTests() {
+    return srcRoot().toString();
+  }
+
+  /**
    * Resolve the module {@code src} root. Tests run from the Etendo root, but fall back to a walk up
    * from the current directory so the scanner is robust to the working directory.
    */

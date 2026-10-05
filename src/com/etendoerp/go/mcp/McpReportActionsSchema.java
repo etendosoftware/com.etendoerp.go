@@ -30,12 +30,10 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
-import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * {@code neo_schema} answers for entities whose handler declares named actions (ETP-5468): the
@@ -85,7 +83,8 @@ final class McpReportActionsSchema {
       return null;
     }
     return McpToolRouter.wrapAsTextContent(
-        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts));
+        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts,
+            McpActionsSection.forEntity(target)));
   }
 
   /**
@@ -164,11 +163,11 @@ final class McpReportActionsSchema {
 
   /**
    * The named actions the entity's handler declares (ETP-5468), or an empty map. Looked up quietly:
-   * a CDI failure must not break {@code neo_schema} for an ordinary entity.
+   * a CDI failure must not break {@code neo_schema} for an ordinary entity. ETP-5558: resolved by
+   * {@link McpDeclaredActions}, so the {@code @NeoExtension} binding counts as the dispatcher's
+   * does and {@code MCP_CONFIG.actions} can hide one.
    */
   static Map<String, NeoActionContract> declaredActionsOf(SFEntity sfEntity) {
-    NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(sfEntity.getJavaQualifier());
-    Map<String, NeoActionContract> contracts = handler != null ? handler.actionContracts() : null;
-    return contracts != null ? contracts : Collections.emptyMap();
+    return McpDeclaredActions.of(sfEntity);
   }
 }

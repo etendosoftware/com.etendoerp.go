@@ -841,6 +841,86 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
+   * ETP-5526 — GET /attachments/{table}/{record}/count writes handleCount's response and never
+   * loads the list.
+   */
+  @Test
+  public void handleAttachmentsCountGetDelegatesToHandleCount() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse payload = NeoResponse.ok(new JSONObject().put("count", 2));
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/123/count");
+
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleCount("c_order", "123")).thenReturn(payload);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, payload);
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleList(Mockito.anyString(), Mockito.anyString()),
+          never());
+    }
+  }
+
+  /**
+   * ETP-5526 — the count subresource is read-only: any other verb is a 405 and no helper runs
+   * (in particular a POST must not fall through to the upload).
+   */
+  @Test
+  public void handleAttachmentsCountRejectsNonGetMethod() throws Exception {
+    for (String method : new String[] { "POST", "DELETE", "PATCH" }) {
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(request.getPathInfo()).thenReturn("/attachments/c_order/123/count");
+
+      try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+          NeoAttachmentsHelper.class);
+           MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+               NeoAttachmentAuthorizer.class)) {
+        boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+            method, request, response);
+
+        assertTrue(method, handled);
+        verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+            eq("Attachments count endpoint only supports GET"));
+        attachmentsMock.verifyNoInteractions();
+      }
+    }
+  }
+
+  /**
+   * ETP-5526 — "count" is only the subresource as a THIRD segment: with two segments it is the
+   * record id, so GET /attachments/c_order/count is still the list of record "count".
+   */
+  @Test
+  public void handleAttachmentsTwoSegmentCountPathIsTheListOfRecordCount() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/count");
+
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "count")).thenReturn(payload);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, payload);
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleCount(Mockito.anyString(), Mockito.anyString()),
+          never());
+    }
+  }
+
+  /**
    * Verifies method restrictions for attachments file endpoint.
    */
   @Test

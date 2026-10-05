@@ -93,6 +93,8 @@ class McpSessionManagerTest {
 
   @AfterEach
   void tearDown() {
+    // executeInContext binds the effective tenant for telemetry; do not leak it into other tests.
+    McpUsageTelemetry.clearCurrentTenant();
     if (swsMock != null) {
       swsMock.close();
     }
@@ -239,6 +241,48 @@ class McpSessionManagerTest {
 
       swsMock.verify(() -> SecureWebServicesUtils.createContext(
           eq(USER_ID), eq(ROLE_ID), eq("specificOrg"), eq(WAREHOUSE_ID), eq("0")));
+    }
+  }
+
+  @Nested
+  @DisplayName("Telemetry tenant binding (ETP-5594)")
+  class TelemetryTenantBinding {
+
+    @Test
+    @DisplayName("binds the resolved client and org, not the token's '0' wildcard")
+    void bindsTheResolvedTenant() throws Exception {
+      // Org is resolved first, then the client.
+      when(hibernateSession.doReturningWork(any())).thenReturn("resolvedOrg", "resolvedClient");
+
+      McpSessionManager.executeInContext(USER_ID, ROLE_ID, "0", "0", WAREHOUSE_ID, () -> "ok");
+
+      McpUsageTelemetry.Tenant tenant = McpUsageTelemetry.currentTenant();
+      assertEquals("resolvedClient", tenant.getClientId());
+      assertEquals("resolvedOrg", tenant.getOrgId());
+    }
+
+    @Test
+    @DisplayName("binds a concrete token tenant unchanged")
+    void bindsAConcreteTenantUnchanged() throws Exception {
+      McpSessionManager.executeInContext(USER_ID, ROLE_ID, CLIENT_ID, ORG_ID, WAREHOUSE_ID,
+          () -> "ok");
+
+      McpUsageTelemetry.Tenant tenant = McpUsageTelemetry.currentTenant();
+      assertEquals(CLIENT_ID, tenant.getClientId());
+      assertEquals(ORG_ID, tenant.getOrgId());
+    }
+
+    @Test
+    @DisplayName("keeps the tenant bound when the callable fails, so the error row is attributed")
+    void keepsTheTenantWhenTheCallableFails() {
+      when(hibernateSession.doReturningWork(any())).thenReturn("resolvedOrg", "resolvedClient");
+
+      assertThrows(IllegalStateException.class, () -> McpSessionManager.executeInContext(
+          USER_ID, ROLE_ID, "0", "0", WAREHOUSE_ID, () -> {
+            throw new IllegalStateException("boom");
+          }));
+
+      assertEquals("resolvedClient", McpUsageTelemetry.currentTenant().getClientId());
     }
   }
 

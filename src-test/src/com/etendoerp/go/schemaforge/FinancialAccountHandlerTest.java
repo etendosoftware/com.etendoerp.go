@@ -187,6 +187,9 @@ public class FinancialAccountHandlerTest {
     Country spain = mock(Country.class);
     when(spain.getId()).thenReturn("106");
     when(spain.getName()).thenReturn("Spain");
+    // The translated identifier (ETP-5579): what the countryIbanRules catalog serialises as
+    // `name`. Deliberately different from getName() so a regression back to it is caught.
+    when(spain.getIdentifier()).thenReturn("España");
     when(spain.getIBANCode()).thenReturn("ES");
     when(spain.getIBANLength()).thenReturn(24L);
     return spain;
@@ -1600,6 +1603,7 @@ public class FinancialAccountHandlerTest {
   /**
    * On the {@code account} entity, the defaults response also gets {@code country} (ETP-4896
    * requirement 1) and the {@code countryIbanRules} catalog as a sibling of {@code defaults}.
+   * Both carry the country's translated identifier, not its base name (ETP-5579).
    */
   @Test
   public void testAfterHandleDefaultsForAccountEntityInjectsCountryAndCatalog() throws Exception {
@@ -1612,7 +1616,10 @@ public class FinancialAccountHandlerTest {
 
     Country orgCountry = mock(Country.class);
     when(orgCountry.getId()).thenReturn("106");
+    // ETP-5579: the identifier is the C_Country_Trl name in the OBContext language; getName() is
+    // the untranslated base name and must NOT reach country$_identifier.
     when(orgCountry.getName()).thenReturn("Spain");
+    when(orgCountry.getIdentifier()).thenReturn("España");
     doReturn(orgCountry).when(handler).resolveOrgCountry();
 
     Country spain = stubSpainWithIbanMeta();
@@ -1640,10 +1647,13 @@ public class FinancialAccountHandlerTest {
       assertEquals(200, out.getHttpStatus());
       JSONObject outDefaults = out.getBody().getJSONObject("defaults");
       assertEquals("106", outDefaults.getString("country"));
-      assertEquals("Spain", outDefaults.getString("country$_identifier"));
+      assertEquals("the translated identifier, not getName()", "España",
+          outDefaults.getString("country$_identifier"));
       JSONArray rules = out.getBody().getJSONArray("countryIbanRules");
       assertEquals(1, rules.length());
       assertEquals("ES", rules.getJSONObject(0).getString("iso"));
+      assertEquals("the catalog rule name is the translated identifier too", "España",
+          rules.getJSONObject(0).getString("name"));
     }
   }
 

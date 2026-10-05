@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
@@ -37,8 +38,8 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.MissingRequiredFieldsException;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
-import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * Private implementation details of {@link McpToolRouterSupport}, extracted so that class stays
@@ -66,11 +67,11 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  *   <li>the date-write rejection descriptors (IMP-16 / IMP-24) — backs
  *       {@code coercePrimitiveFieldValue}'s date branch;</li>
  *   <li>batch/DAL error-message extraction (IMP-15 / IMP-17) — backs
- *       {@code toMcpBatchFailure}.</li>
+ *       {@code toMcpBatchFailure}, now on {@link McpBatchEnvelope} (ETP-5558).</li>
  * </ul>
  *
- * <p>Package-private visibility throughout: every caller lives in {@code McpToolRouterSupport},
- * in the same package.
+ * <p>Package-private visibility throughout: every caller lives in {@code McpToolRouterSupport}
+ * or {@link McpBatchEnvelope}, in the same package.
  */
 final class McpSupportInternals {
 
@@ -138,6 +139,26 @@ final class McpSupportInternals {
     // can read parentField and parentRequiredFor gets the call right the first time. neo_schema
     // emits the same block from the same helper, so the two tools cannot drift apart.
     McpParentScope.publishInto(item, McpParentScope.forEntity(entity));
+    // ETP-5558: and for a header too — its scope never reads the configuration, and a broken one
+    // now hides every MCP write (MCP_CONFIG.verbs fails closed), so it must say why.
+    McpParentScope.publishConfigError(item, entity);
+    // ETP-5558: the actions a window entity's customization declares (the invoice payment actions),
+    // named here so the agent learns they exist before it reaches for a hand-built payment.
+    // A report spec already lists them at spec level (ETP-5468), so it is left as it was.
+    if (!McpDeclaredActions.replacesSchema(entity)) {
+      Map<String, NeoActionContract> declared = McpDeclaredActions.of(entity);
+      if (!declared.isEmpty()) {
+        item.put("actions", new JSONArray(declared.keySet()));
+        item.put("actionsHint", "Run these with neo_action (id = the record each acts on); "
+            + "neo_schema with view:\"actions\" returns their parameters next to the AD buttons.");
+        McpActionsSection.View config = McpActionsSection.forEntity(entity);
+        if (config.isUnusable()) {
+          // neo_action refuses every action of the entity, so discovery must say so.
+          item.put("actionsInvokable", false);
+          item.put("actionsNotInvokableReason", "Not run through MCP: " + config.getReason());
+        }
+      }
+    }
     // Entity-level agent guidance (ETP-4278), additive to the spec-level and
     // per-field prompts. Emitted only when set so untagged entities stay lean.
     String agentPrompt = entity.getAgentPrompt();
@@ -193,11 +214,12 @@ final class McpSupportInternals {
 
   /**
    * Returns whether an entity declares at least one read method and no supported mutation
-   * method. Delegates to {@link NeoMethodPolicy#isReadOnly(SFEntity)} — the single source of
+   * method. Delegates to {@link McpMethodPolicy#isReadOnly(SFEntity)} (ETP-5558: the flags minus the
+   * verbs {@code MCP_CONFIG.verbs} hides) — the single source of
    * truth for the {@code ETGO_SF_ENTITY} method flags (ETP-4254).
    */
   static boolean isReadOnlyEntity(SFEntity entity) {
-    return NeoMethodPolicy.isReadOnly(entity);
+    return McpMethodPolicy.isReadOnly(entity);
   }
 
   /**
