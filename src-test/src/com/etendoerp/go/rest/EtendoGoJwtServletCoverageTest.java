@@ -20,6 +20,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -48,6 +49,7 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -57,6 +59,9 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.Cookie;
 
@@ -77,6 +82,7 @@ import org.junit.Test;
 import org.junit.Before;
 import org.junit.After;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.exception.OBException;
@@ -123,6 +129,10 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * <p>It also owns the specs for {@code applyPaidUpgradeSideEffects} (ETP-5046): which store records
  * a paid tenant's plan, and that the per-tenant retirement of the legacy ETGO_TenantPlan preference
  * can never fail an upgrade that has already been paid for.
+ *
+ * <p>And the specs for the scoped system context of the two ETP-5548 checks,
+ * {@code isProductiveNameTakenByAccount} and {@code isAssociatedDemo}: each runs as System and
+ * hands the caller back its own OBContext and admin-mode depth, on every path.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
@@ -2574,6 +2584,265 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(400, resp.status);
     assertTrue(resp.body().contains("reserved"));
+  }
+
+  // --- Scoped system context of the ETP-5548 checks (ETP-5046) -----------------------------------
+  //
+  // Driven directly, never through the checkout endpoints: there hasOwnedEnvironment installs a
+  // system context first, which would hide a leak from these two methods.
+
+  private static final String NAME_CHECK_WARNING =
+      "Could not check whether company name is in use before checkout";
+
+  /**
+   * The name check runs as System with admin mode on, and the caller gets back the very context
+   * it had and its admin-mode depth — not a leftover System context.
+   */
+  @Test
+  public void productiveNameCheckRunsAsSystemAndHandsTheCallerItsContextBack() throws Exception {
+    OBContext caller = mock(OBContext.class);
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("OWN-PROD")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    AtomicBoolean lookupRanAsSystem = new AtomicBoolean();
+
+    try (ContextThread thread = new ContextThread(caller, 1);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme")).thenAnswer(call -> {
+        lookupRanAsSystem.set(thread.isSystemWithAdminMode());
+        return List.of("OWN-PROD");
+      });
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-PROD",
+          "owner@example.test")).thenReturn(true);
+
+      assertTrue(isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+
+      assertTrue("the lookup must see user/role/client/org 0 with admin mode on",
+          lookupRanAsSystem.get());
+      assertSame(caller, thread.current.get());
+      assertEquals(1, thread.adminDepth.get());
+    }
+  }
+
+  /** A caller with no context (the webhook's case) gets no context back, not a System one. */
+  @Test
+  public void productiveNameCheckRestoresNoContextAsNoContext() throws Exception {
+    servlet.tenantPlanService = mock(TenantPlanService.class);
+
+    try (ContextThread thread = new ContextThread(null, 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class)) {
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme")).thenReturn(List.of());
+
+      assertFalse(isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+
+      assertNull(thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+    }
+  }
+
+  /**
+   * ETP-5548 semantics are unchanged by the scoping: another account's productive and this
+   * account's demo do not count; only this account's productive does.
+   */
+  @Test
+  public void productiveNameCheckCountsOnlyThisAccountsProductive() throws Exception {
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("OTHER-ACCOUNT")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    when(tenantPlan.resolvePlan("OWN-DEMO")).thenReturn(TenantPlanService.PLAN_FREE);
+    when(tenantPlan.resolvePlan("OWN-PROD")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+
+    try (ContextThread thread = new ContextThread(mock(OBContext.class), 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-DEMO",
+          "owner@example.test")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-PROD",
+          "owner@example.test")).thenReturn(true);
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Other"))
+          .thenReturn(List.of("OTHER-ACCOUNT"));
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Demo"))
+          .thenReturn(List.of("OWN-DEMO"));
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
+          .thenReturn(List.of("OTHER-ACCOUNT", "OWN-DEMO", "OWN-PROD"));
+
+      assertFalse("another account's productive is free to reuse",
+          isProductiveNameTakenByAccount("Other", "owner@example.test"));
+      assertFalse("this account's demo is free to reuse",
+          isProductiveNameTakenByAccount("Demo", "owner@example.test"));
+      assertTrue("this account's productive is taken",
+          isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+    }
+  }
+
+  /** The name lookup failing fails open, logged, and still hands the caller its context back. */
+  @Test
+  public void productiveNameCheckFailsOpenWhenTheNameLookupThrows() throws Exception {
+    servlet.tenantPlanService = mock(TenantPlanService.class);
+    assertNameCheckFailsOpen(support -> support.when(
+        () -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
+        .thenThrow(new IllegalStateException("lookup failed")));
+  }
+
+  /** The plan resolution failing fails open the same way. */
+  @Test
+  public void productiveNameCheckFailsOpenWhenThePlanResolutionThrows() throws Exception {
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("OWN-PROD")).thenThrow(new IllegalStateException("plan failed"));
+    assertNameCheckFailsOpen(support -> support.when(
+        () -> EtendoGoJwtSupport.findClientIdsByName("Acme")).thenReturn(List.of("OWN-PROD")));
+  }
+
+  private void assertNameCheckFailsOpen(
+      java.util.function.Consumer<MockedStatic<EtendoGoJwtSupport>> failure) throws Exception {
+    OBContext caller = mock(OBContext.class);
+    LogCapture warnings = LogCapture.attachTo(EtendoGoJwtServlet.class, Level.WARN);
+    try (ContextThread thread = new ContextThread(caller, 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-PROD",
+          "owner@example.test")).thenReturn(true);
+      failure.accept(support);
+
+      assertFalse(isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+      assertTrue(warnings.messagesAt(Level.WARN).stream()
+          .anyMatch(message -> message.startsWith(NAME_CHECK_WARNING)));
+    } finally {
+      warnings.detach();
+    }
+  }
+
+  /** The associated-demo check answers the lifecycle service, as System, and restores the caller. */
+  @Test
+  public void associatedDemoCheckAnswersTheLifecycleAndHandsTheCallerItsContextBack()
+      throws Exception {
+    OBContext caller = mock(OBContext.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    when(lifecycle.isAssociatedWithProductive("DEMO-FREE")).thenReturn(false);
+
+    try (ContextThread thread = new ContextThread(caller, 0)) {
+      AtomicBoolean ranAsSystem = new AtomicBoolean();
+      when(lifecycle.isAssociatedWithProductive("DEMO-SPENT")).thenAnswer(call -> {
+        ranAsSystem.set(thread.isSystemWithAdminMode());
+        return true;
+      });
+
+      assertTrue(isAssociatedDemo("DEMO-SPENT"));
+      assertTrue("the lifecycle read must run as System with admin mode on", ranAsSystem.get());
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+
+      assertFalse(isAssociatedDemo("DEMO-FREE"));
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+    }
+  }
+
+  /**
+   * The associated-demo check does not swallow a failure: it propagates, after the caller's
+   * context and admin-mode depth have been put back.
+   */
+  @Test
+  public void associatedDemoCheckPropagatesAFailureAfterRestoringTheCaller() throws Exception {
+    OBContext caller = mock(OBContext.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    IllegalStateException boom = new IllegalStateException("lifecycle unavailable");
+    when(lifecycle.isAssociatedWithProductive("DEMO-1")).thenThrow(boom);
+
+    try (ContextThread thread = new ContextThread(caller, 0)) {
+      IllegalStateException thrown = assertThrows(IllegalStateException.class,
+          () -> isAssociatedDemo("DEMO-1"));
+
+      assertSame(boom, thrown);
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+    }
+  }
+
+  private boolean isProductiveNameTakenByAccount(String clientName, String accountEmail)
+      throws Exception {
+    return invokePrivateCheck("isProductiveNameTakenByAccount",
+        new Class<?>[] { String.class, String.class }, clientName, accountEmail);
+  }
+
+  private boolean isAssociatedDemo(String clientId) throws Exception {
+    return invokePrivateCheck("isAssociatedDemo", new Class<?>[] { String.class }, clientId);
+  }
+
+  /** Invokes a private boolean check, rethrowing its own runtime failure unwrapped. */
+  private boolean invokePrivateCheck(String name, Class<?>[] types, Object... args)
+      throws Exception {
+    Method check = EtendoGoJwtServlet.class.getDeclaredMethod(name, types);
+    check.setAccessible(true);
+    try {
+      return (Boolean) check.invoke(servlet, args);
+    } catch (InvocationTargetException e) {
+      if (e.getCause() instanceof RuntimeException) {
+        throw (RuntimeException) e.getCause();
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * A stand-in for OBContext's per-thread state — the current context and the admin-mode depth —
+   * so a spec can see what the code under test leaves behind for its caller.
+   */
+  private static final class ContextThread implements AutoCloseable {
+    final AtomicReference<OBContext> current = new AtomicReference<>();
+    final AtomicInteger adminDepth = new AtomicInteger();
+    private final AtomicReference<List<String>> systemIds = new AtomicReference<>();
+    private final OBContext system = mock(OBContext.class);
+    private final MockedStatic<OBContext> statics = mockStatic(OBContext.class);
+    private final int callerAdminDepth;
+
+    ContextThread(OBContext caller, int callerAdminDepth) {
+      this.callerAdminDepth = callerAdminDepth;
+      current.set(caller);
+      adminDepth.set(callerAdminDepth);
+      statics.when(OBContext::getOBContext).thenAnswer(call -> current.get());
+      statics.when(() -> OBContext.setOBContext(anyString(), anyString(), anyString(),
+          anyString())).thenAnswer(call -> {
+            systemIds.set(List.of(call.getArgument(0), call.getArgument(1), call.getArgument(2),
+                call.getArgument(3)));
+            current.set(system);
+            return null;
+          });
+      statics.when(() -> OBContext.setOBContext(ArgumentMatchers.<OBContext>any()))
+          .thenAnswer(call -> {
+            current.set(call.getArgument(0));
+            return null;
+          });
+      statics.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(call -> {
+        adminDepth.incrementAndGet();
+        return null;
+      });
+      statics.when(OBContext::restorePreviousMode).thenAnswer(call -> {
+        adminDepth.decrementAndGet();
+        return null;
+      });
+    }
+
+    /**
+     * Whether the current context is the one installed for user/role/client/org "0" and admin
+     * mode was entered on top of the caller's depth.
+     */
+    boolean isSystemWithAdminMode() {
+      return current.get() == system && List.of("0", "0", "0", "0").equals(systemIds.get())
+          && adminDepth.get() > callerAdminDepth;
+    }
+
+    @Override
+    public void close() {
+      statics.close();
+    }
   }
 
   private static final class PurchaseAttempt {
