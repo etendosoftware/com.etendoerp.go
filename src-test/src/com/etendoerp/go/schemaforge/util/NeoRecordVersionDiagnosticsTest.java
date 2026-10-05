@@ -70,6 +70,8 @@ import org.openbravo.dal.service.OBDal;
  * with no offset, so such a token is compared AS UTC — and the stored values below say UTC
  * outright, which is what makes these assertions fail on a server whose zone is not UTC if that
  * behaviour ever changes.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoRecordVersion
  */
 class NeoRecordVersionDiagnosticsTest {
 

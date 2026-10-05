@@ -47,6 +47,9 @@ import org.junit.jupiter.api.Test;
  * {@code view:"summary"} is a real view on {@code etendo_list}/{@code etendo_get}, so an agent
  * generalising across the tools would ask for the smallest projection and silently be handed the
  * largest response in the surface — no error, no warning, and a plausible-looking answer.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaCreateView
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 @SuppressWarnings("java:S2187") // test methods live in the @Nested classes below
 @DisplayName("IMP-44 — etendo_schema requires an explicit view")

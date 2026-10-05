@@ -50,6 +50,9 @@ import org.junit.jupiter.api.Test;
  * prompt sits alongside {@code spec}/{@code entity}/{@code table} so an agent reads it before the
  * field list, but Jettison's {@code JSONObject} is backed by a hash map, so emission order is not a
  * property this class can pin.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaCreateView
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

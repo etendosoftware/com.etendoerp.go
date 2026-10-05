@@ -55,6 +55,8 @@ import org.junit.jupiter.api.Test;
  * cheap half — and it is paired with, not a substitute for, the trace parity in
  * {@code NeoExtensionParityTest} and the live verification recorded in the plan (§6.0.11, §6.0.13).
  * </p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoExtensionDispatcher
  */
 @DisplayName("E4 (structural) — every MCP surface dispatches, and REST dispatches at all")
 class NeoExtensionSurfaceCoverageTest {

@@ -78,6 +78,8 @@ import org.junit.jupiter.api.Test;
  * class, so {@code getDeclaredMethod} answers it exactly. Classes are loaded with
  * {@code initialize = false} so no static initialiser runs: nothing here needs an
  * {@code OBContext}, a DAL or a servlet container.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoHandler
  */
 class ReportHandlerAccessDeclarationTest {
 

@@ -61,6 +61,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * inside its own try block while resolving the spec. That is a real call site (the router's own
  * {@code authorizeSpecAccess} throws {@code SecurityException} from there), so the test drives the
  * public entry point rather than the private envelope builder.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

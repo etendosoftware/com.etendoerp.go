@@ -59,6 +59,9 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *
  * <p>The refusal is asserted on the envelope an agent reads, because the point is not only to stop
  * the write but to say why: a bare "bad request" would leave the caller retrying the same call.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpParentScope
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @DisplayName("ETP-5558 BUG-1 — an unmappable parentId is refused (parent_unresolvable)")
 class McpParentUnresolvableTest {

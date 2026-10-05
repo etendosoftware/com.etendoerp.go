@@ -40,6 +40,8 @@ import org.junit.jupiter.api.Test;
  * <b>call site</b> that reads the raw clause, which is what {@code McpSourceScanner} exists for —
  * see {@code McpBillToInjectorCallSiteTest} for the precedent. The behaviour of the shared rule
  * itself is covered by {@code NeoParentTabFilterResolverTest}.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @DisplayName("ETP-5542 — the MCP list resolves the parent placeholders of a tab where clause")
 class McpListTabWhereCallSiteTest {

@@ -44,6 +44,8 @@ import org.mockito.Mockito;
  * evaluation, selectors) also reach the hook with {@code httpMethod=POST}; before this change a
  * button call through {@code etendo_action} was run through {@code validateAndEnrichCreate} and the
  * post-hook tried to provision a "new" account.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  */
 @DisplayName("FinancialAccountHandler — CRUD vs sub-endpoint (ETP-5468)")
 class FinancialAccountHandlerEndpointTypeTest {

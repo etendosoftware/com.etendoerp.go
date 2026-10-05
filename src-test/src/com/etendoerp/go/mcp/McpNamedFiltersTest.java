@@ -31,6 +31,8 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link McpNamedFilters} — the pure, DAL-free parser for the per-entity
  * {@code NAMED_FILTERS} JSON that {@code etendo_list} exposes as {@code {status:"<name>"}} filters
  * (ETP-4601).
+ *
+ * @covers com.etendoerp.go.mcp.McpNamedFilters
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

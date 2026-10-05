@@ -28,6 +28,8 @@ import org.junit.Test;
 /**
  * Unit tests for {@link EmailLayout}, the single place in the module allowed to emit email markup
  * (ETP-5003).
+ *
+ * @covers com.etendoerp.go.schemaforge.email.render.EmailLayout
  */
 public class EmailLayoutTest {
 

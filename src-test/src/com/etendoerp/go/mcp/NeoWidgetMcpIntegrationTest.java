@@ -55,6 +55,9 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * empty-state ({@code {response:{data:[],count:0}}}) for clients with no activity.
  * To assert non-zero counts you would additionally need a seeded client with
  * completed sales invoices, products, sellers and outstanding amounts.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpWidgetHandler
  */
 public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
 

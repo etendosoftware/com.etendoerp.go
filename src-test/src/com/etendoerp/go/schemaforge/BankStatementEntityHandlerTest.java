@@ -34,6 +34,8 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link BankStatementEntityHandler} (ETP-5447): generic CRUD writes on
  * {@code importedBankStatements} and {@code bankStatementLines} are refused with a 405 that points
  * to the {@code bank-statements} actions; reads, defaults and selectors pass through.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementEntityHandler
  */
 class BankStatementEntityHandlerTest {
 

@@ -92,6 +92,8 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * behavior is pre-existing and only re-verified at the {@code @Named} qualifier level here.
  * The Remove action ({@code eTPRRemovePayment}) is fully covered below — it is the new
  * behavior fixing the "cannot be deleted, see Linked Items" FK violation on applied payments.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandler
  */
 public class ReactivatePaymentHandlerTest {
 

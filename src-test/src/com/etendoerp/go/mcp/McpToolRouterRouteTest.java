@@ -87,6 +87,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * cover authorization, argument validation, spec/entity resolution errors,
  * process/report tool flows, NeoResponse conversion, and the static content
  * wrapper methods.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * value it sent was <b>kept</b> — otherwise an agent reads a warning and retries a write that
  * already did what it asked — and it has to name the remedy, which is omitting the field rather
  * than sending a different one.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @DisplayName("IMP-45 — supersededDefaults on the create response")
 class McpSupersededDefaultsReportTest {

@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * that keys off the status alone — or off a shared {@code conflict} code — retries the wrong thing
  * forever. Hence the explicit assertion that the code is {@code stale_record} and NOT
  * {@code conflict}.
+ *
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 class McpWriteRequestSupportStaleRecordTest {
 

@@ -75,6 +75,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * </ul>
  * The real {@link ReconciliationHandler} declaration is used, so a drift in its contracts shows
  * up here too.
+ *
+ * @covers com.etendoerp.go.mcp.McpDeclaredActions
+ * @covers com.etendoerp.go.mcp.McpActionsView
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("MCP declared actions (ETP-5468)")

@@ -75,6 +75,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * dies earlier on {@code this.servlet} (defect present), and
  * {@link #createWithQualifierFailsOnlyAtTheDalWriteNotOnTheServlet()} tells those two apart by
  * name.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
 class NeoCrudHandlerBatchQualifierTest {
 

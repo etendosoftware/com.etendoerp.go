@@ -71,6 +71,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * to {@code NoPostedDocumentDS.getData}) still requires a live OBDal session and is excluded.
  * The {@code setPostingService(...)} package-private seam allows injection of a mock
  * {@link DocumentPostingService} so post / bulk-post paths can be exercised without a database.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.NotPostedDocumentsHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NotPostedDocumentsHandlerTest {

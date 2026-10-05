@@ -32,6 +32,8 @@ import org.junit.Test;
  * <p>
  * Full integration tests (RBAC filtering, DAL queries) require OBBaseTest and run
  * against a live Etendo instance. These unit tests cover the pure-logic parts.
+ *
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 public class ToolRegistryTest {
 

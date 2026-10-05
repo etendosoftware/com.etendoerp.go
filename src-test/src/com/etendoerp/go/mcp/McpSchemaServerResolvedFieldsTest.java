@@ -75,6 +75,8 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  * deleting that one line leaves every other test passing, and the method needs an OBContext, a
  * live DAL and an AD_Tab, so it cannot be reached from a unit test. That is the case
  * {@link McpSourceScanner} exists for.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpServerResolvedFields
  */
 @DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and etendo_create")
 class McpSchemaServerResolvedFieldsTest {

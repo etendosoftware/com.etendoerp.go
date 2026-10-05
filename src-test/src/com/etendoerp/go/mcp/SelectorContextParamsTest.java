@@ -41,6 +41,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>These tests call package-private helpers and mock the AD_Tab/AD_Window
  * dependencies. They do not require a database connection.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSelectorContextHelper
  */
 public class SelectorContextParamsTest {
 

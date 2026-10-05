@@ -39,6 +39,8 @@ import org.junit.jupiter.api.Test;
  * request" would fix the false success and leave the caller just as stuck, so every assertion here
  * is about the self-correcting half: {@code available}, {@code parentField}, {@code parentEntity},
  * and a hint that names the next call.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpRoutingException
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

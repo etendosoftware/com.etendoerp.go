@@ -54,6 +54,9 @@ import org.openbravo.model.ad.ui.Tab;
  * re-proposing the value already on the record, or on an {@code $_identifier} companion of a field
  * already reported under its own name, is noise the agent must learn to ignore, and then it will
  * ignore the real one too. Hence the no-false-positive cases here outnumber the positive one.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsService
  */
 @DisplayName("IMP-45 — supersededDefaults is recorded where the callout is held back")
 class NeoSupersededDefaultsTest {

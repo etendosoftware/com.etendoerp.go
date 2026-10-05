@@ -65,6 +65,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 /**
  * Unit tests for {@link McpToolRouterSupport}.
  * Tests the pure utility methods that don't require DB access.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouterSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

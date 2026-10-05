@@ -30,6 +30,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link McpToolDefinition}.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolDefinition
  */
 class McpToolDefinitionTest {
 

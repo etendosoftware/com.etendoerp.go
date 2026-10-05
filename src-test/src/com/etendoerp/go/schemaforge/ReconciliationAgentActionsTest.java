@@ -77,6 +77,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>The support layer is mocked statically, so no DAL / OBContext is needed; one nested class
  * goes one level deeper (real {@code runPostAction}) to prove the SPA route and the agent action
  * hand the business method an identical body.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationAgentActions
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("ReconciliationAgentActions (ETP-5468)")

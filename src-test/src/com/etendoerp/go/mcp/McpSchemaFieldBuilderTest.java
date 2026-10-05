@@ -67,6 +67,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * (ETP-4510, Sonar S1448) — covers AD_Column → JSON field mapping (type/selector inference,
  * visibility, defaults, business-critical flags, button/process metadata) and the
  * per-entity field metadata load used by etendo_schema.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

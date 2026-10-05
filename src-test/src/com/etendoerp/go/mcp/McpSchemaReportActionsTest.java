@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * ({@code findActiveSpecByName}, {@code findIncludedEntity}, {@code listIncludedEntities}) and the
  * generic-path entry ({@code resolveIncludedEntityOrExplain}) are stubbed, so {@code validateArgs}
  * runs for real.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouterSupport
  */
 @DisplayName("etendo_schema on an action report spec (ETP-5468)")
 class McpSchemaReportActionsTest {

@@ -73,6 +73,8 @@ import org.openbravo.model.common.geography.Location;
  *
  * <p>Complements {@code ContactsLocationAddressHandlerTest} (routing, update, the GET enrichers)
  * and {@code ContactsLocationAddressParentAndRegionTest} (parent resolution, region columns).
+ *
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * end-to-end claim still rests on a probe against a real instance; what they do pin down is the
  * resolver's own contract: which values short-circuit, which reach the selector, and — for IMP-22 —
  * <b>what context each selector call is given</b>.
+ *
+ * @covers com.etendoerp.go.mcp.McpFkResolver
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

@@ -87,6 +87,9 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * gate — 79 of the 128 writable entities declare a qualifier — and a live probe caught it
  * accepting {@code documentNo} on {@code sales-order/header}. Its absence is asserted, because
  * nothing about a missing exemption is visible in a signature.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpQuerySupport
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

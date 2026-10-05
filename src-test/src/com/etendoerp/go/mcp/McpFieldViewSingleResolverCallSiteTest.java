@@ -63,6 +63,8 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * override setting {@code businessCritical} was honoured by {@code etendo_schema} and ignored by
  * {@code etendo_list}/{@code etendo_get} with {@code view:"summary"} — an agent told a field is
  * business-critical, then handed a projection that omits it. Routed and guarded here.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpFieldView
  */
 @DisplayName("ETP-5184 — every MCP reader of a field's curation goes through McpFieldView")
 class McpFieldViewSingleResolverCallSiteTest {

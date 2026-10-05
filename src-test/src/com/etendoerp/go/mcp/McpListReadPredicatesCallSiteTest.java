@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * error and no log line. {@code handleList} needs an {@code OBContext}, a live DAL and
  * {@code DefaultJsonDataService}, so — like {@code McpListTabWhereCallSiteTest} — the guard is on
  * the call site; the resolution rule itself is covered by {@code NeoReadPredicatesTest}.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @DisplayName("ETP-5009 — the MCP list applies the customization's read predicates")
 class McpListReadPredicatesCallSiteTest {

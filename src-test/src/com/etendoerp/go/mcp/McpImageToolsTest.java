@@ -59,6 +59,8 @@ import com.etendoerp.go.schemaforge.util.NeoImageUploadTickets;
  * <p>Includes the documentation assertions the plan calls for: both tool descriptions must name the
  * cheap path and the 256 KB cap, so the guidance an agent reads cannot drift away from the
  * validation the server actually enforces.
+ *
+ * @covers com.etendoerp.go.mcp.McpImageTools
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

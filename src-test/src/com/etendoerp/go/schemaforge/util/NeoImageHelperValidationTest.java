@@ -41,6 +41,8 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper.ImageValidationException
  *
  * <p>The MIME guard is the security-relevant part: a declared {@code mime_type} is never trusted, so
  * a caller cannot store an HTML page or a PDF in an image column by mislabelling it.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoImageHelper
  */
 class NeoImageHelperValidationTest {
 

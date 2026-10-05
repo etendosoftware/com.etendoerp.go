@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *       surface at all — and {@code VISIBILITY} — how it is classified once it is — are different
  *       axes, and a classification override may never flip inclusion.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.mcp.McpFieldView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

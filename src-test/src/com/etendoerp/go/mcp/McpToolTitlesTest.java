@@ -33,6 +33,11 @@ import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
+/**
+ * Unit tests for {@link McpToolTitles}.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolTitles
+ */
 class McpToolTitlesTest {
 
   private static final String[] FIXED_TOOLS = { "etendo_discover", "etendo_list", "etendo_get",

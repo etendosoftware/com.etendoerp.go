@@ -44,6 +44,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * that omits a key the service reads would make the MCP refuse a valid call (it validates against
  * the contract before dispatch), and one that adds a key the service ignores would invite the agent
  * to send something that does nothing.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.PaymentActionHandlerSupport
  */
 @DisplayName("ETP-5558 — invoice payment action contracts")
 class PaymentActionContractsTest {

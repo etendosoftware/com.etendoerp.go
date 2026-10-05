@@ -78,6 +78,9 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * dialog posts — and the SPA offers O/C/P only. Every call answered 400 "Missing required
  * parameter: openClose", and firing the button by its column name ({@code OpenClose}) skipped the
  * handler and failed in the OBUIAPP process behind it.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpActionsView
+ * @covers com.etendoerp.go.schemaforge.util.NeoActionContract
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")

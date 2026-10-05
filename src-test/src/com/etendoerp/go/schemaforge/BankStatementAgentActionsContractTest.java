@@ -88,6 +88,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>The engine is a spy of {@link BankStatementsHandler} whose nine SPA methods are stubbed: this
  * class tests the translation, the engine itself is covered by {@code BankStatementsHandlerTest}. {@link NeoAccessHelper} and
  * {@link OBDal} are mocked statically, so no DAL / OBContext is needed.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementAgentActions
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

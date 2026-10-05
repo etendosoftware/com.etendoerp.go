@@ -65,6 +65,8 @@ import org.openbravo.model.common.enterprise.Organization;
  * {@code stripServerOwnedFields} sits <b>outside</b> the {@code active} guard, and it is the
  * reason the inactive-filter cases below are the important ones rather than a completeness
  * exercise.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoServerOwnedFields
  */
 @DisplayName("Tenant ownership on write — client/organization come from the session")
 class NeoServerOwnedFieldsTest {

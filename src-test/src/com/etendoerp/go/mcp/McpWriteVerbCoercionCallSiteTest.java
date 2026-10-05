@@ -53,6 +53,8 @@ import org.junit.jupiter.api.Test;
  * <p>Why source-reading rather than behavioral: the write verbs are private, require an
  * {@code OBContext}, a live DAL and an {@code AD_Tab}, so the call site cannot be asserted from a
  * unit test. Reading the source is the cheap check that maps exactly onto the failure mode.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @DisplayName("ETP-4793 / IMP-16 — every MCP persist path must run coerceFieldTypes")
 class McpWriteVerbCoercionCallSiteTest {

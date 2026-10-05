@@ -80,6 +80,8 @@ import org.openbravo.model.common.geography.Region;
  * <p>Complements {@code ContactsLocationAddressHandlerTest}, which covers {@code
  * resolveRegionByName} itself (the tenant-versus-System duplicate, accent folding, ambiguity) and
  * the whitespace guard.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

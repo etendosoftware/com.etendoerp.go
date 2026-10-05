@@ -34,6 +34,8 @@ import org.junit.jupiter.api.Test;
 /**
  * Unit tests for {@link McpFieldProjection} — the pure {@code etendo_list}/{@code etendo_get} field
  * projection behind the IMP-2 {@code fields} / {@code view:"summary"} arguments.
+ *
+ * @covers com.etendoerp.go.mcp.McpFieldProjection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

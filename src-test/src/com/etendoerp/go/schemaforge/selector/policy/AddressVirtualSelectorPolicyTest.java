@@ -57,6 +57,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * signal we want. The cases that ARE about a wrapper have to get past the guard by definition, so
  * they stub that one query through {@link #stubLocationColumns}; they must never be rewritten to
  * avoid it, because what they assert only means anything once the column really resolved.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.selector.policy.AddressVirtualSelectorPolicy
  */
 public class AddressVirtualSelectorPolicyTest {
 

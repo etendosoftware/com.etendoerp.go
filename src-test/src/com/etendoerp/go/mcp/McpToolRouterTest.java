@@ -45,6 +45,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * CRUD handler tests that require a full DAL session run against a live Etendo
  * instance via OBBaseTest. These tests cover the pure-logic, no-DAL parts
  * plus the authorization guard and exception-wrapping logic of {@code route()}.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 public class McpToolRouterTest {
 

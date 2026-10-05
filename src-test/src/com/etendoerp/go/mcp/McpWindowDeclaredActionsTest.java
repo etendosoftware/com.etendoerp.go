@@ -79,6 +79,9 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * invoice) and the handler's actions sit beside them. The invoice payment actions were served to
  * the SPA all along and invisible to the agent, which therefore built payments by hand through the
  * route BUG-1 corrupted data with.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpDeclaredActions
+ * @covers com.etendoerp.go.mcp.McpActionsSection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")

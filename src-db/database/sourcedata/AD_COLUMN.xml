@@ -11007,7 +11007,7 @@ END]]></SQLLOGIC>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <NAME><![CDATA[EM_Etgo_Total_Discount]]></NAME>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
-<!--801DA2A5D6C4436F8B0F26D0995189C4-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--801DA2A5D6C4436F8B0F26D0995189C4-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo app. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed automatically by the Etendo app — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <COLUMNNAME><![CDATA[EM_Etgo_Total_Discount]]></COLUMNNAME>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <AD_TABLE_ID><![CDATA[259]]></AD_TABLE_ID>
 <!--801DA2A5D6C4436F8B0F26D0995189C4-->  <AD_REFERENCE_ID><![CDATA[22]]></AD_REFERENCE_ID>
@@ -12193,7 +12193,7 @@ END]]></SQLLOGIC>
 <!--8E5D45740B584747A55632EA47B85C85-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--8E5D45740B584747A55632EA47B85C85-->  <NAME><![CDATA[EM_Etgo_Total_Discount]]></NAME>
 <!--8E5D45740B584747A55632EA47B85C85-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
-<!--8E5D45740B584747A55632EA47B85C85-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--8E5D45740B584747A55632EA47B85C85-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo app. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed automatically by the Etendo app — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--8E5D45740B584747A55632EA47B85C85-->  <COLUMNNAME><![CDATA[EM_Etgo_Total_Discount]]></COLUMNNAME>
 <!--8E5D45740B584747A55632EA47B85C85-->  <AD_TABLE_ID><![CDATA[318]]></AD_TABLE_ID>
 <!--8E5D45740B584747A55632EA47B85C85-->  <AD_REFERENCE_ID><![CDATA[22]]></AD_REFERENCE_ID>
@@ -14054,7 +14054,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <NAME><![CDATA[EM_ETGO_Show_Acct_Fields]]></NAME>
-<!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
+<!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in the Etendo app, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <COLUMNNAME><![CDATA[EM_ETGO_Show_Acct_Fields]]></COLUMNNAME>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <AD_TABLE_ID><![CDATA[156]]></AD_TABLE_ID>
 <!--A0F2D12B5B4A48C2855EE73E3E93E274-->  <AD_REFERENCE_ID><![CDATA[20]]></AD_REFERENCE_ID>
@@ -23256,7 +23256,7 @@ Usually, company's internal identifiers for various records (products, customers
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <NAME><![CDATA[EM_ETGO_Payment Intent]]></NAME>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <DESCRIPTION><![CDATA[Serialized request describing the payment to create once the bank confirms the transfer.]]></DESCRIPTION>
-<!--FA0850D2A55444749FE7CD443A3BF317-->  <HELP><![CDATA[JSON snapshot of the Etendo payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from Etendo.]]></HELP>
+<!--FA0850D2A55444749FE7CD443A3BF317-->  <HELP><![CDATA[JSON snapshot of the Etendo payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from the Etendo app.]]></HELP>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <COLUMNNAME><![CDATA[EM_ETGO_Payment_Intent]]></COLUMNNAME>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <AD_TABLE_ID><![CDATA[96A56B61A35441E8877536646345EA6A]]></AD_TABLE_ID>
 <!--FA0850D2A55444749FE7CD443A3BF317-->  <AD_REFERENCE_ID><![CDATA[14]]></AD_REFERENCE_ID>

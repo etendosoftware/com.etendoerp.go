@@ -265,7 +265,7 @@
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <NAME><![CDATA[Total Discount %]]></NAME>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <PRINTNAME><![CDATA[Total Discount %]]></PRINTNAME>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
-<!--135A414766ED4B68BEFDC2CAFB34AA71-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo interface. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--135A414766ED4B68BEFDC2CAFB34AA71-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo app. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed automatically by the Etendo app — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--135A414766ED4B68BEFDC2CAFB34AA71--></AD_ELEMENT>
@@ -2429,7 +2429,7 @@
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <COLUMNNAME><![CDATA[EM_ETGO_Show_Acct_Fields]]></COLUMNNAME>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <NAME><![CDATA[Show Accounting Fields]]></NAME>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <PRINTNAME><![CDATA[Show Accounting Fields]]></PRINTNAME>
-<!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
+<!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in the Etendo app, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4--></AD_ELEMENT>
@@ -2499,7 +2499,7 @@
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <NAME><![CDATA[Payment Intent]]></NAME>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <PRINTNAME><![CDATA[Payment Intent]]></PRINTNAME>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <DESCRIPTION><![CDATA[Serialized request describing the payment to create once the bank confirms the transfer.]]></DESCRIPTION>
-<!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <HELP><![CDATA[JSON snapshot of the Etendo payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from Etendo.]]></HELP>
+<!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <HELP><![CDATA[JSON snapshot of the Etendo payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from the Etendo app.]]></HELP>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B--></AD_ELEMENT>

@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *
  * <p>Pure: only {@link NeoActionContract#resolve} touches the DAL, and it is driven with a static
  * {@link OBDal} mock and a mocked {@link NeoHandlerLookup}.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoActionContract
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("NeoActionContract (ETP-5468)")

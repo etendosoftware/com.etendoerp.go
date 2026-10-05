@@ -46,6 +46,8 @@ import org.openbravo.model.ad.ui.Tab;
  * ("Column not found in table") in blind run {@code 20261001T2331-local-8163}. It is the caller's
  * mistake, so it is now a 422 {@code unknown_selector_column} naming the columns that work, the
  * same shape as {@code etendo_list}'s {@code unknown_filter_field}.
+ *
+ * @covers com.etendoerp.go.mcp.McpSelectorContextHelper
  */
 @DisplayName("ETP-5558 — etendo_selectors refuses an unknown column with 422")
 class McpSelectorUnknownColumnTest {

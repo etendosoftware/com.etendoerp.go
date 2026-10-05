@@ -49,6 +49,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * route BUG-1 corrupted data through. The flags cannot be turned off, because REST and the SPA read
  * them too. The section hides the verb for agents only, and the refusal points at the action that
  * does the job instead.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpVerbsSection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")

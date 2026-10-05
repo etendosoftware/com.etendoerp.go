@@ -50,7 +50,12 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
-/** QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows). */
+/**
+ * QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows).
+ *
+ * @covers com.etendoerp.go.mcp.McpUsageRow
+ * @covers com.etendoerp.go.mcp.McpUsageTelemetry
+ */
 public class McpUsageTenantQaTest {
 
   private McpServlet servlet;

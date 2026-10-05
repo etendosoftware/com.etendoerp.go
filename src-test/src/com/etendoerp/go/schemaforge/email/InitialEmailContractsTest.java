@@ -58,6 +58,10 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Tests the built-in transactional email contracts.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.TransactionalEmailService
+ * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.contracts.CompanyInvitationEmailContract
  */
 public class InitialEmailContractsTest {
 

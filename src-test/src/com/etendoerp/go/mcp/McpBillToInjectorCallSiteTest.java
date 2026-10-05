@@ -50,6 +50,8 @@ import org.junit.jupiter.api.Test;
  *       already refused for the very field the injector was about to fill, which is the whole
  *       defect ETP-5335 reports.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.mcp.McpBillToInjector
  */
 @DisplayName("ETP-5335 — every MCP write path derives the bill-to, in the right order")
 class McpBillToInjectorCallSiteTest {

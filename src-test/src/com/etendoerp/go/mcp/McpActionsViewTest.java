@@ -40,6 +40,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * Unit tests for {@link McpActionsView} — the pure re-shaper behind
  * {@code etendo_schema({view:"actions"})} (IMP-6). No DAL/model access, so these run without a live
  * instance.
+ *
+ * @covers com.etendoerp.go.mcp.McpActionsView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.

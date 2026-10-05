@@ -37,7 +37,11 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
-/** Tests for {@link BatchService}. */
+/**
+ * Tests for {@link BatchService}.
+ *
+ * @covers com.etendoerp.go.schemaforge.BatchService
+ */
 public class BatchServiceTest {
 
   @Test

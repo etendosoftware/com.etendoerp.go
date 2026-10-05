@@ -64,6 +64,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * runs after the contract); the few rules the declared contract enforces first (an empty
  * {@code lines} array, a month-13 header date) are exercised through
  * {@link BankStatementAgentActions#dispatch} so the agent-visible outcome is what is pinned.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementAgentValidation
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("BankStatementAgentValidation (ETP-5469)")

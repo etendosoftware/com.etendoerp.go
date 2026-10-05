@@ -59,6 +59,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * role gate, the SPA-shaped derived context and the flush-to-clean with its rollback (the
  * parameter copy is exercised through {@link BankStatementAgentActionsTest}'s write routing). {@link ReconciliationAgentActionsTest} keeps covering the same helpers through the
  * reconciliation dispatcher; this class pins them in isolation.
+ *
+ * @covers com.etendoerp.go.schemaforge.AgentActionSupport
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("AgentActionSupport (ETP-5469)")

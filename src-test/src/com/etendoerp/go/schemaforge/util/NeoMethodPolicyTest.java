@@ -47,6 +47,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * <p>Before ETP-4254 this logic was duplicated (live in {@code NeoCrudHandler}, dead in
  * {@code NeoServlet}) and absent from the MCP write path. These tests pin the behaviour
  * the REST path always had, so the shared helper cannot drift from it.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoMethodPolicy
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

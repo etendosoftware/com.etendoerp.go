@@ -61,6 +61,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *
  * <p>Uses {@link MockedStatic} to isolate OBContext and OBDal so no live
  * database is required.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoAccessHelper
  */
 public class NeoAccessHelperTest {
 

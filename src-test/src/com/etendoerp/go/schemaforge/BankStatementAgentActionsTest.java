@@ -79,6 +79,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>The nine handler methods are stubbed on a spy, so no DAL is needed; {@code OBDal} is mocked
  * statically only for the flush.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementAgentActions
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("BankStatementAgentActions (ETP-5469, ETP-5447)")

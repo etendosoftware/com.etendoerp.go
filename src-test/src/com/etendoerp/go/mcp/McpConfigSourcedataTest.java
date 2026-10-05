@@ -59,6 +59,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * {@code parent.field} names a real DAL property, because that needs a running model; that half is
  * {@code McpParentScope}'s job at resolve time, and it is why an unresolvable field withholds the
  * entity instead of being ignored.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpActionsSection
+ * @covers com.etendoerp.go.mcp.McpVerbsSection
+ * @covers com.etendoerp.go.mcp.McpParentSection
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {

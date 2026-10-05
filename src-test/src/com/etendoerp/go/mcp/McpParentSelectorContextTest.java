@@ -66,6 +66,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * <p>Every guard must answer {@code null} — the pre-ETP-5535 context — and the abstain cases
  * also assert the parent was never looked up, because the whole body sits inside a
  * {@code catch (Exception)} that would answer {@code null} too.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpParentSelectorContext
  */
 @DisplayName("McpParentSelectorContext (ETP-5535)")
 class McpParentSelectorContextTest {

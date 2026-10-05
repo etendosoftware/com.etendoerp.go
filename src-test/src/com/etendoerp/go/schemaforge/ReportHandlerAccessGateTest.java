@@ -51,6 +51,8 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * {@code AD_Window_Access} / {@code AD_Process_Access} rows, and the point here is not how that
  * lookup works (covered by {@code NeoAccessHelperTest}) but that each handler asks the right
  * question and refuses before doing anything else.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoAccessHelper
  */
 class ReportHandlerAccessGateTest {
 

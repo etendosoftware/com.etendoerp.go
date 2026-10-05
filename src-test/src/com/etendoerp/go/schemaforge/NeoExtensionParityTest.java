@@ -74,6 +74,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * answer, one of them just quietly runs generic CRUD. {@link ResolverDivergence} drives the two
  * resolvers apart on purpose and asserts the gate catches it; without that case a green run here
  * would prove only that the mocks agree with each other.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoExtensionDispatcher
  */
 @DisplayName("E4 — a customization reaches every channel identically (ETP-5415, D7)")
 class NeoExtensionParityTest {

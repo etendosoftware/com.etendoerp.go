@@ -69,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * Unit tests for {@link AgingReportHandler}.
  * Covers pure-logic helpers: bucket resolution, BP IN clause, date parsing,
  * summary/detail row building, meta building, and the describe/handle entry point.
+ *
+ * @covers com.etendoerp.go.schemaforge.AgingReportHandler
  */
 class AgingReportHandlerTest {
 

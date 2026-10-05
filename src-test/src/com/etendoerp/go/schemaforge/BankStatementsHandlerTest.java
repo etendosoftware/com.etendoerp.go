@@ -91,6 +91,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * parseGenericCsv, loadStatements, loadLines, readLinesForPreview) are
  * stubbed via {@code spy(handler)} + {@code doReturn} so the tests run
  * fully offline.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementsHandler
  */
 // Silent runner: clearMocks() (below) wipes the inline mock maker registry after
 // each test to keep the shared test-worker heap flat; the strict runner would
