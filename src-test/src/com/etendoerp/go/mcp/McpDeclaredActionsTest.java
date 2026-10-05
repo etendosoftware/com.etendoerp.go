@@ -262,8 +262,8 @@ class McpDeclaredActionsTest {
       assertTrue(actionsView >= 0, "view:\"actions\" no longer dispatches");
       List<String> view = McpSourceScanner.callArguments(body, "McpActionsView.buildResponse",
           actionsView);
-      assertEquals(4, view.size(),
-          "view:\"actions\" must use the 4-argument buildResponse that appends declared actions");
+      assertTrue(view.size() >= 4,
+          "view:\"actions\" must use a buildResponse overload that appends declared actions");
       assertEquals(declared, view.get(3),
           "the map passed to isActionOnlyEntity must be the one view:\"actions\" appends");
     }

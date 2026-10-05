@@ -38,9 +38,10 @@ import org.openbravo.dal.service.OBDal;
  *
  * <p>Two vocabularies feed into the same table-id-based check:
  * <ul>
- *   <li>{@code NotPostedDocumentsHandler}'s own {@code DOCUMENT_TYPE_CODE_TO_TABLE_ID} /
- *       {@code DOCUMENT_TYPE_TO_TABLE_ID} maps — keyed by the custom "ETBLKP_Documents"
- *       AD_Reference values / {@code NoPostedDocumentDS} document-type labels;</li>
+ *   <li>{@code NotPostedDocumentsHandler}'s own {@code DOCUMENT_TYPE_CODE_TO_TABLE_ID} map —
+ *       keyed by the custom "ETBLKP_Documents" AD_Reference values (its
+ *       {@code DS_LABEL_TO_DOCUMENT_TYPE_CODE} translates {@code NoPostedDocumentDS} labels into
+ *       those codes);</li>
  *   <li>{@link #DOC_BASE_TYPE_TO_TABLE_ID} here — keyed by the classic "Document Base Type"
  *       AD_Reference values ({@code C_DocType.DocBaseType} / {@code C_PeriodControl
  *       .DocumentCategory}), which {@code PeriodControlDocOpenCloseHandler} needs.</li>

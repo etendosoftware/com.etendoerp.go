@@ -27,6 +27,7 @@ import javax.inject.Inject;
 import javax.inject.Named;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -38,6 +39,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
@@ -104,6 +106,25 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
+  }
+
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5558): the
+   * invoice payment actions and {@code currencyOptions}. Published by the MCP next to the AD
+   * buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts =
+        new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(false));
+    contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
+    return contracts;
+  }
+
+  /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
+  @Override
+  public Set<String> agentExcludedActions() {
+    return PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS;
   }
 
   @Override
