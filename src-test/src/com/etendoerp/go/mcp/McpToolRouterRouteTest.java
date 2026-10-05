@@ -18,6 +18,7 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -45,9 +46,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedConstruction;
@@ -354,9 +355,9 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("an unrelated neo_ name is not treated as a rename")
     void unrelatedNeoNameIsNotARename() {
-      org.junit.jupiter.api.Assertions.assertNull(McpRoutingException.renamedToolName("neo_whatever"));
-      org.junit.jupiter.api.Assertions.assertNull(McpRoutingException.renamedToolName("etendo_list"));
-      org.junit.jupiter.api.Assertions.assertNull(McpRoutingException.renamedToolName(null));
+      assertNull(McpRoutingException.renamedToolName("neo_whatever"));
+      assertNull(McpRoutingException.renamedToolName("etendo_list"));
+      assertNull(McpRoutingException.renamedToolName(null));
       assertEquals("etendo_list", McpRoutingException.renamedToolName("neo_list"));
     }
   }
@@ -1886,7 +1887,7 @@ class McpToolRouterRouteTest {
           org.mockito.ArgumentCaptor.forClass(String.class);
       org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
           org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
-      org.junit.jupiter.api.Assertions.assertNull(tokenCaptor.getValue());
+      assertNull(tokenCaptor.getValue());
     }
   }
 

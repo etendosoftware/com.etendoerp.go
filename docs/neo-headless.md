@@ -206,6 +206,9 @@ scopes keep working unchanged; nothing in the database is rewritten.
   (`SELECT count(*) FROM etgo_oauth2_client WHERE scopes LIKE '%neo:%'`, ignoring the internal
   `neo:public-api-*` markers below, and the same on `etgo_oauth2_token`).
 
+The MCP tool names follow a different rule: the old `neo_<x>` names are refused with a pointer to
+the new name, not accepted (see *MCP tool names* at the start of §4.12).
+
 The internal API-key markers `neo:public-api-key` and `neo:public-api-owner-org:<id>` are **not**
 scopes: they are never requestable, never advertised, and are matched by `LIKE` against stored
 rows, so they keep their names.
@@ -1668,6 +1671,16 @@ above to AI agents as JSON-RPC tools (`etendo_discover`, `etendo_schema`, `etend
 Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
 exact same responses as before.
+
+#### MCP tool names — `etendo_<x>`, with `neo_<x>` removed (ETP-5602)
+
+The fixed tools were renamed from `neo_<x>` to `etendo_<x>` (`neo_list` → `etendo_list`, …, all
+eighteen in `McpConstants.TOOLS_RENAMED_FROM_NEO`). Unlike the scopes (§4.1.1) and the resource URIs
+below, the old tool names are **not** aliases: a `tools/call` to one is refused before authorization
+or any lookup, executes nothing, and answers `404` `not_found` with
+`detail:"Tool 'neo_list' was renamed to 'etendo_list'"`, `available:["etendo_list"]` and a hint to
+call the new name and refresh `tools/list` (`McpRoutingException.toolRenamed`). A `neo_` name that
+was never a tool falls through to the normal routing.
 
 #### MCP resource URIs — `etendo://`, with `neo://` deprecated (ETP-5602)
 
