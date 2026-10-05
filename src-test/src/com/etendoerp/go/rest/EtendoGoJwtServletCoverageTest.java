@@ -2089,6 +2089,10 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.subscriptionService = fixture.subscriptionService;
     servlet.tenantPlanService = fixture.tenantPlanService;
     servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    // Stubbed to succeed as in givenPaidUpgrade: a failed projection now fails the upgrade closed
+    // (ETP-5548), which is its own concern and not what this spec is about.
+    when(fixture.lifecycleService.markProductive(anyString())).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = fixture.lifecycleService;
     when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
         .thenReturn(true);
 
