@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.Set;
+
 final class McpConstants {
 
   static final String PARAM_ENTITY = "entity";
@@ -431,6 +433,20 @@ final class McpConstants {
   static final String TOOL_NEO_WIDGET = "etendo_widget";
   /** Global semantic vector-search tool backed by DB Extended. */
   static final String TOOL_NEO_VECTOR_SEARCH = "etendo_vector_search";
+  /** Prefix the fixed tools carried before ETP-5602 renamed them to {@code etendo_*}. */
+  static final String LEGACY_TOOL_PREFIX = "neo_";
+  /**
+   * The fixed tools renamed from {@code neo_<x>} to {@code etendo_<x>} in ETP-5602. A call to an
+   * old name is answered with the new one ({@link McpRoutingException#toolRenamed}); it is never
+   * executed under the old name.
+   */
+  static final Set<String> TOOLS_RENAMED_FROM_NEO = Set.of(
+      "etendo_discover", TOOL_NEO_LIST, TOOL_NEO_GET, TOOL_NEO_CREATE, TOOL_NEO_UPDATE,
+      TOOL_NEO_DELETE, TOOL_NEO_SELECTORS, TOOL_NEO_DEFAULTS, TOOL_NEO_SCHEMA, "etendo_batch",
+      "etendo_action", TOOL_NEO_WIDGET, TOOL_NEO_VECTOR_SEARCH, TOOL_NEO_FEEDBACK,
+      TOOL_NEO_UPLOAD_IMAGE, TOOL_NEO_REQUEST_IMAGE_UPLOAD, TOOL_NEO_GET_IMAGE_UPLOAD,
+      TOOL_GENERATE_AMORTIZATION_PLAN);
+
   /** Spec name that backs the widget handler entities (type W, no AD_Tab). */
   static final String SPEC_DASHBOARD = "dashboard";
 

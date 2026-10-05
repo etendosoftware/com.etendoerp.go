@@ -45,6 +45,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -315,6 +317,46 @@ class McpToolRouterRouteTest {
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("Access denied"));
+    }
+  }
+
+  // ── ETP-5602: removed neo_<x> tool names ──────────────────────────────
+
+  @Nested
+  @DisplayName("a removed neo_<x> tool name")
+  class RenamedToolTests {
+
+    @ParameterizedTest(name = "{0} -> {1}")
+    @CsvSource({
+        "neo_list, etendo_list",
+        "neo_action, etendo_action",
+        "neo_get_image_upload, etendo_get_image_upload",
+        "neo_generate_amortization_plan, etendo_generate_amortization_plan"
+    })
+    @DisplayName("answers with the new name and executes nothing")
+    void answersWithTheNewNameAndExecutesNothing(String oldName, String newName)
+        throws Exception {
+      JSONObject result = router.route(oldName, buildCrudArgs(), READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      JSONObject envelope = new JSONObject(contentText(result));
+      assertEquals("Tool '" + oldName + "' was renamed to '" + newName + "'",
+          envelope.getString("detail"));
+      assertEquals(404, envelope.getInt("status"));
+      assertEquals(newName, envelope.getJSONArray("available").getString(0));
+      // Refused before authorization or any lookup: this is not an alias.
+      authMock.verify(() -> McpAuthorizationService.authorizeToolCall(anyString(), any()),
+          never());
+      supportMock.verify(() -> McpToolRouterSupport.findActiveSpecByName(anyString()), never());
+    }
+
+    @Test
+    @DisplayName("an unrelated neo_ name is not treated as a rename")
+    void unrelatedNeoNameIsNotARename() {
+      org.junit.jupiter.api.Assertions.assertNull(McpToolRouter.renamedToolName("neo_whatever"));
+      org.junit.jupiter.api.Assertions.assertNull(McpToolRouter.renamedToolName("etendo_list"));
+      org.junit.jupiter.api.Assertions.assertNull(McpToolRouter.renamedToolName(null));
+      assertEquals("etendo_list", McpToolRouter.renamedToolName("neo_list"));
     }
   }
 

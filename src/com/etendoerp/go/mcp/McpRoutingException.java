@@ -96,6 +96,23 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The tool was called by the name it carried before ETP-5602 renamed the fixed tools from
+   * {@code neo_<x>} to {@code etendo_<x>}. Answered with the new name instead of falling through
+   * to the process-tool branch, which would have asked for a scope or a spec that has nothing to
+   * do with the mistake. Nothing is executed: this is not an alias.
+   *
+   * @param oldName the removed tool name the caller used
+   * @param newName the current name of the same tool
+   * @return the exception to throw
+   */
+  static McpRoutingException toolRenamed(String oldName, String newName) {
+    return new McpRoutingException("Tool '" + oldName + "' was renamed to '" + newName + "'",
+        McpConstants.STATUS_NOT_FOUND, McpConstants.ERROR_NOT_FOUND, "name", List.of(newName),
+        "Call '" + newName + "' with the same arguments. Run tools/list to refresh the catalog.",
+        null);
+  }
+
+  /**
    * The spec named by the tool call does not exist, is inactive, or is not exposed to MCP.
    *
    * <p>No {@code available} list here on purpose: the catalog can hold dozens of specs, and dumping

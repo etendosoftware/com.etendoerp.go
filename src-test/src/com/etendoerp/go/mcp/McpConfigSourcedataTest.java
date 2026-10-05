@@ -78,7 +78,7 @@ class McpConfigSourcedataTest {
    * same from the Etendo root, from the module, and from an IDE with either as its working
    * directory. Mirrors the lookup in {@code McpWriteVerbCoercionCallSiteTest}.
    */
-  private static Path sourcedataDir() {
+  static Path sourcedataDir() {
     Path fromRoot = Paths.get(SOURCEDATA);
     if (Files.isDirectory(fromRoot)) {
       return fromRoot;
