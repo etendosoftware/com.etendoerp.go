@@ -44,6 +44,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -60,7 +61,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * For each active spec, the registry checks:
  * <ol>
  *   <li>RBAC — does the current role have access to the linked AD_Window or AD_Process?</li>
- *   <li>OAuth2 scopes — does the session have the required scope (neo:read, neo:write, etc.)?</li>
+ *   <li>OAuth2 scopes — does the session have the required scope (etendo:read, etendo:write, etc.)?</li>
  * </ol>
  * <p>
  * Tool generation strategy:
@@ -146,12 +147,11 @@ public class ToolRegistry {
   }
 
   private ScopePermissions resolvePermissions(Set<String> scopes) {
-    boolean hasAll = scopes.contains("neo:*");
     return new ScopePermissions(
-        hasAll || scopes.contains("neo:read"),
-        hasAll || scopes.contains("neo:write"),
-        hasAll || scopes.contains("neo:process"),
-        hasAll || scopes.contains("neo:report"));
+        ApiScopes.grants(scopes, ApiScopes.READ),
+        ApiScopes.grants(scopes, ApiScopes.WRITE),
+        ApiScopes.grants(scopes, ApiScopes.PROCESS),
+        ApiScopes.grants(scopes, ApiScopes.REPORT));
   }
 
   private void processSpec(SFSpec spec, List<String> accessibleWindowSpecs,

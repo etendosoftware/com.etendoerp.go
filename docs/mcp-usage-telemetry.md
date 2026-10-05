@@ -316,7 +316,7 @@ unidentified flooder is the case the limit exists for.
 > writing the invitation there would delete the more actionable pointer at exactly the moment the
 > agent needs it.
 
-`etendo_feedback` is read-tier (`neo:read`): gating it behind `neo:write` would silence exactly the
+`etendo_feedback` is read-tier (`etendo:read`): gating it behind `etendo:write` would silence exactly the
 read-only sessions most likely to get lost.
 
 ---

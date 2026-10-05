@@ -69,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * tool building, and resolveSpecName.
  * <p>
  * Pure unit tests with MockedStatic for OBDal and NeoAccessUtils.
+ *
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -467,6 +469,25 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("etendo_selectors"));
       assertTrue(names.contains("etendo_defaults"));
       assertTrue(names.contains("etendo_schema"));
+    }
+
+    @Test
+    @DisplayName("etendo: scopes register the same tools as their neo: aliases (ETP-5602)")
+    void etendoScopesMatchTheirNeoAliases() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:read"))),
+          toolNames(registry.generateTools(scopesOf("etendo:read"))));
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:write"))),
+          toolNames(registry.generateTools(scopesOf("etendo:write"))));
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:*"))),
+          toolNames(registry.generateTools(scopesOf("etendo:*"))));
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:read", "neo:write"))),
+          toolNames(registry.generateTools(scopesOf("neo:read", "etendo:write"))));
+      assertFalse(toolNames(registry.generateTools(scopesOf("etendo:read")))
+          .contains("etendo_create"));
     }
 
     @Test

@@ -23,6 +23,8 @@ import java.util.Set;
 
 import org.openbravo.base.exception.OBSecurityException;
 
+import com.etendoerp.go.oauth2.ApiScopes;
+
 /**
  * Enforces MCP tool authorization at execution time. Legacy browser JWT sessions
  * receive the broad MCP scope set only after JWT validation; role/window access
@@ -30,11 +32,10 @@ import org.openbravo.base.exception.OBSecurityException;
  */
 final class McpAuthorizationService {
 
-  private static final String SCOPE_ALL = "neo:*";
-  private static final String SCOPE_READ = "neo:read";
-  private static final String SCOPE_WRITE = "neo:write";
-  private static final String SCOPE_PROCESS = "neo:process";
-  private static final String SCOPE_REPORT = "neo:report";
+  private static final String SCOPE_READ = ApiScopes.READ;
+  private static final String SCOPE_WRITE = ApiScopes.WRITE;
+  private static final String SCOPE_PROCESS = ApiScopes.PROCESS;
+  private static final String SCOPE_REPORT = ApiScopes.REPORT;
 
   private McpAuthorizationService() {
   }
@@ -79,7 +80,7 @@ final class McpAuthorizationService {
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_NEO_VECTOR_SEARCH:
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
-      // neo:write would silence exactly the read-only sessions most likely to get lost.
+      // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:
         return SCOPE_READ;
       case "etendo_create":
@@ -101,7 +102,6 @@ final class McpAuthorizationService {
   }
 
   private static boolean hasScope(Set<String> scopes, String requiredScope) {
-    return scopes != null
-        && (scopes.contains(SCOPE_ALL) || scopes.contains(requiredScope));
+    return ApiScopes.grants(scopes, requiredScope);
   }
 }

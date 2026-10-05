@@ -40,6 +40,7 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
@@ -91,8 +92,8 @@ public class McpServlet extends HttpServlet {
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
   // catalog and authorizes each operation by the user's role and window access.
-  private static final String LEGACY_JWT_FALLBACK_SCOPES =
-      "neo:read neo:write neo:process neo:report";
+  private static final String LEGACY_JWT_FALLBACK_SCOPES = String.join(" ",
+      ApiScopes.READ, ApiScopes.WRITE, ApiScopes.PROCESS, ApiScopes.REPORT);
 
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
@@ -354,8 +355,7 @@ public class McpServlet extends HttpServlet {
       JSONObject meta = new JSONObject();
       meta.put("resource", mcpResourceUrl);
       meta.put("authorization_servers", new JSONArray().put(oauth2Url));
-      meta.put("scopes_supported", new JSONArray()
-          .put(LEGACY_JWT_FALLBACK_SCOPES).put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
+      meta.put("scopes_supported", new JSONArray(ApiScopes.ADVERTISED));
       meta.put("bearer_methods_supported", new JSONArray().put("header"));
       response.getWriter().write(meta.toString());
     } catch (JSONException e) {

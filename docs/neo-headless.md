@@ -166,6 +166,46 @@ The token is decoded via `SecureWebServicesUtils.decodeToken()`. Required JWT cl
 
 A missing or invalid token returns `401 Unauthorized`.
 
+#### 4.1.1 OAuth2 scopes — `etendo:*`, with `neo:*` deprecated (ETP-5602)
+
+OAuth2 tokens (MCP clients, API keys, `client_credentials`) carry these scopes:
+
+| Scope | Grants |
+|-------|--------|
+| `etendo:read` | REST `GET`/`HEAD`; MCP read tools and resources |
+| `etendo:write` | REST writes; MCP write tools (`etendo_create`, `etendo_update`, `etendo_delete`, `etendo_action`, image upload) |
+| `etendo:process` | MCP per-spec process tools |
+| `etendo:report` | MCP `generate_*` report tools |
+| `etendo:*` | everything above |
+
+**Deprecated aliases.** The scopes were called `neo:read`, `neo:write`, `neo:process`,
+`neo:report` and `neo:*` until ETP-5602. Each old name is still accepted everywhere a scope is
+checked and is equivalent to its `etendo:` counterpart **and to nothing else** — `neo:read` never
+grants write. Either wildcard grants every scope. Clients, tokens and API keys issued with `neo:*`
+scopes keep working unchanged; nothing in the database is rewritten.
+
+- **Advertised:** only the `etendo:` names — OAuth2 authorization-server metadata
+  (`scopes_supported`), MCP protected-resource metadata, the default scope of a new client
+  (`etendo:read`, or `etendo:*` for dynamic registration), new API keys, and scope error messages.
+- **Requested:** a client may request either prefix. The token is issued with the scope names the
+  client **requested** (echoed, not normalized), so a client that asks for `neo:read` gets
+  `neo:read` back and its own scope comparison keeps working. A requested scope is allowed when the
+  client's configured scopes grant it under either prefix.
+- **Unknown scopes** of either prefix (e.g. `etendo:admin`) are still rejected with
+  `invalid_scope`.
+- **One rule, one place:** every check goes through `ApiScopes.grants` (`com.etendoerp.go.oauth2`):
+  `EnvironmentRequestAuthenticator`, `McpAuthorizationService`, `ToolRegistry`,
+  `OAuth2ClientPolicy`/`OAuth2AuthorizeSupport` and `PublicApiKeyPolicy`. Never compare scope
+  strings directly — that silently rejects one of the two prefixes.
+- **Removal:** the `neo:` aliases are deprecated. New integrations must use `etendo:`; the aliases
+  can be dropped once no active client, token or API key stores a `neo:` scope
+  (`SELECT count(*) FROM etgo_oauth2_client WHERE scopes LIKE '%neo:%'`, ignoring the internal
+  `neo:public-api-*` markers below, and the same on `etgo_oauth2_token`).
+
+The internal API-key markers `neo:public-api-key` and `neo:public-api-owner-org:<id>` are **not**
+scopes: they are never requestable, never advertised, and are matched by `LIKE` against stored
+rows, so they keep their names.
+
 ### 4.2 URL Patterns
 
 All URLs are relative to the servlet root `/sws/neo`.
@@ -1776,7 +1816,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
   `message:"Not a report generator; '<spec>' serves named actions through etendo_action (entity
   <entity>)."`, plus `actionEntity`, `actions[]` and `actionsHint`. Three-way: a report generator
   gets `callable:true` + `reportTool`; a spec with neither keeps `not_configured_for_report_generation`.
-- **Scope.** `etendo_action` is registered only for write-capable tokens (`neo:write` / `neo:*`), so a
+- **Scope.** `etendo_action` is registered only for write-capable tokens (`etendo:write` / `etendo:*`, or their deprecated `neo:` aliases), so a
   read-only token cannot call the read helpers (`pendingLines`, `candidates`, `autoMatch`) either.
 - **Schema.** For an entity whose handler declares actions, `etendo_schema` returns the action catalog
   whatever `view` is asked (`McpActionsView.buildDeclaredResponse`): each entry is
