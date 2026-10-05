@@ -339,8 +339,8 @@ public class GlJournalHeaderHandlerTest {
 
   @Test
   public void reactivateActionSetsInpdocactionRe() throws Exception {
-    // FIN_AddPaymentFromJournal reads the action from the HTTP param `inpdocaction`, not the body;
-    // without it the process silently completes instead of reactivating.
+    // The journal process reads the action from the inpdocaction request parameter, not from the
+    // body. Without it the process silently completes the journal instead of reactivating it.
     RequestContext rc = requestContextWithRequest();
     NeoResponse response = runActionAndCaptureParam("RE", rc);
     assertNotNull(response);
