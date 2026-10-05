@@ -99,6 +99,7 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
+import com.etendoerp.go.onboarding.OnboardingStreamWriter;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
@@ -167,6 +168,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_DEMO_CLIENT_ID = "demoClientId";
+  private static final String FIELD_CLIENT_ID = "clientId";
+  private static final String FIELD_ENVIRONMENT = "environment";
+  /** Provisioning path recorded on an attempt that claimed a pooled tenant. */
+  private static final String PATH_POOL = "POOL";
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
@@ -208,6 +213,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
   private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
   private static final String CLIENT_NAME_REQUIRED = "clientName is required";
+  private static final String CLIENT_NAME_IN_USE_MESSAGE =
+      "You already have a productive environment with this name. Choose a different name.";
+  private static final String RESERVED_CLIENT_NAME_MESSAGE =
+      "This company name is reserved. Choose a different name.";
   private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
   private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ERROR = "error";
@@ -360,6 +369,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingCostingScheduleService();
   OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
+  DevProvisioningFailureFixtureService devProvisioningFailureFixtureService =
+      new DevProvisioningFailureFixtureService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
       new TenantEnvironmentLifecycleService();
@@ -375,6 +386,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   StripeCustomerPortalService stripeCustomerPortalService = new StripeCustomerPortalService();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
+  com.etendoerp.go.schemaforge.email.InternalAlertService internalAlertService =
+      new com.etendoerp.go.schemaforge.email.InternalAlertService();
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
   private final GoSessionService goSessionService;
   // Package-visible so tests can swap the database-backed role lookups for a fake.
@@ -503,6 +516,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (isPath(path, "/dev/provisioning-failure-fixture")
+        && DevProvisioningFailureFixtureService.isEnabled()) {
+      handleDevProvisioningFailureFixturePost(request, response);
+      return;
+    }
     if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
       handleDevLifecyclePost(request, response);
       return;
@@ -527,6 +545,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+  }
+
+  private void handleDevProvisioningFailureFixturePost(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithPlatformAccount(request, response, "dev-provisioning-failure-fixture", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      writeResponse(response, HttpServletResponse.SC_OK,
+          devProvisioningFailureFixtureService.create(account,
+              body.optString(FIELD_CLIENT_NAME, "")));
+    });
+  }
+
+  private void handleDevProvisioningFailureFixtureDelete(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String prefix = "/dev/provisioning-failure-fixture/";
+    String token = request.getPathInfo().substring(prefix.length());
+    if (!DevProvisioningFailureFixtureService.isFixtureRequest(token)) {
+      // A malformed token is the caller's error, not a server failure.
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid fixture cleanup token");
+      return;
+    }
+    runWithPlatformAccount(request, response, "dev-provisioning-failure-fixture-cleanup", account -> {
+      JSONObject result = new JSONObject();
+      result.put("cleaned", devProvisioningFailureFixtureService.cleanup(account, token));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    });
   }
 
   /** The `/session*` family (ETP-4575): cookie-backed sessions. */
@@ -642,7 +687,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (isPath(path, PATH_SESSION)) {
+    if (path != null && path.startsWith("/dev/provisioning-failure-fixture/")
+        && DevProvisioningFailureFixtureService.isEnabled()) {
+      handleDevProvisioningFailureFixtureDelete(request, response);
+    } else if (isPath(path, PATH_SESSION)) {
       handleSessionDelete(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
@@ -656,7 +704,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (!requireBillingOwner(response, account)) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
-      String clientName = validatedBillingClientName(response, body);
+      String clientName = validatedBillingClientName(response, body, account);
       if (clientName == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
@@ -692,15 +740,61 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return false;
   }
 
-  private String validatedBillingClientName(HttpServletResponse response, JSONObject body)
-      throws IOException {
+  private String validatedBillingClientName(HttpServletResponse response, JSONObject body,
+      Account account) throws IOException {
     String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
     if (clientName.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
           CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
       return null;
     }
+    if (ProvisioningClientName.matches(clientName)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          RESERVED_CLIENT_NAME_MESSAGE, RESERVED_CLIENT_NAME_MESSAGE);
+      return null;
+    }
+    if (isProductiveNameTakenByAccount(clientName, account.getEmail())) {
+      // Refused before the provider is contacted: a paid checkout fixes its company name, so
+      // accepting it here would charge for an environment that can never be provisioned.
+      writeError(response, HttpServletResponse.SC_CONFLICT,
+          CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, CLIENT_NAME_IN_USE_MESSAGE,
+          CLIENT_NAME_IN_USE_MESSAGE);
+      return null;
+    }
     return clientName;
+  }
+
+  /**
+   * An account cannot hold two productive environments with the same company name (ETP-5548):
+   * telling them apart would be left to the customer. Any other match is allowed — another
+   * account's environment, or this account's demo, which a purchase never converts but replaces
+   * with a new productive. Onboarding applies the same rule again in
+   * {@code rejectDuplicateProductiveName}; this pre-payment copy fails open, because the onboarding
+   * one still refuses the collision and records it as non-retryable.
+   */
+  private boolean isProductiveNameTakenByAccount(String clientName, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return ownsProductiveNamed(clientName, accountEmail);
+    } catch (RuntimeException e) {
+      log.warn("Could not check whether company name is in use before checkout; the onboarding "
+          + "check still applies", e);
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Caller provides the admin context. Case and surrounding blanks are ignored. */
+  private boolean ownsProductiveNamed(String clientName, String accountEmail) {
+    for (String clientId : EtendoGoJwtSupport.findClientIdsByName(clientName)) {
+      if (EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, accountEmail)
+          && TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private void createHostedCheckoutSession(HttpServletResponse response, Account account,
@@ -761,7 +855,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (!requireBillingOwner(response, account)) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
-      String clientName = validatedBillingClientName(response, body);
+      String clientName = validatedBillingClientName(response, body, account);
       if (clientName == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
@@ -867,22 +961,47 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Answers "pending" for an unknown request id, for another account's request id, and for a
       // genuinely unpaid one alike. That is deliberate: the endpoint must never confirm that a
       // request id exists, and the account predicate inside find() is what enforces it.
-      boolean paid = checkoutRequest != null
-          && checkoutRequestStore.isPaidFor(requestId, account.getId(), account.getEmail(), null);
       JSONObject result = new JSONObject();
       result.put(FIELD_REQUEST_ID, requestId);
-      result.put(FIELD_STATUS, paid ? "paid" : "pending");
-      if (paid) {
-        result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
-        if (checkoutRequest.getDemoClient() != null) {
-          result.put(FIELD_DEMO_CLIENT_ID, checkoutRequest.getDemoClient().getId());
-        }
-      }
-      if (checkoutRequest != null && checkoutRequest.getDemoClient() != null) {
-        addDemoDataTransferSelection(result, requestId, checkoutRequest.getDemoClient().getId());
+      String status = checkoutRequestStore.deriveProvisioningStatus(checkoutRequest);
+      result.put(FIELD_STATUS, status);
+      result.put("retryAllowed", checkoutRequestStore.isProvisioningRetryAllowed(checkoutRequest));
+      if (checkoutRequest != null) {
+        addCheckoutRequestDetails(result, requestId, status, checkoutRequest);
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /** The polling contract's fields that only exist once the request does. */
+  private void addCheckoutRequestDetails(JSONObject result, String requestId, String status,
+      CheckoutRequest checkoutRequest) throws JSONException {
+    result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
+    if (checkoutRequest.getCreatedClient() != null) {
+      result.put(FIELD_CLIENT_ID, checkoutRequest.getCreatedClient().getId());
+    }
+    if (checkoutRequest.getUpdated() != null) {
+      result.put("updatedAt", checkoutRequest.getUpdated().toInstant().toString());
+    }
+    if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED.equals(status)) {
+      addProvisioningFailure(result, checkoutRequest.getFailureReason());
+    }
+    if (checkoutRequest.getDemoClient() != null) {
+      result.put(FIELD_DEMO_CLIENT_ID, checkoutRequest.getDemoClient().getId());
+      addDemoDataTransferSelection(result, requestId, checkoutRequest.getDemoClient().getId());
+    }
+  }
+
+  /**
+   * Adds the failure of an attempt to the public polling contract as a stable code plus a fixed
+   * description. The persisted reason is never returned: it holds the raw cause (exception text,
+   * internal ids, SQL) for operations, and the client localizes the code instead.
+   */
+  private static void addProvisioningFailure(JSONObject result, String persistedReason)
+      throws JSONException {
+    String failureCode = CheckoutRequestStore.failureCode(persistedReason);
+    result.put("failureCode", failureCode);
+    result.put("failureReason", CheckoutRequestStore.safeFailureDescription(failureCode));
   }
 
   /** Account-level billing overview; it remains available when every ERP environment is blocked. */
@@ -1074,7 +1193,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     String createdClientId = purchase.getCreatedClient() == null
         ? null : purchase.getCreatedClient().getId();
-    result.put("clientId", createdClientId == null ? JSONObject.NULL : createdClientId);
+    result.put(FIELD_CLIENT_ID, createdClientId == null ? JSONObject.NULL : createdClientId);
     if (purchase.getDemoClient() != null) {
       addDemoDataTransferSelection(result, purchase.getRequest(), purchase.getDemoClient().getId());
     }
@@ -2852,7 +2971,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (StringUtils.isBlank(sessionClientId) || ZERO_ID.equals(sessionClientId)) {
       return new CheckoutSelection(null, false, false);
     }
-    if (isProductiveClient(sessionClientId)) {
+    // A demo that already originated a productive environment is spent as a source: buying again
+    // from it creates a clean productive environment, exactly like buying from a productive one.
+    if (isProductiveClient(sessionClientId) || isAssociatedDemo(sessionClientId)) {
       return new CheckoutSelection(null, false, false);
     }
     String demoClientId = optionalDemoClientId(body);
@@ -2926,7 +3047,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Client client = OBDal.getInstance().get(Client.class, demoClientId);
       return client != null
           && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(demoClientId, accountEmail)
-          && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(demoClientId));
+          && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(demoClientId))
+          && !tenantEnvironmentLifecycleService.isAssociatedWithProductive(demoClientId);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isAssociatedDemo(String clientId) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return tenantEnvironmentLifecycleService.isAssociatedWithProductive(clientId);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -3091,31 +3223,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * ETP-5117: a tenant converting to productive must stop overriding the System-level
    * ETSG_ForceTestMode default (e.g. a tenant that started as Demo and got its own row via
-   * {@link OnboardingForceTestModeService}). Same best-effort philosophy as {@code
-   * markProductive} itself — commercial/fiscal-config metadata, never allowed to abort an
-   * otherwise-successful paid signup. See {@link OnboardingForceTestModeService}'s own javadoc
-   * ("The reverse direction") for why this needs its own service call, not a one-liner.
+   * {@link OnboardingForceTestModeService}). This operation is part of the paid onboarding
+   * transaction and therefore propagates failures so the plan and fiscal mode cannot diverge.
+   * See {@link OnboardingForceTestModeService}'s own javadoc ("The reverse direction") for why
+   * this needs its own service call, not a one-liner.
    *
    * @param clientId the tenant just marked productive
    */
-  private void revertTestModeForProductiveTenantBestEffort(String clientId) {
-    try {
-      onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
-    } catch (RuntimeException e) {
-      log.error("Could not revert ETSG_ForceTestMode for now-productive tenant '{}': {}",
-          clientId, e.getMessage(), e);
-    }
+  private void revertTestModeForProductiveTenant(String clientId) {
+    onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
   }
 
   /**
    * ETP-5117: applies the side effects of a paid upgrade once {@code handleOnboarding}'s paywall
    * has approved the request — marks the tenant productive and, only on success, reverts any
-   * {@code ETSG_ForceTestMode} override (see {@link #revertTestModeForProductiveTenantBestEffort}).
-   * Joins the onboarding transaction, so a successful marker commits with the tenant. Still
-   * best-effort in the revert direction, mirroring {@code markProductive} itself: commercial/fiscal
-   * -config metadata must never abort an otherwise-successful paid signup. A failed marker is only
-   * logged — "paid but demo" is the symptom ETP-4966 was reported as, and this line is what makes it
-   * searchable instead of indistinguishable from a marker that was never attempted.
+   * {@code ETSG_ForceTestMode} override. All writes join the onboarding transaction; a failure
+   * aborts it so a paid tenant cannot commit with contradictory metadata.
    *
    * @param clientId the tenant just created/resolved
    * @param starOrgId the tenant's "*" organization id, required by {@code markProductive}
@@ -3125,16 +3248,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
       String accountEmail) {
     if (!tenantPlanService.markProductive(clientId, starOrgId)) {
-      log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
-          + "'{}' and will read back as free", clientName, clientId,
-          maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
-    } else {
-      if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
-        log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
-            + "projection", clientName, clientId);
-      }
-      revertTestModeForProductiveTenantBestEffort(clientId);
+      throw new OBException("Paid environment '" + clientName + "' (client " + clientId
+          + ") for account " + maskEmail(accountEmail) + " could not be marked as plan '"
+          + TenantPlanService.PLAN_PRODUCTIVE + "'");
     }
+    if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
+      throw new OBException("Paid environment '" + clientName + "' (client " + clientId
+          + ") could not be marked in the lifecycle projection");
+    }
+    // A tenant must not commit with a productive plan and an active demo override.
+    revertTestModeForProductiveTenant(clientId);
   }
 
   /**
@@ -3169,15 +3292,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           .reversed()
           .thenComparing(user -> StringUtils.defaultString(user.getClient().getName()),
               String.CASE_INSENSITIVE_ORDER));
+      Map<String, Date> unfinishedPaidClients = findUnfinishedPaidClients(account);
       for (User environmentUser : environmentUsers) {
-        Client client = environmentUser.getClient();
-        List<Organization> organizations = EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
-        if (organizations.isEmpty()) {
-          envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser));
-          continue;
-        }
-        for (Organization organization : organizations) {
-          envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser));
+        if (!isUnfinishedPaidEnvironment(environmentUser.getClient(), unfinishedPaidClients)) {
+          addEnvironmentEntries(envArray, environmentUser);
         }
       }
 
@@ -3199,6 +3317,70 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /** One entry per business organization of the user's client, or one without when it has none. */
+  private static void addEnvironmentEntries(org.codehaus.jettison.json.JSONArray envArray,
+      User environmentUser) throws JSONException {
+    Client client = environmentUser.getClient();
+    List<Organization> organizations =
+        EtendoGoJwtDalHelper.findNonStarOrganizations(client.getId());
+    if (organizations.isEmpty()) {
+      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser));
+      return;
+    }
+    for (Organization organization : organizations) {
+      envArray.put(EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser));
+    }
+  }
+
+  /**
+   * Whether {@code client} is the tenant a paid purchase is still building, which must not be
+   * offered as an environment until its checkout is provisioned.
+   *
+   * <p>The classic path commits the client while it builds it, so a failed or running paid attempt
+   * leaves a client that exists but is incomplete. It is recognized by the purchase's company name
+   * and by having been created at or after that purchase was paid. An environment older than the
+   * payment (the demo a purchase may share its name with) is the customer's working tenant and
+   * stays listed.
+   *
+   * <p>Since ETP-5548 a classic-path client keeps its {@link ProvisioningClientName} until the
+   * attempt commits, so a client still carrying one is always hidden; the name match covers the
+   * short window between that commit and the purchase being marked provisioned, and clients built
+   * before the provisioning name existed.
+   *
+   * @param client listed tenant
+   * @param unfinishedPaidClients from {@link CheckoutRequestStore#findUnfinishedPaidClientNames}
+   * @return {@code true} when the tenant is hidden
+   */
+  static boolean isUnfinishedPaidEnvironment(Client client,
+      Map<String, Date> unfinishedPaidClients) {
+    if (client != null && ProvisioningClientName.matches(client.getName())) {
+      return true;
+    }
+    if (client == null || unfinishedPaidClients == null || unfinishedPaidClients.isEmpty()) {
+      return false;
+    }
+    String name = StringUtils.lowerCase(StringUtils.trimToNull(client.getName()), Locale.ROOT);
+    Date paidAt = name == null ? null : unfinishedPaidClients.get(name);
+    Date createdAt = client.getCreationDate();
+    return paidAt != null && createdAt != null && !createdAt.before(paidAt);
+  }
+
+  /**
+   * Fail-open lookup for {@link #isUnfinishedPaidEnvironment}: hiding an incomplete tenant is a
+   * guard, so a failed lookup lists every environment, exactly as before the guard existed, rather
+   * than leaving the account with no environments at all.
+   */
+  private Map<String, Date> findUnfinishedPaidClients(Account account) {
+    try {
+      return checkoutRequestStore.findUnfinishedPaidClientNames(account.getId(),
+          account.getEmail());
+    } catch (RuntimeException e) {
+      log.warn("Could not read unfinished paid purchases for account {}; listing them all",
+          maskEmail(account.getEmail()), e);
+      return Map.of();
     }
   }
 
@@ -3284,21 +3466,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     String accountEmail = preparation.accountEmail;
-    OnboardingRequestData onboardingRequest = preparation.request;
     boolean paidUpgrade = preparation.paidUpgrade;
 
     // Tracked across the try/catch/finally below. Provisioning has many graceful exits that
     // `return` after writing a result line rather than throwing, so the catch block alone would
     // miss most real failures — the dataset step is the common one.
     boolean provisioningCompleted = false;
+    boolean rollbackConfirmed = false;
     String failureReason = null;
+    String failureCode = null;
+    ProvisioningAlertAttempt alertAttempt = new ProvisioningAlertAttempt(paidUpgrade);
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType("application/x-ndjson");
     response.setCharacterEncoding(UTF_8);
     response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
-    PrintWriter writer = response.getWriter();
+    // Remembers the result line a failing step writes, so the catch below neither duplicates it
+    // nor records a generic reason in place of the real one.
+    OnboardingStreamWriter writer = new OnboardingStreamWriter(response.getWriter());
 
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
@@ -3309,18 +3495,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
 
     try {
-      provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword);
+      provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword, alertAttempt);
+      if (!provisioningCompleted) {
+        // Boolean failure exits are promoted to the same exception path as thrown failures. This
+        // is especially important for a pooled tenant: claim and personalization must be rolled
+        // back before the diagnostic write in finally can commit its independent update.
+        throw new OBException("Onboarding provisioning did not complete");
+      }
 
     } catch (Exception e) {
-      log.error("Onboarding failed", e);
-      EtendoGoDalHelper.rollbackDalChanges("onboarding", e, log);
-      sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
-          "Onboarding failed: " + e.getMessage());
-      sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
-      failureReason = e.getMessage();
+      rollbackConfirmed = rollBackFailedOnboarding(e, alertAttempt);
+      if (writer.hasResult() && !writer.isResultSuccess()) {
+        // The failing step already told the client why, possibly with a stable code. That line is
+        // the one the client keeps; a second, generic result would replace it.
+        failureReason = writer.getResultMessage();
+        failureCode = writer.getResultCode();
+      } else {
+        sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
+            "Onboarding failed: " + e.getMessage());
+        sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
+        failureReason = e.getMessage();
+      }
     } finally {
-      recordProvisioningFailureReason(paidUpgrade, provisioningCompleted, onboardingRequest,
-          failureReason);
+      recordOnboardingOutcome(new OnboardingOutcome(provisioningCompleted, rollbackConfirmed,
+          failureReason, failureCode), preparation, alertAttempt);
       // Stop the keepalive before the final flush so no heartbeat races the result line.
       heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
@@ -3329,31 +3527,100 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * Rolls a failed onboarding back and sends its internal alert, only once the rollback is
+   * confirmed: an alert must never report an outcome the database may not hold.
+   *
+   * @return whether the rollback was confirmed
+   */
+  private boolean rollBackFailedOnboarding(Exception e, ProvisioningAlertAttempt alertAttempt) {
+    log.error("Onboarding failed", e);
+    boolean rollbackConfirmed =
+        EtendoGoDalHelper.rollbackDalChangesAndConfirm("onboarding", e, log);
+    if (!rollbackConfirmed) {
+      // The request catches this failure, so the outer DAL cleaner cannot infer an error.
+      org.openbravo.dal.core.SessionHandler.getInstance().setDoRollback(true);
+    }
+    if (alertAttempt.committed) {
+      return rollbackConfirmed;
+    }
+    if (rollbackConfirmed) {
+      notifyProvisioningAlert(alertAttempt,
+          com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.ERROR,
+          e.getClass().getSimpleName());
+    } else {
+      log.warn("Internal provisioning alert suppressed because rollback did not complete attempt={}",
+          alertAttempt.attemptId);
+    }
+    return rollbackConfirmed;
+  }
+
+  /** How an onboarding attempt ended, as the failure diagnostic needs it. */
+  private static final class OnboardingOutcome {
+    private final boolean provisioningCompleted;
+    private final boolean rollbackConfirmed;
+    private final String failureReason;
+    private final String failureCode;
+
+    private OnboardingOutcome(boolean provisioningCompleted, boolean rollbackConfirmed,
+        String failureReason, String failureCode) {
+      this.provisioningCompleted = provisioningCompleted;
+      this.rollbackConfirmed = rollbackConfirmed;
+      this.failureReason = failureReason;
+      this.failureCode = failureCode;
+    }
+  }
+
+  /**
+   * Records the failure diagnostic of a paid attempt, unless the rollback failed: the diagnostic
+   * store commits its own transaction and must never commit unresolved tenant changes.
+   */
+  private void recordOnboardingOutcome(OnboardingOutcome outcome,
+      OnboardingPreparation preparation, ProvisioningAlertAttempt alertAttempt) {
+    if (outcome.provisioningCompleted || outcome.rollbackConfirmed) {
+      recordProvisioningFailureReason(preparation.paidUpgrade, outcome.provisioningCompleted,
+          preparation.request, outcome.failureReason, outcome.failureCode);
+    } else if (preparation.paidUpgrade) {
+      log.warn("Provisioning failure diagnostic suppressed because rollback did not complete "
+          + "attempt={} stage={}", alertAttempt.attemptId, alertAttempt.stage);
+    }
+  }
+
   private boolean executeOnboardingProvisioning(PrintWriter writer,
-      OnboardingPreparation preparation, String adminPassword) throws Exception {
+      OnboardingPreparation preparation, String adminPassword,
+      ProvisioningAlertAttempt alertAttempt) throws Exception {
+    long onboardingStartedAt = System.nanoTime();
+    String correlationId = alertAttempt.attemptId;
     OnboardingRequestData onboardingRequest = preparation.request;
     String accountId = preparation.accountId;
     String accountEmail = preparation.accountEmail;
     String currencyId = preparation.currencyId;
     boolean paidUpgrade = preparation.paidUpgrade;
+    alertAttempt.stage = "admin_context";
     VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
     // ETP-5389: a pre-provisioned tenant when the pool can serve this request, otherwise null and
     // everything below is the classic path, unchanged.
-    String pooledClientId = claimPooledTenant(writer, accountEmail, onboardingRequest,
-        adminPassword);
-    boolean pooled = pooledClientId != null;
-    String clientId = pooled ? pooledClientId
-        : resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
-            adminPassword);
+    alertAttempt.stage = "tenant_selection";
+    if (paidUpgrade && rejectDuplicateProductiveName(writer, onboardingRequest, accountEmail)) {
+      return false;
+    }
+    String provisioningName = ProvisioningClientName.of(accountId, onboardingRequest.paymentToken);
+    String clientId = selectTenant(writer, vars, preparation, provisioningName, adminPassword,
+        alertAttempt);
+    boolean pooled = PATH_POOL.equals(alertAttempt.path);
+    String mode = pooled ? "pool" : "classic";
+    log.info("[ONBOARDING-PERF] phase=tenant_selection mode={} correlationId={} clientId={} "
+        + "elapsedMs={}", mode, correlationId, clientId,
+        elapsedMillis(onboardingStartedAt));
+    alertAttempt.clientId = clientId;
+    alertAttempt.stage = pooled ? "pooled_admin" : "classic_admin";
     if (clientId == null) return false;
+    long residualStartedAt = System.nanoTime();
     String demoSourceClientId = resolveDemoSourceClientId(paidUpgrade, onboardingRequest);
     OnboardingProvisioningChain.AdminContext adminContext =
         resolveAdminContextData(clientId, writer);
     if (adminContext == null) return false;
-    if (paidUpgrade) {
-      applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
-          accountEmail);
-    }
+    alertAttempt.stage = PROGRESS_ORGANIZATION;
     if (!pooled && ensureOrganization(writer, onboardingRequest.clientName, clientId,
         adminContext, currencyId) == null) return false;
     String orgId = resolveOrganizationId(clientId);
@@ -3363,18 +3630,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, "Organization not found after onboarding");
       return false;
     }
+    alertAttempt.stage = pooled ? "pooled_dataset" : "classic_dataset";
     boolean provisioned = pooled
         ? finishPooledTenant(writer, clientId, orgId, adminContext, onboardingRequest)
         : ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
             adminContext.adminRoleId, onboardingRequest);
     if (!provisioned) return false;
-    if (paidUpgrade) {
-      transferDemoCompanyProfile(accountEmail, demoSourceClientId, clientId, orgId);
-    }
-    if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
-      throw new IllegalStateException("Could not initialize demo trial lifecycle");
-    }
+    finishTenantMetadata(preparation, alertAttempt, clientId, orgId, demoSourceClientId,
+        adminContext, pooled ? null : provisioningName);
+    alertAttempt.stage = "commit";
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
+    alertAttempt.committed = true;
+    alertAttempt.stage = "committed";
+    notifyProvisioningAlert(alertAttempt,
+        com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status.OK, null);
+    log.info("[ONBOARDING-PERF] phase=onboarding_residual mode={} correlationId={} clientId={} "
+        + "elapsedMs={}", mode, correlationId, clientId,
+        elapsedMillis(residualStartedAt));
     if (!paidUpgrade) {
       openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
     }
@@ -3389,6 +3661,64 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, "finalize", "done", "Environment ready");
     sendFinalResult(writer, true, "Environment created successfully");
     return true;
+  }
+
+  /**
+   * Picks the tenant for this attempt and records the path taken on {@code alertAttempt}: the
+   * half-built client this same attempt left behind (never replaced by a pooled one), else a
+   * pooled tenant, else a new classic client created under {@code provisioningName}.
+   *
+   * @return the tenant's client id, or {@code null} when none could be resolved or created
+   */
+  private String selectTenant(PrintWriter writer, VariablesSecureApp vars,
+      OnboardingPreparation preparation, String provisioningName, String adminPassword,
+      ProvisioningAlertAttempt alertAttempt) throws Exception {
+    OnboardingRequestData request = preparation.request;
+    boolean resumable = EtendoGoJwtSupport.findClientIdByName(provisioningName) != null;
+    String pooledClientId = resumable ? null : claimPooledTenant(writer, preparation.accountId,
+        preparation.accountEmail, request, adminPassword, alertAttempt.attemptId);
+    if (pooledClientId != null) {
+      alertAttempt.path = PATH_POOL;
+      return pooledClientId;
+    }
+    alertAttempt.path = "CLASSIC";
+    return resolveOrCreateClient(writer, vars, preparation.accountEmail, request,
+        provisioningName, preparation.currencyId, adminPassword);
+  }
+
+  /**
+   * The last writes before the commit: the demo's company profile and the productive markers of a
+   * paid attempt, or the demo trial of a free one, then the requested name of a classic client.
+   *
+   * @param provisioningName name a classic client was built under; {@code null} for a pooled one
+   */
+  private void finishTenantMetadata(OnboardingPreparation preparation,
+      ProvisioningAlertAttempt alertAttempt, String clientId, String orgId,
+      String demoSourceClientId, OnboardingProvisioningChain.AdminContext adminContext,
+      String provisioningName) {
+    OnboardingRequestData request = preparation.request;
+    alertAttempt.stage = "lifecycle";
+    if (preparation.paidUpgrade) {
+      transferDemoCompanyProfile(preparation.accountEmail, demoSourceClientId, clientId, orgId);
+      // Last write before the commit on purpose. The classic path commits internally while it
+      // builds the tenant (InitialClientSetup, InitialOrgSetup), so a productive marker written
+      // any earlier would be committed by those steps and survive a later failure, leaving a
+      // paid-but-incomplete environment that reads back as productive. Written here, the plan,
+      // lifecycle and override removal only exist if every step above succeeded. A classic
+      // dataset pass may have turned the ETSG force-test-mode override on meanwhile, because the
+      // plan still read free then; the override removal below reverts and deletes that row.
+      alertAttempt.stage = "productive_metadata";
+      applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, request.clientName,
+          preparation.accountEmail);
+    } else if (!tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
+      throw new IllegalStateException("Could not initialize demo trial lifecycle");
+    }
+    if (provisioningName != null) {
+      // After every step that names something after the client, and in the final transaction,
+      // so a failure leaves the client under its provisioning name for the retry to find.
+      alertAttempt.stage = "client_name";
+      applyRequestedClientName(clientId, orgId, provisioningName, request.clientName);
+    }
   }
 
   /**
@@ -3469,12 +3799,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * ETP-5389 — takes a pre-provisioned tenant for this request, or answers {@code null} so the
    * caller runs the classic path. See {@link PooledTenantClaimService} for when that happens.
    */
-  private String claimPooledTenant(PrintWriter writer, String accountEmail,
-      OnboardingRequestData request, String adminPassword) {
-    return pooledTenantClaimService.claim(new NdjsonOnboardingProgressSink(writer),
+  private String claimPooledTenant(PrintWriter writer, String accountId, String accountEmail,
+      OnboardingRequestData request, String adminPassword, String correlationId) {
+    String fixtureClientId = devProvisioningFailureFixtureService.reservedClientId(
+        request.paymentToken, accountId, accountEmail);
+    if (DevProvisioningFailureFixtureService.isFixtureRequest(request.paymentToken)
+        && fixtureClientId == null) {
+      throw new OBException("Dedicated E2E fixture reservation is unavailable for this account");
+    }
+    NdjsonOnboardingProgressSink sink = new NdjsonOnboardingProgressSink(writer);
+    PooledTenantClaimService.ClaimRequest claimRequest =
         new PooledTenantClaimService.ClaimRequest(accountEmail, request.clientName,
             request.fullName, request.currencyIso, request.countryCode, request.language,
-            request.address, adminPassword));
+            request.address, adminPassword);
+    return fixtureClientId == null
+        ? pooledTenantClaimService.claim(sink, claimRequest, correlationId)
+        : pooledTenantClaimService.claim(sink, claimRequest, correlationId, fixtureClientId,
+            request.paymentToken);
+  }
+
+  private static long elapsedMillis(long startedAt) {
+    return (System.nanoTime() - startedAt) / 1_000_000L;
   }
 
   /**
@@ -3485,6 +3830,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private boolean finishPooledTenant(PrintWriter writer, String clientId, String orgId,
       OnboardingProvisioningChain.AdminContext adminContext, OnboardingRequestData request) {
+    if (devProvisioningFailureFixtureService.shouldFail(request.paymentToken)) {
+      throw new IllegalStateException("E2E fixture forced pooled tenant finalization failure");
+    }
     return wireOrgInfo(writer, clientId, orgId, adminContext.adminUserId,
         adminContext.adminRoleId, request)
         && wireWarehouseAddress(writer, clientId, orgId, adminContext.adminUserId,
@@ -3555,7 +3903,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     PaywallOutcome paywallOutcome =
-        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+        resolveOnboardingPaywall(accountId, accountEmail, onboardingRequest, response);
     if (paywallOutcome == PaywallOutcome.REFUSED) {
       return null;
     }
@@ -3586,6 +3934,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
         onboardingRequest.paymentToken, accountId, accountEmail);
+    if (StringUtils.isNotBlank(persistedDemoClientId) && isAssociatedDemo(persistedDemoClientId)) {
+      // Two purchases started from the same demo: the first one to finish took it as its origin.
+      // This one is already paid, so it is not refused — it becomes a clean productive
+      // environment, without a source, data transfer or demo revocation (ETP-5548).
+      log.info("Demo {} already originated a productive environment; the paid setup continues "
+          + "without a source", persistedDemoClientId);
+      onboardingRequest.demoClientId = null;
+      return true;
+    }
     Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
     try {
       onboardingRequest.demoClientId = resolvePaidDemoClientId(true, persistedDemoClientId,
@@ -3657,10 +4014,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // recoverable even if a legacy database omits that value.
       return attempt == null ? 0L : attempt;
     }
+    writeClaimRefusal(response, checkoutRequestStore.find(onboardingRequest.paymentToken,
+        accountId, accountEmail));
+    return null;
+  }
+
+  /**
+   * Explains why a paid request could not be claimed. A failure no retry can fix and an
+   * environment already set up are refused for good, so neither may answer "still running": the
+   * customer would wait and retry forever. Anything else is a claim held by another call.
+   */
+  private void writeClaimRefusal(HttpServletResponse response, CheckoutRequest checkoutRequest)
+      throws IOException {
+    String status = checkoutRequestStore.deriveProvisioningStatus(checkoutRequest);
+    if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED.equals(status)
+        && !checkoutRequestStore.isProvisioningRetryAllowed(checkoutRequest)) {
+      String failureDescription = CheckoutRequestStore.safeFailureDescription(
+          CheckoutRequestStore.failureCode(checkoutRequest.getFailureReason()));
+      writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_RETRY_NOT_ALLOWED",
+          "Setup cannot be retried for this environment",
+          failureDescription + ". Setup cannot be retried; contact support to continue.");
+      return;
+    }
+    if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONED.equals(status)) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_COMPLETED",
+          "This environment is already set up",
+          "This environment is already set up. Open it from your environment list.");
+      return;
+    }
     writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
         "Setup is still running for this environment",
         "Setup is still running for this environment. Refresh its status before trying again.");
-    return null;
   }
 
   /**
@@ -3753,21 +4137,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * left it so {@code DERIVED_STATUS} reports {@code STALLED}, rather than being marked terminal
    * by a path that may itself be failing. {@code recordFailureReason} swallows its own errors for
    * the same reason — a failed annotation must not turn one problem into two. Called from the
-   * onboarding {@code finally}, so it runs on every exit including the graceful ones that return
-   * after writing a result line.
+   * onboarding {@code finally} only after successful completion or confirmed rollback. Unsafe
+   * rollback failures skip annotation because its store commits the current DAL transaction.
    *
    * @param paidUpgrade whether this environment was bought rather than free
    * @param provisioningCompleted whether provisioning reached its final result line
    * @param onboardingRequest the parsed onboarding request
-   * @param failureReason the exception message when one was caught, otherwise null
+   * @param failureReason the cause the client was shown, otherwise null
+   * @param failureCode the stable code of that cause, {@code null} when it has none; persisted with
+   *     the reason so the status endpoint can decide retryability and answer without raw text
    */
   private void recordProvisioningFailureReason(boolean paidUpgrade, boolean provisioningCompleted,
-      OnboardingRequestData onboardingRequest, String failureReason) {
+      OnboardingRequestData onboardingRequest, String failureReason, String failureCode) {
     if (!paidUpgrade || provisioningCompleted) {
       return;
     }
     checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
-        failureReason != null ? failureReason : "Provisioning did not complete");
+        CheckoutRequestStore.encodeFailureReason(failureCode, failureReason));
   }
 
   /**
@@ -3779,10 +4165,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return {@link PaywallOutcome#REFUSED} when the caller must stop (the error response is
    *     already written), otherwise whether the environment is free or paid
    */
-  private PaywallOutcome resolveOnboardingPaywall(String accountEmail,
+  private PaywallOutcome resolveOnboardingPaywall(String accountId, String accountEmail,
       OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
     try {
-      TenantPaywallService.Outcome paywall = evaluatePaywall(accountEmail, onboardingRequest);
+      TenantPaywallService.Outcome paywall =
+          evaluatePaywall(accountId, accountEmail, onboardingRequest);
       if (paywall.getDecision().isBlocked()) {
         writePaymentRequiredError(response, paywall.getDecision());
         return PaywallOutcome.REFUSED;
@@ -3890,13 +4277,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * evaluated the flag through ConfigCat and the backend through local properties that were unset
    * everywhere — so the browser sold environments the backend then handed out for free.
    */
-  private TenantPaywallService.Outcome evaluatePaywall(String accountEmail,
+  private TenantPaywallService.Outcome evaluatePaywall(String accountId, String accountEmail,
       OnboardingRequestData onboardingRequest) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
       boolean ownsEnvironment = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
-      boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
+      boolean resuming = isResumingOwnedTenant(
+          ProvisioningClientName.of(accountId, onboardingRequest.paymentToken), accountEmail);
       return tenantPaywallService.evaluate(ownsEnvironment, resuming, false,
           onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
     } finally {
@@ -3905,13 +4293,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Tells a resume of an existing tenant from a request for a new one. A company name that already
-   * resolves to a client this account owns is the retry path {@code validateExistingClient} handles
-   * downstream — provisioning it again reconciles what is missing rather than creating a tenant, so
-   * it must not be charged a second time.
+   * Tells a resume of an existing tenant from a request for a new one. A half-built client this
+   * attempt left behind, found by its {@link ProvisioningClientName}, is the retry path
+   * {@code validateExistingClient} handles downstream — provisioning it again reconciles what is
+   * missing rather than creating a tenant, so it must not be charged a second time. The company
+   * name plays no part (ETP-5548): matching it used to resume, and so convert, a finished demo.
    */
-  private boolean isResumingOwnedTenant(String clientName, String accountEmail) {
-    String existingClientId = EtendoGoJwtSupport.findClientIdByName(clientName);
+  private boolean isResumingOwnedTenant(String provisioningName, String accountEmail) {
+    String existingClientId = EtendoGoJwtSupport.findClientIdByName(provisioningName);
     return existingClientId != null
         && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(existingClientId, accountEmail);
   }
@@ -4001,6 +4390,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (clientName.isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
         FIELD_CLIENT_NAME + " must not be empty");
+        return null;
+      }
+      if (ProvisioningClientName.matches(clientName)) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, RESERVED_CLIENT_NAME_MESSAGE);
         return null;
       }
       OnboardingRequestData data = new OnboardingRequestData();
@@ -4135,18 +4528,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * a second name lookup could return a different client than the one just provisioned.
    */
   private String resolveOrCreateClient(PrintWriter writer, VariablesSecureApp vars,
-      String accountEmail, OnboardingRequestData requestData, String currencyId,
-      String adminPassword) throws Exception {
+      String accountEmail, OnboardingRequestData requestData, String provisioningName,
+      String currencyId, String adminPassword) throws Exception {
     sendProgress(writer, PROGRESS_CLIENT, PROGRESS_IN_PROGRESS,
         "Creating client: " + requestData.clientName + "...");
-    String clientId = EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
+    // ETP-5548: the client is created, and found again on a retry, under the attempt's
+    // provisioning name; the company name is applied by applyRequestedClientName at the end.
+    String clientId = EtendoGoJwtSupport.findClientIdByName(provisioningName);
     if (clientId != null) {
       return validateExistingClient(writer, requestData.clientName, clientId, accountEmail)
           ? clientId : null;
     }
 
     String clientUser = EtendoGoJwtSupport.buildClientUsername(accountEmail, requestData.clientName);
-    String createdClientId = createClient(vars, currencyId, requestData.clientName, clientUser,
+    String createdClientId = createClient(vars, currencyId, provisioningName, clientUser,
         adminPassword, writer);
     if (createdClientId == null) {
       return null;
@@ -4169,19 +4564,87 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private boolean validateExistingClient(PrintWriter writer, String clientName,
       String clientId, String accountEmail) {
-    // ETP-4428: an existing same-named client is resumable ONLY when it belongs to this account.
-    // A previous partial onboarding leaves the client behind (with its org/role/user) but missing
-    // downstream provisioning; re-entering it lets the idempotent chain reconcile what is missing.
-    // A name collision with ANOTHER account's client must never be resumable (tenant isolation).
+    // ETP-4428: a half-built client is resumable ONLY when it belongs to this account. A previous
+    // partial onboarding leaves the client behind (with its org/role/user) but missing downstream
+    // provisioning; re-entering it lets the idempotent chain reconcile what is missing. Since
+    // ETP-5548 the lookup is by provisioning name, so another account's client cannot match in
+    // practice; the check stays as the tenant-isolation guarantee.
     if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, accountEmail)) {
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
-          "Company name '" + clientName + "' is already in use. Use a different name.");
+          "The environment being created belongs to another account.");
       sendFinalResult(writer, false,
-          "The company name '" + clientName + "' is already in use. Please choose a different company name.");
+          "The environment being created belongs to another account. Contact support.");
       return false;
     }
     sendProgress(writer, PROGRESS_CLIENT, "done", "Client already exists, resuming...");
     return true;
+  }
+
+  /**
+   * Onboarding copy of the pre-payment rule in {@code isProductiveNameTakenByAccount}: an account
+   * never gets two productive environments with the same company name (ETP-5548). The checkout
+   * fixes its company name, so the failure carries the non-retryable
+   * {@code CLIENT_NAME_IN_USE} code instead of offering a retry that would fail the same way.
+   *
+   * @return {@code true} when the request was refused and the result line written
+   */
+  private boolean rejectDuplicateProductiveName(PrintWriter writer,
+      OnboardingRequestData requestData, String accountEmail) {
+    OBContext.setAdminMode(true);
+    try {
+      if (!ownsProductiveNamed(requestData.clientName, accountEmail)) {
+        return false;
+      }
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
+        "You already have a productive environment named '" + requestData.clientName + "'.");
+    sendFinalResult(writer, false, CLIENT_NAME_IN_USE_MESSAGE,
+        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE);
+    return true;
+  }
+
+  /**
+   * Gives a classic-path client the requested company name, replacing its provisioning name in the
+   * client and in every name the build derived from it (admin role, trees, ledger, chart of
+   * accounts, calendar) — the same rewrite a pooled tenant gets at claim time. A client that does
+   * not carry {@code provisioningName} is left alone.
+   *
+   * <p>The organization is created with the company name directly, so it only differs when a free
+   * retry resumed the attempt under a different name (a paid checkout fixes its name): it then
+   * takes the requested name too. Its legal name follows only while it still equals the old name —
+   * a legal name copied from the demo is the customer's and stays.
+   */
+  void applyRequestedClientName(String clientId, String orgId, String provisioningName,
+      String clientName) {
+    OBContext.setAdminMode(true);
+    try {
+      Client client = OBDal.getInstance().get(Client.class, clientId);
+      if (client == null || !StringUtils.equals(provisioningName, client.getName())) {
+        return;
+      }
+      client.setName(clientName);
+      client.setSearchKey(clientName);
+      client.setDescription(clientName);
+      OBDal.getInstance().save(client);
+      Organization org = orgId == null ? null : OBDal.getInstance().get(Organization.class, orgId);
+      if (org != null && !StringUtils.equals(clientName, org.getName())) {
+        String previousName = org.getName();
+        org.setName(clientName);
+        org.setSearchKey(clientName);
+        if (StringUtils.isBlank(org.getSocialName())
+            || StringUtils.equals(previousName, org.getSocialName())) {
+          org.setSocialName(clientName);
+        }
+        OBDal.getInstance().save(org);
+      }
+      OBDal.getInstance().flush();
+      pooledTenantClaimService.renamePlaceholderDerivedNames(clientId, provisioningName,
+          clientName);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   private String createClient(VariablesSecureApp vars, String currencyId, String clientName,
@@ -4798,7 +5261,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put("environment", buildSessionEnvironment(entered.getRecord()));
+      result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(entered.getRecord()));
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, entered.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
@@ -4988,7 +5451,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_ACCOUNT, accountJson);
-      result.put("environment", buildSessionEnvironment(sessionRecord));
+      result.put(FIELD_ENVIRONMENT, buildSessionEnvironment(sessionRecord));
       result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
       result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
 
@@ -5017,7 +5480,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONObject env = new JSONObject();
     env.put(FIELD_USER_ID, sessionRecord.getUserId());
     env.put("roleId", sessionRecord.getRoleId());
-    env.put("clientId", sessionRecord.getCtxClientId());
+    env.put(FIELD_CLIENT_ID, sessionRecord.getCtxClientId());
     env.put("orgId", sessionRecord.getCtxOrgId());
     env.put("warehouseId", sessionRecord.getWarehouseId());
     return env;
@@ -5225,6 +5688,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.error("JSON error building field-too-long response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
+  }
+
+  private void notifyProvisioningAlert(ProvisioningAlertAttempt attempt,
+      com.etendoerp.go.schemaforge.email.InternalAlertEvent.Status status, String failureCategory) {
+    try {
+      internalAlertService.sendAfterTransaction(new com.etendoerp.go.schemaforge.email.InternalAlertEvent(
+          "environment-provisioning", status, attempt.attemptId,
+          new com.etendoerp.go.schemaforge.email.InternalAlertEvent.Target(
+              attempt.paid ? "PRODUCTIVE" : "DEMO", attempt.clientId, attempt.path),
+          attempt.stage, StringUtils.defaultIfBlank(failureCategory, null)));
+    } catch (RuntimeException e) {
+      // Even a substituted alert sender must never change a committed provisioning outcome.
+      log.warn("Internal provisioning alert failed attempt={} category={}", attempt.attemptId,
+          e.getClass().getSimpleName());
+    }
+  }
+
+  private static final class ProvisioningAlertAttempt {
+    private final String attemptId = UUID.randomUUID().toString();
+    private final boolean paid;
+    private String clientId;
+    private String path = "UNKNOWN";
+    private String stage = "started";
+    private boolean committed;
+    private ProvisioningAlertAttempt(boolean paid) { this.paid = paid; }
   }
 
   private static final class OnboardingPreparation {

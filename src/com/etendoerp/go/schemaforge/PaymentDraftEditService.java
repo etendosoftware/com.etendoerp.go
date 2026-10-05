@@ -58,8 +58,9 @@ final class PaymentDraftEditService {
    * {@code FIN_Finacc_Transaction} created immediately by {@link
    * PaymentRegistrationService#processOrThrow} (ETP-4891).
    */
-  static NeoResponse confirmDraftPayment(String paymentId) throws Exception {
-    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+  static NeoResponse confirmDraftPayment(String paymentId, String invoiceId) throws Exception {
+    // ETP-5558: a payment of THIS invoice the caller may read, or the same 404 as an unknown id.
+    FIN_Payment payment = PaymentOwnership.invoicePayment(paymentId, invoiceId);
     if (payment == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
     }
@@ -83,8 +84,9 @@ final class PaymentDraftEditService {
    * truth for payment removal (its invoice-recompute becomes a harmless no-op here, since our
    * release already restored the schedule).
    */
-  static NeoResponse deleteDraftPayment(String paymentId) {
-    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+  static NeoResponse deleteDraftPayment(String paymentId, String invoiceId) {
+    // ETP-5558: a payment of THIS invoice the caller may read, or the same 404 as an unknown id.
+    FIN_Payment payment = PaymentOwnership.invoicePayment(paymentId, invoiceId);
     if (payment == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
     }

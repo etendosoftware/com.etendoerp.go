@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -48,6 +49,8 @@ public final class EtendoGoJwtSupport {
   private static final Logger log = LogManager.getLogger(EtendoGoJwtSupport.class);
   private static final String STAR_ORG_VALUE = "*";
   private static final String SYSTEM_ORG_ID = "0";
+  /** Highest number {@link #buildClientUsername} appends before giving up on a free username. */
+  private static final int MAX_USERNAME_NUMBER = 99;
   private static final String SQL_FIND_ROLE_LIST_BY_USER =
       "SELECT r.ad_role_id AS role_id, r.name AS role_name, "
           + "o.ad_org_id AS org_id, o.name AS org_name "
@@ -231,18 +234,45 @@ public final class EtendoGoJwtSupport {
   }
 
   /**
+   * Every active client whose name matches {@code clientName}, ignoring case and surrounding
+   * blanks. Names are not unique across accounts (ETP-5548), so a name check that must see all of
+   * them cannot use {@link #findClientIdByName}, which answers one.
+   */
+  static List<String> findClientIdsByName(String clientName) {
+    String normalized = StringUtils.trimToNull(clientName);
+    if (normalized == null) {
+      return Collections.emptyList();
+    }
+    OBQuery<Client> query = OBDal.getInstance().createQuery(Client.class,
+        "as client where lower(trim(client.name)) = lower(:clientName) and client.active = true");
+    query.setNamedParameter("clientName", normalized);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    List<String> ids = new ArrayList<>();
+    for (Client client : query.list()) {
+      ids.add(client.getId());
+    }
+    return ids;
+  }
+
+  /**
    * Builds a unique ERP username while preserving the platform account email as the identity.
    * This is public so admin-created users follow the same cross-client convention as onboarding.
    *
    * <p>The result fits the AD user username limit by trimming only the disambiguating company
-   * suffix when necessary.
+   * suffix when necessary. When {@code email+<company>} is itself taken — another environment of
+   * the account whose name reduces to the same suffix, e.g. "Acme" and "Acme!" — a number is
+   * appended ({@code +acme2}, {@code +acme3}, ...) (ETP-5548). The suffix stays in {@code [a-z0-9]},
+   * so {@code GoAccountResolver} still recovers the email by splitting on the last {@code '+'}.
+   * "Taken" counts inactive users too, as {@code InitialSetupUtility.existsUserName} and the
+   * {@code AD_USER_UN_USERNAME} index do: a name only free among active users would fail later.
    *
    * @param accountEmail platform account email used as the identity
    * @param clientName company name used to disambiguate the username
    * @return a unique ERP username candidate
    */
   public static String buildClientUsername(String accountEmail, String clientName) {
-    if (findActiveUserByUsername(accountEmail) == null) {
+    if (!isUsernameTaken(accountEmail)) {
       return accountEmail;
     }
     String safeClientName = (clientName != null) ? clientName.toLowerCase().replaceAll("[^a-z0-9]", "") : "";
@@ -252,10 +282,28 @@ public final class EtendoGoJwtSupport {
       // keeps the value storable; the duplicate-username check upstream still guards uniqueness.
       return accountEmail;
     }
-    if (safeClientName.length() > suffixRoom) {
-      safeClientName = safeClientName.substring(0, suffixRoom);
+    String base = StringUtils.left(safeClientName, suffixRoom);
+    String candidate = accountEmail + "+" + base;
+    for (int number = 2; number <= MAX_USERNAME_NUMBER && isUsernameTaken(candidate); number++) {
+      String digits = String.valueOf(number);
+      if (digits.length() > suffixRoom) {
+        break;
+      }
+      candidate = accountEmail + "+" + StringUtils.left(base, suffixRoom - digits.length())
+          + digits;
     }
-    return accountEmail + "+" + safeClientName;
+    return candidate;
+  }
+
+  private static boolean isUsernameTaken(String username) {
+    OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
+        "as user where user.username = :username");
+    query.setNamedParameter("username", username);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setFilterOnActive(false);
+    query.setMaxResult(1);
+    return query.uniqueResult() != null;
   }
 
   static String findStarOrgId(String clientId) {

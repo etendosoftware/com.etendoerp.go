@@ -47,6 +47,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -215,10 +216,41 @@ public class FinancialAccountHandler implements NeoHandler {
    */
   FinancialAccountProviderEnricher providerEnricher = new FinancialAccountProviderEnricher();
 
+  /**
+   * The account's manual movements as declared actions (ETP-5558). Package-visible and non-final
+   * so unit tests can swap in one over a stubbed movements endpoint.
+   */
+  FinancialAccountMovementActions movementActions = new FinancialAccountMovementActions();
+
+  /** The account's funds transfers as declared actions (ETP-5558). Swappable like the above. */
+  FinancialAccountTransferActions transferActions = new FinancialAccountTransferActions();
+
+  /**
+   * The movement and funds-transfer actions of the account, declared for agents (ETP-5558): the
+   * SPA runs them through {@code financial-account-transactions}, a spec the MCP does not serve.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts =
+        new LinkedHashMap<>(FinancialAccountMovementActions.actionContracts());
+    contracts.putAll(FinancialAccountTransferActions.actionContracts());
+    return contracts;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!SPEC.equals(context.getSpecName())) {
       return null;
+    }
+    if (ENTITY_ACCOUNT.equals(context.getEntityName())) {
+      NeoResponse movement = movementActions.handle(context);
+      if (movement != null) {
+        return movement;
+      }
+      NeoResponse transfer = transferActions.handle(context);
+      if (transfer != null) {
+        return transfer;
+      }
     }
     if (!NeoEndpointTypes.isCrud(context)) {
       // Button actions, callouts, display logic and selectors are not account writes: let the
@@ -384,7 +416,12 @@ public class FinancialAccountHandler implements NeoHandler {
       return;
     }
     defaults.put(FIELD_COUNTRY, orgCountry.getId());
-    defaults.put(FIELD_COUNTRY + SUFFIX_IDENTIFIER, orgCountry.getName());
+    // ETP-5579: getIdentifier(), NOT getName() — same reason as ETP-5022 in
+    // ContactsLocationAddressHandler. getName() is the plain Hibernate getter and never consults
+    // C_Country_Trl ("Spain" for an es_ES user); getIdentifier() resolves the translation in the
+    // OBContext language. Country's identifier is the single Name column, so only the language
+    // of the text changes.
+    defaults.put(FIELD_COUNTRY + SUFFIX_IDENTIFIER, orgCountry.getIdentifier());
   }
 
   /**

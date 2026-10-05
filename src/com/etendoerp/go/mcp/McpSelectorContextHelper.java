@@ -19,16 +19,22 @@ package com.etendoerp.go.mcp;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.ad.ui.Window;
@@ -62,6 +68,33 @@ final class McpSelectorContextHelper {
   private static final String COLUMN_REGION = "C_Region_ID";
 
   private McpSelectorContextHelper() {
+  }
+
+  /**
+   * The names {@code neo_selectors} accepts for an entity: the field (DAL property) name of every
+   * active column of the tab's table whose reference is a selector reference, sorted. Structural —
+   * read off the AD, never off an entity name — so it answers the same question for every entity.
+   *
+   * @param adTab         the entity's tab
+   * @param dalEntity     the tab table's DAL entity, may be {@code null} (DB column names are used)
+   * @param selectorRefs  the selector {@code AD_Reference} ids
+   * @return the names, empty when the tab has none
+   */
+  static List<String> selectorColumnNames(Tab adTab, Entity dalEntity, Set<String> selectorRefs) {
+    Set<String> names = new java.util.TreeSet<>();
+    if (adTab == null || adTab.getTable() == null) {
+      return new ArrayList<>(names);
+    }
+    for (Column column : adTab.getTable().getADColumnList()) {
+      if (!Boolean.TRUE.equals(column.isActive()) || column.getReference() == null
+          || !selectorRefs.contains((String) column.getReference().getId())) {
+        continue;
+      }
+      Property property = dalEntity == null ? null
+          : dalEntity.getPropertyByColumnName(column.getDBColumnName());
+      names.add(property != null ? property.getName() : column.getDBColumnName());
+    }
+    return new ArrayList<>(names);
   }
 
   static Map<String, String> buildSelectorContextParams(JSONObject args, Tab adTab) {

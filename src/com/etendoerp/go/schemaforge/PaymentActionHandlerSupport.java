@@ -2,12 +2,22 @@ package com.etendoerp.go.schemaforge;
 
 import javax.servlet.http.HttpServletResponse;
 
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Transaction;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+import com.etendoerp.go.schemaforge.util.NeoActionContract.Param;
 
 /**
  * Shared invoice payment ACTION handling for both sales and purchase invoice headers.
@@ -26,6 +36,19 @@ final class PaymentActionHandlerSupport {
   private static final String PIS_RETRY_ACTION = "retryPisPayment";
   private static final String CONFIRM_ACTION = "confirmPayment";
   private static final String DELETE_ACTION = "deletePayment";
+  private static final String MSG_PAYMENT_NOT_SAVED =
+      "The payment was not saved; nothing was registered — it is safe to retry";
+  private static final String MSG_DRAFT_NOT_DELETED =
+      "The draft was not deleted; nothing changed — it is safe to retry";
+
+  /**
+   * The PIS actions this support serves to the SPA, plus the invoice's PSD2 button, all excluded
+   * from agents (ETP-5558, product decision): a bank-initiated payment ends in an authorization
+   * only a person can give.
+   */
+  static final Set<String> AGENT_EXCLUDED_ACTIONS = Set.of(PIS_SUPPLIER_ACCOUNTS_ACTION,
+      PIS_TEMPLATES_ACTION, PIS_STATUS_ACTION, PIS_CANCEL_ACTION, PIS_RETRY_ACTION,
+      "psd2GenerateBankPayment");
 
   private static final String FIELD_PAYMENT_ID = "paymentId";
   private static final String FIELD_SCHEDULE_ID = "scheduleId";
@@ -36,13 +59,148 @@ final class PaymentActionHandlerSupport {
   private PaymentActionHandlerSupport() {
   }
 
+  /**
+   * The payment actions this support serves, declared for agents (ETP-5558, FR-1).
+   *
+   * <p>The SPA has called these from the invoice panel all along; the declaration makes them
+   * discoverable and typed through MCP ({@code neo_schema view:"actions"}, {@code neo_discover}),
+   * where they used to be invisible — which is why agents built payments by hand. The REST
+   * behaviour is untouched: nothing on the REST path reads these contracts.</p>
+   *
+   * <p>The PIS actions ({@code pisSupplierAccounts}, {@code pisTemplates}, {@code pisPaymentStatus},
+   * {@code cancelPisPayment}, {@code retryPisPayment}) and the {@code pis} body key are deliberately
+   * left out: a bank-initiated payment ends in an authorization only a person can give, so PIS is
+   * excluded from the agent surface (product decision). The MCP validates every call against
+   * these contracts before the handler runs, so an undeclared key such as {@code pis} is refused
+   * (422); the PIS actions themselves are refused (405) through {@link #AGENT_EXCLUDED_ACTIONS},
+   * which both invoice headers return from {@code agentExcludedActions()}.</p>
+   *
+   * @param isReceipt {@code true} for collections (sales invoices), {@code false} for payments
+   * @return the contracts, in presentation order
+   */
+  static Map<String, NeoActionContract> actionContracts(boolean isReceipt) {
+    String doc = isReceipt ? "sales invoice" : "purchase invoice";
+    String money = isReceipt ? "collection" : "payment";
+    String idDescription = "the id of the " + doc + " the " + money + " is for";
+    String spec = isReceipt ? "sales-invoice" : "purchase-invoice";
+    String installments = "neo_list(spec:'" + spec + "', entity:'paymentPlan', parentId:<invoice "
+        + "id>) lists the invoice's installments with their outstanding amount";
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    contracts.put(ACTION_NAME, NeoActionContract.write(ACTION_NAME,
+        "Registers a " + money + " against one installment of this " + doc + ", exactly as the "
+            + "invoice's payment panel does. This is the way to pay or collect an invoice — "
+            + "payments are never created by hand. With process 'confirm' the " + money
+            + " is processed and applied; with 'draft' it is saved for later and can be confirmed "
+            + "with confirmPayment or edited by calling this again with paymentId. Returns the "
+            + money + " {id, documentNo, amount, status, processed, paymentMethod, creditUsed, "
+            + "creditGenerated, creditAvailable, writeoffAmount} and the invoice's new state "
+            + "{outstandingAmount, totalPaid, paymentComplete}. Before calling it: "
+            + "invoiceAccounts gives a valid account, the methods it accepts and the one it uses "
+            + "by default.",
+        Param.optional(FIELD_SCHEDULE_ID, NeoActionContract.TYPE_STRING,
+            "Id of the invoice installment (FIN_Payment_Schedule) being paid: "
+                + installments + ". Default: the invoice's only pending installment (the one the "
+                + "draft pays, with paymentId); with several pending it is refused with the "
+                + "list, each with its outstanding amount and due date."),
+        Param.required(FIELD_AMOUNT, NeoActionContract.TYPE_NUMBER,
+            "Amount of the " + money + ", in the invoice currency (the same currency as the "
+                + "installment's outstanding amount). When the account is in another currency, "
+                + "the account " + (isReceipt ? "receives" : "pays") + " this amount × "
+                + "conversionRate. Less than the outstanding amount is a partial " + money
+                + "; more is an overpayment, possible only on a collection in the organization's "
+                + "currency (see overpaymentAction)."),
+        Param.required(FIELD_DATE, NeoActionContract.TYPE_DATE,
+            "Date of the " + money + " (yyyy-MM-dd)."),
+        Param.required(FIELD_ACCOUNT, NeoActionContract.TYPE_STRING,
+            "Id of the financial account the money " + (isReceipt ? "arrives in" : "leaves from")
+                + ". invoiceAccounts lists the valid ones, with the payment methods each accepts."),
+        Param.optional("fin_paymentmethod_id", NeoActionContract.TYPE_STRING,
+            "Id of the payment method. Must be one the chosen account accepts (invoiceAccounts → "
+                + "paymentMethodIds); another is refused with the valid ones. Default: the "
+                + "account's defaultMethodId in invoiceAccounts."),
+        // Required for agents only (ETP-5558): the handler reads paymentId, conversionRate and
+        // writeoffDifference only when the body carries process (or another advanced key), and
+        // silently ignores them otherwise (§4.12.9). Requiring it here keeps REST unchanged.
+        Param.requiredOptions("process",
+            "'confirm' processes and applies the " + money + "; 'draft' only saves it, to confirm "
+                + "later with confirmPayment. Always send it: paymentId, conversionRate and "
+                + "writeoffDifference only take effect with it.",
+            List.of("draft", "confirm")),
+        Param.optional(FIELD_PAYMENT_ID, NeoActionContract.TYPE_STRING,
+            "Id of an existing DRAFT " + money + " to edit in place instead of creating a new "
+                + "one (same id and document number). A processed " + money + " cannot be edited."),
+        Param.array("creditSources", NeoActionContract.TYPE_OBJECT, false,
+            "Existing credit of the business partner to apply, each item either "
+                + "{\"kind\":\"credit\",\"paymentId\":<payment with credit>,\"use\":<amount>} "
+                + "for accumulated credit, or {\"kind\":\"abono\",\"psdId\":<credit-note "
+                + "detail>,\"use\":<amount>} for a credit note. invoiceCreditSources lists both "
+                + "kinds with their available amount ('avail'). Default: none."),
+        Param.options("overpaymentAction",
+            "What to do with an amount above the outstanding: 'leave-credit' keeps it as credit "
+                + "of the business partner, 'refund' returns it. Only a collection whose invoice "
+                + "is in the organization's currency can be overpaid, and then this is required "
+                + "when actual_payment plus creditSources exceeds the installment's outstanding "
+                + "amount. A payment, or a collection in another currency, is refused whenever it "
+                + "exceeds the outstanding: lower the amount.",
+            List.of("leave-credit", "refund")),
+        Param.optional("conversionRate", NeoActionContract.TYPE_NUMBER,
+            "Exchange rate from the invoice currency to the account currency. Required, and "
+                + "positive, when the invoice and account currencies differ; ignored otherwise. "
+                + "currencyOptions lists the currencies with a rate for the invoice date."),
+        Param.optional("writeoffDifference", NeoActionContract.TYPE_BOOLEAN,
+            "true writes off the difference between the amount and the outstanding, closing the "
+                + "installment. The write-off is capped by the account's writeoffLimit "
+                + "(invoiceAccounts): a larger difference is refused. Default: false."))
+        .withIdDescription(idDescription));
+    contracts.put(CONFIRM_ACTION, NeoActionContract.write(CONFIRM_ACTION,
+        "Processes a DRAFT " + money + " of this invoice (one registered with process 'draft'). "
+            + "Returns the processed " + money + " and the invoice's new state, as registerPayment "
+            + "does.",
+        Param.required(FIELD_PAYMENT_ID, NeoActionContract.TYPE_STRING,
+            "Id of the draft " + money + " (invoicePayments).")).withIdDescription(idDescription));
+    contracts.put(DELETE_ACTION, NeoActionContract.write(DELETE_ACTION,
+        "Deletes a DRAFT " + money + " of this invoice. A processed one cannot be deleted. "
+            + "Returns what was deleted {id, documentNo, amount, status} and the invoice's state.",
+        Param.required(FIELD_PAYMENT_ID, NeoActionContract.TYPE_STRING,
+            "Id of the draft " + money + " (invoicePayments).")).withIdDescription(idDescription));
+    contracts.put(LIST_ACTION, NeoActionContract.read(LIST_ACTION,
+        "Lists the " + money + "s already registered against this invoice: id, documentNo, "
+            + "amount, status, processed, appliedToInvoice, account, conversionRate. A draft's id "
+            + "is what confirmPayment, deletePayment and registerPayment's paymentId take.")
+        .withIdDescription(idDescription));
+    contracts.put(ACCOUNTS_ACTION, NeoActionContract.read(ACCOUNTS_ACTION,
+        "Lists the financial accounts a " + money + " of this invoice can use: id, label, "
+            + "currency, writeoffLimit, paymentMethodIds (the methods each accepts) and "
+            + "defaultMethodId (the one registerPayment uses on it when fin_paymentmethod_id is "
+            + "left out); invoiceMethodId is the invoice's own method and invoiceMethodAccepted "
+            + "says whether any listed account accepts it.").withIdDescription(idDescription));
+    contracts.put(METHODS_ACTION, NeoActionContract.read(METHODS_ACTION,
+        "Lists the payment methods available for a " + money + " of this invoice: id, label.")
+        .withIdDescription(idDescription));
+    contracts.put(CREDIT_SOURCES_ACTION, NeoActionContract.read(CREDIT_SOURCES_ACTION,
+        "Lists the business partner's credit that can fund a " + money + " of this invoice, in "
+            + "the invoice currency: {kind:'credit', paymentId} for accumulated credit and "
+            + "{kind:'abono', psdId} for credit notes, each with its available amount 'avail'. "
+            + "Pass them to registerPayment's creditSources.",
+        Param.optional("editPaymentId", NeoActionContract.TYPE_STRING,
+            "When editing a draft, its id: the credit that draft already holds is counted as "
+                + "available again.")).withIdDescription(idDescription));
+    return contracts;
+  }
+
   static NeoResponse handle(NeoContext context, boolean isReceipt, Logger log) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return null;
     }
     String fieldName = context.getFieldName();
+    // ETP-5558: an agent gets the extra checks and the richer answers of PaymentAgentSupport; the
+    // REST path (the SPA) is untouched.
+    boolean agent = context.isMcpOrigin();
 
     NeoResponse queryResult = routeQuery(context, fieldName, isReceipt);
+    if (agent && ACCOUNTS_ACTION.equals(fieldName)) {
+      return agentAccounts(queryResult, log);
+    }
     if (queryResult != null) {
       return queryResult;
     }
@@ -65,12 +223,22 @@ final class PaymentActionHandlerSupport {
 
     // Validate inputs BEFORE opening an admin session, so malformed requests
     // return 400 without requiring a DB context.
-    NeoResponse validationError = validateBody(body, fieldName);
+    NeoResponse validationError = validateBody(body, fieldName, agent);
     if (validationError != null) {
       return validationError;
     }
 
-    return executeMutating(fieldName, isReceipt, invoiceId, body, isConfirm, log);
+    return executeMutating(new MutatingCall(fieldName, isReceipt, invoiceId, body, agent), log);
+  }
+
+  /** The invoiceAccounts answer with each account's effective default method, for an agent. */
+  private static NeoResponse agentAccounts(NeoResponse accounts, Logger log) {
+    try {
+      return PaymentAgentSupport.withAgentDefaults(accounts);
+    } catch (Exception e) {
+      log.warn("Could not add the agent defaults to invoiceAccounts: {}", e.getMessage());
+      return accounts;
+    }
   }
 
   /** Routes the read-only listing actions; returns null when {@code fieldName} is not one. */
@@ -105,15 +273,18 @@ final class PaymentActionHandlerSupport {
     return null;
   }
 
-  /** Validates the required body fields; returns an error response, or null when valid. */
-  private static NeoResponse validateBody(JSONObject body, String fieldName) {
+  /**
+   * Validates the required body fields; returns an error response, or null when valid. An agent may
+   * leave {@code scheduleId} out: {@link PaymentAgentSupport#checkRegister} resolves it.
+   */
+  private static NeoResponse validateBody(JSONObject body, String fieldName, boolean agent) {
     if (CONFIRM_ACTION.equals(fieldName) || DELETE_ACTION.equals(fieldName)) {
       if (StringUtils.isBlank(body.optString(FIELD_PAYMENT_ID, null))) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "paymentId is required");
       }
       return null;
     }
-    if (StringUtils.isBlank(body.optString(FIELD_SCHEDULE_ID, null))
+    if ((!agent && StringUtils.isBlank(body.optString(FIELD_SCHEDULE_ID, null)))
         || StringUtils.isBlank(body.optString(FIELD_AMOUNT, null))
         || StringUtils.isBlank(body.optString(FIELD_DATE, null))
         || StringUtils.isBlank(body.optString(FIELD_ACCOUNT, null))) {
@@ -129,24 +300,40 @@ final class PaymentActionHandlerSupport {
         || body.has("overpaymentAction") || body.has("fin_paymentmethod_id");
   }
 
+  /** One mutating payment action: which one, on which invoice, and whether an agent sent it. */
+  private record MutatingCall(String fieldName, boolean isReceipt, String invoiceId,
+      JSONObject body, boolean agent) {
+  }
+
   /** Runs the mutating action inside an admin session with rollback-on-error handling. */
-  private static NeoResponse executeMutating(String fieldName, boolean isReceipt,
-      String invoiceId, JSONObject body, boolean isConfirm, Logger log) {
+  private static NeoResponse executeMutating(MutatingCall call, Logger log) {
+    String fieldName = call.fieldName();
+    String invoiceId = call.invoiceId();
     try {
       OBContext.setAdminMode(true);
       try {
-        if (isConfirm) {
-          return PaymentDraftEditService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+        if (!call.agent()) {
+          return dispatchMutating(fieldName, call.isReceipt(), invoiceId, call.body());
         }
-        if (DELETE_ACTION.equals(fieldName)) {
-          return PaymentDraftEditService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+        if (ACTION_NAME.equals(fieldName)) {
+          NeoResponse refusal = PaymentAgentSupport.checkRegister(invoiceId, call.body(),
+              call.isReceipt());
+          if (refusal != null) {
+            return refusal;
+          }
         }
-        if (isAdvanced(body)) {
-          return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
+        JSONObject deleted = DELETE_ACTION.equals(fieldName)
+            ? describeDraftQuietly(call.body().optString(FIELD_PAYMENT_ID, null), invoiceId, log)
+            : null;
+        if (isMarkedRollback()) {
+          // describeDraft failed in a way that dooms the transaction: running the delete now would
+          // be undone at commit while the agent is told it happened.
+          OBDal.getInstance().rollbackAndClose();
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              MSG_DRAFT_NOT_DELETED);
         }
-        return PaymentRegistrationService.doRegisterPayment(invoiceId,
-            body.optString(FIELD_SCHEDULE_ID, null), body.optString(FIELD_AMOUNT, null),
-            body.optString(FIELD_DATE, null), body.optString(FIELD_ACCOUNT, null), isReceipt);
+        NeoResponse result = dispatchMutating(fieldName, call.isReceipt(), invoiceId, call.body());
+        return enrichQuietly(call, result, deleted, log);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -160,5 +347,70 @@ final class PaymentActionHandlerSupport {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while processing the payment");
     }
+  }
+
+  /**
+   * The draft a delete is about to remove, for the agent's answer. A failure here only costs the
+   * description: the delete itself still runs (ETP-5558).
+   */
+  private static JSONObject describeDraftQuietly(String paymentId, String invoiceId, Logger log) {
+    try {
+      return PaymentAgentSupport.describeDraft(paymentId, invoiceId);
+    } catch (Exception e) {
+      log.warn("Could not describe draft {} before deleting it: {}", paymentId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * The agent's richer answer, never at the cost of the mutation (ETP-5558): the payment is
+   * already written when this runs, so a failure while reading its outcome must not reach the
+   * caller's catch — that would roll a completed payment back, or report it as failed and invite a
+   * duplicate. The plain result goes back instead, marked {@code enriched:false}.
+   */
+  private static NeoResponse enrichQuietly(MutatingCall call, NeoResponse result,
+      JSONObject deleted, Logger log) {
+    try {
+      return PaymentAgentSupport.enrich(call.fieldName(), result, call.invoiceId(), call.body(),
+          deleted);
+    } catch (Exception e) {
+      if (isMarkedRollback()) {
+        // The failure doomed the transaction (Hibernate marks it rollback-only), so the commit
+        // would silently undo the payment: say so instead of answering a 2xx.
+        log.error("Payment action '{}' for invoice {} rolled back: reading its outcome failed: {}",
+            call.fieldName(), call.invoiceId(), e.getMessage(), e);
+        OBDal.getInstance().rollbackAndClose();
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            DELETE_ACTION.equals(call.fieldName()) ? MSG_DRAFT_NOT_DELETED : MSG_PAYMENT_NOT_SAVED);
+      }
+      log.warn("Payment action '{}' succeeded for invoice {} but its outcome could not be added: {}",
+          call.fieldName(), call.invoiceId(), e.getMessage());
+      return PaymentAgentSupport.markNotEnriched(result);
+    }
+  }
+
+  /** Whether the current transaction can no longer commit (Hibernate marked it rollback-only). */
+  private static boolean isMarkedRollback() {
+    Transaction tx = OBDal.getInstance().getSession().getTransaction();
+    return tx != null && tx.getStatus() == TransactionStatus.MARKED_ROLLBACK;
+  }
+
+  /** The service call behind each mutating action; runs inside the caller's admin session. */
+  private static NeoResponse dispatchMutating(String fieldName, boolean isReceipt,
+      String invoiceId, JSONObject body) throws Exception {
+    if (CONFIRM_ACTION.equals(fieldName)) {
+      return PaymentDraftEditService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null),
+          invoiceId);
+    }
+    if (DELETE_ACTION.equals(fieldName)) {
+      return PaymentDraftEditService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null),
+          invoiceId);
+    }
+    if (isAdvanced(body)) {
+      return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
+    }
+    return PaymentRegistrationService.doRegisterPayment(invoiceId,
+        body.optString(FIELD_SCHEDULE_ID, null), body.optString(FIELD_AMOUNT, null),
+        body.optString(FIELD_DATE, null), body.optString(FIELD_ACCOUNT, null), isReceipt);
   }
 }
