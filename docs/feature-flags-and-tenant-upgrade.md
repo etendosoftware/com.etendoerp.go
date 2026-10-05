@@ -514,7 +514,8 @@ fixed `failureReason` describing that code:
 **Failure codes (ETP-5548).** The raw cause of a failed attempt (exception text, internal ids,
 SQL) stays in `ETGO_CHECKOUT_REQUEST.FAILURE_REASON` for operations and is never returned. The row
 stores it as `CODE: cause`; the endpoint returns only the code and a fixed description, and the
-client localizes the code:
+client localizes the code. The codes, their encoding and their fixed descriptions live in
+`com.etendoerp.go.payment.ProvisioningFailureReason`; `CheckoutRequestStore` only consults them:
 
 | `failureCode` | Cause | Retryable |
 |---------------|-------|-----------|

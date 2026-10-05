@@ -82,6 +82,7 @@ import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.StripeCurrencyScale;
 import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
 import com.etendoerp.go.payment.PlanNotAvailableException;
@@ -901,7 +902,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Refused before the provider is contacted: a paid checkout fixes its company name, so
       // accepting it here would charge for an environment that can never be provisioned.
       writeError(response, HttpServletResponse.SC_CONFLICT,
-          CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, CLIENT_NAME_IN_USE_MESSAGE,
+          ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE, CLIENT_NAME_IN_USE_MESSAGE,
           CLIENT_NAME_IN_USE_MESSAGE);
       return null;
     }
@@ -1180,9 +1181,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private static void addProvisioningFailure(JSONObject result, String persistedReason)
       throws JSONException {
-    String failureCode = CheckoutRequestStore.failureCode(persistedReason);
+    String failureCode = ProvisioningFailureReason.codeOf(persistedReason);
     result.put("failureCode", failureCode);
-    result.put("failureReason", CheckoutRequestStore.safeFailureDescription(failureCode));
+    result.put("failureReason", ProvisioningFailureReason.safeDescription(failureCode));
   }
 
   /** Account-level billing overview; it remains available when every ERP environment is blocked. */
@@ -4402,8 +4403,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String status = checkoutRequestStore.deriveProvisioningStatus(checkoutRequest);
     if (CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED.equals(status)
         && !checkoutRequestStore.isProvisioningRetryAllowed(checkoutRequest)) {
-      String failureDescription = CheckoutRequestStore.safeFailureDescription(
-          CheckoutRequestStore.failureCode(checkoutRequest.getFailureReason()));
+      String failureDescription = ProvisioningFailureReason.safeDescription(
+          ProvisioningFailureReason.codeOf(checkoutRequest.getFailureReason()));
       writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_RETRY_NOT_ALLOWED",
           "Setup cannot be retried for this environment",
           failureDescription + ". Setup cannot be retried; contact support to continue.");
@@ -4526,7 +4527,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
-        CheckoutRequestStore.encodeFailureReason(failureCode, failureReason));
+        ProvisioningFailureReason.encode(failureCode, failureReason));
   }
 
   /**
@@ -4974,7 +4975,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
         "You already have a productive environment named '" + requestData.clientName + "'.");
     sendFinalResult(writer, false, CLIENT_NAME_IN_USE_MESSAGE,
-        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE);
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE);
     return true;
   }
 

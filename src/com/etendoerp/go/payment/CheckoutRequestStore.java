@@ -7,10 +7,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Supplier;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -369,8 +366,8 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
 
   /**
    * Tells whether a new fenced provisioning attempt may be claimed for the row. A failure whose
-   * code is deterministic (see {@link #NON_RETRYABLE_FAILURE_CODES}) is never retryable: the same
-   * request would fail the same way on every attempt.
+   * code is deterministic (see {@link ProvisioningFailureReason#isRetryable}) is never retryable:
+   * the same request would fail the same way on every attempt.
    *
    * @param request durable checkout row, or {@code null}
    * @return whether the row may be retried
@@ -378,79 +375,9 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   public boolean isProvisioningRetryAllowed(CheckoutRequest request) {
     String derived = deriveProvisioningStatus(request);
     if (DERIVED_STATUS_PROVISIONING_FAILED.equals(derived)) {
-      return !NON_RETRYABLE_FAILURE_CODES.contains(failureCode(request.getFailureReason()));
+      return ProvisioningFailureReason.isRetryable(request.getFailureReason());
     }
     return "paid".equals(derived) || DERIVED_STATUS_STALLED.equals(derived);
-  }
-
-  /** Failure code of a provisioning attempt whose cause is not known more precisely. */
-  public static final String FAILURE_CODE_PROVISIONING_FAILED = "PROVISIONING_FAILED";
-  /**
-   * The account already has a productive environment with the requested company name (ETP-5548;
-   * before it, the name belonged to another account's environment).
-   */
-  public static final String FAILURE_CODE_CLIENT_NAME_IN_USE = "CLIENT_NAME_IN_USE";
-
-  /**
-   * Failure codes a retry cannot fix. The checkout request fixes the company name, so a name
-   * collision fails again on every attempt; offering a retry would only loop the customer.
-   */
-  static final Set<String> NON_RETRYABLE_FAILURE_CODES = Set.of(FAILURE_CODE_CLIENT_NAME_IN_USE);
-
-  /**
-   * Customer-safe description of each failure code. The persisted reason keeps the raw cause for
-   * operations; it can carry exception text, internal ids or SQL, so it never leaves the backend.
-   */
-  private static final Map<String, String> SAFE_FAILURE_DESCRIPTIONS = Map.of(
-      FAILURE_CODE_CLIENT_NAME_IN_USE,
-      "The account already has a productive environment with this company name",
-      FAILURE_CODE_PROVISIONING_FAILED, "The environment setup did not complete");
-
-  private static final Pattern FAILURE_CODE_PREFIX = Pattern.compile("^([A-Z][A-Z0-9_]*): ");
-
-  /**
-   * Encodes a failure as {@code CODE: message}, the format {@link #failureCode} reads back.
-   *
-   * <p>The code travels as a prefix of the existing {@code FAILURE_REASON} column rather than in a
-   * column of its own: the reason is an operational annotation of a row whose lifecycle stays
-   * {@code PROVISIONING}, and rows written before codes existed simply read back as
-   * {@link #FAILURE_CODE_PROVISIONING_FAILED}.
-   *
-   * @param code stable failure code, {@code null} for {@link #FAILURE_CODE_PROVISIONING_FAILED}
-   * @param message raw operational cause, kept for diagnostics only
-   * @return the value to persist
-   */
-  public static String encodeFailureReason(String code, String message) {
-    String safeCode = StringUtils.defaultIfBlank(code, FAILURE_CODE_PROVISIONING_FAILED);
-    return safeCode + ": " + StringUtils.defaultIfBlank(StringUtils.normalizeSpace(message),
-        "Provisioning did not complete");
-  }
-
-  /**
-   * Reads the failure code back from a persisted reason written by {@link #encodeFailureReason}.
-   *
-   * @param failureReason persisted {@code FAILURE_REASON}
-   * @return its failure code; {@code null} when there is no failure, and
-   *     {@link #FAILURE_CODE_PROVISIONING_FAILED} for a reason written without one
-   */
-  public static String failureCode(String failureReason) {
-    if (StringUtils.isBlank(failureReason)) {
-      return null;
-    }
-    Matcher matcher = FAILURE_CODE_PREFIX.matcher(failureReason);
-    return matcher.find() ? matcher.group(1) : FAILURE_CODE_PROVISIONING_FAILED;
-  }
-
-  /**
-   * Maps a failure code to its fixed customer-facing description; unknown codes get the generic
-   * one.
-   *
-   * @param failureCode a code from {@link #failureCode}
-   * @return a fixed description of it that is safe to return to the customer
-   */
-  public static String safeFailureDescription(String failureCode) {
-    return SAFE_FAILURE_DESCRIPTIONS.getOrDefault(failureCode,
-        SAFE_FAILURE_DESCRIPTIONS.get(FAILURE_CODE_PROVISIONING_FAILED));
   }
 
   /** Lifecycle order. A request may only move to a strictly later element. */
@@ -987,13 +914,14 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
                 + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
                 + "   and (cr.failureReason is not null or cr.provisioningAt <= :staleBefore)"
                 // A deterministic failure is never reclaimed, whoever asks: see
-                // NON_RETRYABLE_FAILURE_CODES.
+                // ProvisioningFailureReason.isRetryable.
                 + "   and (cr.failureReason is null"
                 + "        or cr.failureReason not like :nameInUsePrefix)")
             .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
             .setParameter("now", now)
             .setParameter("staleBefore", staleBefore)
-            .setParameter("nameInUsePrefix", FAILURE_CODE_CLIENT_NAME_IN_USE + ": %")
+            .setParameter("nameInUsePrefix",
+                ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE + ": %")
             .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
             .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
             .executeUpdate();

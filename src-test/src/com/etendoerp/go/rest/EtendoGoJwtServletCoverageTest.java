@@ -99,6 +99,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.ProvisioningFailureReason;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -286,8 +287,8 @@ public class EtendoGoJwtServletCoverageTest {
     CheckoutRequestStore store = mock(CheckoutRequestStore.class);
     servlet.checkoutRequestStore = store;
     CheckoutRequest nameInUse = mock(CheckoutRequest.class);
-    when(nameInUse.getFailureReason()).thenReturn(CheckoutRequestStore.encodeFailureReason(
-        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "raw cause"));
+    when(nameInUse.getFailureReason()).thenReturn(ProvisioningFailureReason.encode(
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE, "raw cause"));
     when(store.deriveProvisioningStatus(nameInUse))
         .thenReturn(CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED);
     when(store.isProvisioningRetryAllowed(nameInUse)).thenReturn(false);
@@ -2373,7 +2374,7 @@ public class EtendoGoJwtServletCoverageTest {
         countResultLines(run.response.body()));
     assertTrue(run.response.body().contains("Org info unavailable"));
     verify(run.store).recordFailureReason("purchase-1",
-        CheckoutRequestStore.FAILURE_CODE_PROVISIONING_FAILED + ": Org info unavailable");
+        ProvisioningFailureReason.CODE_PROVISIONING_FAILED + ": Org info unavailable");
   }
 
   /**
@@ -2389,10 +2390,10 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(1, countResultLines(run.response.body()));
     assertTrue(run.response.body().contains(
-        "\"code\":\"" + CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE + "\""));
+        "\"code\":\"" + ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE + "\""));
     verify(run.store).recordFailureReason(eq("purchase-1"),
         org.mockito.ArgumentMatchers.startsWith(
-            CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE + ": "));
+            ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE + ": "));
     verify(servlet.tenantPlanService, never()).markProductive(anyString(), anyString());
   }
 
@@ -2423,7 +2424,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     JSONObject body = new JSONObject(response.body());
     assertEquals("provisioning_failed", body.getString("status"));
-    assertEquals(CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE,
+    assertEquals(ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE,
         body.getString("failureCode"));
     assertFalse("A deterministic failure is not offered for retry",
         body.getBoolean("retryAllowed"));
@@ -2542,7 +2543,7 @@ public class EtendoGoJwtServletCoverageTest {
     PurchaseAttempt attempt = postPurchaseNamed("Acme", TenantPlanService.PLAN_PRODUCTIVE);
 
     assertEquals(409, attempt.response.status);
-    assertTrue(attempt.response.body().contains(CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE));
+    assertTrue(attempt.response.body().contains(ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE));
     verifyNoInteractions(attempt.checkout);
   }
 

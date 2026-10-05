@@ -91,6 +91,8 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  *
  * <p>Assertions on committed values load fresh DAL entities rather than retaining objects from a
  * previous session, so they read committed state after bulk HQL updates.
+ *
+ * @covers com.etendoerp.go.payment.CheckoutRequestStore
  */
 public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
@@ -591,8 +593,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String requestId = createPaidRequest(accountId, email);
 
     assertTrue(store.claimForProvisioning(requestId, email));
-    forceFailureReason(requestId, CheckoutRequestStore.encodeFailureReason(
-        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "The company name is taken"));
+    forceFailureReason(requestId, ProvisioningFailureReason.encode(
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE, "The company name is taken"));
 
     assertFalse("A name collision fails identically on every attempt",
         store.claimForProvisioning(requestId, email));
