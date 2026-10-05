@@ -225,7 +225,7 @@ public class InitialEmailContractsTest {
     assertEquals("Bienvenido a Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
-        .contains("Tu cuenta de Etendo Go fue creada correctamente"));
+        .contains("Tu cuenta de Etendo fue creada correctamente"));
   }
 
   @Test
