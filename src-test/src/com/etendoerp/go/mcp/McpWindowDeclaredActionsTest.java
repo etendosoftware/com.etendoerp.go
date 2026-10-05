@@ -189,7 +189,7 @@ class McpWindowDeclaredActionsTest {
   private static final String HIDE_PIS = "{\"actions\":{\"hidden\":[\"pisTemplates\","
       + "\"psd2GenerateBankPayment\"],\"redirect\":{\"aPRMAddpayment\":\"registerPayment\"},"
       + "\"reason\":\"PIS needs a person to authorize at the bank\","
-      + "\"redirectReason\":\"the classic Add Payment button is not the Etendo GO payment flow\"}}";
+      + "\"redirectReason\":\"the classic Add Payment button is not the Etendo payment flow\"}}";
 
   private static JSONArray buttons() throws Exception {
     JSONArray fields = new JSONArray();

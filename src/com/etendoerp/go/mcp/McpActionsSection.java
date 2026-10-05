@@ -45,7 +45,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *     "redirect": { "aPRMAddpayment": "registerPayment" },
  *     "values":   { "aPRMProcessPayment": ["P"] },
  *     "reason":   "PIS needs a person to authorize at the bank",
- *     "redirectReason": "the classic Add Payment button is not the Etendo GO payment flow"
+ *     "redirectReason": "the classic Add Payment button is not the Etendo payment flow"
  *   }
  * }
  * </pre>
