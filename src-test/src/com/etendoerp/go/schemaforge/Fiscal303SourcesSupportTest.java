@@ -371,6 +371,71 @@ public class Fiscal303SourcesSupportTest {
     assertEquals(new BigDecimal("24.20"), row.get("total"));
   }
 
+  /**
+   * ETP-5599 REPRO (case 1): a rectificativa intracomunitaria with a POSITIVE amount —
+   * {@code EM_ETSG_IsRectificative = Y} on the invoice's doc type, positive taxable amount — must
+   * still be classified as corrective by {@link Fiscal303SourcesSupport#isCorrectiveInvoiceTax}
+   * and show the corrective box pairs (14/15 devengado, 40/41 deductible), exactly like the
+   * negative-amount case already covered by
+   * {@link #testCollectSources_negativeRectificativaPairedLines_preservesSignOnBothRows}. Before
+   * the fix, the sign-only check fell through to the normal pair (10/11, 36/37) for this positive
+   * amount, which is the bug reported in ETP-5599.
+   */
+  @Test
+  public void testCollectSources_positiveRectificativaIntraEuPairedLines_showsCorrectiveBoxes() {
+    Invoice inv = buildRectificativeInvoice(
+        "inv-rect-pos-1", "RECT-2000001", date(2026, 3, 13), date(2026, 3, 13));
+    InvoiceTax devengado = buildInvoiceTax(inv, "20.00", "4.20");
+    InvoiceTax soportado = buildInvoiceTax(inv, "20.00", "4.20");
+
+    List<Map<String, Object>> rows = runCollectSources(
+        java.util.Arrays.asList(devengado, soportado),
+        java.util.Arrays.asList("rate-devengado-rect-pos", "rate-soportado-rect-pos"),
+        java.util.Arrays.asList(java.util.Arrays.asList(10, 11), java.util.Arrays.asList(36, 37)));
+
+    assertEquals(2, rows.size());
+
+    Map<String, Object> accrued = rows.get(0);
+    assertEquals("accrued", accrued.get("type"));
+    // Corrective redirection must still apply for a POSITIVE amount: 10/11 -> 14/15.
+    assertEquals("14,15", accrued.get(Fiscal303BoxesHandler.BOXES));
+    assertEquals(new BigDecimal("20.00"), accrued.get("base"));
+    assertEquals(new BigDecimal("4.20"), accrued.get("vat"));
+
+    Map<String, Object> deductible = rows.get(1);
+    assertEquals("deductible", deductible.get("type"));
+    // Corrective redirection must still apply for a POSITIVE amount: 36/37 -> 40/41.
+    assertEquals("40,41", deductible.get(Fiscal303BoxesHandler.BOXES));
+    assertEquals(new BigDecimal("20.00"), deductible.get("base"));
+    assertEquals(new BigDecimal("4.20"), deductible.get("vat"));
+  }
+
+  /**
+   * ETP-5599 REPRO (case 3): a rectificativa de importación no-UE with a POSITIVE amount — a
+   * purchase ({@code API}) deduction line whose normal box pair is 32/33 (Import_Goods) — must
+   * also redirect to the purchase corrective pair 40/41, not stay at 32/33, once the invoice's
+   * doc type carries {@code EM_ETSG_IsRectificative = Y}.
+   */
+  @Test
+  public void testCollectSources_positiveRectificativaImportNonEu_showsCorrectiveBoxes() {
+    Invoice inv = buildRectificativeInvoice(
+        "inv-rect-pos-import-1", "RECT-2000002", date(2026, 3, 14), date(2026, 3, 14));
+    InvoiceTax importLine = buildInvoiceTax(inv, "100.00", "21.00");
+
+    List<Map<String, Object>> rows = runCollectSources(
+        Collections.singletonList(importLine),
+        Collections.singletonList("rate-import-rect-pos"),
+        Collections.singletonList(java.util.Arrays.asList(32, 33)));
+
+    assertEquals(1, rows.size());
+    Map<String, Object> row = rows.get(0);
+    assertEquals("deductible", row.get("type"));
+    // Corrective redirection must still apply for a POSITIVE amount: 32/33 -> 40/41.
+    assertEquals("40,41", row.get(Fiscal303BoxesHandler.BOXES));
+    assertEquals(new BigDecimal("100.00"), row.get("base"));
+    assertEquals(new BigDecimal("21.00"), row.get("vat"));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   @SuppressWarnings("unchecked")
@@ -435,6 +500,18 @@ public class Fiscal303SourcesSupportTest {
     when(docType.getDocumentCategory()).thenReturn("ARI");
     when(inv.getDocumentType()).thenReturn(docType);
     when(inv.getBusinessPartner()).thenReturn(null);
+    return inv;
+  }
+
+  /**
+   * ETP-5599: variant of {@link #buildInvoice} whose document type carries
+   * {@code EM_ETSG_IsRectificative = Y} — the flag {@code isCorrectiveInvoiceTax} must now check
+   * regardless of the tax line's sign.
+   */
+  private static Invoice buildRectificativeInvoice(String id, String docNo, Date invoiceDate,
+      Date accountingDate) {
+    Invoice inv = buildInvoice(id, docNo, invoiceDate, accountingDate);
+    when(inv.getDocumentType().isEtsgIsRectificative()).thenReturn(Boolean.TRUE);
     return inv;
   }
 
