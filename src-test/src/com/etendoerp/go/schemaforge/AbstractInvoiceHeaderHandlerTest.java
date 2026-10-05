@@ -78,7 +78,10 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *   <li>{@code enrichInvoiceSubtype}</li>
  *   <li>{@code enrichDocTypeLocked}</li>
  *   <li>{@code completeInvoiceIfNeeded} (ETP-4388 — Verifactu/ProcessInvoiceHook dispatch fix)</li>
+ *   <li>{@code isStandardInvoiceDocType} (ETP-5576 — follow-up eligibility, fails closed)</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -3436,5 +3439,52 @@ public class AbstractInvoiceHeaderHandlerTest {
     NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
+  }
+
+  // ── isStandardInvoiceDocType (ETP-5576): gates a WRITE, so it fails CLOSED ──
+
+  @Test
+  public void isStandardInvoiceDocType_blankId_isFalseWithoutLookup() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      TestHandler handler = new TestHandler();
+
+      assertFalse(handler.isStandardInvoiceDocType(null));
+      assertFalse(handler.isStandardInvoiceDocType(""));
+      assertFalse(handler.isStandardInvoiceDocType("   "));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /** Unlike resolveSubtype (fails OPEN to FAC), an unknown or unreadable doc type is not FAC. */
+  @Test
+  public void isStandardInvoiceDocType_unknownOrFailingLookup_isFalse() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-missing")).thenReturn(null);
+      when(dal.get(DocumentType.class, "dt-error")).thenThrow(new RuntimeException("DB error"));
+      TestHandler handler = new TestHandler();
+
+      assertFalse(handler.isStandardInvoiceDocType("dt-missing"));
+      assertFalse(handler.isStandardInvoiceDocType("dt-error"));
+    }
+  }
+
+  @Test
+  public void isStandardInvoiceDocType_followsTheHandlerClassification() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType rectificativa = mock(DocumentType.class);
+      when(rectificativa.getDocumentCategory()).thenReturn("ARC");
+      DocumentType standard = mock(DocumentType.class);
+      when(standard.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(rectificativa);
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(standard);
+      TestHandler handler = new TestHandler();
+
+      assertFalse(handler.isStandardInvoiceDocType("dt-arc"));
+      assertTrue(handler.isStandardInvoiceDocType("dt-ari"));
+    }
   }
 }

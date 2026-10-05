@@ -93,6 +93,80 @@ final class InvoiceLineLinker {
   }
 
   /**
+   * Links ONE invoice line to ONE freshly created (draft) movement line — the explicit, pair-wise
+   * link the follow-up document service uses (ETP-5576). Unlike
+   * {@link #linkPendingInvoiceLinesToInout}, it never touches any other invoice line.
+   *
+   * <p>Mirrors Classic's "Create lines from invoice" ({@code CreateFrom.java}, the receipt branch
+   * and {@code updateInvoiceAndBOMStructure}) with one deliberate refinement, and is the same rule
+   * for both directions:
+   * <ul>
+   *   <li><b>The invoice line has no {@code M_InOutLine_ID} yet</b> → set it, and write NO match
+   *       row. {@code M_INOUT_POST} creates the match row itself when the movement is completed,
+   *       from that very column and with the movement's FINAL quantity: unconditionally on the
+   *       purchase side ({@code M_MatchInv}, no existence check — a draft-time row here would be
+   *       duplicated at completion), with a {@code NOT EXISTS} guard on the sales side
+   *       ({@code M_MatchSI}). Classic inserts the sales row at draft time as well; deferring it
+   *       to completion gives the same end state without freezing a quantity the user may still
+   *       edit on the draft.</li>
+   *   <li><b>The invoice line already points at another movement line</b> (a second or later
+   *       partial shipment/receipt) → the column cannot hold a second link, and
+   *       {@code M_INOUT_POST} will not create a match row for a line the column does not point
+   *       at, so the match row is written now, idempotently ({@code NOT EXISTS}), with the movement
+   *       line's current quantity — exactly Classic's {@code insertMatchSI}/{@code insertMatchInv}.</li>
+   * </ul>
+   *
+   * <p>Both statements are native SQL on purpose: the invoice is already completed, and the core
+   * {@code C_INVOICELINE_TRG} lets a link-only update through (it returns early unless quantity,
+   * amount, product, tax or UOM change). Match rows cascade-delete with the movement line, so
+   * deleting the draft movement leaves nothing behind; the column is {@code ON DELETE SET NULL}.
+   *
+   * @param invoiceLineId the source invoice line
+   * @param inoutLineId the new movement line; must already be flushed
+   * @param matchTable the match table of the transaction direction
+   */
+  static void linkInvoiceLineToInOutLine(String invoiceLineId, String inoutLineId,
+      InOutInvoiceLinks.MatchTable matchTable) {
+    String userId = currentUserIdOrSystem();
+    int updated = OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "UPDATE C_InvoiceLine "
+            + "SET M_InOutLine_ID = :inoutLineId, "
+            + "    Updated = now(), "
+            + "    UpdatedBy = :userId "
+            + "WHERE C_InvoiceLine_ID = :invoiceLineId "
+            + "  AND M_InOutLine_ID IS NULL")
+        .setParameter("inoutLineId", inoutLineId)
+        .setParameter("userId", userId)
+        .setParameter("invoiceLineId", invoiceLineId)
+        .executeUpdate();
+    if (updated > 0) {
+      return;
+    }
+    String table = matchTable.tableName();
+    OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "INSERT INTO " + table + " ("
+            + matchTable.idColumn() + ", ad_client_id, ad_org_id, isactive, created, createdby, "
+            + "updated, updatedby, m_inoutline_id, c_invoiceline_id, m_product_id, datetrx, qty, "
+            + "processing, processed, posted) "
+            + "SELECT get_uuid(), iol.ad_client_id, iol.ad_org_id, 'Y', now(), :userId, "
+            + "now(), :userId, iol.m_inoutline_id, il.c_invoiceline_id, iol.m_product_id, "
+            + "i.dateacct, iol.movementqty, 'N', 'Y', 'N' "
+            + "FROM m_inoutline iol "
+            + "JOIN c_invoiceline il ON il.c_invoiceline_id = :invoiceLineId "
+            + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+            + "WHERE iol.m_inoutline_id = :inoutLineId "
+            + "AND NOT EXISTS (SELECT 1 FROM " + table + " mt "
+            + "  WHERE mt.m_inoutline_id = iol.m_inoutline_id "
+            + "    AND mt.c_invoiceline_id = il.c_invoiceline_id)")
+        .setParameter("userId", userId)
+        .setParameter("invoiceLineId", invoiceLineId)
+        .setParameter("inoutLineId", inoutLineId)
+        .executeUpdate();
+  }
+
+  /**
    * Returns the current user's id, or the System user id when the context has
    * no user (background tasks, system-init paths). Avoids NPEs at the call
    * sites of {@link #linkPendingInvoiceLinesToInout}.

@@ -58,6 +58,8 @@ import org.openbravo.model.ad.system.Client;
  * {@code OBProvider.getInstance().get(ShipmentInOut.class)} returns a controlled
  * mock, then verifies that every setter on the returned shipment is called with
  * the value taken from {@code source}.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCommercialDocumentFactory
  */
 public class NeoCommercialDocumentFactoryTest {
 
@@ -507,28 +509,8 @@ public class NeoCommercialDocumentFactoryTest {
     }
   }
 
-  /**
-   * Verifies that {@code createShipmentFromInvoiceHeader} inherits the new shipment's
-   * currency from the source invoice's currency.
-   */
-  @Test
-  public void testCreateShipmentFromInvoiceHeaderInheritsInvoiceCurrency() {
-    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
-      Invoice invoice = mock(Invoice.class);
-      Currency invoiceCurrency = mock(Currency.class);
-      when(invoice.getCurrency()).thenReturn(invoiceCurrency);
-
-      ShipmentInOut newShipment = mock(ShipmentInOut.class);
-      OBProvider provider = mock(OBProvider.class);
-      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
-      when(provider.get(ShipmentInOut.class)).thenReturn(newShipment);
-
-      NeoCommercialDocumentFactory.createShipmentFromInvoiceHeader(
-          invoice, mock(DocumentType.class), true, "M+", mock(Warehouse.class));
-
-      verify(newShipment).setEtgoCurrency(invoiceCurrency);
-    }
-  }
+  // ETP-5576: the invoice → movement header (createShipmentFromInvoiceHeader) moved to
+  // InOutTargetBuilder; its currency-inheritance assertion lives in InOutTargetBuilderTest.
 
   // ── createInvoiceFromReceiptHeader ──────────────────────────────────────
 
