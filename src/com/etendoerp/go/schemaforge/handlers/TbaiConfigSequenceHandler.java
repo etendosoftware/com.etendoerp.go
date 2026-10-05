@@ -140,7 +140,7 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
   private static final String METHOD_POST = "POST";
 
   private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
-      "Automatic TicketBAI invoice sending (Etendo GO)";
+      "Automatic TicketBAI invoice sending (Etendo)";
 
   private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
 
