@@ -288,7 +288,7 @@ Stripe price id actually charged (`STRIPE_PRICE_ID`, recorded on requests since 
 into `PROVIDER_PRICE_ID` — copied from its latest paid `ETGO_CHECKOUT_REQUEST` row where one
 exists (NULL otherwise; `SNAPSHOT_AMOUNT`/`SNAPSHOT_CURRENCY` always stay NULL, since the request
 stores no amount), **and retires that tenant's now-stale `ETGO_TenantPlan` preference in the
-same transaction** (§8). Delivered as `20260924T150000Z__R37-tenant-subscription-backfill.sql`
+same transaction** (§8). Delivered as `20261005T180000Z__R37-tenant-subscription-backfill.sql`
 under `schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop
 merge, see §7.3. Re-running creates zero rows and retires nothing;
 `@check` converges to 0 for two independent reasons afterwards, since it requires both a
@@ -378,10 +378,12 @@ merged, develop carried fixes up to `20260922T130000Z`, one of them
 (`R38-org-legalentity-pointer`) with the *identical* `20260918T120000Z`. On any environment that
 had processed those, R37 would have been skipped silently — no ledger row, no error. It was renamed
 to `20260924T150000Z` before reaching a shared environment (renaming an *unapplied* fix is allowed;
-`sql/README.md` rule 3 forbids it only once applied).
+`sql/README.md` rule 3 forbids it only once applied). When develop was merged into ETP-5046 again on
+2026-10-05 it carried fixes up to `20261005T120000Z` (`R46-acct-rpt-definitions-redelivery`), so R37
+was re-dated a second time, to `20261005T180000Z`.
 
 `schema_forge/cli/test/data-fixes-catalog-ordering.test.js` guards it from two sides: R37 must sort
-strictly after `NEWEST_DEVELOP_FIX_AT_MERGE` (`20260922T130000Z__R39-document-sequence-clear-descriptions`,
+strictly after `NEWEST_DEVELOP_FIX_AT_MERGE` (`20261005T120000Z__R46-acct-rpt-definitions-redelivery`,
 frozen — later fixes are expected to land after R37), and no two fixes in the catalog may share a
 timestamp prefix, except seven already-applied pairs frozen by exact file name
 (`APPLIED_SHARED_TIMESTAMPS`; applied fixes can never be renamed). The guard cannot see a fix dated

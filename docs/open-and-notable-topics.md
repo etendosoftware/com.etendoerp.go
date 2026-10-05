@@ -314,8 +314,9 @@ ledger row, no error, nothing in any report.
 
 R37 was authored as `20260918T120000Z`. At merge time develop carried fixes up to
 `20260922T130000Z`, and `R38-org-legalentity-pointer` had the **identical** `20260918T120000Z`
-(equal is skipped too). It was renamed to `20260924T150000Z__R37-tenant-subscription-backfill.sql`
-before reaching any shared environment; `sql/README.md` rule 3 forbids renaming an *applied* fix,
+(equal is skipped too). It was renamed to `20260924T150000Z__R37-tenant-subscription-backfill.sql`,
+and again to `20261005T180000Z__R37-tenant-subscription-backfill.sql` once develop carried fixes up
+to `20261005T120000Z`, before reaching any shared environment; `sql/README.md` rule 3 forbids renaming an *applied* fix,
 not an unapplied one. The consequence had it shipped: every paying tenant left on the retired
 preference, with §3.2's end condition never reached.
 
