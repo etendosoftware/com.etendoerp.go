@@ -33,14 +33,9 @@ import java.util.function.BiFunction;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
@@ -78,8 +73,10 @@ final class ReconciliationAgentActions {
   private static final String P_DATE_TO = ReconciliationHandler.PARAM_DATE_TO;
   private static final String S = NeoActionContract.TYPE_STRING;
   private static final String LINE_DESC =
-      "Id of the bank statement line (from pendingLines). For a partially reconciled line use "
-          + "its pending sub-line, not the group head (the refusal names it as remainderLineId).";
+      "Id of the bank statement line (from pendingLines). For a partially reconciled line, "
+          + "candidates, reconcileGroup and applySuggestions accept the group head and act on its "
+          + "pending sub-line (remainderLineId) automatically; reconcileDifference needs the "
+          + "pending sub-line itself and its refusal names it as remainderLineId.";
 
   /** What the {@code neo_action} {@code id} argument identifies for every action here. */
   private static final String ID_DESC =
@@ -110,11 +107,6 @@ final class ReconciliationAgentActions {
   private static final Map<String, String> QUERY_PARAM_ALIASES =
       Map.of(P_LINE, ReconciliationHandler.PARAM_LINE_ID);
 
-  /** Same give-up point as Core's {@code SessionHandler#flushRemainingChanges}. */
-  private static final int MAX_FLUSHES = 100;
-
-  private static final Logger log = LogManager.getLogger(ReconciliationAgentActions.class);
-
   private ReconciliationAgentActions() {
   }
 
@@ -140,17 +132,19 @@ final class ReconciliationAgentActions {
           "id (the financial account id) is required");
     }
     boolean mutating = CONTRACTS.get(action).isMutating();
-    if (!hasAccess(context, mutating)) {
+    if (!AgentActionSupport.hasAccess(context, mutating)) {
       return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
           "Access denied to spec for current role");
     }
     try {
       if (mutating) {
-        JSONObject body = copy(params);
+        JSONObject body = AgentActionSupport.copy(params);
         body.put(ReconciliationHandler.KEY_FINANCIAL_ACCOUNT_ID, accountId);
         NeoResponse written = WRITE_ROUTES.get(action).apply(handler,
-            derive(context, "POST", body, null));
-        return flushWhileContextIsSet(handler, action, written);
+            AgentActionSupport.derive(context, "POST", body, null));
+        // ETP-5468 BUG-2: flush to clean while the OBContext is still set (see the helper).
+        return AgentActionSupport.flushWhileContextIsSet(action, "reconciliation", written,
+            handler::doRollbackAndClose);
       }
       Map<String, String> query = new HashMap<>();
       query.put(ReconciliationHandler.PARAM_ACCOUNT_ID, accountId);
@@ -160,87 +154,12 @@ final class ReconciliationAgentActions {
           query.put(QUERY_PARAM_ALIASES.getOrDefault(key, key), params.getString(key));
         }
       }
-      return READ_ROUTES.get(action).apply(handler, derive(context, "GET", null, query));
+      return READ_ROUTES.get(action).apply(handler,
+          AgentActionSupport.derive(context, "GET", null, query));
     } catch (JSONException e) {
       return NeoResponse.error(NeoActionContract.SC_UNPROCESSABLE,
           "Invalid action parameters: " + e.getMessage());
     }
-  }
-
-  /**
-   * Flushes the session to a clean state while the caller's {@code OBContext} is still set, and
-   * turns a flush failure into a rolled-back JSON error (ETP-5468, BUG-2).
-   *
-   * <p><b>Why.</b> Business event handlers change data during a flush, so Core flushes repeatedly
-   * until the session is clean ({@code SessionHandler#flushRemainingChanges}). The SPA route is
-   * committed by {@code DalRequestFilter} with the request's {@code OBContext} still in place, so
-   * those extra flushes succeed. The MCP servlet runs each tool inside
-   * {@code McpSessionManager#executeInContext}, which flushes ONCE and then restores the previous
-   * (null) {@code OBContext}; whatever the first flush left dirty is flushed again by
-   * {@code DalThreadCleaner} at request end with no context, {@code OBInterceptor} throws a
-   * NullPointerException, the commit fails and the client gets a Tomcat HTML 500 — after the
-   * tool had already reported success. Undoing a posted single-transaction reconciliation is such
-   * a case. Flushing to clean HERE, inside the tool, leaves nothing for that late flush, and a
-   * failure is rolled back and answered as JSON like any other refusal of this dispatcher.</p>
-   *
-   * <p>Local to this dispatcher on purpose: the defect is in the generic MCP session scope and a
-   * fix there changes every MCP tool. An error response is returned untouched —
-   * {@code runPostAction} already rolled it back.</p>
-   */
-  private static NeoResponse flushWhileContextIsSet(ReconciliationHandler handler, String action,
-      NeoResponse written) {
-    if (written == null || written.getHttpStatus() >= HttpServletResponse.SC_BAD_REQUEST) {
-      return written;
-    }
-    try {
-      int flushes = 0;
-      while (OBDal.getInstance().getSession().isDirty() && flushes < MAX_FLUSHES) {
-        OBDal.getInstance().flush();
-        flushes++;
-      }
-      return written;
-    } catch (Exception e) {
-      log.error("{}: could not persist the reconciliation changes; rolled back", action, e);
-      handler.doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "The reconciliation changes could not be saved and were rolled back: "
-              + StringUtils.defaultIfBlank(e.getMessage(), e.getClass().getSimpleName()));
-    }
-  }
-
-  /**
-   * The same role gate the SPA route passes through {@code NeoRequestRouter}: report-spec access
-   * with the HTTP method the SPA would use. {@code neo_action} is authorized as a read by the MCP
-   * router, so a write needs the POST check here. Fails closed when the spec cannot be resolved.
-   */
-  private static boolean hasAccess(NeoContext context, boolean mutating) {
-    SFSpec spec = context.getSfEntity() != null ? context.getSfEntity().getETGOSFSpec() : null;
-    return spec != null && NeoAccessHelper.hasReportSpecAccess(spec, mutating ? "POST" : "GET");
-  }
-
-  private static NeoContext derive(NeoContext source, String method, JSONObject body,
-      Map<String, String> query) {
-    return NeoContext.builder()
-        .specName(source.getSpecName())
-        .entityName(source.getEntityName())
-        .httpMethod(method)
-        .recordId(source.getRecordId())
-        .requestBody(body)
-        .queryParams(query != null ? query : Collections.emptyMap())
-        .adTab(source.getAdTab())
-        .sfEntity(source.getSfEntity())
-        .obContext(source.getObContext())
-        .mcpOrigin(source.isMcpOrigin())
-        .build();
-  }
-
-  private static JSONObject copy(JSONObject source) throws JSONException {
-    JSONObject out = new JSONObject();
-    for (Iterator<?> it = source.keys(); it.hasNext();) {
-      String key = String.valueOf(it.next());
-      out.put(key, source.get(key));
-    }
-    return out;
   }
 
   private static Map<String, NeoActionContract> buildContracts() {
@@ -288,9 +207,16 @@ final class ReconciliationAgentActions {
                 + "and/or unpaid invoices, which are paid on the fly. Send operationIds, invoices, "
                 + "or both. The selection must add up to the line amount; a gap within the "
                 + "account's tolerance is posted to the difference GL item, a larger shortfall "
-                + "leaves the line partially reconciled (pending remainder). Foreign-currency "
-                + "items are converted with the same exchange rate the UI uses — no extra "
-                + "parameter. Completes and processes the reconciliation, or rolls back.",
+                + "leaves the line partially reconciled (pending remainder). A 201 with "
+                + "partial:true means the line is NOT complete: pendingAmount (signed like the "
+                + "line) is still open — continue with remainderLineId. partial:false means the "
+                + "line is closed. Foreign-currency items are converted with the same exchange "
+                + "rate the UI uses — no extra parameter. A line left linked to a movement "
+                + "that has no reconciliation at all is freed first (the movement is kept). A "
+                + "line whose movement sits in an unconfirmed draft reconciliation is refused "
+                + "(409) until that draft is reviewed. Completes and processes the "
+                + "reconciliation; a refusal rolls back this call's own writes, invoice payments "
+                + "included.",
             required(P_LINE, S, LINE_DESC),
             array("operationIds", S, false, "Ids of existing movements (from candidates, "
                 + "kind=transactions)."),
@@ -315,9 +241,10 @@ final class ReconciliationAgentActions {
         NeoActionContract.write(UNDO_RECONCILIATION,
             "Undoes the reconciliation of a statement line: the line returns to pending, "
                 + "movements and payments that the reconciliation created automatically are "
-                + "removed, pre-existing movements are kept but unreconciled. Refused when the "
-                + "accounting period is closed, or when another draft reconciliation of the "
-                + "account holds unconfirmed matches.",
+                + "removed, pre-existing movements are kept but unreconciled. A line linked to a "
+                + "movement that has no reconciliation is just freed (healed:true; the movement "
+                + "is kept). Refused when the accounting period is closed, or when another draft "
+                + "reconciliation of the account holds unconfirmed matches.",
             required(P_LINE, S, LINE_DESC)),
         NeoActionContract.write(REMOVE_OPERATION,
             "Detaches specific movements from a reconciled line and deletes the ones the "
@@ -335,7 +262,8 @@ final class ReconciliationAgentActions {
             "Confirms automatch groups in one reconciliation. Accept all = send every group "
                 + "autoMatch returned; accept some = send only those; to reject a group simply do "
                 + "not send it (nothing is persisted for it). Invalid groups are reported per "
-                + "group in results[] without blocking the others.",
+                + "group in results[] without blocking the others — including a second group that "
+                + "lands on a line an earlier group of the same call already took.",
             array("groups", NeoActionContract.TYPE_OBJECT, true, "One entry per accepted autoMatch "
                 + "group: {statementLineId: group.statementLine.id, operationIds: ids of the "
                 + "group's operations whose isNew is false, createPayment: group.createPayment "

@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.Optional;
 import java.util.Set;
 
 import javax.enterprise.inject.spi.Bean;
@@ -43,6 +44,11 @@ import com.etendoerp.go.schemaforge.NeoHandler;
  * value. Reading the annotation off {@code handler.getClass()} instead silently misses any
  * normal-scoped bean, because Weld's client proxy is a subclass and {@code @Named} is not
  * {@code @Inherited}.</p>
+ *
+ * <p>The scan itself is memoised by {@link NeoHandlerResolutionCache}; what is memoised is the
+ * {@link Bean}, not a reference obtained from it, so every caller still gets its own instance.
+ * This resolver's cache is separate from the one behind {@code NeoServletSupport.lookupHandler} on
+ * purpose — see that class's javadoc.</p>
  */
 public final class NeoHandlerLookup {
 
@@ -63,14 +69,37 @@ public final class NeoHandlerLookup {
       return null;
     }
     BeanManager bm = WeldUtils.getStaticInstanceBeanManager();
+    Optional<Bean<?>> bean = NeoHandlerResolutionCache.beanByName(qualifier,
+        q -> resolveBeanByName(bm, q));
+    if (!bean.isPresent()) {
+      return null;
+    }
+    Bean<?> resolved = bean.get();
+    return (NeoHandler) bm.getReference(resolved, NeoHandler.class,
+        bm.createCreationalContext(resolved));
+  }
+
+  /**
+   * The uncached resolution, kept exactly as it was before {@link NeoHandlerResolutionCache} was
+   * introduced: scan the deployed {@link NeoHandler} beans and take the first whose CDI name equals
+   * the qualifier.
+   *
+   * <p>Only the <b>bean</b> is memoised, never the reference obtained from it. The caller still
+   * calls {@code getReference} on every request, so the instance's lifecycle is untouched — a
+   * {@code @Dependent} handler keeps getting a fresh instance, exactly as before.</p>
+   *
+   * @param bm        the bean manager to scan
+   * @param qualifier the {@code Java_Qualifier} to match
+   * @return the matching bean, or {@link Optional#empty()} when none is deployed
+   */
+  private static Optional<Bean<?>> resolveBeanByName(BeanManager bm, String qualifier) {
     Set<Bean<?>> beans = bm.getBeans(NeoHandler.class, WeldUtils.ANY_LITERAL);
     for (Bean<?> bean : beans) {
       if (qualifier.equals(bean.getName())) {
-        return (NeoHandler) bm.getReference(bean, NeoHandler.class,
-            bm.createCreationalContext(bean));
+        return Optional.of(bean);
       }
     }
-    return null;
+    return Optional.empty();
   }
 
   /**

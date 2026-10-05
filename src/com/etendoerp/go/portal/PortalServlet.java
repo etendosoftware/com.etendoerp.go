@@ -40,10 +40,10 @@ import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.utility.Image;
-import org.openbravo.model.ad.system.ClientInformation;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.invoice.Invoice;
 
+import com.etendoerp.go.common.CompanyLogoResolver;
 import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -232,8 +232,10 @@ public class PortalServlet extends HttpBaseServlet {
   /**
    * Streams the tenant's own logo, so the customer can see whose portal this is.
    *
-   * <p>The image served is {@code AD_ClientInfo.your_company_document_image} — the one the
-   * tenant already uploaded for its printed documents. That is deliberate reuse: a customer looking
+   * <p>The image served is the tenant's printed-document logo, resolved by
+   * {@link CompanyLogoResolver} exactly as the GO printables resolve it (ETP-5541): the logo
+   * uploaded on the Organization screen ({@code AD_OrgInfo}), falling back to
+   * {@code AD_ClientInfo}. That is deliberate reuse: a customer looking
    * at this page has an invoice from the same company in hand, and the logo on both should match. It
    * also means a tenant configures branding once, in the place it already configures it.
    *
@@ -270,12 +272,13 @@ public class PortalServlet extends HttpBaseServlet {
   /**
    * Resolves the tenant's document logo, or {@code null} when it has none.
    *
-   * <p>Read under the admin mode {@code doGet} already established: a portal request has no Etendo
-   * session, so DAL's own client filtering would match nothing.
+   * <p>Delegates to {@link CompanyLogoResolver} so the portal and the printed documents can never
+   * disagree on the logo. A portal session carries no organization, so resolution starts at the
+   * client's first organization logo. The resolver runs its own admin-mode reads: a portal request
+   * has no Etendo session, so DAL's own client filtering would match nothing.
    */
   private static Image resolveTenantLogo(String clientId) {
-    ClientInformation info = OBDal.getInstance().get(ClientInformation.class, clientId);
-    return info == null ? null : info.getYourCompanyDocumentImage();
+    return CompanyLogoResolver.resolve(clientId, null);
   }
 
   /** Lists the Business Partner's completed sales invoices and their outstanding balance. */

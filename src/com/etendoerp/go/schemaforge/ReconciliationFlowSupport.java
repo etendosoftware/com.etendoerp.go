@@ -23,7 +23,9 @@ import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 import javax.servlet.http.HttpServletResponse;
@@ -207,14 +209,13 @@ final class ReconciliationFlowSupport {
   static NeoResponse validateOperations(List<String> operationIds, String accountId,
       FIN_BankStatementLine line, Function<String, FIN_FinaccTransaction> transactionLoader,
       BigDecimal tolerance) {
+    NeoResponse refError = validateOperationRefs(operationIds, accountId, transactionLoader);
+    if (refError != null) {
+      return refError;
+    }
     BigDecimal opSum = BigDecimal.ZERO;
     for (String opId : operationIds) {
-      FIN_FinaccTransaction trx = transactionLoader.apply(opId);
-      NeoResponse opError = validateOperation(trx, opId, accountId);
-      if (opError != null) {
-        return opError;
-      }
-      opSum = opSum.add(signedAmount(trx));
+      opSum = opSum.add(signedAmount(transactionLoader.apply(opId)));
     }
     BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     int lineSign = lineAmount.signum();
@@ -225,6 +226,26 @@ final class ReconciliationFlowSupport {
           "The selected operations (" + opSum.toPlainString()
               + ") exceed the statement line amount (" + lineAmount.toPlainString()
               + "). Operations can match part of the line but not exceed it.");
+    }
+    return null;
+  }
+
+  /**
+   * The per-operation half of {@link #validateOperations}: every id must resolve to a free movement
+   * of {@code accountId}. Needs no statement line and no invoice-derived transaction, which is why
+   * {@code reconcileGroup} runs it on the CLIENT-SUPPLIED ids before paying any invoice (ETP-5472):
+   * an unknown or already-reconciled id is refused before a payment exists. The sum/sign half needs
+   * those invoice transactions, so it stays in {@link #validateOperations}, after the payments.
+   *
+   * @return the first operation's error, verbatim, or {@code null} when every id is valid
+   */
+  static NeoResponse validateOperationRefs(List<String> operationIds, String accountId,
+      Function<String, FIN_FinaccTransaction> transactionLoader) {
+    for (String opId : operationIds) {
+      NeoResponse opError = validateOperation(transactionLoader.apply(opId), opId, accountId);
+      if (opError != null) {
+        return opError;
+      }
     }
     return null;
   }
@@ -256,6 +277,11 @@ final class ReconciliationFlowSupport {
    * Extracted verbatim from {@code ReconciliationHandler.compose} so that class stays under the
    * Sonar per-class method-count limit (java:S1448); every DAL/Classic seam still runs on the
    * caller's {@code handler} instance, so behavior — and test stubbing — is unchanged.
+   *
+   * <p>ETP-5472: the 201 also says whether the line is closed — {@code partial} (true only when
+   * Core's split left a pending remainder row), {@code pendingAmount} (that row's signed amount, 0
+   * when closed) and, when partial, the {@code remainderLineId} to continue with. See
+   * {@link ReconciliationLineTargetSupport#putMatchOutcome}.
    */
   static NeoResponse compose(ReconciliationHandler handler, FIN_FinancialAccount account,
       FIN_BankStatementLine line, List<String> operationIds) throws Exception {
@@ -273,6 +299,7 @@ final class ReconciliationFlowSupport {
     lineIds.put(line.getId());
     data.put("lineIds", lineIds);
     data.put(ReconciliationHandler.KEY_UPDATED_BALANCE, nullSafe(rec.getEndingBalance()));
+    ReconciliationLineTargetSupport.putMatchOutcome(handler, data, line.getId());
     return NeoResponse.createdWithData(data);
   }
 
@@ -302,16 +329,22 @@ final class ReconciliationFlowSupport {
    * <p>Extracted from {@code ReconciliationHandler.applySuggestions} so that method stays under the
    * Sonar cognitive-complexity limit (java:S3776); behavior is unchanged, and every DAL seam still
    * runs on the caller's {@code handler} instance.
+   *
+   * <p>ETP-5472: two groups may resolve to the same effective line — a partial group's head is
+   * redirected to its remainder, so a batch carrying both the head and the remainder names one row
+   * twice. The ids of the accepted groups' lines are tracked, and a later group landing on one of
+   * them is rejected (409) before anything is matched.
    */
   static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results)
       throws Exception {
+    Set<String> takenLineIds = new HashSet<>();
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
       if (groupEntry == null) {
         continue;
       }
-      NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared);
+      NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared, takenLineIds);
       if (prepError != null) {
         JSONObject failure = prepError.getBody();
         if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
@@ -324,26 +357,32 @@ final class ReconciliationFlowSupport {
   }
 
   static NeoResponse prepareGroup(ReconciliationHandler handler, FIN_FinancialAccount account,
-      JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out) throws Exception {
+      JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out,
+      Set<String> takenLineIds) throws Exception {
     String statementLineId = groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
     if (StringUtils.isBlank(statementLineId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
     }
 
-    FIN_BankStatementLine line = handler.loadLine(statementLineId);
+    FIN_BankStatementLine requested = handler.loadLine(statementLineId);
     // Ownership: the line must belong to the account this batch is reconciling. Every other entry
     // point already did this — reconcileGroup, reactivate, reactivateSelected and
     // reconcileDifference. applySuggestions was the one path that skipped it, so a line from
     // another account, another tenant's included, could be matched in against transactions of this
     // one. See ETP-4950.
-    if (line == null || !ReconciliationSupport.belongsToAccount(line, account.getId())) {
+    if (requested == null || !ReconciliationSupport.belongsToAccount(requested, account.getId())) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           ReconciliationHandler.MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
     }
-    if (line.getFinancialAccountTransaction() != null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "Statement line is already reconciled: " + statementLineId);
+    // ETP-5472: same resolution as reconcileGroup — a partial group's reconciled head is redirected
+    // to its pending remainder, a stuck line is freed first, a draft-held or fully reconciled one is
+    // refused — plus the batch-only rule: an effective line already taken by an accepted group.
+    ReconciliationLineTargetSupport.Target target =
+        resolveGroupLine(handler, requested, statementLineId, takenLineIds);
+    if (target.error() != null) {
+      return target.error();
     }
+    FIN_BankStatementLine line = target.line();
     // ETP-5121: same rule the manual path applies. Reached only by a client applying a STALE
     // preview - the statement was reactivated between autoMatch and applySuggestions - or by a
     // direct API call, since loadPendingLines no longer proposes a draft statement's lines at all.
@@ -401,6 +440,29 @@ final class ReconciliationFlowSupport {
     }
 
     out.add(new ReconciliationHandler.PreparedGroup(line, operationIds));
+    takenLineIds.add(line.getId());
     return null;
+  }
+
+  /**
+   * {@link ReconciliationLineTargetSupport#resolveForMatch} for one {@code applySuggestions} group,
+   * refusing an effective line an earlier accepted group of the same batch already took (409, the
+   * same message as any other already-reconciled group). The duplicate check reads only ids, and a
+   * line in {@code takenLineIds} is already pending, so the usual duplicates (the same id twice, or
+   * a partial head plus its remainder) reach this refusal without any heal. Split out of
+   * {@link #prepareGroup} to keep it under Sonar java:S3776.
+   */
+  private static ReconciliationLineTargetSupport.Target resolveGroupLine(
+      ReconciliationHandler handler, FIN_BankStatementLine requested, String statementLineId,
+      Set<String> takenLineIds) throws Exception {
+    String conflictMessage = ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED + ": "
+        + statementLineId;
+    ReconciliationLineTargetSupport.Target target =
+        ReconciliationLineTargetSupport.resolveForMatch(handler, requested, conflictMessage);
+    if (target.error() == null && takenLineIds.contains(target.line().getId())) {
+      return ReconciliationLineTargetSupport.Target.failed(
+          NeoResponse.error(HttpServletResponse.SC_CONFLICT, conflictMessage));
+    }
+    return target;
   }
 }

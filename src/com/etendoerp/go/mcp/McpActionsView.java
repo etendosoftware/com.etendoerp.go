@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -45,6 +48,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * full schema, unchanged.
  */
 final class McpActionsView {
+
+  /** Opens every withdrawal note: the action exists, it is just not run through MCP. */
+  private static final String NOT_RUN_THROUGH_MCP = "Not run through MCP: ";
 
   private McpActionsView() {
   }
@@ -86,14 +92,233 @@ final class McpActionsView {
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
       throws JSONException {
+    return buildResponse(specName, entityName, fields, Map.of(), null);
+  }
+
+  /**
+   * Same as {@link #buildResponse(String, String, JSONArray)}, plus the named actions the entity's
+   * customization declares (ETP-5535), appended after the AD buttons in the form
+   * {@link NeoActionContract#toJson()} renders them.
+   *
+   * <p>For an entity that has fields AND declares actions — a window whose customization serves
+   * actions no AD button column stands behind, such as the sales quotation's
+   * {@code rejectQuotation}. Before ETP-5535 such an action was reachable through {@code neo_action}
+   * but listed nowhere, so an agent fell back on the AD button closest in meaning and failed there.
+   * A declared entry carries {@code invokeVia}, so it counts towards {@code invokableCount} like any
+   * callable button. With no declared action the response is byte-for-byte the 3-argument one.</p>
+   *
+   * @param declared the customization's declared actions; {@code null} or empty adds nothing
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared) throws JSONException {
+    return buildResponse(specName, entityName, fields, declared, null);
+  }
+
+  /**
+   * The same response for a window entity whose customization also declares actions (ETP-5558):
+   * the AD buttons first, then the declared actions, in one catalogue.
+   *
+   * <p>On a window entity both are real — {@code documentAction} completes the invoice, and
+   * {@code registerPayment} pays it — so neither replaces the other (a report spec, where the AD
+   * tab only gates the role, still uses {@link #buildDeclaredResponse}). {@code MCP_CONFIG.actions}
+   * shapes the buttons: a hidden one is left out, a redirected one stays listed, not invokable,
+   * carrying {@code useInstead}. The declared contracts arrive already filtered, and each counts as
+   * invokable.</p>
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param fields     the full schema field array
+   * @param declared   the actions the customization declares, minus the hidden ones; {@code null}
+   *                   or empty adds nothing
+   * @param config     the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
+   * @return the response
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared, McpActionsSection.View config)
+      throws JSONException {
+    return buildResponse(specName, entityName, fields, declared, config, Set.of());
+  }
+
+  /**
+   * Same, also leaving out the buttons the customization excludes from agents
+   * ({@code NeoHandler#agentExcludedActions()}, ETP-5558) — {@code neo_action} refuses them.
+   *
+   * @param excluded the excluded action names
+   */
+  @SuppressWarnings("java:S107") // the catalogue's inputs; a holder would only rename them
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared, McpActionsSection.View config,
+      Set<String> excluded) throws JSONException {
+    Map<String, NeoActionContract> offered = declared != null ? declared : Map.of();
+    boolean hasDeclared = !offered.isEmpty();
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
-    JSONArray actions = apply(fields);
+    JSONArray actions = withoutDescribedButtons(apply(applyConfig(fields, config, excluded)),
+        offered);
+    for (NeoActionContract contract : offered.values()) {
+      actions.put(contract.toJson());
+    }
+    withdrawAllIfUnusable(actions, config);
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
+    if (hasDeclared) {
+      response.put("declaredActionsHint", "Entries carrying 'parameters' are served by this "
+          + "window's own logic rather than an AD button: call neo_action with action = the "
+          + "entry's 'action', id = the record its idDescription names, and parameters matching "
+          + "its schema. Prefer them over an AD button with a similar meaning.");
+    }
     return response;
+  }
+
+  /**
+   * Shape the AD buttons of a schema field array the way {@code MCP_CONFIG.actions} and the
+   * customization's agent-excluded actions say (ETP-5558), leaving every other field untouched.
+   *
+   * <p>Every projection of {@code neo_schema} that describes a button goes through here —
+   * {@code view:"actions"}, {@code view:"full"} and its {@code fields:[…]} whitelist — so they
+   * cannot disagree. Before this, only the actions view was shaped: a blind agent read the full
+   * view, found {@code aPRMProcessPayment} still offering Void, and offered it to its user. A
+   * hidden or excluded button is left out, a redirected one is withdrawn with {@code useInstead},
+   * a narrowed one keeps only its allowed {@code actionValues}, and an unusable configuration
+   * withdraws every button. A button is matched by its field name and by its DB column, the two
+   * names {@code neo_action} fires it by.</p>
+   *
+   * @param fields   the full schema field array; its kept buttons are shaped in place
+   * @param config   the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
+   * @param excluded the action names the customization keeps for people only
+   * @return a new array, in the original order
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONArray applyConfig(JSONArray fields, McpActionsSection.View config,
+      Set<String> excluded) throws JSONException {
+    JSONArray shaped = new JSONArray();
+    if (fields == null) {
+      return shaped;
+    }
+    Set<String> keptForPeople = excluded != null ? excluded : Set.of();
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.getJSONObject(i);
+      if (!TYPE_BUTTON.equals(field.optString("type", null))) {
+        shaped.put(field);
+      } else if (shapeButton(field, config, keptForPeople)) {
+        shaped.put(field);
+      }
+    }
+    return shaped;
+  }
+
+  /**
+   * Describe the AD buttons a declared contract stands for by that contract (ETP-5587), leaving
+   * every other field untouched.
+   *
+   * <p>A button's {@code actionValues} come from its AD reference list and its
+   * {@code actionParameter} is always {@code docAction} — right for a document action, wrong for a
+   * button whose customization declares what it reads. {@code periodControl.openClose} advertised
+   * {@code docAction} with C/N/O/P while its handler reads {@code openClose} and the SPA offers
+   * O/C/P only, so every agent call was refused. Such a button carries the contract's
+   * {@code parameters} schema instead, in every projection; the actions view lists the contract
+   * itself in its place ({@link #buildResponse}).</p>
+   *
+   * @param fields   the schema field array; described buttons are rewritten in place
+   * @param declared the declared contracts the MCP offers, by name
+   * @return {@code fields}, for chaining
+   * @throws JSONException if the JSON cannot be built
+   */
+  static JSONArray describeDeclaredButtons(JSONArray fields,
+      Map<String, NeoActionContract> declared) throws JSONException {
+    if (fields == null || declared == null || declared.isEmpty()) {
+      return fields;
+    }
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.getJSONObject(i);
+      NeoActionContract contract = describedBy(field, declared);
+      if (contract != null) {
+        field.remove(McpConstants.KEY_ACTION_VALUES);
+        field.remove(McpConstants.KEY_ACTION_PARAMETER);
+        field.put(McpConstants.PARAM_PARAMETERS,
+            contract.toJson().getJSONObject(McpConstants.PARAM_PARAMETERS));
+        field.put("declaredAction", contract.getName());
+      }
+    }
+    return fields;
+  }
+
+  /** @return the declared contract that stands for this button, or {@code null} */
+  private static NeoActionContract describedBy(JSONObject field,
+      Map<String, NeoActionContract> declared) {
+    if (!TYPE_BUTTON.equals(field.optString("type", null))) {
+      return null;
+    }
+    for (String name : namesOf(field)) {
+      NeoActionContract contract = declared.get(name);
+      if (contract != null) {
+        return contract;
+      }
+    }
+    return null;
+  }
+
+  /** The actions view lists a declared contract once: the button it describes is left out. */
+  private static JSONArray withoutDescribedButtons(JSONArray buttons,
+      Map<String, NeoActionContract> declared) throws JSONException {
+    if (declared == null || declared.isEmpty()) {
+      return buttons;
+    }
+    JSONArray kept = new JSONArray();
+    for (int i = 0; i < buttons.length(); i++) {
+      JSONObject button = buttons.getJSONObject(i);
+      if (describedBy(button, declared) == null) {
+        kept.put(button);
+      }
+    }
+    return kept;
+  }
+
+  /** @return {@code false} when the button must be left out; otherwise shapes it in place */
+  private static boolean shapeButton(JSONObject button, McpActionsSection.View config,
+      Set<String> excluded) throws JSONException {
+    List<String> names = namesOf(button);
+    for (String name : names) {
+      if (excluded.contains(name) || (config != null && config.isHidden(name))) {
+        return false;
+      }
+    }
+    if (config == null) {
+      return true;
+    }
+    for (String name : names) {
+      String instead = config.redirectOf(name);
+      if (instead != null) {
+        redirect(button, instead, config.getRedirectReason());
+        break;
+      }
+    }
+    for (String name : names) {
+      Set<String> allowed = config.allowedValuesOf(name);
+      if (allowed != null) {
+        narrowValues(button, allowed);
+        break;
+      }
+    }
+    if (config.isUnusable()) {
+      withdraw(button, NOT_RUN_THROUGH_MCP + config.getReason());
+    }
+    return true;
+  }
+
+  /** The names a button is known by: its field name, then its DB column. */
+  private static List<String> namesOf(JSONObject button) {
+    List<String> names = new ArrayList<>(2);
+    for (String key : List.of("name", "column")) {
+      String name = button.optString(key, null);
+      if (name != null && !names.contains(name)) {
+        names.add(name);
+      }
+    }
+    return names;
   }
 
   /**
@@ -110,6 +335,19 @@ final class McpActionsView {
    */
   static JSONObject buildDeclaredResponse(String specName, String entityName,
       Map<String, NeoActionContract> contracts) throws JSONException {
+    return buildDeclaredResponse(specName, entityName, contracts, null);
+  }
+
+  /**
+   * {@link #buildDeclaredResponse(String, String, Map)} that also reports an unusable
+   * {@code MCP_CONFIG} (ETP-5558): {@code neo_action} then refuses every action, so none is listed
+   * as invokable.
+   *
+   * @param config the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
+   */
+  static JSONObject buildDeclaredResponse(String specName, String entityName,
+      Map<String, NeoActionContract> contracts, McpActionsSection.View config)
+      throws JSONException {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
@@ -117,14 +355,63 @@ final class McpActionsView {
     for (NeoActionContract contract : contracts.values()) {
       actions.put(contract.toJson());
     }
+    withdrawAllIfUnusable(actions, config);
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
-    response.put(KEY_INVOKABLE_COUNT, actions.length());
+    response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
     response.put("hint", "Call neo_action with this spec and entity, id = the record each action "
         + "acts on (its idDescription says which), action = one of the names above and "
         + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "
         + "before anything runs.");
     return response;
+  }
+
+  /**
+   * Keep only the {@code actionValues} {@code MCP_CONFIG.actions.values} offers for this button
+   * (ETP-5558): the others are what the UI's own button never sends.
+   */
+  private static void narrowValues(JSONObject button, Set<String> allowed) throws JSONException {
+    JSONArray values = allowed == null ? null
+        : button.optJSONArray(McpConstants.KEY_ACTION_VALUES);
+    if (values == null) {
+      return;
+    }
+    JSONArray kept = new JSONArray();
+    for (int i = 0; i < values.length(); i++) {
+      JSONObject entry = values.optJSONObject(i);
+      if (entry != null && allowed.contains(entry.optString("value", null))) {
+        kept.put(entry);
+      }
+    }
+    button.put(McpConstants.KEY_ACTION_VALUES, kept);
+  }
+
+  /** Mark a button as one to leave for {@code instead}: listed, not invokable, and why. */
+  private static void redirect(JSONObject button, String instead, String reason)
+      throws JSONException {
+    withdraw(button, NOT_RUN_THROUGH_MCP + reason + ". Use '" + instead
+        + "' (listed below) instead.");
+    button.put("useInstead", instead);
+  }
+
+  /**
+   * An unusable {@code MCP_CONFIG} makes {@code neo_action} refuse every action of the entity
+   * (ETP-5558), so the catalogue must not call any of them invokable.
+   */
+  private static void withdrawAllIfUnusable(JSONArray actions, McpActionsSection.View config)
+      throws JSONException {
+    if (config == null || !config.isUnusable()) {
+      return;
+    }
+    for (int i = 0; i < actions.length(); i++) {
+      withdraw(actions.getJSONObject(i), NOT_RUN_THROUGH_MCP + config.getReason());
+    }
+  }
+
+  private static void withdraw(JSONObject action, String reason) throws JSONException {
+    action.remove(McpSchemaFieldBuilder.KEY_INVOKE_VIA);
+    action.put(McpSchemaFieldBuilder.KEY_INVOKABLE, false);
+    action.put(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, reason);
   }
 
   /** @return how many of the catalog's actions {@code neo_action} can actually run (IMP-21). */

@@ -650,8 +650,8 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all ten fields are populated")
-    void allTenFieldsPopulated() throws Exception {
+    @DisplayName("all eleven fields are populated")
+    void allElevenFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
       when(organization.getId()).thenReturn("O-2");
@@ -663,9 +663,10 @@ class EtendoGoJwtDalHelperTest {
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
           EnvironmentPlanCache.empty());
 
-          // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046) and
-          // the relationship marker. Lifecycle fields are conditional and absent here.
-          assertEquals(10, result.length());
+      // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
+      // relationship marker and the demo-association flag (ETP-5548). Lifecycle fields are
+      // conditional and absent here.
+      assertEquals(11, result.length());
     }
 
     @Test
@@ -721,6 +722,22 @@ class EtendoGoJwtDalHelperTest {
       assertEquals(TenantPlanService.PLAN_PRODUCTIVE, result.getString("plan"));
       assertTrue(result.isNull("planKey"));
       assertTrue(result.isNull("subscriptionStatus"));
+    }
+
+    @Test
+    @DisplayName("reports a demo without association marker as still usable as a purchase source")
+    void reportsNoAssociationWithoutMarker() throws Exception {
+      when(client.getId()).thenReturn("C-4");
+      when(client.getName()).thenReturn("Client Four");
+      when(environmentUser.getId()).thenReturn("U-4");
+      when(environmentUser.getUsername()).thenReturn("user@four.com");
+      when(environmentUser.getName()).thenReturn("User Four");
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
+
+      // ETP-5548: always present, so the purchase picker never has to guess from a missing key.
+      assertFalse(result.getBoolean("associatedWithProductive"));
     }
   }
 

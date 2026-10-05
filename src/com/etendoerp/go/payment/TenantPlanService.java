@@ -106,11 +106,9 @@ public class TenantPlanService {
    * — which is precisely what the fallback exists for. On the success path the preference is not
    * written at all; it is {@link #retireProductivePreference retired} instead.
    *
-   * <p>Best-effort by design: the plan marker is commercial metadata, not part of the tenant's
-   * functional provisioning, so a failure here is logged rather than allowed to roll back an
-   * otherwise complete environment. It is <em>reported</em> to the caller all the same — an
-   * environment that was paid for and could not be marked is the exact state ETP-4966 was reported
-   * as, and a caller that cannot tell success from failure cannot say so.
+   * <p>The caller must treat a {@code false} result as a provisioning failure. Paid onboarding
+   * writes this marker in the same transaction as the tenant claim and functional setup, so a
+   * paid tenant cannot commit without its productive plan.
    *
    * @param clientId the AD_Client just created
    * @param organizationId the client's {@code *} organization, used as the preference's visibility

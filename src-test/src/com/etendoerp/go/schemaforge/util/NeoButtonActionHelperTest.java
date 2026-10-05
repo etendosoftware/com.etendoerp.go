@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -28,6 +29,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -46,6 +48,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -54,8 +57,10 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -78,6 +83,18 @@ class NeoButtonActionHelperTest {
   private MockedStatic<NeoProcessService> processServiceMock;
   private MockedStatic<ModelProvider> modelProviderMock;
   private OBDal dal;
+
+  // addTabParamsCore fixtures (ETP-5447)
+  @Mock
+  private SFEntity tabEntity;
+  @Mock
+  private Tab tab;
+  @Mock
+  private Table table;
+  @Mock
+  private Column keyColumn;
+  @Mock
+  private Column plainColumn;
 
   @BeforeEach
   void setUp() {
@@ -879,6 +896,131 @@ class NeoButtonActionHelperTest {
 
       assertNotNull(result);
       assertTrue(result.isEmpty());
+    }
+  }
+
+  // ── addTabParamsCore (ETP-5447) ───────────────────────────────────────
+
+  /**
+   * The tab parameters every button process receives. ETP-5447: Classic
+   * {@code FIN_BankStatementProcess} reads {@code FIN_Bankstatement_ID} — the real key column of
+   * {@code FIN_BankStatement} — so the table-name-derived {@code FIN_BankStatement_ID} alone left
+   * its record id null. The key column's own name is now sent too when it differs.
+   */
+  @Nested
+  @DisplayName("addTabParamsCore")
+  class AddTabParamsCore {
+
+    private static final String RECORD_ID = "REC-1";
+    private static final String TAB_ID = "tab-1";
+    private static final String IN_TAB_ID = "inpTabId";
+    private static final String BANK_STATEMENT_TABLE = "FIN_BankStatement";
+    private static final String DERIVED_KEY = "FIN_BankStatement_ID";
+    private static final String REAL_KEY = "FIN_Bankstatement_ID";
+
+    private JSONObject invoke() throws Exception {
+      Method method = NeoButtonActionHelper.class.getDeclaredMethod("addTabParamsCore",
+          SFEntity.class, String.class, JSONObject.class);
+      method.setAccessible(true);
+      JSONObject params = new JSONObject();
+      method.invoke(null, tabEntity, RECORD_ID, params);
+      return params;
+    }
+
+    private void givenTable(String dbTableName, List<Column> columns) {
+      when(tabEntity.getADTab()).thenReturn(tab);
+      doReturn(TAB_ID).when(tab).getId();
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn(dbTableName);
+      when(table.getADColumnList()).thenReturn(columns);
+    }
+
+    private void givenKeyColumn(String dbColumnName) {
+      when(keyColumn.isKeyColumn()).thenReturn(Boolean.TRUE);
+      when(keyColumn.getDBColumnName()).thenReturn(dbColumnName);
+    }
+
+    private void givenPlainColumn() {
+      when(plainColumn.isKeyColumn()).thenReturn(Boolean.FALSE);
+      when(plainColumn.getDBColumnName()).thenReturn("Name");
+    }
+
+    @Test
+    void testPutsBothKeysWhenTheKeyColumnCasingDiffers() throws Exception {
+      givenPlainColumn();
+      givenKeyColumn(REAL_KEY);
+      givenTable(BANK_STATEMENT_TABLE, List.of(plainColumn, keyColumn));
+
+      JSONObject params = invoke();
+
+      assertEquals(TAB_ID, params.getString(IN_TAB_ID));
+      assertEquals(RECORD_ID, params.getString(DERIVED_KEY));
+      assertEquals(RECORD_ID, params.getString(REAL_KEY));
+      assertEquals(3, params.length());
+    }
+
+    @Test
+    void testPutsOneKeyWhenTheKeyColumnMatchesTheTableName() throws Exception {
+      givenKeyColumn("C_Order_ID");
+      givenTable("C_Order", List.of(keyColumn));
+
+      JSONObject params = invoke();
+
+      assertEquals(RECORD_ID, params.getString("C_Order_ID"));
+      assertEquals(2, params.length());
+    }
+
+    @Test
+    void testFallsBackToTheDerivedKeyWhenNoColumnIsKey() throws Exception {
+      givenPlainColumn();
+      givenTable(BANK_STATEMENT_TABLE, List.of(plainColumn));
+
+      JSONObject params = invoke();
+
+      assertEquals(RECORD_ID, params.getString(DERIVED_KEY));
+      assertFalse(params.has(REAL_KEY));
+      assertEquals(2, params.length());
+    }
+
+    @Test
+    void testFallsBackToTheDerivedKeyWhenTheColumnListIsNull() throws Exception {
+      givenTable(BANK_STATEMENT_TABLE, null);
+
+      JSONObject params = invoke();
+
+      assertEquals(RECORD_ID, params.getString(DERIVED_KEY));
+      assertEquals(2, params.length());
+    }
+
+    @Test
+    void testTreatsANullKeyFlagAsNotKey() throws Exception {
+      when(keyColumn.isKeyColumn()).thenReturn(null);
+      when(keyColumn.getDBColumnName()).thenReturn(REAL_KEY);
+      givenTable(BANK_STATEMENT_TABLE, List.of(keyColumn));
+
+      JSONObject params = invoke();
+
+      assertFalse(params.has(REAL_KEY));
+      assertEquals(RECORD_ID, params.getString(DERIVED_KEY));
+    }
+
+    @Test
+    void testPutsOnlyTheTabIdWhenTheTabHasNoTable() throws Exception {
+      when(tabEntity.getADTab()).thenReturn(tab);
+      doReturn(TAB_ID).when(tab).getId();
+      when(tab.getTable()).thenReturn(null);
+
+      JSONObject params = invoke();
+
+      assertEquals(TAB_ID, params.getString(IN_TAB_ID));
+      assertEquals(1, params.length());
+    }
+
+    @Test
+    void testPutsNothingWhenTheEntityHasNoTab() throws Exception {
+      when(tabEntity.getADTab()).thenReturn(null);
+
+      assertEquals(0, invoke().length());
     }
   }
 }

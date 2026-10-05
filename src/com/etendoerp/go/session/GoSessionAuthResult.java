@@ -21,7 +21,8 @@ package com.etendoerp.go.session;
  * <ul>
  *   <li>{@link Status#NO_SESSION} — no session cookie; the caller may fall back to legacy Bearer.</li>
  *   <li>{@link Status#UNAUTHENTICATED} — a cookie was present but invalid/expired/revoked → {@code 401}.</li>
- *   <li>{@link Status#CSRF_FAILED} — valid session but the unsafe request failed CSRF/Origin → {@code 403}.</li>
+ *   <li>{@link Status#CSRF_FAILED} — valid session but the unsafe request failed CSRF/Origin → {@code 403};
+ *       {@link #getRefusalMessage()} says which of the two proofs failed.</li>
  *   <li>{@link Status#AUTHENTICATED} — resolved session available via {@link #getRecord()}.</li>
  * </ul>
  */
@@ -32,10 +33,16 @@ public final class GoSessionAuthResult {
 
   private final Status status;
   private final GoSessionRecord sessionRecord;
+  private final String refusalMessage;
 
   private GoSessionAuthResult(Status status, GoSessionRecord sessionRecord) {
+    this(status, sessionRecord, null);
+  }
+
+  private GoSessionAuthResult(Status status, GoSessionRecord sessionRecord, String refusalMessage) {
     this.status = status;
     this.sessionRecord = sessionRecord;
+    this.refusalMessage = refusalMessage;
   }
 
   /** @return a result meaning no session cookie was present */
@@ -48,9 +55,14 @@ public final class GoSessionAuthResult {
     return new GoSessionAuthResult(Status.UNAUTHENTICATED, null);
   }
 
-  /** @return a result meaning a valid session failed the CSRF/Origin check on an unsafe method */
+  /** @return a result meaning a valid session sent a missing or stale CSRF token on an unsafe method */
   public static GoSessionAuthResult csrfFailed() {
-    return new GoSessionAuthResult(Status.CSRF_FAILED, null);
+    return new GoSessionAuthResult(Status.CSRF_FAILED, null, GoSessionSecurity.MSG_CSRF_TOKEN_INVALID);
+  }
+
+  /** @return a result meaning a valid session sent an unsafe request from a disallowed origin */
+  public static GoSessionAuthResult originRejected() {
+    return new GoSessionAuthResult(Status.CSRF_FAILED, null, GoSessionSecurity.MSG_ORIGIN_NOT_ALLOWED);
   }
 
   /**
@@ -75,6 +87,16 @@ public final class GoSessionAuthResult {
    */
   public GoSessionRecord getRecord() {
     return sessionRecord;
+  }
+
+  /**
+   * Returns the client-safe message to refuse the request with.
+   *
+   * @return for {@link Status#CSRF_FAILED}, the message naming which proof failed (ETP-5550);
+   *     otherwise {@code null}
+   */
+  public String getRefusalMessage() {
+    return refusalMessage;
   }
 
   /** @return {@code true} when the request carries a valid, authenticated session */

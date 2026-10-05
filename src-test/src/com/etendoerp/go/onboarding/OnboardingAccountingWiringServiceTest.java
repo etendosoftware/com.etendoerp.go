@@ -40,6 +40,8 @@ import java.util.Set;
 
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -73,6 +75,19 @@ import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
  * XML and cannot be exercised by a pure unit test.
  */
 public class OnboardingAccountingWiringServiceTest {
+
+  /** The thread's context before each test; tests that install a mock one must not leak it. */
+  private OBContext contextBefore;
+
+  @Before
+  public void rememberContext() {
+    contextBefore = OBContext.getOBContext();
+  }
+
+  @After
+  public void restoreContext() {
+    OBContext.setOBContext(contextBefore);
+  }
 
   // ---------------------------------------------------------------------------------------------
   // wire() — context validation

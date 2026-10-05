@@ -242,6 +242,22 @@ reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
 
 ## 2. The onboarding paywall
 
+### Local pooled failure fixture
+
+The provisioning failure E2E fixture is available only when
+`etendo.go.runtime.environment=local` (or `ETGO_RUNTIME_ENVIRONMENT=local`).
+`POST /sws/go/dev/provisioning-failure-fixture` creates a paid test checkout and
+reserves a dedicated pooled tenant. If no reusable fixture tenant exists, it provisions one with
+the normal pool provisioner. No client ID or pool feature flag is required. The fixture pool row
+has an `E2E fixture:` marker; normal pool claims exclude it. The returned `requestId` is used as
+`paymentToken` in the real onboarding request, which claims only that reserved tenant and fails
+during its finalization. A new provisioning version replaces the dedicated fixture tenant; the
+previous fixture pool row becomes `STALE` only after the replacement is reserved. Its client
+(whose admin remains inactive) is retained for explicit operator cleanup. Repeated E2E runs on one version reuse the same
+dedicated tenant. `DELETE /sws/go/dev/provisioning-failure-fixture/{cleanupToken}` deletes
+the test checkout and restores the dedicated tenant to `READY` for reuse. Both routes require the
+authenticated fixture owner. These routes are rejected outside `local`.
+
 `POST /sws/go/onboarding` gains a payment gate.
 
 ### Contract
@@ -272,7 +288,9 @@ provision) and `isProductive()` (does what it provisions become productive).
 2. **Account owns no environment → allowed.** A first environment is always free.
 3. **Request targets an environment the account already owns → allowed.** That is the resume path
    `validateExistingClient` handles downstream (a partially provisioned environment being
-   reconciled), not a new environment, so it is not charged again.
+   reconciled), not a new environment, so it is not charged again. Since ETP-5548 "targets" means
+   the half-built client this same attempt left under its provisioning name — never a finished
+   environment that happens to share the company name.
 4. **Otherwise → the payment decides:** a `CheckoutRequestStore`-confirmed payment (an
    `ETGO_CHECKOUT_REQUEST` row at `PAID` or later) ⇒ allowed; token absent ⇒ `PAYMENT_REQUIRED`;
    token present but unconfirmed ⇒ `PAYMENT_DECLINED`. Both refusals answer 402 with
@@ -287,6 +305,13 @@ account only has invited memberships or has no owner record. The check reads `AD
 through `OwnerSupport`; an administrator role name or an email match is not sufficient. Invitation
 access remains independent because environment discovery and NEO entry continue to evaluate the
 destination membership separately.
+
+The demo trial lasts **14 days** (product definition, ETP-5548), counted from the
+`ETGO_DemoTrialStartedAt` stamped when the demo becomes ready. Override it per instance with
+`etendo.go.demo.trial.days` (`ETGO_DEMO_TRIAL_DAYS`). The expiry is computed from the configured
+length on every read rather than stored, so changing it — including the 15 → 14 change — moves the
+deadline of existing demos too, not only new ones. The renewal grace window is separate:
+`etendo.go.billing.grace.days` (`ETGO_BILLING_GRACE_DAYS`), 15 days.
 
 For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
 (`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
@@ -338,6 +363,22 @@ account owns it. That purchase records an explicit empty demo selection and igno
 demo and transfer choices. It creates a separate productive environment: no demo is inferred,
 associated or revoked, and no company profile or demo data is copied. A demo-to-productive conversion
 continues to require the explicit demo selection described above.
+
+**A demo is the origin of at most one productive environment (ETP-5548, product decision).** The
+first paid environment created from a demo associates it (`ETGO_AssociatedProductiveClientId` on
+the demo) and revokes its access. From then on the demo is spent as a source:
+
+- `GET /sws/go/environments` reports `associatedWithProductive: true` for it, and the upgrade page
+  leaves it out of the source picker and does not prefill the new name from it.
+- A purchase whose session is in that demo is treated like a productive-origin purchase: it records
+  an empty selection and ignores any `demoClientId` / `dataTransfer` in the body. The result is a
+  clean productive environment, with no origin.
+- Naming a spent demo as `demoClientId` from another demo session answers 400
+  `INVALID_DEMO_SELECTION`, like a demo that is not free or not owned.
+- A purchase that recorded the demo **before** it was spent (two purchases started from the same
+  demo, the other one finished first) is already paid, so onboarding does not refuse it: it drops
+  the source and provisions a clean productive environment — no association, profile copy,
+  revocation or data transfer.
 
 Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
 taken from `PAID`; if the row has remained `PROVISIONING` longer than
@@ -392,14 +433,22 @@ to the exact organization created for the productive client in this paid onboard
 source has zero or multiple active business organizations, paid provisioning fails rather than
 silently continuing with a partial profile.
 
-When a source organization exists, the copied profile comprises its name, trade name, and business
-type (`AD_Org.Name`, `AD_Org.Social_Name`, and `AD_Org.ETGO_Business_Type`); tax ID and fiscal
+When a source organization exists, the copied profile comprises its business type
+(`AD_Org.ETGO_Business_Type`), its legal name (`AD_Org.Social_Name`) only when the user edited it in
+the demo, its tax ID and fiscal
 address including its country (`AD_OrgInfo.TaxID` and the linked location); and company logo
 (`AD_OrgInfo.Your_Company_Document_Image`). The logo is copied to a new `AD_Image` row owned by the
 target client, so the productive organization does not depend on an image row owned by the demo
 client. The target is identified by the productive client created in this paid onboarding attempt,
 not by organization name. This keeps the profile on the intended target even when another
 organization has the same name.
+
+The organization **name** is never copied (ETP-5548): the productive environment keeps the name the
+user typed on the purchase. Copying it made a renamed purchase come out with the demo's name, since
+onboarding names the organization after the company. For the same reason the legal name is copied
+only when it differs from the demo's organization and client names — that is the value onboarding
+seeds, not a legal identity the user chose, and carrying it over would print the old name on the
+new environment's documents.
 
 After a paid productive environment created from an explicitly selected demo has been provisioned
 successfully and the demo environment has been associated with it, the account loses access to that
@@ -444,6 +493,58 @@ price. While no plan carries a provider price, the **legacy price fallback** kee
 grandfathered `legacy-productive` plan at `etendo.go.checkout.price.id`, and the first priced plan
 retires it with no redeploy. Rules: `plans/2026-09-18-etp-5046-plan-and-subscription-design.md`
 §6–§6.1; operator go-live procedure: §6.2.
+
+### Checkout provisioning status contract
+
+`GET /sws/go/checkout/sessions/{requestId}` is the account-scoped polling contract after the
+Stripe return. It uses the checkout request row as the source of truth and returns a derived
+`status`, `retryAllowed`, `clientId` when an environment has been linked, `updatedAt` (ISO-8601
+instant of the row's last change), and — only for `provisioning_failed` — a `failureCode` plus a
+fixed `failureReason` describing that code:
+
+| `status` | Meaning | `retryAllowed` |
+|----------|---------|----------------|
+| `pending` | Unknown, unpaid, or pre-payment request | `false` |
+| `paid` | Payment confirmed; provisioning has not claimed the request | `true` |
+| `provisioning` | An active fenced provisioning attempt is running | `false` |
+| `provisioning_failed` | The last attempt recorded a diagnostic failure | `true`, unless its `failureCode` is non-retryable |
+| `stalled` | The provisioning lease expired without a diagnostic failure | `true` |
+| `provisioned` | The request is terminal and carries its created client id | `false` |
+
+**Failure codes (ETP-5548).** The raw cause of a failed attempt (exception text, internal ids,
+SQL) stays in `ETGO_CHECKOUT_REQUEST.FAILURE_REASON` for operations and is never returned. The row
+stores it as `CODE: cause`; the endpoint returns only the code and a fixed description, and the
+client localizes the code:
+
+| `failureCode` | Cause | Retryable |
+|---------------|-------|-----------|
+| `PROVISIONING_FAILED` | Any failure without a more precise code, including every reason written before codes existed | yes |
+| `CLIENT_NAME_IN_USE` | The account already has a productive environment with the purchase's company name (ETP-5548; before it: the name belonged to another account's environment) | **no** |
+
+A non-retryable code fails identically on every attempt — the checkout fixes its company name — so
+`retryAllowed` is `false` and `claimForProvisioning` refuses to reclaim the row even for a caller
+that ignores the flag. Such a purchase needs support. The same collision is refused **before
+payment** by `POST /sws/go/checkout/sessions` and `POST /sws/go/billing/purchases` (409
+`CLIENT_NAME_IN_USE`, provider never contacted); the provisioning-time code covers the race of a
+name taken between payment and setup.
+
+**Company names are not unique (ETP-5548).** Only one rule applies to the name: an account never
+has two productive environments with the same company name (case and blanks ignored). Another
+account's environment, or this account's demo, may share it. A purchase always creates a new
+productive environment — it never resumes, and so never converts, an existing one because the
+names match: the classic path builds the client under a provisioning name tied to the checkout
+request and applies the company name only at the end (`docs/onboarding-flow.md`, Overview).
+
+The recorded cause is the one the customer was shown: a step that fails gracefully writes its own
+NDJSON `result` line (message and optional `code`) and returns `false`. The onboarding handler
+promotes that `false` to its rollback path but does **not** write a second, generic result, which
+would replace the real one in the client — the client keeps the last `result` line
+(`OnboardingStreamWriter` records the first one).
+
+Retrying always reuses the same `requestId`. `claimForProvisioning` advances the attempt token
+atomically; an active `PROVISIONING` row and a terminal `PROVISIONED` row cannot be claimed again,
+and a failed or stale attempt can be reclaimed with a new fencing token. This prevents a browser
+retry from creating a second environment or charging the customer again.
 
 The token is server-generated and correlated server-side, so a browser cannot turn a successful
 return URL into authorization. `CheckoutRequestStore.isPaidFor` matches on the request id **plus**
@@ -541,19 +642,34 @@ favorites and saved filters. The row is created at runtime as ordinary data, so 
 Absence of the preference means `free`. Every tenant provisioned before this feature, and every first
 (unpaid) tenant, reads back as free without a migration.
 
-The marker is written inside the onboarding transaction, right after the admin context is resolved,
-so a successful write commits with the tenant. It is best-effort in the other direction: **a paid
-tenant can still commit unmarked and read back as free** rather than have provisioning rolled back
-over a plan marker. That trade is deliberate — the marker is commercial metadata, not part of the
-tenant's functional provisioning — but it means the plan is not a guaranteed record of payment, and
-reconciling one is a billing concern rather than something this write can promise.
+**Since ETP-5548 the plan record is mandatory, and it is the last write before the commit.** The
+plan (since ETP-5046 the `ETGO_SUBSCRIPTION` row, or this marker as the fallback when the row cannot
+be opened — see *Transitional read fallback* below), the lifecycle projection
+(`ETGO_EnvironmentType=PRODUCTIVE`) and the removal of the tenant's own `ETSG_ForceTestMode` override
+are written by `applyPaidUpgradeSideEffects` immediately before the onboarding `commitDalChanges`,
+after the organization, dataset and demo-profile steps. A failure of any of the three — for the
+plan, neither the subscription nor the fallback marker recorded — aborts the onboarding, so a paid
+tenant never commits unmarked or half-marked.
 
-What changed in ETP-4966 is that this case is no longer **silent**. `markProductive` returns whether
-it wrote the marker, and `handleOnboarding` logs an ERROR naming the environment, the client id and
-the masked account when a paid environment could not be marked. Before that, a failed marker and a
-marker that was never attempted produced the identical observable state — no log line either way —
-which is why diagnosing the original report had to go through the ECS task definitions to prove which
-of the two had happened.
+The position matters as much as the obligation. The classic path commits internally while it builds
+the tenant (`InitialClientSetup`, `InitialOrgSetup`), and a marker written before those steps was
+committed by them: a later failure then left a paid, incomplete environment that read back as
+productive and appeared in `/environments` (reproduced on ETP-5548 with a second purchase from an
+already-associated demo, a case that now provisions a clean environment instead, see above). Written last, a failed attempt leaves at most an incomplete classic client
+**without** productive metadata, which the retry resumes by name.
+
+A classic dataset pass on a paid tenant runs while the plan still reads `free`, so it inserts
+`ETSG_ForceTestMode='Y'` like for any free tenant; the override removal at the end flips it to `N`
+(firing the fiscal-config cascade) and deletes it, leaving the tenant on the System default. The
+pooled path has no internal commits, so it is fully atomic either way.
+
+**Known limit of the classic path:** because `InitialClientSetup`/`InitialOrgSetup` commit, a failed
+classic paid attempt leaves the client and organization behind. The client still carries its
+provisioning name (`PEND-<requestId without hyphens>`, ETP-5548), which hides it from `/environments` and
+is how the next attempt with the same `requestId` finds and reuses it. A client created at or
+after the payment of a `PAID`/`PROVISIONING` purchase with the same company name is hidden too
+(the window between the commit and the purchase being marked provisioned); an older tenant of
+that name — the demo the purchase came from — stays listed.
 
 The write and the read must also agree on the column. `Preferences.setPreferenceValue(...,
 isListProperty=false, ...)` stores the key in `AD_Preference.Attribute`, which is what `resolvePlan`
@@ -562,7 +678,8 @@ paid tenant read back as free with nothing reporting it. `TenantPlanServiceTest`
 for that reason.
 
 A `paymentToken` the webhook confirmed is what makes an environment productive — including for an
-account's first environment, and including when converting an environment that already exists.
+account's first environment. A purchase never converts an existing environment (ETP-5548): it
+always provisions a new one.
 
 ### Transitional read fallback (ETP-5046 cutover) — grep `ETP-5046-TRANSITIONAL-FALLBACK`
 
@@ -582,7 +699,8 @@ exists that the backfill would orphan), so it cannot simply be made automatic.
   `ETGO_TenantPlan` row this tenant still carries, so a newly paid tenant lands directly in the
   post-cutover state;
 - **failure** → it calls `markProductive`, because the preference is then the only record that the
-  tenant paid, and the fallback below is the only thing that will read it back.
+  tenant paid, and the fallback below is the only thing that will read it back. If that write fails
+  too, the onboarding aborts (ETP-5548, see above) and the purchase stays retryable.
 
 Both writes are **System-owned rows (client `0`) written from the new tenant's context**, so both
 run through `payment/SystemContext` (the subscription insert in `SubscriptionService.openSubscription`,
@@ -709,6 +827,7 @@ Checklist for the follow-up that replaces local configuration with Mixpanel Feat
   "currencyCode": "EUR",
   "currencyId": "…", "currencyStandardPrecision": 2,
   "yourCompanyDocumentImageId": "…",
+  "brandingUpdated": "2026-09-29T10:15:30Z",
   "organization": { "...": "..." },
   "accountId": "A1B2C3…",
   "accountEmail": "user@example.com"
@@ -770,3 +889,7 @@ must never break the session.
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Demo data transfer worker | `com.etendoerp.go.payment.DemoDataTransferService` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |
+
+## Internal provisioning outcome alerts (ETP-5548)
+
+Customer demo/productive creation now emits an internal `OK` after the tenant transaction commits or an `ERROR` after an uncommitted attempt is rolled back, including assigned pool tenants. Recipients default to `builds@etendo.software`; enabled state, recipients, result filters and language are configurable. Delivery failures are contained and do not change provisioning or purchase outcomes. See [Internal operational alerts](internal-operational-alerts.md) for exact properties, authorization, transaction boundaries and payload restrictions.

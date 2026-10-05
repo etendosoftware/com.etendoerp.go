@@ -638,7 +638,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * ({@code INSERT ... SELECT ... FROM c_bpartner WHERE ...}) and therefore cost nothing on an empty
    * table, and because this method is the single place that provisions posting accounts for any
    * business partner the dataset ever does carry. Partners the tenant creates later get their
-   * posting rows from Classic's own {@code c_bpartner_trg}.
+   * posting rows from Classic's own {@code c_bpartner_trg}. The optional sample data (ETP-5426)
+   * does carry partners, but is imported after this method ran — its posting rows come from
+   * {@link #provisionSampleDataPostingAccounts}.
    *
    * @param client target client
    * @param ledger the accounting schema whose defaults are copied
@@ -655,6 +657,34 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(PRODUCT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(FIN_FINANCIAL_ACCOUNT_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(WAREHOUSE_ACCT_SQL, clientId, schemaId);
+  }
+
+  /**
+   * ETP-5426 — provisions the posting accounts of the entities the optional sample data brings in
+   * (business partners, the "Beverages" category, the sample products, the template financial
+   * accounts and the secondary warehouse), which reach the tenant AFTER
+   * {@link #provisionEntityPostingAccounts} has run.
+   *
+   * <p>Runs the very statements of that method — same defaults, same {@code NOT EXISTS} guards, so
+   * rows that already exist are left alone — and only those: the business-partner-group and tax
+   * statements (and the group account overrides around them) have nothing new to cover, since the
+   * sample data brings neither groups nor taxes. GOClient's own {@code *_ACCT} rows for these
+   * entities are deliberately not imported: they would not follow the tenant's defaults, and
+   * GOClient's {@code FIN_FINANCIAL_ACCOUNT_ACCT} still carries the cleared-payment accounts that
+   * ETP-5207 stopped provisioning.
+   *
+   * @param client target client
+   * @param ledger the accounting schema whose defaults are copied
+   */
+  protected void provisionSampleDataPostingAccounts(Client client, AcctSchema ledger) {
+    String clientId = client.getId();
+    String schemaId = ledger.getId();
+    runEntityAcctInsert(PRODUCT_CATEGORY_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(BP_CUSTOMER_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, schemaId);
+    runEntityAcctInsert(PRODUCT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(FIN_FINANCIAL_ACCOUNT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(WAREHOUSE_ACCT_SQL, clientId, schemaId);
   }

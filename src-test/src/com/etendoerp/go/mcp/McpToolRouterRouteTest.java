@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -65,6 +66,7 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -495,7 +497,7 @@ class McpToolRouterRouteTest {
         // The denial must short-circuit before any DAL work — BatchService must never
         // be reached once authorizeSpecAccess throws.
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
-            .executeBatch(any());
+            .executeBatch(any(), any());
       }
     }
 
@@ -516,12 +518,15 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any())).thenReturn(batchResult);
+        when(mockBatch.executeBatch(any(), any())).thenReturn(batchResult);
 
         JSONObject result = router.handleBatch(buildBatchArgs());
 
         assertFalse(result.has("isError"));
-        org.mockito.Mockito.verify(mockBatch).executeBatch(any());
+        // ETP-5415: the two-arg overload is the assertion, not an incidental detail — the MCP
+        // body transforms now ride along as a per-operation preprocessor, and a call through the
+        // one-arg overload would silently run the batch with none of them.
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(), any());
       }
     }
   }
@@ -942,6 +947,74 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("entity"));
     }
+
+    // ── ETP-5558: neo_defaults on an entity whose create MCP_CONFIG.verbs hides ──
+
+    private static final String HIDE_CREATE = "{\"verbs\":{\"create\":false,"
+        + "\"reason\":\"Payments are registered from the invoice\","
+        + "\"instead\":\"neo_action(spec:'sales-invoice', entity:'header', "
+        + "action:'registerPayment')\"}}";
+
+    private JSONObject defaultsFor(SFEntity entity) throws Exception {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+      try {
+        setupSpecLookup(mockSpec());
+        setupEntityLookup(entity, mockTab());
+        obContextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+        supportMock.when(() -> McpToolRouterSupport.requireVerbNotHidden(any(), any(),
+            anyString())).thenCallRealMethod();
+        defaultsMock.when(() -> NeoDefaultsService.resolveDefaults(any(), isNull()))
+            .thenReturn(NeoResponse.ok(new JSONObject().put("documentNo", "<auto>")));
+        return router.route("neo_defaults", buildCrudArgs(), READ_SCOPES);
+      } finally {
+        McpConfigCache.invalidateAll();
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5558: a create hidden by MCP_CONFIG.verbs answers the 405 neo_create gives")
+    void defaultsRefusedWhenCreateIsHidden() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(HIDE_CREATE);
+      when(entity.isPost()).thenReturn(true);
+
+      JSONObject result = defaultsFor(entity);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      JSONObject expected = McpRoutingException.verbHidden(SPEC_NAME, ENTITY_NAME, "POST",
+          "Payments are registered from the invoice",
+          "neo_action(spec:'sales-invoice', entity:'header', action:'registerPayment')")
+          .toEnvelope();
+      JSONObject actual = new JSONObject(text);
+      assertEquals(405, actual.getInt(McpConstants.KEY_STATUS));
+      assertEquals("method_not_allowed", actual.getString(McpConstants.KEY_ERROR));
+      assertEquals(expected.getString(McpConstants.KEY_DETAIL),
+          actual.getString(McpConstants.KEY_DETAIL));
+      assertEquals(expected.getString(McpConstants.KEY_HINT),
+          actual.getString(McpConstants.KEY_HINT));
+      assertTrue(actual.getString(McpConstants.KEY_DETAIL)
+          .contains("Payments are registered from the invoice"), text);
+      assertTrue(actual.getString(McpConstants.KEY_HINT).contains("registerPayment"), text);
+      defaultsMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
+    }
+
+    @Test
+    @DisplayName("ETP-5558: a raw ISPOST off with no verbs section keeps the old neo_defaults")
+    void defaultsUnchangedWhenOnlyTheFlagIsOff() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.isPost()).thenReturn(false);
+
+      JSONObject result = defaultsFor(entity);
+
+      assertFalse(result.has("isError"), result.toString());
+      defaultsMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), isNull()));
+      supportMock.verify(() -> McpToolRouterSupport.requireVerbNotHidden(any(), any(),
+          eq("POST")));
+      supportMock.verify(() -> McpToolRouterSupport.requireMethodEnabled(any(), any(),
+          anyString()), never());
+    }
   }
 
   // ── Process tools ─────────────────────────────────────────────────────
@@ -1098,7 +1171,13 @@ class McpToolRouterRouteTest {
       when(handler.reportFormats()).thenReturn(List.of("json"));
       when(handler.handle(any(NeoContext.class))).thenReturn(handlerResponse);
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
             .thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
@@ -1137,7 +1216,13 @@ class McpToolRouterRouteTest {
       NeoHandler handler = mock(NeoHandler.class);
       when(handler.reportParameters()).thenReturn(Optional.empty());
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
             .thenReturn(handler);
 
@@ -1273,7 +1358,13 @@ class McpToolRouterRouteTest {
 
     private JSONObject routeReportWith(NeoHandler handler, SFEntity reportEntity, JSONObject args)
         throws Exception {
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
             .thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
@@ -1763,6 +1854,12 @@ class McpToolRouterRouteTest {
     private static final Set<String> ACTION_SCOPES = Set.of("neo:write");
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
+    /**
+     * ETP-5415: {@code NeoExtensionDispatcher} answers "no customization" for a blank
+     * {@code Java_Qualifier} before it consults {@code NeoHandlerLookup}, so an entity mock has to
+     * carry one for the stubbed handler to be reached.
+     */
+    private static final String HANDLER_QUALIFIER = "action-test-handler";
 
     @BeforeEach
     void setupActionSupport() {
@@ -1770,6 +1867,12 @@ class McpToolRouterRouteTest {
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
           .thenCallRealMethod();
+      // ETP-5415: a handler's pre-hook error now reaches the caller through
+      // McpHookExecutor.neoResponseToMcpResult, which normalizes it with toMcpHandlerError. With the
+      // class statically mocked that method returned null and the handler's message was lost; here
+      // the body is passed through so the test asserts on what the handler said.
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     private JSONObject buildActionArgs() throws Exception {
@@ -1898,6 +2001,7 @@ class McpToolRouterRouteTest {
     void actionRunsEntityHandlerHooks() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -1910,7 +2014,14 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(NeoResponse.ok(responseBody));
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      // ETP-5415: neo_action dispatches through NeoExtensionDispatcher, which on the MCP channel
+      // resolves via NeoHandlerLookup.byQualifier. Asserting on the handler itself rather than on
+      // McpHookExecutor is also the better test: what matters is that the customization ran, not
+      // which helper carried the call.
+      NeoHandler handler = mock(NeoHandler.class);
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+
         router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
 
         // The REST action path wraps the button action in the entity's NeoHandler
@@ -1920,9 +2031,8 @@ class McpToolRouterRouteTest {
         // logic the UI executes — e.g. AbstractOrderHeaderHandler's pre-CO total-discount
         // line, or GlJournalHeaderHandler's interception of the contextless classic
         // dispatch that would otherwise NPE inside FIN_AddPaymentFromJournal (ETP-4285).
-        hookMock.verify(() -> McpHookExecutor.resolveEntityHandler(entity));
-        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()));
-        hookMock.verify(() -> McpHookExecutor.runPostHook(any(), any(), any()));
+        verify(handler).handle(any(NeoContext.class));
+        verify(handler).afterHandle(any(NeoContext.class));
       }
     }
 
@@ -1945,9 +2055,11 @@ class McpToolRouterRouteTest {
       try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
         router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
 
+        // ETP-5558: the method comes from the declared contract; an AD button has none and stays
+        // on POST, exactly as before.
         hookMock.verify(() -> McpHookExecutor.buildActionHookContext(
             eq(SPEC_NAME), eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME),
-            any(), eq(tab), eq(entity)));
+            any(), eq(tab), eq(entity), eq("POST")));
       }
     }
 
@@ -1956,14 +2068,21 @@ class McpToolRouterRouteTest {
     void actionPreHookShortCircuitsWithoutFiringTheProcess() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
 
-      JSONObject hookResult = McpToolRouter.wrapAsErrorContent("Order has no lines");
+      // ETP-5415: neo_action dispatches through NeoExtensionDispatcher, which on the MCP channel
+      // resolves via NeoHandlerLookup.byQualifier. Asserting on the handler itself rather than on
+      // McpHookExecutor is also the better test: what matters is that the customization ran, not
+      // which helper carried the call.
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.handle(any(NeoContext.class)))
+          .thenReturn(NeoResponse.error(400, "Order has no lines"));
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.runPreHook(any(), any())).thenReturn(hookResult);
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
 
         JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
 
@@ -2011,6 +2130,7 @@ class McpToolRouterRouteTest {
     void actionPostHookReplacesResult() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -2022,12 +2142,19 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(NeoResponse.ok(responseBody));
 
-      JSONObject replaced = McpToolRouter.wrapAsTextContent("{\"processResult\":\"warning\"}");
+      // ETP-5415: neo_action dispatches through NeoExtensionDispatcher, which on the MCP channel
+      // resolves via NeoHandlerLookup.byQualifier. Asserting on the handler itself rather than on
+      // McpHookExecutor is also the better test: what matters is that the customization ran, not
+      // which helper carried the call.
+      JSONObject replacedBody = new JSONObject();
+      replacedBody.put("processResult", "warning");
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.runPreHook(any(), any())).thenReturn(null);
-        hookMock.when(() -> McpHookExecutor.runPostHook(any(), any(), any()))
-            .thenReturn(replaced);
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.handle(any(NeoContext.class))).thenReturn(null);
+      when(handler.afterHandle(any(NeoContext.class))).thenReturn(NeoResponse.ok(replacedBody));
+
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
 
         JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
 
@@ -2352,8 +2479,20 @@ class McpToolRouterRouteTest {
       NeoHandler handler = mock(NeoHandler.class);
       JSONObject handled = handlerResult();
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity)).thenReturn(handler);
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(handler);
+        // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
+        // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
+        // resolveEntityHandler + runPreHook; the seam moved, the assertion below did not.
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+            .thenReturn(handled);
         hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
 
         JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
@@ -2377,16 +2516,30 @@ class McpToolRouterRouteTest {
       JSONObject args = buildCrudArgs();
       args.put("id", "rec-1");
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity)).thenReturn(handler);
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(handler);
+        // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
+        // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
+        // resolveEntityHandler + runPreHook; the seam moved, the assertion below did not.
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+            .thenReturn(handled);
         hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
 
         JSONObject result = router.route("neo_get", args, READ_SCOPES);
 
         assertFalse(result.optBoolean("isError"), result.toString());
         assertTrue(contentText(result).contains("\"servedBy\":\"handler\""), contentText(result));
-        hookMock.verify(() -> McpHookExecutor.buildReadHookContext(anyString(), anyString(),
-            eq("rec-1"), isNull(), eq(entity), any()));
+        // The seam the router now calls is runReadProvider (ETP-5415, D13); the earlier assertion on
+        // buildReadHookContext could not hold once the whole McpHookExecutor is stubbed.
+        hookMock.verify(() -> McpHookExecutor.runReadProvider(eq(SPEC_NAME), eq(ENTITY_NAME),
+            eq("rec-1"), eq(entity), any()));
       }
     }
 
@@ -2401,8 +2554,15 @@ class McpToolRouterRouteTest {
     void listOnTablessUnhandledEntityStillRefuses() throws Exception {
       SFEntity entity = setupTablessEntity();
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity)).thenReturn(null);
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(null);
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(null);
 
         JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
 
