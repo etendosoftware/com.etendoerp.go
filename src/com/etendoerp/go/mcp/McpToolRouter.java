@@ -75,6 +75,7 @@ import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoParentTabFilterResolver;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
+import com.etendoerp.go.schemaforge.NeoReadPredicates;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -495,6 +496,19 @@ public class McpToolRouter {
       }
     }
 
+    // ETP-5009: the customization's read predicates, ANDed in exactly as the REST list GET and
+    // its ?_distinct= fetch do (NeoReadPredicates), so a row a customization excludes from the
+    // query is excluded here too — rather than only from the page its afterHandle was handed.
+    String readPredicate = NeoReadPredicates.resolve(McpHookExecutor.buildReadHookContext(
+        specName, entityName, null, adTab, sfEntity,
+        McpHookExecutor.buildReadProviderParams(filters, parentId, offset, limit, orderBy)),
+        NeoExtensionChannel.MCP);
+    if (StringUtils.isNotBlank(readPredicate)) {
+      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, NeoReadPredicates.and(
+          params.get(JsonConstants.WHERE_AND_FILTER_CLAUSE), readPredicate));
+      params.put(JsonConstants.USE_ALIAS, "true");
+    }
+
     String result = jsonService.fetch(params);
     JSONObject responseJson = new JSONObject(result);
 
@@ -747,8 +761,12 @@ public class McpToolRouter {
     // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
     // record ids before anything downstream touches them. A value that already looks like an id
     // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
+    // ETP-5535: a child's selectors also see its parent record, as neo_selectors' parentContext
+    // would carry it — a line's tax rule reads the header's order date.
     JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
-        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
+        McpSelectorContextHelper.buildSelectorContextParams(
+            McpParentSelectorContext.selectorArgs(sfEntity, dalEntity, filteredBody, null, null),
+            adTab), log);
     if (fkError != null) {
       return wrapAsErrorContent(fkError);
     }
@@ -1334,14 +1352,16 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    // ETP-5468: an entity of a report spec whose handler declares named actions
-    // (bank-reconciliation) has no field payload of its own — its AD tab is only there for role
-    // gating, and dumping that tab's columns and buttons would advertise actions this entity does
-    // not serve. Its schema IS the action catalog, whatever view was asked for.
-    // ETP-5558: a window entity's declared actions (the invoice payment actions) sit NEXT TO its AD
-    // buttons instead — merged into view:"actions" below; every other view is unchanged.
+    // ETP-5468: an entity whose handler declares named actions (bank-reconciliation) has no
+    // field payload of its own — its AD tab is only there for role gating, and dumping that tab's
+    // columns and buttons would advertise actions this entity does not serve. Its schema IS the
+    // action catalog, whatever view was asked for.
+    // ETP-5535 / ETP-5558: only when it has no field payload. A window entity whose customization
+    // declares actions next to its AD buttons (sales-quotation/quotation, the invoice payment
+    // actions) keeps its schema, and its declared actions join the AD buttons in view:"actions"
+    // below; every other view is unchanged.
     Map<String, NeoActionContract> declaredActions = McpDeclaredActions.of(sfEntity);
-    if (!declaredActions.isEmpty() && McpDeclaredActions.replacesSchema(sfEntity)) {
+    if (McpReportActionsSchema.isActionOnlyEntity(sfEntity, declaredActions)) {
       return wrapAsTextContent(
           McpActionsView.buildDeclaredResponse(specName, entityName, declaredActions,
               McpActionsSection.forEntity(sfEntity)));
@@ -1419,9 +1439,13 @@ public class McpToolRouter {
       // ETP-5368: union the AD/neo_defaults answer with the fields a wrapper handler resolves
       // itself. Both mean the same thing to the caller — "the server has this, do not ask the
       // user" — and only the second one knows that an address wrapper builds its own C_Location.
+      // ETP-5535: the second set also carries what the entity's customization declares the create
+      // callout cascade derives from another field of the body
+      // (NeoHandler#serverResolvedCreateFields). The neo_create pre-check deliberately does not skip
+      // those: it runs after the cascade, so they are present there unless the cascade failed.
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
-      serverResolved.addAll(NeoSelectorPolicy.serverResolvedFieldNames(sfEntity));
+      serverResolved.addAll(McpServerResolvedFields.forCreate(sfEntity));
       return wrapAsTextContent(McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
               entityAgentPrompt));
@@ -1722,8 +1746,16 @@ public class McpToolRouter {
     // This runs before any defaults pass has touched the body, so here a present uOM really is
     // the caller's own.
     injectLineUomIfApplicable(body, dalEntity, body.has(FIELD_UOM));
+    // ETP-5535: the same parent selector context as handleCreate. The op's parent exists by now
+    // (see above). It is read from op.parentId(), not from the body: a parentRef op carries its
+    // parent nowhere in the body yet — BatchService injects it only when the record is created —
+    // exactly the reason McpLinePriceInjector below takes op.parentId() too. A placeholder that is
+    // somehow still unresolved is skipped and the op resolves with the pre-ETP-5535 context.
     JSONObject fkError = McpFkResolver.resolveFkNames(body, dalEntity, adTab,
-        McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log,
+        McpSelectorContextHelper.buildSelectorContextParams(
+            McpParentSelectorContext.selectorArgs(sfEntity, dalEntity, body, op.parentId(),
+                value -> value.startsWith(BatchService.REF_PREFIX)),
+            adTab), log,
         value -> value.startsWith(BatchService.REF_PREFIX));
     if (fkError != null) {
       return McpBatchEnvelope.toMcpBatchPreflightFailure(fkError, op.index(), op.opId());

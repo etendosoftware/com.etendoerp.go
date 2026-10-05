@@ -228,7 +228,14 @@ final class McpConstants {
    * {@code injectCommercialAmounts}, which {@code neo_batch} gets through the shared path. That is
    * a defect on the <em>create</em> side, it is independent of this flag, and folding it in is its
    * own step — a create path that silently persists a zero gross amount is a data bug worth
-   * landing on its own evidence rather than inside a re-enablement.
+   * landing on its own evidence rather than inside a re-enablement. ETP-5528 left this shared path
+   * as it is: sales order and sales quotation lines get the amounts from their own customizations
+   * ({@code OrderLineDiscountSupport}) on every create, and so do sales invoice lines
+   * ({@code SalesInvoiceLineHandler} → {@code InvoiceLineAmountSupport}: {@code lineNetAmount} and
+   * {@code grossAmount}). Every other entity still does not on {@code neo_create}, as on
+   * {@code develop} — purchase invoice lines and purchase order lines included (a purchase invoice
+   * line still persists {@code lineNetAmount 0} / {@code grossAmount 0}) — see
+   * {@code neo-headless.md} §4.12.9 and §4.12.20.
    *
    * <p>The guard against this drifting again is {@code NeoExtensionParityTest} (E4), which asserts
    * over the execution trace that one customization is reached by every channel. It cannot see a

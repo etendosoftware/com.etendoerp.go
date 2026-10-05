@@ -25,6 +25,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.Date;
@@ -101,6 +102,7 @@ import com.etendoerp.go.onboarding.NdjsonOnboardingProgressSink;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
+import com.etendoerp.go.onboarding.OnboardingSampleDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
@@ -196,10 +198,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String HEADER_CACHE_CONTROL = "Cache-Control";
   private static final String VALUE_NO_STORE = "no-store";
   private static final String HEADER_SET_COOKIE = "Set-Cookie";
-  private static final String MSG_CSRF_VALIDATION_FAILED = "CSRF validation failed";
   private static final String PATH_SESSION = "/session";
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
+  private static final String FIELD_INCLUDE_SAMPLE_DATA = "includeSampleData";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
   private static final String HEADER_ORIGIN = "Origin";
@@ -253,6 +255,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
+  // ETP-5426: the optional sample-data step. "warning" is its failure status: the tenant is
+  // already committed and usable, so a sample-data failure never becomes a provisioning "error".
+  private static final String PROGRESS_SAMPLE_DATA = "sampleData";
+  private static final String PROGRESS_DONE = "done";
+  private static final String PROGRESS_WARNING = "warning";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
@@ -296,7 +303,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
-      "fiscalIdValue", FIELD_ADDRESS, "sector" };
+      "fiscalIdValue", FIELD_ADDRESS, "sector", FIELD_INCLUDE_SAMPLE_DATA };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
@@ -351,6 +358,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingForceTestModeService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
+  OnboardingSampleDataService onboardingSampleDataService = new OnboardingSampleDataService();
   PooledTenantClaimService pooledTenantClaimService = new PooledTenantClaimService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
@@ -2426,7 +2434,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     OBContext.setAdminMode(true);
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-      writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, sessionAuth.getRefusalMessage());
       return null;
     }
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.UNAUTHENTICATED) {
@@ -2619,7 +2627,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (form != null) {
       for (String field : ONBOARDING_DRAFT_FORM_FIELDS) {
         Object value = form.opt(field);
-        if (value instanceof String) {
+        // Every draft field is text except the sample-data opt-in (ETP-5426), a checkbox. Dropping
+        // a Boolean here would silently lose the choice across a logout, not fail.
+        if (value instanceof String
+            || (value instanceof Boolean && FIELD_INCLUDE_SAMPLE_DATA.equals(field))) {
           cleanForm.put(field, value);
         }
       }
@@ -3364,13 +3375,94 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throw new IllegalStateException("Could not initialize demo trial lifecycle");
     }
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
+    if (!paidUpgrade) {
+      openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
+    }
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
+    // ETP-5426: after the commit (a failure here can no longer undo the tenant) and before the
+    // costing schedule is activated (so the background costing never races the import).
+    importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
+        paidUpgrade);
     onboardingCostingScheduleService.activateSchedule(clientId);
     sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
     sendProgress(writer, "finalize", "done", "Environment ready");
     sendFinalResult(writer, true, "Environment created successfully");
     return true;
+  }
+
+  /**
+   * ETP-5575 — opens a demo's fiscal periods through the end of its trial, pooled or classic. The
+   * chain only opens through the month the tenant was built, so a signup at the end of a month, or
+   * a pooled tenant built in an earlier month, could not post during the rest of its trial.
+   *
+   * <p>Runs after the onboarding commit, in its own transaction, and never fails the onboarding:
+   * the tenant is already committed with the chain's window, so on any failure (the commit
+   * included, which is why it sits inside the try) this step rolls back only itself and the
+   * tenant keeps today's behaviour. The started/done markers make a step that never finished
+   * visible in the logs.
+   */
+  void openDemoTrialPeriodsBestEffort(String clientId, String orgId,
+      OnboardingProvisioningChain.AdminContext adminContext) {
+    log.info("ETP-5575 demo period window started for client {}", clientId);
+    try {
+      onboardingPeriodControlService.openDemoTrialWindow(clientId, orgId,
+          adminContext.adminUserId, adminContext.adminRoleId, resolveTrialStart(clientId),
+          tenantEnvironmentLifecycleService.configuration().getTrialDays());
+      EtendoGoDalHelper.commitDalChanges("demo period window", log);
+      log.info("ETP-5575 demo period window done for client {}", clientId);
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.error("ETP-5575 demo period window failed for client {}", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+    }
+  }
+
+  /**
+   * ETP-5426 — imports the optional sample data into the tenant just committed, when the request
+   * opted in and is eligible (see {@link OnboardingSampleDataService#isEligible}).
+   *
+   * <p>Runs in its own transaction, after the onboarding commit, so it applies equally to a tenant
+   * claimed from the pool and to a classic one. Best effort by contract: any failure is rolled
+   * back — discarding only the sample data — and reported as a {@code warning} progress line; the
+   * onboarding still ends with a successful result.
+   */
+  void importSampleDataBestEffort(PrintWriter writer, String clientId, String orgId,
+      OnboardingProvisioningChain.AdminContext adminContext, OnboardingRequestData request,
+      boolean paidUpgrade) {
+    if (!OnboardingSampleDataService.isEligible(request.includeSampleData, paidUpgrade,
+        request.countryCode, request.currencyIso)) {
+      if (request.includeSampleData) {
+        log.info("Sample data requested but not eligible for client {} (paid={}, country={}, "
+            + "currency={}); skipping", clientId, paidUpgrade, request.countryCode,
+            request.currencyIso);
+      }
+      return;
+    }
+    sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_IN_PROGRESS, "Loading sample data...");
+    try {
+      onboardingSampleDataService.importSampleData(clientId, orgId, adminContext.adminUserId,
+          adminContext.adminRoleId);
+      EtendoGoDalHelper.commitDalChanges("onboarding sample data", log);
+      sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_DONE, "Sample data loaded");
+    } catch (Exception e) { // NOSONAR — best effort by contract: the tenant must survive any failure.
+      log.error("Sample data import failed for client {}; the tenant is kept without it",
+          clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding sample data", e, log);
+      sendProgress(writer, PROGRESS_SAMPLE_DATA, PROGRESS_WARNING,
+          "Sample data could not be loaded");
+    }
+  }
+
+  /**
+   * The demo's stored trial start ({@code ETGO_DemoTrialStartedAt}), which {@code markDemoReady}
+   * keeps from the first successful onboarding, so a resumed demo keeps its original window. Falls
+   * back to now when it cannot be read.
+   */
+  private Instant resolveTrialStart(String clientId) {
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        tenantEnvironmentLifecycleService.resolve(clientId);
+    Instant startedAt = snapshot != null ? snapshot.getTrialStartedAt() : null;
+    return startedAt != null ? startedAt : Instant.now();
   }
 
   /**
@@ -3927,6 +4019,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      // ETP-5426: opt-in, off unless the form explicitly sends true.
+      data.includeSampleData = body.optBoolean(FIELD_INCLUDE_SAMPLE_DATA, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -4595,7 +4689,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
       if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, auth.getRefusalMessage());
         return;
       }
       if (auth.isAuthenticated()) {
@@ -4620,7 +4714,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Body: { "userId": "..." }
    * Enters an environment: verifies the user belongs to the account, resolves the full context
    * (user/role/client/org/warehouse) and rotates the session with that context stored. Returns
-   * { status, environment, roleList, csrfToken } plus a rotated cookie. Unsafe method → CSRF required.
+   * { status, environment, roleList, csrfToken } plus a rotated cookie. Re-entering the environment
+   * the session already holds keeps the session, its cookies and its CSRF token (ETP-5550). Unsafe
+   * method → CSRF required.
    */
   private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -4646,7 +4742,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
       if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, auth.getRefusalMessage());
         return;
       }
       if (!auth.isAuthenticated()) {
@@ -4677,6 +4773,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      List<String> previousContext = environmentContextOf(sessionRecord);
       // Reuse the platform's context derivation: generate the environment JWT and read its claims,
       // so the session stores exactly the user/role/client/org/warehouse the JWT layer would.
       DecodedJWT context = SecureWebServicesUtils.decodeToken(
@@ -4688,24 +4785,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sessionRecord.setCtxOrgId(requestedOrgId.isEmpty() ? generatedOrgId : requestedOrgId);
       sessionRecord.setWarehouseId(resolveWarehouseId(requestedOrgId, generatedOrgId, context));
 
-      IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
-      if (rotated == null) {
+      IssuedGoSession entered = rotateUnlessReentry(sessionRecord,
+          previousContext.equals(environmentContextOf(sessionRecord)), response);
+      if (entered == null) {
         writeError(response, HttpServletResponse.SC_CONFLICT,
             "Session changed concurrently; restore and retry");
         return;
       }
 
-      setSessionCookies(response, rotated);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put("environment", buildSessionEnvironment(rotated.getRecord()));
+      result.put("environment", buildSessionEnvironment(entered.getRecord()));
       result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
-      result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      result.put(FIELD_CSRF_TOKEN, entered.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
-      recordCookieEnvironmentLogin(rotated.getRecord(), startNanos);
+      recordCookieEnvironmentLogin(entered.getRecord(), startNanos);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
       log.error("Database error during environment switch", e);
@@ -4775,6 +4872,38 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Requested role is not available to this user");
     }
     return role;
+  }
+
+  /**
+   * ETP-5550 — rotating on an environment entry guards a privilege change; re-entering the
+   * environment the session already holds is none, and rotating anyway revokes the CSRF token every
+   * other open tab still holds (the onboarding re-enters on its own whenever it mounts with a live
+   * session). So a re-entry keeps the session as it is.
+   *
+   * @param sessionRecord the authenticated session, already carrying the entered context
+   * @param reentry       whether that context is the one the session held before
+   * @param response      where a rotation sets its new cookies
+   * @return on a re-entry, the current session with no plaintext tokens (its cookies are left
+   *     untouched) and its current CSRF token; otherwise the rotated session, its cookies set; or
+   *     {@code null} when a concurrent rotation won
+   */
+  private IssuedGoSession rotateUnlessReentry(GoSessionRecord sessionRecord, boolean reentry,
+      HttpServletResponse response) {
+    if (reentry) {
+      return new IssuedGoSession(null, null, sessionRecord.getCsrfToken(), sessionRecord);
+    }
+    IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
+    if (rotated != null) {
+      setSessionCookies(response, rotated);
+    }
+    return rotated;
+  }
+
+  /** The environment a session is in; any difference in it is a privilege change. */
+  private static List<String> environmentContextOf(GoSessionRecord sessionRecord) {
+    return Arrays.asList(sessionRecord.getUserId(), sessionRecord.getRoleId(),
+        sessionRecord.getCtxClientId(), sessionRecord.getCtxOrgId(),
+        sessionRecord.getWarehouseId());
   }
 
   /**
@@ -4915,7 +5044,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
 
       if (!GoSessionSecurity.isOriginAllowed(request)) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            GoSessionSecurity.MSG_ORIGIN_NOT_ALLOWED);
         return;
       }
       String rawRefresh = extractRefreshToken(request);
@@ -5134,6 +5264,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Resolved only from the account-scoped checkout row; onboarding never trusts a browser value.
     private String demoClientId;
     private String upgradeAction;
+    // ETP-5426: the signup form's "include sample data" opt-in. Honoured only when
+    // OnboardingSampleDataService.isEligible accepts the request.
+    private boolean includeSampleData;
   }
 
 }

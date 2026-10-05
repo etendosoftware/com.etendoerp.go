@@ -1063,10 +1063,10 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_schema replaces only when replacesSchema says so, and merges otherwise")
+    @DisplayName("neo_schema replaces only when isActionOnlyEntity says so, and merges otherwise")
     void schemaMergesForWindows() {
       String body = method("handleSchema");
-      assertTrue(Pattern.compile("McpDeclaredActions\\s*\\.\\s*replacesSchema\\s*\\(")
+      assertTrue(Pattern.compile("McpReportActionsSchema\\s*\\.\\s*isActionOnlyEntity\\s*\\(")
           .matcher(body).find());
       Matcher declared = Pattern.compile("(\\w+)\\s*=\\s*McpDeclaredActions\\s*\\.\\s*of\\s*\\(")
           .matcher(body);

@@ -62,6 +62,7 @@ import com.etendoerp.go.schemaforge.PaymentInvoiceApplications;
 import com.etendoerp.go.schemaforge.PaymentRegistrationService;
 import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
 import com.etendoerp.go.schemaforge.PisPaymentService;
+import com.etendoerp.go.schemaforge.ReconciledPaymentReactivation;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
@@ -321,18 +322,36 @@ public class ReactivatePaymentHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Reactivates the payment through the module's {@code RE} action. For a RECONCILED payment
+   * ({@code RPPC}) the delegation is bracketed by {@link ReconciledPaymentReactivation} (ETP-5547):
+   * {@code prepare} captures the matched bank-statement line and aligns the payment status with its
+   * method's paid level so Core restores the invoice's paid amounts; {@code finish} clears the
+   * line's matching leftovers and re-collapses a split line once the reactivation went through, or
+   * undoes the status change when it did not. When the delegation (or {@code finish}'s flush of
+   * the reactivation's writes) throws, {@code finishAfterFailure} rolls the possibly-aborted
+   * transaction back before compensating, so the error answer never sits on top of an aborted
+   * transaction. All three are no-ops for an unreconciled payment. The {@code RE} semantics are
+   * unchanged: the reactivated payment keeps its invoice schedule detail, and the UI routes the
+   * user to edit that draft.
+   */
   private NeoResponse handleReactivate(NeoContext context) {
     NeoResponse notOwned = requireOwnedPayment(context);
     if (notOwned != null) {
       return notOwned;
     }
+    ReconciledPaymentReactivation.Prepared reconciled = null;
     try {
       clearTransferErrorFlag(context.getRecordId());
+      reconciled = ReconciledPaymentReactivation.prepare(context.getRecordId());
       JSONObject params = new JSONObject();
       params.put(ACTION_PARAM, REACTIVATE_VALUE);
-      return NeoButtonActionHelper.executeButtonActionCore(
+      NeoResponse result = NeoButtonActionHelper.executeButtonActionCore(
           context.getSfEntity(), context.getRecordId(), context.getFieldName(), params);
+      ReconciledPaymentReactivation.finish(reconciled);
+      return result;
     } catch (Exception e) {
+      ReconciledPaymentReactivation.finishAfterFailure(reconciled);
       log.error("Error reactivating payment for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Payment reactivation failed: " + e.getMessage());
     }
