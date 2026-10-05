@@ -101,6 +101,36 @@ public class NeoContext {
     return recordId;
   }
 
+  /**
+   * ETP-5009: the id core will read this request by, resolved the way
+   * {@code NeoCrudHandler#buildDalParams} hands it to core — the path id when there is one (it is
+   * authoritative, ETP-5195), otherwise the query-string {@code id}. So
+   * {@code GET /sws/neo/{spec}/{entity}?id=X} is a read by id too, not a list read.
+   *
+   * @return the id to read by, or {@code null} when the request names none
+   */
+  public String getReadId() {
+    if (recordId != null) {
+      return recordId;
+    }
+    return queryParams != null ? queryParams.get("id") : null;
+  }
+
+  /**
+   * ETP-5009: whether this request is a {@code GET} by id (path or query-string {@code id}, see
+   * {@link #getReadId}). The single definition shared by the list read predicates and by the
+   * handlers that post-filter a single-record read; a blank id is a list read.
+   *
+   * @return {@code true} for a {@code GET} naming a non-blank id
+   */
+  public boolean isReadById() {
+    if (!"GET".equals(httpMethod)) {
+      return false;
+    }
+    String readId = getReadId();
+    return readId != null && !readId.trim().isEmpty();
+  }
+
   public JSONObject getRequestBody() {
     return requestBody;
   }

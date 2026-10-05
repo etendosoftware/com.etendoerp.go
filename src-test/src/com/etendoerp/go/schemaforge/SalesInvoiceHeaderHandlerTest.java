@@ -32,6 +32,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -59,11 +60,15 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
 /**
@@ -208,6 +213,67 @@ public class SalesInvoiceHeaderHandlerTest {
   public void testAfterHandleReturnsNullForNonCrudEndpoint() {
     NeoContext ctx = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.SELECTOR).build();
     assertNull(new SalesInvoiceHeaderHandler().afterHandle(ctx));
+  }
+
+  // ── ETP-5547: action POSTs must not re-sync the rate row of a processed invoice ──
+
+  private static final String ETP5547_INVOICE = "inv-5547";
+
+  /**
+   * Runs {@code afterHandle} for a header ACTION POST on a processed, foreign-currency invoice
+   * with an exchange-rate override, and asserts the conversion-rate sync was never reached.
+   * Before ETP-5547 every POST re-synced the invoice's rate row; on a posted invoice Core's
+   * trigger rejected that write and the aborted transaction silently rolled back the confirmed
+   * payment (registerPayment) or the clone (cloneRecord) after a 2xx had been answered.
+   */
+  private static void assertActionDoesNotSyncConversionRate(String actionName) throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .specName("sales-invoice").entityName("header")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName(actionName)
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, ETP5547_INVOICE)).thenReturn(invoice);
+      when(invoice.getId()).thenReturn(ETP5547_INVOICE);
+      when(invoice.isProcessed()).thenReturn(true);
+      when(invoice.getPosted()).thenReturn("N");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-5547");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-5547");
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("29.39"));
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-5547")).thenReturn("eur-5547");
+
+      new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  @Test
+  public void testAfterHandleDoesNotSyncConversionRateOnRegisterPaymentAction() throws Exception {
+    assertActionDoesNotSyncConversionRate("registerPayment");
+  }
+
+  @Test
+  public void testAfterHandleDoesNotSyncConversionRateOnCloneRecordAction() throws Exception {
+    assertActionDoesNotSyncConversionRate("cloneRecord");
   }
 
   /**
