@@ -1665,6 +1665,22 @@ Wave 3 of the MCP improvements adds three agent-ergonomics features on top of th
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
 exact same responses as before.
 
+#### MCP resource URIs — `etendo://`, with `neo://` deprecated (ETP-5602)
+
+`resources/list` (`McpResourceProvider`) advertises:
+
+| URI | Content |
+|-----|---------|
+| `etendo://specs` | every active spec the role can read (name, type, description) |
+| `etendo://specs/{specName}` | the spec with its entities and fields |
+| `etendo://specs/{specName}/{entityName}` | one entity: fields, types, FK references |
+| `etendo://processes/{specName}` | a process spec's parameters and description |
+
+Until ETP-5602 the same URIs used the `neo://` scheme. `resources/read` still accepts it as an
+alias — `neo://specs/sales-order` reads exactly what `etendo://specs/sales-order` reads — so a
+client that cached the old URIs keeps working. Only `etendo://` is advertised. Reading a resource
+needs the `etendo:read` scope (or its `neo:read` alias, see §4.1.1).
+
 #### 4.12.1 `etendo_schema({view:"actions"})` — actions-only projection (IMP-6)
 
 `etendo_schema` normally returns the full field dump for an entity — for a compliance-heavy window this
@@ -3878,7 +3894,7 @@ Attaching it to a record stays an explicit `etendo_update` of the image field. T
 generic across every image field and keeps the audit trail obvious.
 
 Design record, including the rejected alternatives and the phases not yet built (the read path:
-a `neo://image/{id}` resource, `resource_link` in `etendo_get`, and a downscaling `etendo_get_image`):
+a `etendo://image/{id}` resource, `resource_link` in `etendo_get`, and a downscaling `etendo_get_image`):
 `docs/plans/2026-09-07-mcp-image-field-support-plan.md`.
 
 ### 4.14 Record Links in the App (ETP-5200)

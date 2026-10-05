@@ -232,9 +232,9 @@ protocol gap (SEP-2356), not something we can close in Etendo.
 ### Layer C — `etendo_get_image` + a resource (the read path)
 
 - `etendo_get` on a record with an image field returns the id today. Additionally emit a
-  `resource_link` to `neo://image/{imageId}` so a client can fetch it on demand without
+  `resource_link` to `etendo://image/{imageId}` so a client can fetch it on demand without
   the agent paying for it.
-- `McpResourceProvider`: register `neo://image/{id}`, returning a binary resource
+- `McpResourceProvider`: register `etendo://image/{id}`, returning a binary resource
   (`blob` = base64, `mimeType` from `AD_Image.Mimetype`) — the spec-standard way to move
   binaries server→client.
 - `etendo_get_image({ imageId, max_dimension?: 512 })` → MCP `ImageContent`
@@ -331,7 +331,7 @@ Still open:
 | **P1** | Layer A (type mapping + schema description + self-correctable write error) | `.go` (+ regenerate `contract.mcp.json` in schema_forge) | very low |
 | **P2** | Extract `NeoImageHelper.createImage` + MIME sniff; `etendo_upload_image` base64 fallback (256 KB cap) | `.go` | low |
 | **P3** | `etendo_request_image_upload` + one-shot upload endpoint + in-memory ticket store | `.go` | medium (new endpoint + security review) |
-| **P4** | Layer C: `neo://image/{id}` resource + `resource_link` in `etendo_get` | `.go` | low |
+| **P4** | Layer C: `etendo://image/{id}` resource + `resource_link` in `etendo_get` | `.go` | low |
 | **P5** | `etendo_get_image` returning downscaled `ImageContent` | `.go` | low (watch payload) |
 
 P1+P2 is the whole write path and closes the reported gap on its own. P3/P4 are the
@@ -377,7 +377,7 @@ read path and can ship independently.
 - `src/com/etendoerp/go/mcp/McpSchemaCreateView.java`, `McpDefaultsView.java` — parity
 - `src/com/etendoerp/go/mcp/ToolRegistry.java`, `McpToolRouter.java` — new tools
 - `src/com/etendoerp/go/mcp/McpWriteRequestSupport.java` — image-id validation + error
-- `src/com/etendoerp/go/mcp/McpResourceProvider.java` — `neo://image/{id}`
+- `src/com/etendoerp/go/mcp/McpResourceProvider.java` — `etendo://image/{id}`
 - `src/com/etendoerp/go/schemaforge/util/NeoImageHelper.java` — extract `createImage`,
   add the MIME sniff + cap shared by servlet, tool and ticket endpoint
 - `src/com/etendoerp/go/schemaforge/NeoBuiltInEndpointHandler.java` — upload-ticket route
