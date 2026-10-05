@@ -21,12 +21,17 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -447,6 +452,176 @@ public class OnboardingPeriodControlServiceTest {
   }
 
   // ---------------------------------------------------------------------------
+  // 12. ETP-5575 — demo trial window (open-only, through the trial end)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testDemoWindowCrossesIntoTheNextMonthAndLeavesLaterMonthsAlone() {
+    Period sep = period("2026-09-01", "2026-09-30", "C");
+    Period oct = period("2026-10-01", "2026-10-31", "O");
+    Period nov = period("2026-11-01", "2026-11-30", "O");
+    PeriodControl sepControl = control("O");
+    PeriodControl octControl = control("N");
+    PeriodControl novControl = control("N");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(sep, oct, nov);
+    service.controlsByPeriod.put(sep, Arrays.asList(sepControl));
+    service.controlsByPeriod.put(oct, Arrays.asList(octControl));
+    service.controlsByPeriod.put(nov, Arrays.asList(novControl));
+
+    runWithDal(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        Instant.parse("2026-09-30T10:00:00Z"), 15));
+
+    assertEquals("O", octControl.getPeriodStatus());
+    verify(octControl).setOpenClose("C");
+    verify(oct).setOpenClose("C");
+    assertEquals("N", novControl.getPeriodStatus());
+    verify(nov, never()).setOpenClose("C");
+    verify(sepControl, never()).setPeriodStatus("O");
+    assertTrue("the window must be flushed", service.flushed);
+  }
+
+  @Test
+  public void testDemoWindowOpensEveryDuplicateCopyOfAPeriod() {
+    Period sep = period("2026-09-01", "2026-09-30", "C");
+    PeriodControl datasetCopy = control("O");
+    PeriodControl orgReadyCopy = control("N");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(sep);
+    service.controlsByPeriod.put(sep, Arrays.asList(datasetCopy, orgReadyCopy));
+
+    runWithDal(() -> service.openNeverOpenedPeriodsThrough(service.periods, date("2026-10-15")));
+
+    assertEquals("O", datasetCopy.getPeriodStatus());
+    assertEquals("O", orgReadyCopy.getPeriodStatus());
+    verify(orgReadyCopy).setPeriodAction("N");
+    verify(orgReadyCopy).setOpenClose("C");
+    // Already flagged open: no redundant save of the period.
+    verify(sep, never()).setOpenClose("O");
+  }
+
+  @Test
+  public void testDemoWindowNeverTouchesUserClosedRows() {
+    Period aug = period("2026-08-01", "2026-08-31", "O");
+    PeriodControl closed = control("C");
+    PeriodControl permanentlyClosed = control("P");
+    PeriodControl neverOpened = control("N");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(aug);
+    service.controlsByPeriod.put(aug, Arrays.asList(closed, permanentlyClosed, neverOpened));
+
+    runWithDal(() -> service.openNeverOpenedPeriodsThrough(service.periods, date("2026-10-15")));
+
+    assertEquals("C", closed.getPeriodStatus());
+    assertEquals("P", permanentlyClosed.getPeriodStatus());
+    assertEquals("O", neverOpened.getPeriodStatus());
+    verify(closed, never()).setOpenClose("C");
+    verify(permanentlyClosed, never()).setOpenClose("C");
+    // Not every row is open, so the period keeps its open-available flag.
+    verify(aug, never()).setOpenClose("C");
+  }
+
+  @Test
+  public void testDemoWindowBeyondTheCalendarOpensWhatExists() {
+    Period dec = period("2026-12-01", "2026-12-31", "O");
+    PeriodControl decControl = control("N");
+    RealLogicService service = new RealLogicService();
+    service.periods = Arrays.asList(dec);
+    service.controlsByPeriod.put(dec, Arrays.asList(decControl));
+
+    runWithDal(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        Instant.parse("2026-12-20T10:00:00Z"), 15));
+
+    assertEquals("O", decControl.getPeriodStatus());
+    verify(dec).setOpenClose("C");
+  }
+
+  @Test
+  public void testDemoWindowPrefersTheOrganizationCalendar() {
+    RealLogicService service = new RealLogicService();
+    Calendar orgCalendar = mock(Calendar.class);
+    when(service.organization.getCalendar()).thenReturn(orgCalendar);
+
+    runWithDal(() -> service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+        Instant.parse("2026-10-01T10:00:00Z"), 15));
+
+    assertSame(orgCalendar, service.lastResolvedCalendar);
+  }
+
+  @Test
+  public void testDemoWindowFailsWithoutATrialStart() {
+    RealLogicService service = new RealLogicService();
+    try {
+      service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1", null, 15);
+      fail("Expected a missing trial start to fail");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("Missing trial start"));
+    }
+  }
+
+  @Test
+  public void testDemoWindowFailsWhenOrganizationNotFoundAndRestoresContext() {
+    RealLogicService service = new RealLogicService();
+    service.organizationResolvesToNull = true;
+    OBContext previous = mock(OBContext.class);
+    OBContext.setOBContext(previous);
+
+    try {
+      service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+          Instant.parse("2026-10-01T10:00:00Z"), 15);
+      fail("Expected a missing organization to fail");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("Organization not found for demo period window"));
+    }
+    assertSame(previous, OBContext.getOBContext());
+  }
+
+  @Test
+  public void testDemoWindowFailsWhenNoCalendarIsFound() {
+    RealLogicService service = new RealLogicService();
+    service.calendarResolvesToNull = true;
+
+    try {
+      service.openDemoTrialWindow("CLIENT-1", "ORG-1", "USER-1", "ROLE-1",
+          Instant.parse("2026-10-01T10:00:00Z"), 15);
+      fail("Expected a missing calendar to fail");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("No calendar found for demo period window"));
+    }
+  }
+
+  private static void runWithDal(Runnable action) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      action.run();
+    }
+  }
+
+  private static Date date(String isoDate) {
+    return Date.from(LocalDate.parse(isoDate).atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  private static Period period(String start, String end, String openClose) {
+    Period period = mock(Period.class);
+    when(period.getStartingDate()).thenReturn(date(start));
+    when(period.getEndingDate()).thenReturn(date(end));
+    when(period.getOpenClose()).thenReturn(openClose);
+    return period;
+  }
+
+  /** A control row whose status getter reflects what the service sets, like a real entity. */
+  private static PeriodControl control(String status) {
+    PeriodControl control = mock(PeriodControl.class);
+    String[] current = { status };
+    when(control.getPeriodStatus()).thenAnswer(invocation -> current[0]);
+    doAnswer(invocation -> {
+      current[0] = invocation.getArgument(0);
+      return null;
+    }).when(control).setPeriodStatus(anyString());
+    return control;
+  }
+
+  // ---------------------------------------------------------------------------
   // Test seam subclass
   // ---------------------------------------------------------------------------
 
@@ -548,6 +723,12 @@ public class OnboardingPeriodControlServiceTest {
     Date fixedNow = NOW;
     List<Period> periods = java.util.Collections.emptyList();
     final java.util.Map<Period, List<PeriodControl>> controlsByPeriod = new java.util.HashMap<>();
+    final Organization organization = mock(Organization.class);
+    final Calendar importedCalendar = mock(Calendar.class);
+    boolean organizationResolvesToNull;
+    boolean calendarResolvesToNull;
+    boolean flushed;
+    Calendar lastResolvedCalendar;
 
     @Override
     protected Date currentDate() {
@@ -555,7 +736,23 @@ public class OnboardingPeriodControlServiceTest {
     }
 
     @Override
+    protected Organization resolveOrganization(String orgId) {
+      return organizationResolvesToNull ? null : organization;
+    }
+
+    @Override
+    protected Calendar resolveImportedCalendar(Organization org) {
+      return calendarResolvesToNull ? null : importedCalendar;
+    }
+
+    @Override
+    protected void flushChanges() {
+      flushed = true;
+    }
+
+    @Override
     protected List<Period> resolveCalendarPeriods(Calendar calendar) {
+      lastResolvedCalendar = calendar;
       return periods;
     }
 

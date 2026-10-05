@@ -232,7 +232,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   }
 
   /**
-   * {@code isUnsafeRequestAuthorized} requires the allowed {@code Origin} AND the CSRF token — a
+   * The session authenticator requires the allowed {@code Origin} AND the CSRF token — a
    * correct {@code X-Go-CSRF} does not compensate for a disallowed origin, so this must fail on its
    * own, distinct from the CSRF-missing tests above (which use an allowed origin).
    */

@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -30,6 +31,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -43,6 +47,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
@@ -50,6 +55,7 @@ import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
@@ -57,10 +63,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentPropDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.ReconciliationHandler;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
 /**
@@ -1297,6 +1306,251 @@ public class ReactivatePaymentHandlerTest {
       new ReactivatePaymentHandler().handle(actionCtx("etprReactivatePayment", "pay-ok"));
 
       verify(payment, never()).setStatus(anyString());
+    }
+  }
+
+  // ── ETP-5547: Reactivate of a reconciled (RPPC) payment ──────────────────────────────────
+
+  private static final String REACTIVATE_ACTION = "etprReactivatePayment";
+  private static final String NORMALIZE_METHOD = "normalizeReactivatedMatchGroup";
+  private static final String ETP5547_PAYMENT = "pay-5547";
+  private static final String ETP5547_LINE = "bsl-5547";
+  private static final String STATUS_RECONCILED = "RPPC";
+  private static final String STATUS_WITHDRAWN_NOT_CLEARED = "PWNC";
+
+  /**
+   * A stateful payment / transaction / bank-statement-line triple. The delegated reactivation
+   * ({@code NeoButtonActionHelper.executeButtonActionCore}, statically mocked) flips
+   * {@link #reactivated} when it succeeds, and the mocks answer from that flag the way the
+   * database would afterwards: the payment is no longer processed, its transaction no longer
+   * belongs to a reconciliation, and the statement line lost its transaction pointer.
+   */
+  private static final class ReactivateScenario {
+    final FIN_Payment payment = mock(FIN_Payment.class);
+    final FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    final FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    final OBDal dal = mock(OBDal.class);
+    final Connection conn = mock(Connection.class);
+    final Savepoint savepoint = mock(Savepoint.class);
+    final org.hibernate.Session session = mock(org.hibernate.Session.class);
+    final PreparedStatement statusPs = mock(PreparedStatement.class);
+    final OBContext obContext = mock(OBContext.class);
+    final org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+    boolean reactivated;
+    String status;
+    String statusAtDelegation;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ReactivateScenario wireScenario(MockedStatic<OBDal> obDalMock,
+      MockedStatic<OBContext> ctxMock, MockedStatic<NeoButtonActionHelper> actionMock,
+      String initialStatus, boolean reconciled, boolean reactivationSucceeds) throws Exception {
+    ReactivateScenario sc = new ReactivateScenario();
+    sc.status = initialStatus;
+    obDalMock.when(OBDal::getInstance).thenReturn(sc.dal);
+    // ReconciledPaymentReactivation.writeStatus: raw JDBC UPDATE of fin_payment.status, stamped
+    // with the context user, then mirrored onto the entity (setStatus below keeps sc.status).
+    ctxMock.when(OBContext::getOBContext).thenReturn(sc.obContext);
+    when(sc.obContext.getUser()).thenReturn(sc.user);
+    when(sc.user.getId()).thenReturn("user-5547");
+    when(sc.conn.prepareStatement(anyString())).thenReturn(sc.statusPs);
+    when(sc.dal.getConnection()).thenReturn(sc.conn);
+    when(sc.dal.getSession()).thenReturn(sc.session);
+    when(sc.conn.setSavepoint()).thenReturn(sc.savepoint);
+
+    when(sc.payment.getId()).thenReturn(ETP5547_PAYMENT);
+    when(sc.payment.getStatus()).thenAnswer(inv -> sc.status);
+    Mockito.doAnswer(inv -> {
+      sc.status = inv.getArgument(0);
+      return null;
+    }).when(sc.payment).setStatus(anyString());
+    when(sc.payment.isProcessed()).thenAnswer(inv -> !sc.reactivated);
+    when(sc.dal.get(FIN_Payment.class, ETP5547_PAYMENT)).thenReturn(sc.payment);
+
+    when(sc.trx.getFinPayment()).thenReturn(sc.payment);
+    when(sc.trx.getReconciliation()).thenAnswer(
+        inv -> reconciled && !sc.reactivated ? mock(FIN_Reconciliation.class) : null);
+    List<FIN_BankStatementLine> lines = reconciled
+        ? Collections.singletonList(sc.line)
+        : Collections.<FIN_BankStatementLine>emptyList();
+    when(sc.trx.getFINBankStatementLineList()).thenReturn(lines);
+    when(sc.payment.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(sc.trx));
+
+    // Criteria restrictions are not evaluated by a mock: answer as the DB would for
+    // "this payment's transaction that belongs to a reconciliation".
+    OBCriteria<FIN_FinaccTransaction> trxCrit = mock(OBCriteria.class, Mockito.RETURNS_SELF);
+    when(trxCrit.uniqueResult()).thenAnswer(
+        inv -> reconciled && !sc.reactivated ? sc.trx : null);
+    when(trxCrit.list()).thenAnswer(inv -> reconciled && !sc.reactivated
+        ? Collections.singletonList(sc.trx)
+        : Collections.emptyList());
+    when(sc.dal.createCriteria(FIN_FinaccTransaction.class)).thenReturn(trxCrit);
+
+    when(sc.line.getId()).thenReturn(ETP5547_LINE);
+    when(sc.line.getFinancialAccountTransaction()).thenAnswer(
+        inv -> reconciled && !sc.reactivated ? sc.trx : null);
+    when(sc.dal.get(FIN_BankStatementLine.class, ETP5547_LINE)).thenReturn(sc.line);
+
+    actionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+        any(), anyString(), anyString(), any())).thenAnswer(inv -> {
+          sc.statusAtDelegation = sc.status;
+          if (!reactivationSucceeds) {
+            return NeoResponse.error(500, "Process failed");
+          }
+          sc.reactivated = true;
+          return NeoResponse.ok(new JSONObject());
+        });
+    return sc;
+  }
+
+  /** Did any constructed ReconciliationHandler get asked to normalize {@code line}? */
+  private static boolean normalized(MockedConstruction<ReconciliationHandler> handlers,
+      FIN_BankStatementLine line) {
+    return handlers.constructed().stream()
+        .flatMap(h -> Mockito.mockingDetails(h).getInvocations().stream())
+        .anyMatch(inv -> NORMALIZE_METHOD.equals(inv.getMethod().getName())
+            && inv.getArguments().length == 1 && inv.getArguments()[0] == line);
+  }
+
+  /** Did any constructed ReconciliationHandler get asked to normalize anything at all? */
+  private static boolean normalizedAnything(MockedConstruction<ReconciliationHandler> handlers) {
+    return handlers.constructed().stream()
+        .flatMap(h -> Mockito.mockingDetails(h).getInvocations().stream())
+        .anyMatch(inv -> NORMALIZE_METHOD.equals(inv.getMethod().getName()));
+  }
+
+  /**
+   * Classic's un-match ({@code APRM_MatchingUtility.unmatch}) leaves the bank statement line
+   * clean and re-joins lines Core split for a 1:N match. GO's Reactivate of a reconciled payment
+   * left the line fragmented and still flagged as matched. After a successful reactivate the line
+   * loses its matching leftovers and goes through
+   * {@code ReconciliationHandler.normalizeReactivatedMatchGroup}.
+   */
+  @Test
+  public void testReactivateOfReconciledPaymentNormalizesItsBankStatementLine() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, true);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertNotNull(result);
+      assertTrue("a successful reactivate must stay successful", result.getHttpStatus() < 300);
+      assertTrue("the matched bank statement line must be normalized after the reactivate",
+          normalized(reconHandlers, sc.line));
+      verify(sc.line).setMatchingtype(null);
+      verify(sc.line).setMatchedDocument(null);
+    }
+  }
+
+  /**
+   * Core restores the invoice's paid amounts only when the payment's status matches its method's
+   * paid level. For an RDNC/PWNC method an RPPC payment never matched, so it returned to draft
+   * while its invoice still read as paid. Like Core's unmatch, the payment must be moved to that
+   * level BEFORE the reactivation runs.
+   */
+  @Test
+  public void testReactivateOfReconciledPaymentAlignsStatusBeforeDelegating() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, true);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+
+      new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertEquals(STATUS_WITHDRAWN_NOT_CLEARED, sc.statusAtDelegation);
+    }
+  }
+
+  /** A payment that was never reconciled has no bank statement line to clean up. */
+  @Test
+  public void testReactivateOfNonReconciledPaymentDoesNotNormalizeAnyLine() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc =
+          wireScenario(obDalMock, ctxMock, actionMock, STATUS_WITHDRAWN_NOT_CLEARED, false, true);
+
+      new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertFalse(normalizedAnything(reconHandlers));
+      verify(sc.payment, never()).setStatus(anyString());
+      verify(sc.line, never()).setMatchingtype(Mockito.<String>any());
+    }
+  }
+
+  /**
+   * A reactivate that answers an error (no exception) must leave a reconciled payment as it was:
+   * the line untouched and the status back to RPPC, not stuck at the "not cleared" level it was
+   * moved to beforehand. This goes through {@code finish}, which sees the payment still processed.
+   */
+  @Test
+  public void testFailedReactivateOfReconciledPaymentLeavesItReconciled() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, false);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertNotNull(result);
+      assertTrue(result.getHttpStatus() >= 400);
+      assertFalse(normalizedAnything(reconHandlers));
+      assertEquals(STATUS_RECONCILED, sc.status);
+    }
+  }
+
+  /**
+   * The delegated reactivate THROWS: the handler answers 500 and goes through
+   * {@code finishAfterFailure} — the aborted transaction is rolled back first, then the status
+   * prepare applied is written back to RPPC; the statement line is never touched.
+   */
+  @Test
+  public void testThrowingReactivateOfReconciledPaymentRollsBackAndLeavesItReconciled()
+      throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, false);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+      actionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()))
+          .thenThrow(new IllegalStateException("process blew up"));
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+      verify(sc.dal).rollbackAndClose();
+      assertEquals(STATUS_RECONCILED, sc.status);
+      assertFalse(normalizedAnything(reconHandlers));
+      verify(sc.line, never()).setMatchingtype(Mockito.<String>any());
     }
   }
 
