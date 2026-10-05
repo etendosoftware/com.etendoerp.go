@@ -286,7 +286,6 @@ public class EnvironmentRequestAuthenticator {
     return ApiScopes.grants(scopes, ApiScopes.WRITE);
   }
 
-
   // ------------------------------------------------------------------ phase 2: bind
 
   /** The one post-authentication step. Every scheme reaches it, and nothing here asks which. */

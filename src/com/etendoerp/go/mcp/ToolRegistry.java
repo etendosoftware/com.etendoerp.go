@@ -363,7 +363,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
       // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
-      // These tools address no spec at all — they create an AD_Image row — and "neo-upload-image"
+      // These tools address no spec at all — they create an AD_Image row — and "etendo-upload-image"
       // would be looked up as a spec and denied.
       case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
       case McpConstants.TOOL_NEO_UPLOAD_IMAGE:

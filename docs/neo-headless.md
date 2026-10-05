@@ -191,6 +191,10 @@ scopes keep working unchanged; nothing in the database is rewritten.
   client **requested** (echoed, not normalized), so a client that asks for `neo:read` gets
   `neo:read` back and its own scope comparison keeps working. A requested scope is allowed when the
   client's configured scopes grant it under either prefix.
+- **Not requested:** a token request with no `scope` gets the client's configured scopes under
+  the names they are **stored** with — a client saved with `neo:read` receives `neo:read`.
+- **Refresh:** a refreshed token keeps the scope names stored on the token it replaces; refresh
+  never renames, adds or drops a scope.
 - **Unknown scopes** of either prefix (e.g. `etendo:admin`) are still rejected with
   `invalid_scope`.
 - **One rule, one place:** every check goes through `ApiScopes.grants` (`com.etendoerp.go.oauth2`):

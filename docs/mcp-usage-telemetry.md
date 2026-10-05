@@ -65,6 +65,9 @@ a `fields` array is a projection list, whose entries are field names too. The er
 | `Status` | VARCHAR(60) | review state: `NULL` = pending, `R` = reviewed (`..._STATUS_CHK`) |
 | `Reviewed_By` | VARCHAR(60) | free-text name or handle of the reviewer; no FK, no reference |
 
+`Tool_Name` holds the `neo_*` tool names on rows written before the ETP-5602 deploy and the
+`etendo_*` names after it; a query over both periods must match both prefixes.
+
 Indexes: `etgo_mcp_usage_cli_created (ad_client_id, created)` and `etgo_mcp_usage_session
 (session_key)`.
 
