@@ -580,6 +580,45 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertEquals("A failed retry must claim the request again", 2L, rawAttempts(requestId));
   }
 
+  /**
+   * ETP-5548: a deterministic failure is never reclaimed, even by a caller that ignores the
+   * {@code retryAllowed} flag of the status endpoint and posts onboarding directly.
+   */
+  @Test
+  public void testDeterministicFailureIsNeverReclaimed() {
+    String email = newEmail("claim-name-in-use");
+    String accountId = createAccount(email);
+    String requestId = createPaidRequest(accountId, email);
+
+    assertTrue(store.claimForProvisioning(requestId, email));
+    forceFailureReason(requestId, CheckoutRequestStore.encodeFailureReason(
+        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "The company name is taken"));
+
+    assertFalse("A name collision fails identically on every attempt",
+        store.claimForProvisioning(requestId, email));
+    assertEquals("The refused retry must not consume an attempt", 1L, rawAttempts(requestId));
+  }
+
+  /** ETP-5548: only unfinished paid purchases hide the environment they are building. */
+  @Test
+  public void testUnfinishedPaidClientNamesSkipProvisionedPurchases() {
+    String email = newEmail("unfinished-names");
+    String accountId = createAccount(email);
+    String requestId = createPaidRequest(accountId, email);
+
+    assertTrue("A paid purchase that has not provisioned is unfinished",
+        store.findUnfinishedPaidClientNames(accountId, email)
+            .containsKey(ENVIRONMENT.toLowerCase(java.util.Locale.ROOT)));
+
+    forceStatus(requestId, STATUS_PROVISIONED);
+
+    assertTrue("A provisioned purchase no longer hides its environment",
+        store.findUnfinishedPaidClientNames(accountId, email).isEmpty());
+    assertTrue("Another account never sees this account's purchases",
+        store.findUnfinishedPaidClientNames(createAccount(newEmail("unfinished-intruder")), email)
+            .isEmpty());
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Group 3 — restart survival, the acceptance criterion of ETP-5045
   // ---------------------------------------------------------------------------------------------

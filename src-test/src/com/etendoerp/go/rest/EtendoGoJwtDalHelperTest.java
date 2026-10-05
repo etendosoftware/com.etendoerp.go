@@ -636,8 +636,8 @@ class EtendoGoJwtDalHelperTest {
 
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
 
-      // Seven original fields plus plan and relationship metadata.
-      assertEquals(9, result.length());
+      // Seven original fields plus plan, relationship and demo-association metadata.
+      assertEquals(10, result.length());
     }
 
     @Test
@@ -652,6 +652,21 @@ class EtendoGoJwtDalHelperTest {
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
 
       assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+    }
+
+    @Test
+    @DisplayName("reports a demo without association marker as still usable as a purchase source")
+    void reportsNoAssociationWithoutMarker() throws Exception {
+      when(client.getId()).thenReturn("C-4");
+      when(client.getName()).thenReturn("Client Four");
+      when(environmentUser.getId()).thenReturn("U-4");
+      when(environmentUser.getUsername()).thenReturn("user@four.com");
+      when(environmentUser.getName()).thenReturn("User Four");
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+
+      // ETP-5548: always present, so the purchase picker never has to guess from a missing key.
+      assertFalse(result.getBoolean("associatedWithProductive"));
     }
   }
 

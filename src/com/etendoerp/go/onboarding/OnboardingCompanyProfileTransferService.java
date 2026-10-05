@@ -107,10 +107,27 @@ public class OnboardingCompanyProfileTransferService {
     return query.uniqueResult();
   }
 
+  /**
+   * The productive environment keeps the name the user typed on the purchase: the organization
+   * name is never copied from the demo (ETP-5548). The legal name is copied only when the user
+   * edited it in the demo; onboarding seeds it with the demo's own name, and carrying that default
+   * over would put the old name back on the new environment's documents.
+   */
   private void copyOrganizationFields(Organization source, Organization target) {
-    copyIfPresent(source.getName(), target::setName);
-    copyIfPresent(source.getSocialName(), target::setSocialName);
+    if (isCustomizedSocialName(source)) {
+      target.setSocialName(source.getSocialName());
+    }
     copyIfPresent(source.getEtgoBusinessType(), target::setEtgoBusinessType);
+  }
+
+  static boolean isCustomizedSocialName(Organization source) {
+    String socialName = StringUtils.trimToNull(source.getSocialName());
+    if (socialName == null) {
+      return false;
+    }
+    String clientName = source.getClient() == null ? null : source.getClient().getName();
+    return !StringUtils.equalsIgnoreCase(socialName, StringUtils.trim(source.getName()))
+        && !StringUtils.equalsIgnoreCase(socialName, StringUtils.trim(clientName));
   }
 
   private void copyFiscalFields(OrganizationInformation source, OrganizationInformation target,
