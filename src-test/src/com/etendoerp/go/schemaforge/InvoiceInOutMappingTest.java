@@ -294,8 +294,8 @@ class InvoiceInOutMappingTest {
       String matchTable) {
     InOutTargetBuilder.LineLinker linker =
         InvoiceInOutMapping.linker(InOutTargetBuilder.Direction.valueOf(direction));
-    InOutTargetBuilder.Line line = new InOutTargetBuilder.Line("il-1", null, null, null,
-        BigDecimal.ONE, null, null, false);
+    InOutTargetBuilder.Line line = InOutTargetBuilder.Line.builder().sourceLineId("il-1")
+        .quantity(BigDecimal.ONE).stockable(false).build();
     ShipmentInOutLine created = mock(ShipmentInOutLine.class);
     when(created.getId()).thenReturn("iol-1");
 

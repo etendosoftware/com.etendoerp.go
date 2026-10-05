@@ -36,7 +36,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
-import java.util.List;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -3446,11 +3445,11 @@ public class AbstractInvoiceHeaderHandlerTest {
   @Test
   public void isStandardInvoiceDocType_blankId_isFalseWithoutLookup() {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      TestHandler handler = new TestHandler();
+      TestHandler docTypeHandler = new TestHandler();
 
-      assertFalse(handler.isStandardInvoiceDocType(null));
-      assertFalse(handler.isStandardInvoiceDocType(""));
-      assertFalse(handler.isStandardInvoiceDocType("   "));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType(null));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType(""));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("   "));
       dalMock.verifyNoInteractions();
     }
   }
@@ -3463,10 +3462,10 @@ public class AbstractInvoiceHeaderHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(DocumentType.class, "dt-missing")).thenReturn(null);
       when(dal.get(DocumentType.class, "dt-error")).thenThrow(new RuntimeException("DB error"));
-      TestHandler handler = new TestHandler();
+      TestHandler docTypeHandler = new TestHandler();
 
-      assertFalse(handler.isStandardInvoiceDocType("dt-missing"));
-      assertFalse(handler.isStandardInvoiceDocType("dt-error"));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-missing"));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-error"));
     }
   }
 
@@ -3481,10 +3480,10 @@ public class AbstractInvoiceHeaderHandlerTest {
       when(standard.getDocumentCategory()).thenReturn("ARI");
       when(dal.get(DocumentType.class, "dt-arc")).thenReturn(rectificativa);
       when(dal.get(DocumentType.class, "dt-ari")).thenReturn(standard);
-      TestHandler handler = new TestHandler();
+      TestHandler docTypeHandler = new TestHandler();
 
-      assertFalse(handler.isStandardInvoiceDocType("dt-arc"));
-      assertTrue(handler.isStandardInvoiceDocType("dt-ari"));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-arc"));
+      assertTrue(docTypeHandler.isStandardInvoiceDocType("dt-ari"));
     }
   }
 }

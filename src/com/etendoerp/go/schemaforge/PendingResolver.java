@@ -49,6 +49,8 @@ interface PendingResolver {
    * {@link FollowUpActionHandler} to check, through {@link TenantOwnership}, that the requested
    * record belongs to the caller's readable clients and organizations before anything runs in
    * admin mode.
+   *
+   * @return the DAL entity class of the source header
    */
   Class<? extends BaseOBObject> sourceEntity();
 
@@ -62,6 +64,9 @@ interface PendingResolver {
    * {@link FollowUpDocumentService#annotatePage} wraps this call in a savepoint on that
    * connection, so a failure degrades to {@code FOLLOW_UP_LOOKUP_FAILED} without aborting the
    * request's transaction.
+   *
+   * @param sourceIds the source record ids to evaluate
+   * @return one verdict per known id, keyed by id; unknown ids are absent
    */
   Map<String, Source> loadSources(Collection<String> sourceIds);
 
@@ -69,6 +74,8 @@ interface PendingResolver {
    * Takes a row lock on the source record (and whatever else its pending depends on) until the
    * current transaction ends, so that two simultaneous requests cannot both see the same quantity
    * as pending. Called BEFORE {@link #loadSources} on the create path.
+   *
+   * @param sourceId the source record to lock
    */
   void lockSource(String sourceId);
 

@@ -1413,8 +1413,8 @@ public class PurchaseInvoiceHeaderHandlerTest {
       assertNull(resolver.ineligibility("N", "CO", "dt-api"));
     }
 
-    InOutTargetBuilder.Line line = new InOutTargetBuilder.Line("il-1", null, null, null,
-        BigDecimal.ONE, null, null, false);
+    InOutTargetBuilder.Line line = InOutTargetBuilder.Line.builder().sourceLineId("il-1")
+        .quantity(BigDecimal.ONE).stockable(false).build();
     Object[] buildArgs = createThroughFlow(flow, line);
 
     assertEquals(InOutTargetBuilder.Direction.PURCHASE, buildArgs[0]);

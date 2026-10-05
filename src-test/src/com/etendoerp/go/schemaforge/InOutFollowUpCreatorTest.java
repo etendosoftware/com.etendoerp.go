@@ -106,7 +106,7 @@ class InOutFollowUpCreatorTest {
   }
 
   private static InOutTargetBuilder.Line line(String sourceLineId) {
-    return new InOutTargetBuilder.Line(sourceLineId, null, null, null, BigDecimal.ONE, null, null,
-        false);
+    return InOutTargetBuilder.Line.builder().sourceLineId(sourceLineId).quantity(BigDecimal.ONE)
+        .stockable(false).build();
   }
 }

@@ -40,6 +40,7 @@ interface TargetCreator {
    * @param sourceId the source record
    * @param pendingLines the lines {@link PendingResolver#loadSources} declared for this source
    *     (non-empty)
+   * @return the created target document (id, documentNo, line count)
    */
   Result createTarget(String sourceId, List<PendingResolver.SourceLine> pendingLines);
 

@@ -193,42 +193,80 @@ final class FollowUpDocumentService {
 
   private static void annotateRecord(JSONObject rec, List<FollowUpFlow> flows,
       List<Map<String, PendingResolver.Source>> verdicts) throws JSONException {
-    JSONObject root = rec.optJSONObject(FIELD_FOLLOW_UP);
-    if (root == null) {
-      root = new JSONObject();
-      rec.put(FIELD_FOLLOW_UP, root);
-    }
-    JSONArray available = root.optJSONArray(KEY_AVAILABLE);
-    if (available == null) {
-      available = new JSONArray();
-      root.put(KEY_AVAILABLE, available);
-    }
+    JSONObject root = followUpRoot(rec);
+    JSONArray available = availableKeys(root);
     String id = rec.optString("id", null);
     for (int s = 0; s < flows.size(); s++) {
       FollowUpTarget target = flows.get(s).target();
       Map<String, PendingResolver.Source> byId = verdicts.get(s);
       PendingResolver.Source source = byId != null ? byId.get(id) : null;
-      String reason;
-      if (byId == null) {
-        reason = REASON_LOOKUP_FAILED;
-      } else if (source == null) {
-        reason = FollowUpException.Reason.NOT_FOUND.getCode();
-      } else {
-        reason = source.isAvailable() ? null : source.getUnavailability().getCode();
-      }
+      String reason = unavailabilityReason(byId, source);
       boolean needed = reason == null;
-      JSONObject entry = new JSONObject();
-      entry.put(KEY_NEEDED, needed);
-      entry.put(KEY_REASON, needed ? JSONObject.NULL : reason);
-      entry.put(KEY_PENDING_LINES, needed ? source.getLines().size() : 0);
-      entry.put(KEY_ACTION, target.getActionName());
-      entry.put(KEY_TARGET_SPEC, target.getSpec());
-      entry.put(KEY_TARGET_ENTITY, target.getEntity());
-      root.put(target.getKey(), entry);
+      root.put(target.getKey(), followUpEntry(target, source, reason));
       if (needed) {
         available.put(target.getKey());
       }
     }
+  }
+
+  /** The record's existing {@value #FIELD_FOLLOW_UP} object, or a new one attached to it. */
+  private static JSONObject followUpRoot(JSONObject rec) throws JSONException {
+    JSONObject root = rec.optJSONObject(FIELD_FOLLOW_UP);
+    if (root == null) {
+      root = new JSONObject();
+      rec.put(FIELD_FOLLOW_UP, root);
+    }
+    return root;
+  }
+
+  /** The root's existing {@value #KEY_AVAILABLE} array, or a new one attached to it. */
+  private static JSONArray availableKeys(JSONObject root) throws JSONException {
+    JSONArray available = root.optJSONArray(KEY_AVAILABLE);
+    if (available == null) {
+      available = new JSONArray();
+      root.put(KEY_AVAILABLE, available);
+    }
+    return available;
+  }
+
+  /**
+   * Why the follow-up is not needed for one record, or {@code null} when it is needed.
+   *
+   * @param byId the flow's verdicts for the page, {@code null} when its lookup failed
+   * @param source the record's verdict, {@code null} when absent (or when {@code byId} is null)
+   * @return {@value #REASON_LOOKUP_FAILED}, a {@link FollowUpException.Reason} code, or
+   *     {@code null} when the source is available
+   */
+  private static String unavailabilityReason(Map<String, PendingResolver.Source> byId,
+      PendingResolver.Source source) {
+    if (byId == null) {
+      return REASON_LOOKUP_FAILED;
+    }
+    if (source == null) {
+      return FollowUpException.Reason.NOT_FOUND.getCode();
+    }
+    return source.isAvailable() ? null : source.getUnavailability().getCode();
+  }
+
+  /**
+   * One flow's annotation entry for one record.
+   *
+   * @param target the flow's identity
+   * @param source the record's verdict; non-null whenever {@code reason} is {@code null}
+   * @param reason {@code null} when the follow-up is needed
+   * @return the {@code {needed, reason, pendingLines, action, targetSpec, targetEntity}} entry
+   */
+  private static JSONObject followUpEntry(FollowUpTarget target, PendingResolver.Source source,
+      String reason) throws JSONException {
+    boolean needed = reason == null;
+    JSONObject entry = new JSONObject();
+    entry.put(KEY_NEEDED, needed);
+    entry.put(KEY_REASON, needed ? JSONObject.NULL : reason);
+    entry.put(KEY_PENDING_LINES, needed ? source.getLines().size() : 0);
+    entry.put(KEY_ACTION, target.getActionName());
+    entry.put(KEY_TARGET_SPEC, target.getSpec());
+    entry.put(KEY_TARGET_ENTITY, target.getEntity());
+    return entry;
   }
 
   // ---------------------------------------------------------------------------------------------

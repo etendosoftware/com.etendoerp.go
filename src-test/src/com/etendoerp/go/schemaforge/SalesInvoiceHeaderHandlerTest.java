@@ -1351,8 +1351,8 @@ public class SalesInvoiceHeaderHandlerTest {
       assertNull(resolver.ineligibility("Y", "CO", "dt-ari"));
     }
 
-    InOutTargetBuilder.Line line = new InOutTargetBuilder.Line("il-1", null, null, null,
-        BigDecimal.ONE, null, null, false);
+    InOutTargetBuilder.Line line = InOutTargetBuilder.Line.builder().sourceLineId("il-1")
+        .quantity(BigDecimal.ONE).stockable(false).build();
     Object[] buildArgs = createThroughFlow(flow, line);
 
     assertEquals(InOutTargetBuilder.Direction.SALES, buildArgs[0]);

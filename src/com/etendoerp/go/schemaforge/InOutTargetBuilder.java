@@ -115,6 +115,12 @@ final class InOutTargetBuilder {
   /** Links one created movement line back to its source line; called after the flush. */
   @FunctionalInterface
   interface LineLinker {
+    /**
+     * Links {@code created} back to the source line {@code line} describes.
+     *
+     * @param line the neutral line the movement line was built from
+     * @param created the persisted (already flushed) movement line
+     */
     void link(Line line, ShipmentInOutLine created);
   }
 
@@ -144,7 +150,10 @@ final class InOutTargetBuilder {
     }
   }
 
-  /** Neutral movement line. {@code sourceLineId} is opaque to the builder — for the linker. */
+  /**
+   * Neutral movement line. {@code sourceLineId} is opaque to the builder — for the linker. Built
+   * through {@link #builder()}: an unset field is {@code null} ({@code stockable}: {@code false}).
+   */
   static final class Line {
     private final String sourceLineId;
     private final Product product;
@@ -155,16 +164,19 @@ final class InOutTargetBuilder {
     private final String description;
     private final boolean stockable;
 
-    Line(String sourceLineId, Product product, UOM uom, AttributeSetInstance attributeSetValue,
-        BigDecimal quantity, OrderLine orderLine, String description, boolean stockable) {
-      this.sourceLineId = sourceLineId;
-      this.product = product;
-      this.uom = uom;
-      this.attributeSetValue = attributeSetValue;
-      this.quantity = quantity;
-      this.orderLine = orderLine;
-      this.description = description;
-      this.stockable = stockable;
+    private Line(Builder b) {
+      this.sourceLineId = b.sourceLineId;
+      this.product = b.product;
+      this.uom = b.uom;
+      this.attributeSetValue = b.attributeSetValue;
+      this.quantity = b.quantity;
+      this.orderLine = b.orderLine;
+      this.description = b.description;
+      this.stockable = b.stockable;
+    }
+
+    static Builder builder() {
+      return new Builder();
     }
 
     String getSourceLineId() {
@@ -173,6 +185,65 @@ final class InOutTargetBuilder {
 
     boolean isStockable() {
       return stockable;
+    }
+
+    /** Fluent builder — {@link Line} has too many fields for a plain constructor (java:S107). */
+    static final class Builder {
+      private String sourceLineId;
+      private Product product;
+      private UOM uom;
+      private AttributeSetInstance attributeSetValue;
+      private BigDecimal quantity;
+      private OrderLine orderLine;
+      private String description;
+      private boolean stockable;
+
+      private Builder() {
+      }
+
+      Builder sourceLineId(String v) {
+        this.sourceLineId = v;
+        return this;
+      }
+
+      Builder product(Product v) {
+        this.product = v;
+        return this;
+      }
+
+      Builder uom(UOM v) {
+        this.uom = v;
+        return this;
+      }
+
+      Builder attributeSetValue(AttributeSetInstance v) {
+        this.attributeSetValue = v;
+        return this;
+      }
+
+      Builder quantity(BigDecimal v) {
+        this.quantity = v;
+        return this;
+      }
+
+      Builder orderLine(OrderLine v) {
+        this.orderLine = v;
+        return this;
+      }
+
+      Builder description(String v) {
+        this.description = v;
+        return this;
+      }
+
+      Builder stockable(boolean v) {
+        this.stockable = v;
+        return this;
+      }
+
+      Line build() {
+        return new Line(this);
+      }
     }
   }
 

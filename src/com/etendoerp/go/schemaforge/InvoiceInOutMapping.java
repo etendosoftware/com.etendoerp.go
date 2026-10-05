@@ -70,9 +70,16 @@ final class InvoiceInOutMapping {
             "Source document line not found: " + pending.getSourceLineId());
       }
       invoiceLines.add(il);
-      lines.add(new InOutTargetBuilder.Line(pending.getSourceLineId(), il.getProduct(),
-          il.getUOM(), il.getAttributeSetValue(), pending.getPendingQty(), il.getSalesOrderLine(),
-          il.getDescription(), InOutLineFromOrderFactory.isStockable(il.getProduct())));
+      lines.add(InOutTargetBuilder.Line.builder()
+          .sourceLineId(pending.getSourceLineId())
+          .product(il.getProduct())
+          .uom(il.getUOM())
+          .attributeSetValue(il.getAttributeSetValue())
+          .quantity(pending.getPendingQty())
+          .orderLine(il.getSalesOrderLine())
+          .description(il.getDescription())
+          .stockable(InOutLineFromOrderFactory.isStockable(il.getProduct()))
+          .build());
     }
     InOutTargetBuilder.Header header = new InOutTargetBuilder.Header(invoice.getClient(),
         invoice.getOrganization(), invoice.getBusinessPartner(), invoice.getPartnerAddress(),

@@ -218,8 +218,8 @@ class InOutTargetBuilderTest {
   }
 
   private static InOutTargetBuilder.Line line(String sourceLineId, boolean stockable) {
-    return new InOutTargetBuilder.Line(sourceLineId, mock(Product.class), null, null,
-        new BigDecimal("3"), null, null, stockable);
+    return InOutTargetBuilder.Line.builder().sourceLineId(sourceLineId)
+        .product(mock(Product.class)).quantity(new BigDecimal("3")).stockable(stockable).build();
   }
 
   private ShipmentInOut newInOut() {

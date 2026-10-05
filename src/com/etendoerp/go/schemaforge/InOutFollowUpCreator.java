@@ -50,6 +50,14 @@ final class InOutFollowUpCreator implements TargetCreator {
    */
   @FunctionalInterface
   interface SourceMapper {
+    /**
+     * Maps a source and its pending lines to the movement's neutral header and lines.
+     *
+     * @param sourceId the source record
+     * @param pendingLines the lines {@link PendingResolver#loadSources} declared for this source
+     * @return the neutral header and one {@link InOutTargetBuilder.Line} per pending line
+     * @throws FollowUpException with {@code NOT_FOUND} when the source no longer exists
+     */
     Mapping map(String sourceId, List<PendingResolver.SourceLine> pendingLines);
   }
 
