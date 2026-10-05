@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -34,10 +36,12 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.gl.GLJournal;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Hooks for the Simple G/L Journal header entity.
@@ -61,7 +65,11 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  *
  * <p><b>Single date (ETP-5611):</b> the window shows one "Fecha" ({@code accountingDate}); every
  * CRUD write mirrors it into {@code documentDate}, unconditionally — the UI itself sends
- * {@code documentDate=@#Date@} on create, and that value must not survive.
+ * {@code documentDate=@#Date@} on create, and that value must not survive. On POST the mirror goes
+ * into the body (the create filter lets a handler-supplied read-only value through). On PATCH/PUT
+ * NEO's {@code filterWriteRequest} drops the hidden {@code documentDate} from the body after this
+ * pre-hook, so the hook sets it on the record itself; the CRUD update flushes it in the same
+ * transaction, so both dates commit or roll back together.
  *
  * <p><b>Currency (ETP-5611):</b> manual journals are single-currency in Etendo GO — always the
  * accounting schema currency. {@code @C_Currency_ID@} resolves to the organization currency first,
@@ -111,33 +119,41 @@ public class GlJournalHeaderHandler implements NeoHandler {
     if (docAction != null) {
       return runDocumentAction(context, docAction);
     }
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
-      NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_ACCOUNTING_DATE, FIELD_DOCUMENT_DATE);
+    mirrorAccountingDate(context);
+    if ("POST".equalsIgnoreCase(context.getHttpMethod()) && context.getRequestBody() != null) {
+      injectSchemaAndCurrency(context, context.getRequestBody());
     }
-    if (!"POST".equalsIgnoreCase(context.getHttpMethod())) {
-      return null;
+    return null;
+  }
+
+  /**
+   * Copies the single visible date into {@code documentDate} on every CRUD write: into the body
+   * (POST), and on the record itself for PATCH/PUT — see the class javadoc for why.
+   */
+  private void mirrorAccountingDate(NeoContext context) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || !NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return;
     }
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return null;
+    NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_ACCOUNTING_DATE, FIELD_DOCUMENT_DATE);
+    if (!"POST".equals(context.getHttpMethod())) {
+      mirrorDocumentDateOnRecord(context);
+    }
+  }
+
+  /**
+   * On create, injects the session accounting schema when absent and forces the schema currency.
+   * Multi-ledger journals ({@code Multi_Gl = 'Y'}) get neither: the constraint allows a null
+   * schema and the journal may be in any currency.
+   */
+  private void injectSchemaAndCurrency(NeoContext context, JSONObject body) {
+    if ("Y".equalsIgnoreCase(body.optString(FIELD_MULTI_GL, "N"))) {
+      return;
     }
     try {
-      // When Multi_Gl = 'Y' the constraint allows a null AcctSchema and the journal may be in any
-      // currency — inject nothing.
-      String multiGl = body.optString(FIELD_MULTI_GL, "N");
-      if ("Y".equalsIgnoreCase(multiGl)) {
-        return null;
-      }
       // Only inject the schema when it is absent (never overwrite an explicit caller value).
       if (!body.has(FIELD_ACCOUNTING_SCHEMA) || body.isNull(FIELD_ACCOUNTING_SCHEMA)) {
-        String acctSchemaId = sessionAcctSchemaId(context);
-        if (acctSchemaId != null) {
-          body.put(FIELD_ACCOUNTING_SCHEMA, acctSchemaId);
-          log.debug("[GL-JOURNAL] Injected accountingSchema={} from session", acctSchemaId);
-        } else {
-          log.warn("[GL-JOURNAL] No $C_AcctSchema_ID in session — gl_journal_multiacct_check may fire");
-        }
+        injectSessionSchema(context, body);
       }
       // The currency is always the schema's — the field is read-only in the UI, so a different
       // value can only come from MCP/REST, and the schema currency must win there too.
@@ -148,7 +164,16 @@ public class GlJournalHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("[GL-JOURNAL] Could not inject accountingSchema/currency: {}", e.getMessage(), e);
     }
-    return null;
+  }
+
+  private static void injectSessionSchema(NeoContext context, JSONObject body) throws JSONException {
+    String acctSchemaId = sessionAcctSchemaId(context);
+    if (acctSchemaId != null) {
+      body.put(FIELD_ACCOUNTING_SCHEMA, acctSchemaId);
+      log.debug("[GL-JOURNAL] Injected accountingSchema={} from session", acctSchemaId);
+    } else {
+      log.warn("[GL-JOURNAL] No $C_AcctSchema_ID in session — gl_journal_multiacct_check may fire");
+    }
   }
 
   @Override
@@ -188,6 +213,37 @@ public class GlJournalHeaderHandler implements NeoHandler {
       log.warn("[GL-JOURNAL] Could not inject the schema currency default: {}", e.getMessage(), e);
       return null;
     }
+  }
+
+  /**
+   * Sets the journal's {@code documentDate} to the {@code accountingDate} of a PATCH/PUT body.
+   * No-op when the body carries no parseable date, the record does not exist or is already
+   * processed (a processed journal is locked; the update itself is refused anyway).
+   */
+  private void mirrorDocumentDateOnRecord(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    String journalId = context.getRecordId();
+    if (body == null || journalId == null || body.isNull(FIELD_ACCOUNTING_DATE)) {
+      return;
+    }
+    String canonical = NeoDateFormat.toCanonical(body.optString(FIELD_ACCOUNTING_DATE), false);
+    if (canonical == null) {
+      return;
+    }
+    try {
+      java.util.Date date = new SimpleDateFormat(NeoDateFormat.ISO_DATE).parse(canonical);
+      GLJournal journal = loadJournal(journalId);
+      if (journal != null && !Boolean.TRUE.equals(journal.isProcessed())) {
+        journal.setDocumentDate(date);
+      }
+    } catch (ParseException e) {
+      log.debug("[GL-JOURNAL] Unparseable accountingDate '{}': {}", canonical, e.getMessage());
+    }
+  }
+
+  /** Package-private seam for unit tests. */
+  GLJournal loadJournal(String journalId) {
+    return OBDal.getInstance().get(GLJournal.class, journalId);
   }
 
   /** The session accounting schema ({@code $C_AcctSchema_ID}), or null when absent. */

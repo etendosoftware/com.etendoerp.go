@@ -93,6 +93,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 /**
  * Unit tests for {@link NeoCrudHandler}.
  * Uses JUnit 5 (Jupiter) and Mockito.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
 class NeoCrudHandlerTest {
 

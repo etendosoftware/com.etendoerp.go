@@ -53,9 +53,13 @@ public final class NeoTabDefaultSort {
 
   private static final Logger log = LogManager.getLogger(NeoTabDefaultSort.class);
 
+  /**
+   * One order-by term: optional leading {@code -}, optional {@code e.} alias, a dotted path, an
+   * optional case-insensitive {@code asc}/{@code desc}. The path is matched loosely here and its
+   * segments are validated one by one in {@link #isPropertyPath}.
+   */
   private static final Pattern TERM = Pattern.compile(
-      "^(-)?(?:e\\.)?([A-Za-z]\\w*(?:\\.[A-Za-z]\\w*)*)(?:\\s+(asc|desc))?$",
-      Pattern.CASE_INSENSITIVE);
+      "^(-)?(?:e\\.)?([A-Za-z][\\w.]*)(?:\\s+((?i:asc|desc)))?$");
 
   private NeoTabDefaultSort() {
   }
@@ -63,31 +67,40 @@ public final class NeoTabDefaultSort {
   /**
    * Puts the tab's default order into {@code params} as {@code _sortBy} when the tab is a child
    * tab ({@code tabLevel > 0}), the request carries no {@code _sortBy}/{@code _orderBy} of its
-   * own, and the tab's order-by clause is usable. An explicit sort (column header click, MCP
-   * {@code orderBy}, a handler pre-hook default) always wins.
+   * own, is not an aggregate ({@code _summary}) query, and the tab's order-by clause is usable. An
+   * explicit sort (column header click, MCP {@code orderBy}, a handler pre-hook default) always
+   * wins.
+   *
+   * @param params the DAL request parameters, modified in place
+   * @param tab the AD tab the list reads
+   * @param dalEntityName the DAL entity name of the tab's table, used to validate the clause
    */
   public static void applyIfAbsent(Map<String, String> params, Tab tab, String dalEntityName) {
-    if (params.containsKey(JsonConstants.SORTBY_PARAMETER)
-        || params.containsKey(JsonConstants.ORDERBY_PARAMETER) || !isChildTab(tab)) {
-      return;
+    if (appliesTo(params, tab)) {
+      put(params, tab, ModelProvider.getInstance().getEntity(dalEntityName, false));
     }
-    applyIfAbsent(params, tab, ModelProvider.getInstance().getEntity(dalEntityName, false));
   }
 
   /** Same as {@link #applyIfAbsent(Map, Tab, String)} with the entity already resolved. */
   static void applyIfAbsent(Map<String, String> params, Tab tab, Entity entity) {
-    if (params.containsKey(JsonConstants.SORTBY_PARAMETER)
-        || params.containsKey(JsonConstants.ORDERBY_PARAMETER) || !isChildTab(tab)) {
-      return;
+    if (appliesTo(params, tab)) {
+      put(params, tab, entity);
     }
+  }
+
+  private static boolean appliesTo(Map<String, String> params, Tab tab) {
+    // An `order by` on a plain column breaks an aggregate (_summary) query.
+    return !params.containsKey(JsonConstants.SORTBY_PARAMETER)
+        && !params.containsKey(JsonConstants.ORDERBY_PARAMETER)
+        && StringUtils.isBlank(params.get(JsonConstants.SUMMARY_PARAMETER))
+        && tab != null && tab.getTabLevel() != null && tab.getTabLevel() > 0;
+  }
+
+  private static void put(Map<String, String> params, Tab tab, Entity entity) {
     String sortBy = deriveSortBy(tab.getHqlorderbyclause(), entity);
     if (sortBy != null) {
       params.put(JsonConstants.SORTBY_PARAMETER, sortBy);
     }
-  }
-
-  private static boolean isChildTab(Tab tab) {
-    return tab != null && tab.getTabLevel() != null && tab.getTabLevel() > 0;
   }
 
   /**
@@ -131,9 +144,9 @@ public final class NeoTabDefaultSort {
 
   private static boolean isPropertyPath(Entity entity, String path) {
     Entity current = entity;
-    String[] segments = path.split("\\.");
+    String[] segments = path.split("\\.", -1);
     for (int i = 0; i < segments.length; i++) {
-      if (current == null || !current.hasProperty(segments[i])) {
+      if (current == null || segments[i].isEmpty() || !current.hasProperty(segments[i])) {
         return false;
       }
       Property property = current.getProperty(segments[i]);

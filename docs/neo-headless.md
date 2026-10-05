@@ -4609,9 +4609,12 @@ Rules:
 
 - An explicit sort always wins: a `_sortBy`/`_orderBy` query param, MCP `orderBy`, or a handler
   pre-hook default (e.g. `ProductCostingHandler`).
+- An aggregate request (`_summary`) never gets the default: an `order by` on a plain column breaks
+  an aggregate query.
 - Only a plain comma-separated list of property paths is used: an `e.` prefix, a leading `-` or a
   trailing `asc`/`desc` is accepted and normalised to `_sortBy` syntax (`e.a desc, b` → `-a,b`).
-- Every path must exist on the DAL entity (case-sensitive, walked through many-to-one targets).
+- Every path must exist on the DAL entity (case-sensitive, walked through many-to-one targets;
+  an empty segment such as `a..b` is rejected).
   Any unusable term — a function (`abs(debit) desc`), a foreign alias (`fa.type`, `trx.movementDate`),
   a stale or Classic-only name (`Debit`, `sEQNoAsset`) — skips the **whole** clause and the list
   keeps the old id order. A bad clause can never turn a working list into a 500.

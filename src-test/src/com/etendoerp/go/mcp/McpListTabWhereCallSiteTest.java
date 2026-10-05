@@ -40,6 +40,11 @@ import org.junit.jupiter.api.Test;
  * <b>call site</b> that reads the raw clause, which is what {@code McpSourceScanner} exists for —
  * see {@code McpBillToInjectorCallSiteTest} for the precedent. The behaviour of the shared rule
  * itself is covered by {@code NeoParentTabFilterResolverTest}.</p>
+ *
+ * <p>The same applies to the default child-tab order (ETP-5611): the guard checks the call site,
+ * {@code NeoTabDefaultSortTest} covers the rule.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @DisplayName("ETP-5542 — the MCP list resolves the parent placeholders of a tab where clause")
 class McpListTabWhereCallSiteTest {
@@ -72,6 +77,31 @@ class McpListTabWhereCallSiteTest {
         "handleList reads adTab.getHqlwhereclause() directly, so the placeholders of a child tab's"
             + " clause stay unresolved and the list comes back empty (ETP-5542). Go through"
             + " NeoParentTabFilterResolver.resolveTabWhere(adTab, parentId), the rule REST uses.");
+  }
+
+  /** ETP-5611: the shared default child-tab order, fed with the tab and the DAL entity name. */
+  private static final Pattern DEFAULT_SORT = Pattern.compile(
+      "NeoTabDefaultSort\\s*\\.\\s*applyIfAbsent\\s*\\(\\s*params\\s*,\\s*adTab\\s*,\\s*dalEntityName\\s*\\)");
+
+  @Test
+  @DisplayName("ETP-5611 — handleList applies the same default child-tab order as the REST list")
+  void listAppliesTheSharedDefaultSort() {
+    String body = listBody();
+    int sortAt = indexOf(DEFAULT_SORT, body);
+    int orderByAt = body.indexOf("JsonConstants.SORTBY_PARAMETER, orderBy");
+
+    assertTrue(sortAt >= 0,
+        "handleList no longer calls NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName)."
+            + " Without it neo_list returns child lines in id (random UUID) order while the REST list"
+            + " follows the AD tab order-by — an undeclared REST/MCP divergence (ETP-5611).");
+    assertTrue(orderByAt >= 0 && orderByAt < sortAt,
+        "The default sort must run AFTER the caller's orderBy is put into params, or it would"
+            + " override an explicit orderBy instead of yielding to it.");
+  }
+
+  private static int indexOf(Pattern pattern, String text) {
+    java.util.regex.Matcher m = pattern.matcher(text);
+    return m.find() ? m.start() : -1;
   }
 
   private static String listBody() {

@@ -35,6 +35,8 @@ import org.openbravo.model.ad.ui.Tab;
  * Unit tests for {@link NeoTabDefaultSort} (ETP-5611): a child-tab list with no explicit sort is
  * ordered by the AD tab's {@code HQL_OrderBy_Clause} when — and only when — that clause is a plain
  * list of properties that exist on the entity. Anything else keeps today's behaviour (no sort).
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoTabDefaultSort
  */
 public class NeoTabDefaultSortTest {
 
@@ -148,6 +150,21 @@ public class NeoTabDefaultSortTest {
     params.put("_orderBy", "debit");
     NeoTabDefaultSort.applyIfAbsent(params, tab(1L, "lineNo"), lineEntity());
     assertFalse(params.containsKey("_sortBy"));
+  }
+
+  @Test
+  public void summaryRequestIsLeftAlone() {
+    // An aggregate (_summary) query with an `order by` on a non-aggregated column fails in SQL.
+    Map<String, String> params = new HashMap<>();
+    params.put("_summary", "{\"debit\":\"sum\"}");
+    NeoTabDefaultSort.applyIfAbsent(params, tab(1L, "lineNo"), lineEntity());
+    assertFalse(params.containsKey("_sortBy"));
+  }
+
+  @Test
+  public void emptyPathSegmentIsSkipped() {
+    assertNull(NeoTabDefaultSort.deriveSortBy("account..name", lineEntity()));
+    assertNull(NeoTabDefaultSort.deriveSortBy("lineNo.", lineEntity()));
   }
 
   @Test

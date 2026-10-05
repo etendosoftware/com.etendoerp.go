@@ -51,6 +51,8 @@ import org.openbravo.client.kernel.RequestContext;
  *   <li>ETP-5611: {@code inpdocaction} set on the request for CO and RE; date mirror; schema
  *       currency on POST and DEFAULTS.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GlJournalHeaderHandler
  */
 public class GlJournalHeaderHandlerTest {
 
@@ -419,6 +421,76 @@ public class GlJournalHeaderHandlerTest {
     body.put("description", "x");
     assertNull(handler.handle(crudContext("PATCH", body)));
     assertFalse(body.has("documentDate"));
+  }
+
+  // PATCH/PUT: NEO's filterWriteRequest drops the hidden (system) documentDate from the body after
+  // this pre-hook, so the handler writes it on the record itself, in the same transaction.
+
+  private static NeoContext patchContext(String recordId, JSONObject body) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(recordId)
+        .requestBody(body)
+        .build();
+  }
+
+  private static org.openbravo.model.financialmgmt.gl.GLJournal journal(boolean processed) {
+    org.openbravo.model.financialmgmt.gl.GLJournal j =
+        mock(org.openbravo.model.financialmgmt.gl.GLJournal.class);
+    when(j.isProcessed()).thenReturn(processed);
+    return j;
+  }
+
+  @Test
+  public void patchWritesDocumentDateOnTheRecord() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    org.openbravo.model.financialmgmt.gl.GLJournal j = journal(false);
+    doReturn(j).when(h).loadJournal("GL-1");
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-09-30");
+    assertNull(h.handle(patchContext("GL-1", body)));
+    verify(j).setDocumentDate(new java.text.SimpleDateFormat("yyyy-MM-dd").parse("2026-09-30"));
+  }
+
+  @Test
+  public void patchOnAProcessedJournalLeavesTheRecordAlone() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    org.openbravo.model.financialmgmt.gl.GLJournal j = journal(true);
+    doReturn(j).when(h).loadJournal("GL-1");
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-09-30");
+    h.handle(patchContext("GL-1", body));
+    verify(j, never()).setDocumentDate(any());
+  }
+
+  @Test
+  public void patchWithAnUnparseableDateLeavesTheRecordAlone() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "not-a-date");
+    h.handle(patchContext("GL-1", body));
+    verify(h, never()).loadJournal(any());
+  }
+
+  @Test
+  public void patchWithoutAccountingDateNeverLoadsTheRecord() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("description", "x");
+    h.handle(patchContext("GL-1", body));
+    verify(h, never()).loadJournal(any());
+  }
+
+  @Test
+  public void postMirrorsInTheBodyOnlyAndNeverLoadsARecord() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("multigeneralLedger", "Y");
+    body.put("accountingDate", "2026-09-30");
+    h.handle(crudContext("POST", body));
+    assertEquals("2026-09-30", body.getString("documentDate"));
+    verify(h, never()).loadJournal(any());
   }
 
   // ─── ETP-5611: currency is always the accounting schema currency ────────
