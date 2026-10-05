@@ -24,6 +24,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
+
 /**
  * A routing failure that already knows its own IMP-5 envelope (ETP-4793 / IMP-17).
  *
@@ -48,6 +50,12 @@ class McpRoutingException extends OBException {
 
   /** Opens every message that names the offending field, so the three read the same way. */
   private static final String FIELD_PREFIX = "Field '";
+
+  /** Joins a quoted entity (or action) to the quoted spec it belongs to. */
+  private static final String QUOTED_OF = "' of '";
+
+  /** Closes the {@code spec:} argument of a suggested call and opens its {@code entity:}. */
+  private static final String ENTITY_ARG = "', entity:'";
 
   private final int status;
   private final String errorCode;
@@ -205,6 +213,46 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * A write verb {@code MCP_CONFIG.verbs} hides from the MCP (ETP-5558).
+   *
+   * <p>Same status and code as a method the {@code ETGO_SF_ENTITY} flags disable — to the agent both
+   * mean "this tool cannot do this here" — but the answer carries the operator's {@code reason} and
+   * the way to get the job done, because a hidden verb is never a dead end: the UI does the same
+   * thing through an action, and the agent is pointed at it.</p>
+   *
+   * @param specName   the spec being written
+   * @param entityName the entity
+   * @param method     the HTTP-method equivalent of the refused operation
+   * @param reason     the declared reason, never blank
+   * @param instead    the declared replacement call, or {@code null} to point at the entity's
+   *                   actions
+   * @return the exception to throw
+   */
+  static McpRoutingException verbHidden(String specName, String entityName, String method,
+      String reason, String instead) {
+    return new McpRoutingException(
+        "'" + entityName + QUOTED_OF + specName + "' does not accept " + verbName(method)
+            + " through MCP: " + reason + ". Nothing was written.",
+        McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+        List.of(),
+        instead != null
+            ? "Do not retry this call. Use " + instead + " instead."
+            : "Do not retry this call. Call neo_schema(spec:'" + specName + ENTITY_ARG
+                + entityName + "', view:'actions') and use the action that does this.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  private static String verbName(String method) {
+    if (NeoMethodPolicy.METHOD_POST.equals(method)) {
+      return "create";
+    }
+    if (NeoMethodPolicy.METHOD_DELETE.equals(method)) {
+      return "delete";
+    }
+    return "update";
+  }
+
+  /**
    * The {@code status} filter names a business state the entity does not declare (ETP-4793 / IMP-17,
    * evidence C14).
    *
@@ -271,6 +319,37 @@ class McpRoutingException extends OBException {
             ? "Retry with one of the names in 'available'. That list is truncated — call "
                 + "neo_schema with view:\"full\" for this entity to see every filterable "
                 + "field."
+            : RETRY_WITH_AVAILABLE,
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * {@code neo_selectors} named a column that is not a selector (foreign-key) column of the entity
+   * (ETP-5558). It used to escape as an {@code IllegalArgumentException} — a 500 telling the agent
+   * the server had failed, when it was the agent's argument that was wrong. Blind run
+   * {@code 20261001T2331-local-8163} asked for {@code glItemDifferenceId}, a name the account's
+   * handler adds to its rows, not a column. Same shape as {@link #unknownFilterField}: 422, the
+   * name back in {@code field}, the selector columns in {@code available}.
+   *
+   * @param column     the column as the caller spelled it
+   * @param entityName the entity, for the message
+   * @param available  the entity's selector column names
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownSelectorColumn(String column, String entityName,
+      List<String> available) {
+    List<String> names = available == null ? List.of() : available;
+    boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
+    if (truncated) {
+      names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
+    }
+    return new McpRoutingException(
+        "Column '" + column + "' is not a selector column of entity '" + entityName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_SELECTOR_COLUMN, column,
+        names,
+        truncated
+            ? "Retry with one of the names in 'available'. That list is truncated — neo_schema "
+                + "with view:\"full\" marks every field that has a selector."
             : RETRY_WITH_AVAILABLE,
         McpConstants.SEE_ALSO_READING);
   }
@@ -475,9 +554,128 @@ class McpRoutingException extends OBException {
         McpConstants.PARAM_PARENT_ID, List.of(),
         parentEntity == null
             ? "Look up the parent record, then pass its id as parentId."
-            : "Call neo_list(spec:'" + specName + "', entity:'" + parentEntity
+            : "Call neo_list(spec:'" + specName + ENTITY_ARG + parentEntity
                 + "') to find the parent first, then repeat this call with parentId:'<thatId>'.",
         McpConstants.SEE_ALSO_READING).withExtras(extras);
+  }
+
+  /**
+   * A child create on an entity whose parent cannot be identified (ETP-5558).
+   *
+   * <p>Raised whether or not the caller sent {@code parentId}: with the parent unmappable, the
+   * mandatory-defaults pass fills the link on its own and the record lands under a parent the caller
+   * never chose — a {@code payment-out} line ended up on an unrelated, processed collection that
+   * way. {@code problem} is {@link McpParentScope}'s own explanation, which names the tab and the
+   * columns it looked at, so the refusal says what is wrong with the entity and not only that
+   * something is.</p>
+   *
+   * <p>The hint deliberately does not suggest setting the link field by hand: on these entities it
+   * points at an intermediate record (a payment detail, a payment schedule) the agent has no safe
+   * way to choose, so that advice would lead straight back to a wrong parent.</p>
+   *
+   * @param specName     the spec being written
+   * @param entityName   the child entity
+   * @param parentEntity the parent entity's name, or {@code null} when it could not be named — the
+   *                     hint then sends the agent to {@code neo_discover} instead
+   * @param problem      why the parent cannot be mapped, or {@code null} when the scope gives none
+   * @return the exception to throw
+   */
+  static McpRoutingException parentUnresolvable(String specName, String entityName,
+      String parentEntity, String problem) {
+    String why = problem == null ? "the entity declares no field that links it to its parent"
+        : problem;
+    return new McpRoutingException(
+        "Cannot create '" + entityName + QUOTED_OF + specName + "' through MCP: its parent cannot "
+            + "be identified (" + why + "), so the record would be attached to a parent nobody "
+            + "chose. Nothing was written.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_UNRESOLVABLE,
+        McpConstants.PARAM_PARENT_ID, List.of(),
+        parentEntity == null
+            ? "Do not retry this create. Call neo_discover to find the parent entity of '"
+                + entityName + "', then neo_schema on it with view:'actions' and use the action "
+                + "that creates this record."
+            : "Do not retry this create. Call neo_schema(spec:'" + specName + ENTITY_ARG
+                + parentEntity + "', view:'actions') and use the action that creates this record.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * An action {@code MCP_CONFIG.actions} hides from the MCP (ETP-5558).
+   *
+   * <p>The customization would serve it — the SPA calls it — so this is a refusal of the channel,
+   * not of the action: the same 405 a hidden write verb answers, carrying the operator's reason.</p>
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param action     the refused action
+   * @param reason     the declared reason (or the unusable-configuration reason)
+   * @return the exception to throw
+   */
+  static McpRoutingException actionHidden(String specName, String entityName, String action,
+      String reason) {
+    return new McpRoutingException(
+        "Action '" + action + QUOTED_OF + entityName + "' (" + specName + ") is not available "
+            + "through MCP: " + reason + ". Nothing was run.",
+        McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+        List.of(),
+        "Do not retry this call. Call neo_schema(spec:'" + specName + ENTITY_ARG + entityName
+            + "', view:'actions') for the actions this entity offers.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * A button {@code MCP_CONFIG.actions} redirects to another action (ETP-5558).
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param action     the refused button
+   * @param instead    the action to call instead
+   * @param reason     the declared reason
+   * @return the exception to throw
+   */
+  static McpRoutingException actionRedirected(String specName, String entityName, String action,
+      String instead, String reason) {
+    return new McpRoutingException(
+        "Action '" + action + QUOTED_OF + entityName + "' (" + specName + ") is not run through "
+            + "MCP: " + reason + ". Nothing was run.",
+        McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+        List.of(),
+        "Do not retry this call. Use neo_action(spec:'" + specName + ENTITY_ARG + entityName
+            + "', action:'" + instead + "') instead; neo_schema(view:'actions') gives its "
+            + "parameters.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * A declared action called with parameters its contract refuses (ETP-5558): an undeclared key, a
+   * missing required one, or a value of the wrong shape. Judged before the customization runs.
+   *
+   * @param specName   the spec
+   * @param entityName the entity
+   * @param action     the action
+   * @param error      the {@code error} object {@code NeoActionContract.validate} built; its
+   *                   {@code message} becomes the detail and its correction keys
+   *                   ({@code unknownParameters}, {@code missingParameters}, ...) are carried over
+   * @return the exception to throw
+   * @throws JSONException if the error object cannot be read
+   */
+  static McpRoutingException actionParametersInvalid(String specName, String entityName,
+      String action, JSONObject error) throws JSONException {
+    JSONObject extras = new JSONObject();
+    for (java.util.Iterator<?> it = error.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      if (!"message".equals(key) && !McpConstants.KEY_STATUS.equals(key)
+          && !McpConstants.PARAM_FIELD.equals(key)) {
+        extras.put(key, error.get(key));
+      }
+    }
+    String message = error.optString("message", "Invalid parameters for action '" + action + "'.");
+    return new McpRoutingException(message + " Nothing was run.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
+        error.optString(McpConstants.PARAM_FIELD, null), List.of(),
+        "Correct the parameters and retry. neo_schema(spec:'" + specName + ENTITY_ARG
+            + entityName + "', view:'actions') gives the parameter schema of '" + action + "'.",
+        McpConstants.SEE_ALSO_WRITING).withExtras(extras);
   }
 
   static McpRoutingException missingArgument(String detail, String field) {

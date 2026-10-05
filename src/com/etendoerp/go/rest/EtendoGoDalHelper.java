@@ -38,13 +38,19 @@ final class EtendoGoDalHelper {
   }
 
   static void rollbackDalChanges(String operation, Exception failure, Logger log) {
+    rollbackDalChangesAndConfirm(operation, failure, log);
+  }
+
+  static boolean rollbackDalChangesAndConfirm(String operation, Exception failure, Logger log) {
     try {
       OBDal.getInstance().rollbackAndClose();
+      return true;
     } catch (Exception rollbackEx) {
       if (log != null) {
         log.error("Rollback failed after {}", operation, rollbackEx);
         log.debug("Original failure while handling {}", operation, failure);
       }
+      return false;
     }
   }
 }

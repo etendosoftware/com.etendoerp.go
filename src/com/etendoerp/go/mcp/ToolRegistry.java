@@ -901,7 +901,7 @@ public class ToolRegistry {
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
             + "override before neo_create) and `systemManaged` (compliance/audit flags the server "
             + "owns — leave them alone). \"minimal\" returns only the `confirm` block. Use "
-            + "grouped/minimal on compliance-heavy specs (invoices, payments) to avoid wading "
+            + "grouped/minimal on compliance-heavy specs (invoices, orders) to avoid wading "
             + "through ~65 fields when only ~5 matter. In both grouped views a field the server "
             + "knows but could not resolve a value for is listed in `metadata.unresolvedFields` "
             + "instead of appearing in `confirm` with an empty value — those are the fields you "

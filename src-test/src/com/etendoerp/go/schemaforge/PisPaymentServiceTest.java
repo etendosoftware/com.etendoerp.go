@@ -87,11 +87,19 @@ class PisPaymentServiceTest {
   private OBContext obContext;
 
   private MockedStatic<OBDal> obDalMock;
+  /**
+   * ETP-5558: request ids now go through {@link TenantOwnership}; tenancy is covered by
+   * {@code PaymentOwnershipTest}, so here every row is visible.
+   */
+  private MockedStatic<TenantOwnership> tenantMock;
   private MockedStatic<OBContext> obContextMock;
 
   @BeforeEach
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
+    tenantMock = mockStatic(TenantOwnership.class, org.mockito.Answers.CALLS_REAL_METHODS);
+    tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(
+        org.mockito.ArgumentMatchers.any())).thenReturn(true);
     obContextMock = mockStatic(OBContext.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
@@ -100,6 +108,7 @@ class PisPaymentServiceTest {
 
   @AfterEach
   void tearDown() {
+    tenantMock.close();
     obDalMock.close();
     obContextMock.close();
   }

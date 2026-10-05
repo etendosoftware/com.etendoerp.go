@@ -109,6 +109,29 @@ class McpNamedFiltersTest {
     }
   }
 
+  @Nested
+  @DisplayName("publishInto")
+  class PublishInto {
+
+    @Test
+    @DisplayName("adds namedFilters with what describe exposes")
+    void addsTheDescriptors() throws Exception {
+      org.codehaus.jettison.json.JSONObject schema = new org.codehaus.jettison.json.JSONObject();
+      McpNamedFilters.publishInto(schema, JSON);
+      assertEquals(McpNamedFilters.describe(JSON).toString(),
+          schema.getJSONArray("namedFilters").toString());
+    }
+
+    @Test
+    @DisplayName("adds no key when the entity declares no filter")
+    void addsNothingWithoutFilters() throws Exception {
+      org.codehaus.jettison.json.JSONObject schema = new org.codehaus.jettison.json.JSONObject();
+      McpNamedFilters.publishInto(schema, null);
+      McpNamedFilters.publishInto(schema, "garbage");
+      assertEquals(0, schema.length());
+    }
+  }
+
   /**
    * The failure an unknown filter name produces, which lives in {@link McpQuerySupport} but is only
    * meaningful against this parser's output (ETP-4793 / IMP-17, evidence C14).

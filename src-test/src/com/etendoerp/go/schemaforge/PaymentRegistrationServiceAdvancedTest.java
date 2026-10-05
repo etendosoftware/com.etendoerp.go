@@ -56,6 +56,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
+import org.mockito.Answers;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -71,6 +72,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
@@ -141,6 +143,11 @@ class PaymentRegistrationServiceAdvancedTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
+  /**
+   * ETP-5558: every request id now goes through {@link TenantOwnership}. These tests are about the
+   * payment flows, not tenancy (that is {@code PaymentOwnershipTest}), so every row is visible.
+   */
+  private MockedStatic<TenantOwnership> tenantMock;
   private MockedStatic<FIN_Utility> finUtilityMock;
   private MockedStatic<FIN_AddPayment> finAddPaymentMock;
   private MockedStatic<FIN_PaymentProcess> finPaymentProcessMock;
@@ -191,6 +198,16 @@ class PaymentRegistrationServiceAdvancedTest {
 
     obContextMock = mockStatic(OBContext.class);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+    tenantMock = mockStatic(TenantOwnership.class, Answers.CALLS_REAL_METHODS);
+    tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(any())).thenReturn(true);
+    // The invoice's installment, so a draft linked to it belongs to INVOICE_ID (ETP-5558).
+    when(invoice.getId()).thenReturn(INVOICE_ID);
+    when(schedule.getInvoice()).thenReturn(invoice);
+    // ETP-5558: invoicePayments checks the URL's invoice is the caller's before listing.
+    when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
+    // ETP-5558: credit is spendable only by the same business partner's payment.
+    when(bp.getId()).thenReturn("bp-1");
+    when(newPayment.getBusinessPartner()).thenReturn(bp);
 
     finUtilityMock = mockStatic(FIN_Utility.class);
     finUtilityMock.when(() -> FIN_Utility.getDocumentType(any(), anyString())).thenReturn(docType);
@@ -265,8 +282,20 @@ class PaymentRegistrationServiceAdvancedTest {
     closeQuietly(finPaymentProcessMock);
     closeQuietly(finAddPaymentMock);
     closeQuietly(finUtilityMock);
+    closeQuietly(tenantMock);
     closeQuietly(obContextMock);
     closeQuietly(obDalMock);
+  }
+
+  /** Links {@code payment} to the invoice's installment, as every draft of the invoice is. */
+  private void linkToInvoice(FIN_Payment payment) {
+    FIN_PaymentScheduleDetail documentPsd = mock(FIN_PaymentScheduleDetail.class);
+    when(documentPsd.getInvoicePaymentSchedule()).thenReturn(schedule);
+    FIN_PaymentDetail detail = mock(FIN_PaymentDetail.class);
+    when(detail.getFINPaymentScheduleDetailList())
+        .thenReturn(new ArrayList<>(Collections.singletonList(documentPsd)));
+    when(payment.getFINPaymentDetailList())
+        .thenReturn(new ArrayList<>(Collections.singletonList(detail)));
   }
 
   private static void closeQuietly(AutoCloseable closeable) {
@@ -758,6 +787,74 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - write-off limit (ETP-5558)
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * ETP-5558 repro, with the numbers seen live: a 121.00 invoice paid with 100.00 and
+   * {@code writeoffDifference:true} on an account whose write-off limit is 5.00. Only the SPA knew
+   * about the limit, so an MCP / REST caller had the 21.00 written off and the invoice fully paid.
+   * The request must now be refused before ANY payment is built.
+   */
+  @Test
+  @DisplayName("ETP-5558: a write-off above the account limit is refused and nothing is written")
+  void testAdvancedWriteoffAboveLimitIsRefused() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("121.00"));
+    when(account.getWriteofflimit()).thenReturn(new BigDecimal("5.00"));
+    JSONObject body = advancedBody("100.00", CONFIRM).put("writeoffDifference", true);
+
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> messages = mockStatic(OBMessageUtils.class)) {
+      messages.when(() -> OBMessageUtils.messageBD("ETGO_WriteoffLimitExceeded"))
+          .thenReturn("Write-off @difference@ over limit @limit@");
+      response = PaymentRegistrationService.doRegisterPaymentAdvanced(INVOICE_ID, body, true);
+    }
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("Write-off 21.00 over limit 5.00"),
+        "the refusal must name the difference and the limit: " + response.getBody());
+    assertTrue(daoConstruction.constructed().isEmpty(), "no draft payment may be created");
+    finAddPaymentMock.verify(
+        () -> FIN_AddPayment.updatePaymentDetail(any(), any(), any(), anyBoolean()), never());
+    finAddPaymentMock.verify(
+        () -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(), anyString()),
+        never());
+  }
+
+  @Test
+  @DisplayName("ETP-5558: a write-off within the account limit still reaches Core with the flag on")
+  void testAdvancedWriteoffWithinLimitProceeds() throws Exception {
+    stubAdvancedBasics();
+    FIN_PaymentScheduleDetail psd = stubPendingPSDs(new BigDecimal("121.00"));
+    when(account.getWriteofflimit()).thenReturn(new BigDecimal("5.00"));
+    JSONObject body = advancedBody("118.00", CONFIRM).put("writeoffDifference", true);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(psd), eq(newPayment), eq(new BigDecimal("118.00")), eq(true)));
+  }
+
+  @Test
+  @DisplayName("ETP-5558: an account with no write-off limit (null) accepts any write-off")
+  void testAdvancedWriteoffWithoutLimitProceeds() throws Exception {
+    stubAdvancedBasics();
+    FIN_PaymentScheduleDetail psd = stubPendingPSDs(new BigDecimal("121.00"));
+    when(account.getWriteofflimit()).thenReturn(null);
+    JSONObject body = advancedBody("100.00", CONFIRM).put("writeoffDifference", true);
+
+    NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+        INVOICE_ID, body, true);
+
+    assertEquals(201, response.getHttpStatus());
+    finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
+        eq(psd), eq(newPayment), eq(new BigDecimal("100.00")), eq(true)));
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // doRegisterPaymentAdvanced - multi-currency (conversion rate)
   // ════════════════════════════════════════════════════════════════════════
 
@@ -915,6 +1012,33 @@ class PaymentRegistrationServiceAdvancedTest {
         any(), any(), anyString(), any(), anyString()), never());
   }
 
+  /**
+   * ETP-5558: with pis:true + process:confirm the bank transfer is instructed before the draft is
+   * resolved, so an edit id that is not a draft of this invoice must be refused BEFORE that —
+   * otherwise money moves and only the replay answers 404.
+   */
+  @Test
+  @DisplayName("A foreign edit paymentId is refused before a PIS transfer is instructed")
+  void testAdvancedForeignEditIdRefusedBeforePis() throws Exception {
+    stubAdvancedBasics();
+    when(dal.get(FIN_Payment.class, DRAFT_PAY_ID)).thenReturn(mock(FIN_Payment.class));
+
+    JSONObject body = advancedBody("58.70", CONFIRM).put("paymentId", DRAFT_PAY_ID)
+        .put("pis", true);
+
+    try (MockedStatic<PisPaymentService> pis = mockStatic(PisPaymentService.class);
+        MockedStatic<PisDeferredPaymentService> deferred =
+            mockStatic(PisDeferredPaymentService.class)) {
+      NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+          INVOICE_ID, body, true);
+
+      assertEquals(404, response.getHttpStatus());
+      deferred.verify(() -> PisDeferredPaymentService.initiateDeferredPis(any(), any(), any(),
+          any(), any(), anyBoolean()), never());
+      pis.verify(() -> PisPaymentService.validatePisEligibility(any(), any(), any()), never());
+    }
+  }
+
   @Test
   @DisplayName("Editing an already-processed payment is rejected before any field is rewritten")
   void testAdvancedEditProcessedPaymentThrows() throws Exception {
@@ -922,6 +1046,7 @@ class PaymentRegistrationServiceAdvancedTest {
     FIN_Payment processed = mock(FIN_Payment.class);
     when(processed.isProcessed()).thenReturn(true);
     when(dal.get(FIN_Payment.class, DRAFT_PAY_ID)).thenReturn(processed);
+    linkToInvoice(processed);
 
     JSONObject body = advancedBody("58.70", DRAFT).put("paymentId", DRAFT_PAY_ID);
 
@@ -1013,6 +1138,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     FIN_Payment creditSource = mock(FIN_Payment.class);
     when(creditSource.getUsedCredit()).thenReturn(new BigDecimal("10"));
+    when(creditSource.getBusinessPartner()).thenReturn(bp);
     when(dal.get(FIN_Payment.class, CREDIT_PAY_ID)).thenReturn(creditSource);
 
     // cash 0, credit 100 → fully funded by credit
@@ -1048,6 +1174,7 @@ class PaymentRegistrationServiceAdvancedTest {
     FIN_PaymentSchedule abonoSchedule = mock(FIN_PaymentSchedule.class);
     Invoice abonoInvoice = mock(Invoice.class);
     when(abonoInvoice.getGrandTotalAmount()).thenReturn(new BigDecimal("-30.00"));
+    when(abonoInvoice.getBusinessPartner()).thenReturn(bp);
     when(abonoSchedule.getInvoice()).thenReturn(abonoInvoice);
     when(abonoPsd.getInvoicePaymentSchedule()).thenReturn(abonoSchedule);
 
@@ -1290,8 +1417,9 @@ class PaymentRegistrationServiceAdvancedTest {
   void testConfirmDraftPaymentProcesses() throws Exception {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     when(newPayment.isProcessed()).thenReturn(true);
+    linkToInvoice(newPayment);
 
-    NeoResponse response = PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID, INVOICE_ID);
 
     assertEquals(201, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
@@ -1305,7 +1433,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testConfirmDraftPaymentNotFound() throws Exception {
     when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
-    NeoResponse response = PaymentDraftEditService.confirmDraftPayment("missing");
+    NeoResponse response = PaymentDraftEditService.confirmDraftPayment("missing", INVOICE_ID);
 
     assertEquals(404, response.getHttpStatus());
     finAddPaymentMock.verify(
@@ -1317,6 +1445,7 @@ class PaymentRegistrationServiceAdvancedTest {
   @DisplayName("confirmDraftPayment surfaces a processing error as an exception")
   void testConfirmDraftPaymentProcessingError() {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
+    linkToInvoice(newPayment);
     OBError error = mock(OBError.class);
     when(error.getType()).thenReturn(ERROR_TYPE);
     when(error.getMessage()).thenReturn("boom");
@@ -1324,7 +1453,7 @@ class PaymentRegistrationServiceAdvancedTest {
         .thenReturn(error);
 
     OBException ex = assertThrows(OBException.class,
-        () -> PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID));
+        () -> PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID, INVOICE_ID));
     assertEquals("boom", ex.getMessage());
   }
 
@@ -1337,7 +1466,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testDeleteDraftPaymentNotFoundReturns404() {
     when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
-    NeoResponse response = PaymentDraftEditService.deleteDraftPayment("missing");
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment("missing", INVOICE_ID);
 
     assertEquals(404, response.getHttpStatus());
     paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(any()), never());
@@ -1348,9 +1477,10 @@ class PaymentRegistrationServiceAdvancedTest {
   void testDeleteDraftPaymentProcessedThrows() {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     when(newPayment.isProcessed()).thenReturn(true);
+    linkToInvoice(newPayment);
 
     OBException ex = assertThrows(OBException.class,
-        () -> PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID));
+        () -> PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID, INVOICE_ID));
 
     assertEquals("Cannot delete a processed payment", ex.getMessage());
     paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(any()), never());
@@ -1375,7 +1505,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubNoConsumedCredit();
 
-    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID, INVOICE_ID);
 
     assertEquals(204, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
@@ -1406,7 +1536,13 @@ class PaymentRegistrationServiceAdvancedTest {
     when(crit.add(any(Criterion.class))).thenReturn(crit);
     when(crit.list()).thenReturn(Collections.singletonList(link));
 
-    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+    // A draft holding no installment detail of its own: ownership is not what this test is about.
+    NeoResponse response;
+    try (MockedStatic<PaymentOwnership> owned = mockStatic(PaymentOwnership.class)) {
+      owned.when(() -> PaymentOwnership.invoicePayment(NEW_PAY_ID, INVOICE_ID))
+          .thenReturn(newPayment);
+      response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID, INVOICE_ID);
+    }
 
     assertEquals(204, response.getHttpStatus());
     verify(creditSource).setUsedCredit(new BigDecimal("10"));
@@ -1432,7 +1568,13 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubNoConsumedCredit();
 
-    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+    // A draft holding no installment detail of its own: ownership is not what this test is about.
+    NeoResponse response;
+    try (MockedStatic<PaymentOwnership> owned = mockStatic(PaymentOwnership.class)) {
+      owned.when(() -> PaymentOwnership.invoicePayment(NEW_PAY_ID, INVOICE_ID))
+          .thenReturn(newPayment);
+      response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID, INVOICE_ID);
+    }
 
     assertEquals(204, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
@@ -1469,7 +1611,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubNoConsumedCredit();
 
-    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID, INVOICE_ID);
 
     assertEquals(204, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
@@ -1739,6 +1881,11 @@ class PaymentRegistrationServiceAdvancedTest {
 
   /** A {@code handleListCreditSources} context carrying {@code editPaymentId} in its request body. */
   private NeoContext creditSourcesContextWithEditPaymentId(String editPaymentId) throws Exception {
+    // ETP-5558: editPaymentId is honoured only for a draft of this invoice.
+    FIN_Payment draft = mock(FIN_Payment.class);
+    when(draft.getId()).thenReturn(editPaymentId);
+    linkToInvoice(draft);
+    when(dal.get(FIN_Payment.class, editPaymentId)).thenReturn(draft);
     return NeoContext.builder()
         .recordId(INVOICE_ID)
         .httpMethod("GET")

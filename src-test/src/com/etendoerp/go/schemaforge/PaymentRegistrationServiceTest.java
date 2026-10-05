@@ -100,17 +100,28 @@ class PaymentRegistrationServiceTest {
   private Session session;
 
   private MockedStatic<OBDal> obDalMock;
+  /**
+   * ETP-5558: request ids now go through {@link TenantOwnership}; tenancy is covered by
+   * {@code PaymentOwnershipTest}, so here every row is visible.
+   */
+  private MockedStatic<TenantOwnership> tenantMock;
   private MockedStatic<OBContext> obContextMock;
 
   @BeforeEach
   @SuppressWarnings("unchecked")
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
+    tenantMock = mockStatic(TenantOwnership.class, org.mockito.Answers.CALLS_REAL_METHODS);
+    tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(
+        org.mockito.ArgumentMatchers.any())).thenReturn(true);
     obContextMock = mockStatic(OBContext.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
     when(obDal.getSession()).thenReturn(session);
+    // ETP-5558: invoicePayments checks the URL's invoice is the caller's before listing; a test
+    // that needs "not found" stubs null explicitly, which overrides this.
+    when(obDal.get(Invoice.class, "inv-1")).thenReturn(mock(Invoice.class));
 
     // paymentListItem (exercised by every handleListPayments test with a non-empty result)
     // calls PisPaymentService.linkedPisPayment for the "viaPis" badge — stub it here once
@@ -131,8 +142,15 @@ class PaymentRegistrationServiceTest {
     when(creditCriteria.list()).thenReturn(Collections.emptyList());
   }
 
+  /** ETP-5558: the installment must be the invoice's own to be paid through it. */
+  private static void linkToInvoice(FIN_PaymentSchedule schedule, Invoice invoice) {
+    when(invoice.getId()).thenReturn("inv-1");
+    when(schedule.getInvoice()).thenReturn(invoice);
+  }
+
   @AfterEach
   void tearDown() {
+    tenantMock.close();
     obDalMock.close();
     obContextMock.close();
   }
@@ -182,6 +200,7 @@ class PaymentRegistrationServiceTest {
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
         "inv-1", "sched-1", "not-a-number", "2026-01-15", "acc-1", true);
@@ -200,6 +219,7 @@ class PaymentRegistrationServiceTest {
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
         "inv-1", "sched-1", "100.00", "not-a-date", "acc-1", true);
@@ -218,6 +238,7 @@ class PaymentRegistrationServiceTest {
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(null);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
@@ -250,6 +271,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
@@ -279,6 +301,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // Mock the OBCriteria for findPendingPSDs - returns empty list
@@ -319,6 +342,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // findPendingPSDs returns one PSD
@@ -367,6 +391,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // Empty PSDs so we stop at that check (after currency passes)
@@ -402,6 +427,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // Empty PSDs to stop at that validation
@@ -437,6 +463,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     OBCriteria<FIN_PaymentScheduleDetail> psdCriteria = mock(OBCriteria.class);

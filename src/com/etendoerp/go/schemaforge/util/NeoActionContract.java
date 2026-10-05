@@ -65,6 +65,12 @@ public final class NeoActionContract {
   public static final String TYPE_STRING = "string";
   /** JSON Schema type for a true/false parameter. */
   public static final String TYPE_BOOLEAN = "boolean";
+  /**
+   * A number or numeric string. Accepts a JSON number or a numeric string, because the SPA sends
+   * amounts as strings ({@code "121"}) and an agent naturally sends {@code 121}; both reach the
+   * handler, which parses with {@code BigDecimal} (ETP-5558).
+   */
+  public static final String TYPE_NUMBER = "number";
   /** A {@code yyyy-MM-dd} date carried as a string (see {@link NeoReportParam#TYPE_DATE}). */
   public static final String TYPE_DATE = "date";
   /** JSON Schema type for a list parameter; the item type is declared separately. */
@@ -87,19 +93,48 @@ public final class NeoActionContract {
   private final boolean mutating;
   private final List<Param> params;
   private final String idDescription;
+  private final String httpMethod;
+  private final boolean fieldValuesBody;
+
+  /** The method an action is called with unless it declares another — what the MCP always used. */
+  public static final String DEFAULT_HTTP_METHOD = "POST";
 
   private NeoActionContract(String name, String description, boolean mutating,
       List<Param> params) {
-    this(name, description, mutating, params, null);
+    this(name, description, mutating, params, null, DEFAULT_HTTP_METHOD, false);
   }
 
+  @SuppressWarnings("java:S107") // one value object: the seven fields are the contract itself
   private NeoActionContract(String name, String description, boolean mutating,
-      List<Param> params, String idDescription) {
+      List<Param> params, String idDescription, String httpMethod, boolean fieldValuesBody) {
     this.name = name;
     this.description = description;
     this.mutating = mutating;
     this.params = List.copyOf(params);
     this.idDescription = idDescription;
+    this.httpMethod = httpMethod;
+    this.fieldValuesBody = fieldValuesBody;
+  }
+
+  /**
+   * The same contract, served under another HTTP method (ETP-5558).
+   *
+   * <p>For a handler action that only answers one method: {@code currencyOptions} refuses anything
+   * but {@code GET}, while the MCP builds every action call as a {@code POST}. Declaring it here
+   * keeps that knowledge in the customization that owns it; the MCP reads it and calls the action
+   * the way the handler expects.</p>
+   *
+   * @param method {@code GET} or {@code POST}
+   * @return a copy carrying the method
+   */
+  public NeoActionContract withHttpMethod(String method) {
+    return new NeoActionContract(name, description, mutating, params, idDescription, method,
+        fieldValuesBody);
+  }
+
+  /** @return the HTTP method the action is called with; {@link #DEFAULT_HTTP_METHOD} unless declared */
+  public String getHttpMethod() {
+    return httpMethod;
   }
 
   /**
@@ -111,12 +146,35 @@ public final class NeoActionContract {
    * @return a copy carrying the description
    */
   public NeoActionContract withIdDescription(String idDescription) {
-    return new NeoActionContract(name, description, mutating, params, idDescription);
+    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
+        fieldValuesBody);
   }
 
   /** @return what the {@code id} argument identifies, or {@code null} when not declared */
   public String getIdDescription() {
     return idDescription;
+  }
+
+  /**
+   * The same contract, read by its customization from the {@code fieldValues} object of the
+   * request body (ETP-5558, ETP-5587).
+   *
+   * <p>For an action behind an AD button whose parameters the SPA collects in its process dialog:
+   * the SPA posts them as {@code {"fieldValues": {...}}}, and the customization reads them there
+   * ({@code PeriodOpenCloseHandler} reads {@code fieldValues.openClose}). The agent still passes
+   * the declared parameters flat; {@code neo_action} wraps them, so the customization receives the
+   * body the SPA sends instead of answering "Missing required parameter".</p>
+   *
+   * @return a copy whose parameters travel under {@code fieldValues}
+   */
+  public NeoActionContract withFieldValuesBody() {
+    return new NeoActionContract(name, description, mutating, params, idDescription, httpMethod,
+        true);
+  }
+
+  /** @return {@code true} when the parameters travel under {@code fieldValues} in the body */
+  public boolean isFieldValuesBody() {
+    return fieldValuesBody;
   }
 
   /**
@@ -380,7 +438,8 @@ public final class NeoActionContract {
      * A required scalar parameter.
      *
      * @param name        the body key
-     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN} or {@link #TYPE_DATE}
+     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN}, {@link #TYPE_NUMBER} or
+     *                    {@link #TYPE_DATE}
      * @param description meaning and expected shape
      * @return the descriptor
      */
@@ -392,7 +451,8 @@ public final class NeoActionContract {
      * An optional scalar parameter. State the default in the description.
      *
      * @param name        the body key
-     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN} or {@link #TYPE_DATE}
+     * @param type        {@link #TYPE_STRING}, {@link #TYPE_BOOLEAN}, {@link #TYPE_NUMBER} or
+     *                    {@link #TYPE_DATE}
      * @param description meaning, expected shape and default
      * @return the descriptor
      */
@@ -410,6 +470,21 @@ public final class NeoActionContract {
      */
     public static Param options(String name, String description, List<String> allowedValues) {
       return new Param(name, TYPE_STRING, null, false, description, allowedValues);
+    }
+
+    /**
+     * A required string restricted to a closed set (ETP-5558). For a choice the handler defaults
+     * but the agent must make explicitly — because what the handler does without it differs from
+     * what the contract promises.
+     *
+     * @param name          the body key
+     * @param description   meaning of each value
+     * @param allowedValues every value the handler distinguishes
+     * @return the descriptor
+     */
+    public static Param requiredOptions(String name, String description,
+        List<String> allowedValues) {
+      return new Param(name, TYPE_STRING, null, true, description, allowedValues);
     }
 
     /**
@@ -482,6 +557,8 @@ public final class NeoActionContract {
       switch (type) {
         case TYPE_BOOLEAN:
           return value instanceof Boolean ? null : "a boolean";
+        case TYPE_NUMBER:
+          return isNumeric(value) ? null : "a number or numeric string";
         case TYPE_DATE:
           return value instanceof String && DATE.matcher((String) value).matches() ? null
               : "a date in yyyy-MM-dd format";
@@ -489,6 +566,21 @@ public final class NeoActionContract {
           return isArrayOf(value) ? null : "an array of " + itemType + "s";
         default:
           return value instanceof String ? null : "a string";
+      }
+    }
+
+    private static boolean isNumeric(Object value) {
+      if (value instanceof Number) {
+        return true;
+      }
+      if (!(value instanceof String) || StringUtils.isBlank((String) value)) {
+        return false;
+      }
+      try {
+        new java.math.BigDecimal(((String) value).trim());
+        return true;
+      } catch (NumberFormatException e) {
+        return false;
       }
     }
 

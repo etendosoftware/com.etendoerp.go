@@ -20,12 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.List;
 
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
@@ -45,6 +52,44 @@ public class PooledTenantClaimServiceTest {
   private static final PooledTenantClaimService.ClaimRequest SUPPORTED =
       new PooledTenantClaimService.ClaimRequest("owner@acme.test", "Acme", "Ada Lovelace", "EUR",
           "ES", "es_ES", "Calle Mayor 1", "secret");
+
+  /**
+   * ETP-5548: a claimed tenant showed "POOL-<id> Admin" as its role and kept the placeholder in its
+   * ledger, chart of accounts, calendar and trees. Every rewrite stays inside the claimed client.
+   */
+  @Test
+  void renamesEveryNameDerivedFromThePlaceholderInsideTheClaimedClient() {
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    @SuppressWarnings("unchecked")
+    NativeQuery<Object> query = mock(NativeQuery.class, RETURNS_SELF);
+    List<String> statements = new ArrayList<>();
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(anyString())).thenAnswer(invocation -> {
+      statements.add(invocation.getArgument(0));
+      return query;
+    });
+    when(query.executeUpdate()).thenReturn(1, 17, 1, 1, 1);
+
+    int rewritten;
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      rewritten = new PooledTenantClaimService().renamePlaceholderDerivedNames("CLIENT-1",
+          "POOL-ABC", "Acme SL");
+    }
+
+    assertEquals(21, rewritten);
+    assertEquals(PooledTenantClaimService.PLACEHOLDER_DERIVED_NAME_UPDATES, statements);
+    for (String table : List.of("ad_role", "ad_tree", "c_acctschema", "c_element", "c_calendar")) {
+      assertTrue(statements.stream().anyMatch(sql -> sql.startsWith("update " + table + " ")),
+          table + " must be rewritten");
+    }
+    statements.forEach(sql -> assertTrue(sql.contains("where ad_client_id = :clientId"),
+        "a rewrite must never leave the claimed client: " + sql));
+    verify(query, times(5)).setParameter("placeholder", "POOL-ABC");
+    verify(query, times(5)).setParameter("clientName", "Acme SL");
+    verify(query, times(5)).setParameter("clientId", "CLIENT-1");
+  }
 
   @Test
   public void flagOffNeverTouchesThePool() {
@@ -70,14 +115,14 @@ public class PooledTenantClaimServiceTest {
     assertTrue(service.fakeStore.calls.isEmpty());
   }
 
+  /**
+   * ETP-5548: company names are not unique, so eligibility never looks the name up — no DAL is
+   * stubbed here, and a lookup would fail the test. Resuming a half-built client is decided by the
+   * servlet before the claim is attempted.
+   */
   @Test
-  public void anExistingClientNameKeepsResumeAndCollisionHandlingClassic() {
-    TestClaimService service = new TestClaimService(true);
-    service.existingClientId = "CLIENT-EXISTING";
-
-    assertNull(service.claim(new RecordingSink(), SUPPORTED));
-
-    assertTrue(service.fakeStore.calls.isEmpty());
+  public void eligibilityNeverDependsOnTheCompanyNameBeingTaken() {
+    assertTrue(new TestClaimService(true).isEligible(SUPPORTED));
   }
 
   @Test
@@ -158,7 +203,6 @@ public class PooledTenantClaimServiceTest {
   private static final class TestClaimService extends PooledTenantClaimService {
     final FakeTenantPoolStore fakeStore = new FakeTenantPoolStore();
     private final boolean enabled;
-    String existingClientId;
     RuntimeException personalizationFailure;
     boolean personalized;
     String personalizedClientId;
@@ -172,11 +216,6 @@ public class PooledTenantClaimServiceTest {
     @Override
     boolean isPoolEnabled(String accountEmail) {
       return enabled;
-    }
-
-    @Override
-    String findClientIdByName(String clientName) {
-      return existingClientId;
     }
 
     @Override
