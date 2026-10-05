@@ -86,13 +86,44 @@ final class McpActionsView {
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
       throws JSONException {
+    return buildResponse(specName, entityName, fields, null);
+  }
+
+  /**
+   * Same as {@link #buildResponse(String, String, JSONArray)}, plus the named actions the entity's
+   * customization declares (ETP-5535), appended after the AD buttons in the form
+   * {@link NeoActionContract#toJson()} renders them.
+   *
+   * <p>For an entity that has fields AND declares actions — a window whose customization serves
+   * actions no AD button column stands behind, such as the sales quotation's
+   * {@code rejectQuotation}. Before ETP-5535 such an action was reachable through {@code neo_action}
+   * but listed nowhere, so an agent fell back on the AD button closest in meaning and failed there.
+   * A declared entry carries {@code invokeVia}, so it counts towards {@code invokableCount} like any
+   * callable button. With no declared action the response is byte-for-byte the 3-argument one.</p>
+   *
+   * @param declared the customization's declared actions; {@code null} or empty adds nothing
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Map<String, NeoActionContract> declared) throws JSONException {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
     JSONArray actions = apply(fields);
+    boolean hasDeclared = declared != null && !declared.isEmpty();
+    if (hasDeclared) {
+      for (NeoActionContract contract : declared.values()) {
+        actions.put(contract.toJson());
+      }
+    }
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
+    if (hasDeclared) {
+      response.put("declaredActionsHint", "Entries carrying 'parameters' are served by this "
+          + "window's own logic rather than an AD button: call neo_action with action = the "
+          + "entry's 'action', id = the record its idDescription names, and parameters matching "
+          + "its schema. Prefer them over an AD button with a similar meaning.");
+    }
     return response;
   }
 

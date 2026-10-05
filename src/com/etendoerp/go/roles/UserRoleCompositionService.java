@@ -207,16 +207,32 @@ public class UserRoleCompositionService {
   private final UserRoleWriteLock writeLock;
 
   /**
+   * ETP-5565 — realigns the personal role with its templates after every composition that
+   * changed its inheritances (see {@link TemplateAccessPropagationService#realignAfterComposition}).
+   */
+  private final TemplateAccessPropagationService templateAccessPropagation;
+
+  /**
    * Creates the service with the real per-user {@link UserRoleWriteLock}, so every write entry
    * point is serialized against concurrent writes on the same user (ETP-5278).
    */
   public UserRoleCompositionService() {
-    this(new UserRoleWriteLock());
+    this(new UserRoleWriteLock(), new TemplateAccessPropagationService());
   }
 
-  /** Test seam: plain unit tests that mock {@link OBDal} inject {@link UserRoleWriteLock#NO_OP}. */
+  /**
+   * Test seam: plain unit tests that mock {@link OBDal} inject {@link UserRoleWriteLock#NO_OP};
+   * the post-composition sweep is native SQL, so they get {@link
+   * TemplateAccessPropagationService#NO_OP}.
+   */
   UserRoleCompositionService(UserRoleWriteLock writeLock) {
+    this(writeLock, TemplateAccessPropagationService.NO_OP);
+  }
+
+  private UserRoleCompositionService(UserRoleWriteLock writeLock,
+      TemplateAccessPropagationService templateAccessPropagation) {
     this.writeLock = writeLock;
+    this.templateAccessPropagation = templateAccessPropagation;
   }
 
   /**
@@ -336,6 +352,9 @@ public class UserRoleCompositionService {
       OBDal.getInstance().flush();
 
       UserRoleSyncSupport.syncSingleActiveUserRole(user, personalRole);
+      if (counters[0] > 0 || counters[1] > 0) {
+        templateAccessPropagation.realignAfterComposition(personalRole);
+      }
 
       List<String> appliedIds = new ArrayList<>();
       for (Role template : templates) {

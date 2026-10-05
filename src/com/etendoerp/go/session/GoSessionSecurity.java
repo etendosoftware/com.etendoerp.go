@@ -53,6 +53,20 @@ public final class GoSessionSecurity {
   /** Header carrying the session-bound CSRF token on unsafe methods. */
   public static final String CSRF_HEADER = "X-Go-CSRF";
 
+  /**
+   * Refusal message when the CSRF token of an unsafe request is missing or is not the session's —
+   * typically a tab still holding the token of a session another tab rotated away. The client
+   * matches this exact text to re-read the session and retry once (ETP-5550): do not reword it.
+   */
+  public static final String MSG_CSRF_TOKEN_INVALID = "CSRF validation failed";
+
+  /**
+   * Refusal message when an unsafe request comes from an origin outside the allowlist. Kept apart
+   * from {@link #MSG_CSRF_TOKEN_INVALID} so a proxy or allowlist misconfiguration is not mistaken
+   * for a stale token, and so the client does not retry a request that can never pass.
+   */
+  public static final String MSG_ORIGIN_NOT_ALLOWED = "Origin not allowed";
+
   private static final String COOKIE_ATTRIBUTES = "; Secure; HttpOnly; Path=/; SameSite=Lax";
   private static final String ORIGIN_HEADER = "Origin";
   private static final String REFERER_HEADER = "Referer";

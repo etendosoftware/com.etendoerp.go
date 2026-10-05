@@ -369,6 +369,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           item.put(FIELD_DOCUMENT_NO, inv.getDocumentNo());
           item.put("documentStatus", inv.getDocumentStatus());
           item.put("grandTotalAmount", inv.getGrandTotalAmount() != null ? inv.getGrandTotalAmount() : 0);
+          // ETP-5527 — same key the CRUD list returns, so the related-documents chip formats
+          // the amount in the invoice's own currency (form and preview read this field).
+          Currency currency = inv.getCurrency();
+          item.put("currency$_identifier", currency != null ? currency.getISOCode() : JSONObject.NULL);
           if (inv.getInvoiceDate() != null) {
             item.put("invoiceDate", new SimpleDateFormat("yyyy-MM-dd").format(inv.getInvoiceDate()));
           }

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -65,8 +66,9 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
  * this change, so a brand-new handler class was used rather than extending an existing one.
  *
  * <p>ETP-4967: also hides any product classified under a category flagged
- * {@code em_etgo_issystemcategory = 'Y'} from GET responses — see
- * {@link #hideSystemCategoryProducts}.
+ * {@code em_etgo_issystemcategory = 'Y'}. ETP-5009 moved the list half into the query
+ * ({@link #readPredicates}), so the list, its count, its paging and the {@code ?_distinct=} filter
+ * values all agree; a read by id is still hidden by {@link #hideSystemCategoryProducts}.
  *
  * <p>ETP-4943 / ETP-5091: also forces {@code stocked}/{@code returnable} to {@code false}
  * whenever a request declares {@code productType} as Service ({@code "S"}), Expense
@@ -102,6 +104,21 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_RESPONSE = "response";
   /** Display-only flag consumed by the Product window's cost banner and save gate. */
   private static final String FIELD_HAS_COST = "etgoHasCost";
+  /**
+   * ETP-5009: excludes products whose category is flagged {@code EM_Etgo_IsSystemCategory = 'Y'}
+   * (DAL property {@code etgoIssystemcategory}, a Yes/No column mapped as {@code Boolean} — the
+   * same property {@code ProductCategorySystemFlagSelectorPolicy} already filters on). A
+   * server-side constant: nothing in it comes from the request.
+   *
+   * <p>A correlated {@code not exists} on the FK id rather than the implicit path
+   * {@code e.productCategory.etgoIssystemcategory}, so it adds no join to the list query nor to
+   * the {@code SELECT DISTINCT} of the {@code ?_distinct=} fetch. It is not scoped to the current
+   * client the way {@link SystemCategoryIds} is: a product only ever references a category it can
+   * see, so a system category of any client is one this product must not be listed under.
+   */
+  static final String EXCLUDE_SYSTEM_CATEGORY_PREDICATE =
+      "not exists (select 1 from ProductCategory pc where pc.id = e.productCategory.id"
+          + " and pc.etgoIssystemcategory = true)";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -158,6 +175,22 @@ public class ProductDefaultsHandler implements NeoHandler {
     body.put(FIELD_RETURNABLE, false);
   }
 
+  /**
+   * ETP-5009: keeps system-category products out of every list read — REST list and count, the
+   * {@code ?_distinct=} filter values, MCP {@code neo_list} — by putting the exclusion into the
+   * query. Replaces the list half of {@link #hideSystemCategoryProducts}, which post-filtered a
+   * page core had already cut and counted, and which the distinct fetch never reached at all: the
+   * Product window's Categoría filter offered "Discounts" and its Tipo filter offered Servicio,
+   * both carried only by the hidden {@code ETGO_DTO} product.
+   */
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    if (context == null || !SPEC.equals(context.getSpecName())) {
+      return List.of();
+    }
+    return List.of(EXCLUDE_SYSTEM_CATEGORY_PREDICATE);
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     if (context == null || !SPEC.equals(context.getSpecName())) {
@@ -199,7 +232,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     // record the form keeps showing, so skipping them left a freshly created product with the
     // flag absent — and an absent flag means "has a cost", so the banner stayed hidden until the
     // user reloaded the page. Only a GET list is excluded, where this would be one count per row.
-    if (METHOD_GET.equals(context.getHttpMethod()) && StringUtils.isBlank(context.getRecordId())) {
+    if (METHOD_GET.equals(context.getHttpMethod()) && !context.isReadById()) {
       return filtered;
     }
     NeoResponse target = filtered != null ? filtered : context.getPreviousResult();
@@ -381,13 +414,18 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
-   * ETP-4967: strips products classified under a category flagged {@code em_etgo_issystemcategory
-   * = 'Y'} (see {@link SystemCategoryIds}) from GET responses (list and single-record alike —
-   * {@code response.data} has the same shape either way), so e.g. {@code ETGO_DTO} (category
-   * "Discounts") never shows up in the Product window.
+   * ETP-4967: strips a product classified under a category flagged {@code
+   * em_etgo_issystemcategory = 'Y'} (see {@link SystemCategoryIds}) from a single-record GET, so
+   * e.g. {@code ETGO_DTO} (category "Discounts") cannot be opened in the Product window either.
+   *
+   * <p>ETP-5009: single-record reads only. A list read is already restricted in the query by
+   * {@link #readPredicates}; a read by id is not, because core resolves it with its own
+   * {@code id = :id} query and ignores the where clause, so this post-filter is still what hides
+   * the record there. "Read by id" is {@link NeoContext#isReadById}: the path id <em>and</em> the
+   * query-string form {@code GET …/product/product?id=X}, which core fetches by id just the same.
    */
   private NeoResponse hideSystemCategoryProducts(NeoContext context) {
-    if (!METHOD_GET.equals(context.getHttpMethod())) {
+    if (!context.isReadById()) {
       return null;
     }
     NeoResponse previous = context.getPreviousResult();
@@ -454,10 +492,9 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
-   * {@code response.totalRows}/{@code endRow} come from core's own datasource count query,
-   * computed before {@link #filterHiddenCategoryRows} ran — decrement them by
-   * {@code removedCount} so a caller that pages off those fields (rather than
-   * {@code data.length}, which is already correct) does not request a page past the end.
+   * {@code response.totalRows}/{@code endRow} were computed before {@link #filterHiddenCategoryRows}
+   * ran — decrement them by {@code removedCount} so the emptied single-record response does not
+   * still claim to hold a row.
    */
   private static void adjustRowCounts(JSONObject responseWrapper, int removedCount)
       throws JSONException {

@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * Discovers and opens the GOClient onboarding sourcedata XML files, whether bundled on the
@@ -41,6 +42,7 @@ final class OnboardingSourceFiles {
   private static final String SAMPLE_DATA_INDEX_RESOURCE =
       SAMPLE_DATA_RESOURCE_ROOT + "/index.txt";
   private static final String RESOURCE_PATH_SEPARATOR = "/";
+  private static final String INCLUDE_TABLE_REQUIRED = "includeTable is required";
 
   private OnboardingSourceFiles() {
     // Utility class.
@@ -59,13 +61,26 @@ final class OnboardingSourceFiles {
   }
 
   static SourceFileProvider directorySourceFileProvider(Path sampleDataDirectory) {
+    return directorySourceFileProvider(sampleDataDirectory,
+        OnboardingDatasetDefinition::shouldIncludeTable);
+  }
+
+  /**
+   * Lists the XML files of a sourcedata directory whose table the given filter accepts.
+   *
+   * @param sampleDataDirectory the directory that holds the sourcedata files
+   * @param includeTable        accepts the table names whose file is read
+   * @return the lazily evaluated provider
+   */
+  static SourceFileProvider directorySourceFileProvider(Path sampleDataDirectory,
+      Predicate<String> includeTable) {
+    Objects.requireNonNull(includeTable, INCLUDE_TABLE_REQUIRED);
     return () -> {
       List<SourceFile> files = new ArrayList<>();
       try (var stream = Files.list(sampleDataDirectory)) {
         stream.filter(Files::isRegularFile)
             .filter(path -> path.getFileName().toString().endsWith(".xml"))
-            .filter(path -> OnboardingDatasetDefinition.shouldIncludeTable(
-                tableName(path.getFileName().toString())))
+            .filter(path -> includeTable.test(tableName(path.getFileName().toString())))
             .sorted(Comparator.comparing(path -> path.getFileName().toString()))
             .forEach(path -> files.add(new SourceFile(path.getFileName().toString(),
                 () -> openFileSystemSourceFile(path))));
@@ -78,12 +93,24 @@ final class OnboardingSourceFiles {
   }
 
   static SourceFileProvider classpathSourceFileProvider(ClassLoader classLoader) {
+    return classpathSourceFileProvider(classLoader, OnboardingDatasetDefinition::shouldIncludeTable);
+  }
+
+  /**
+   * Lists the bundled sourcedata files whose table the given filter accepts.
+   *
+   * @param classLoader  the class loader that holds the bundled sourcedata
+   * @param includeTable accepts the table names whose file is read
+   * @return the lazily evaluated provider
+   */
+  static SourceFileProvider classpathSourceFileProvider(ClassLoader classLoader,
+      Predicate<String> includeTable) {
     Objects.requireNonNull(classLoader, "classLoader is required");
+    Objects.requireNonNull(includeTable, INCLUDE_TABLE_REQUIRED);
     return () -> {
       List<SourceFile> files = new ArrayList<>();
       for (String fileName : readBundledSourceFileNames(classLoader)) {
-        if (fileName.endsWith(".xml")
-            && OnboardingDatasetDefinition.shouldIncludeTable(tableName(fileName))) {
+        if (fileName.endsWith(".xml") && includeTable.test(tableName(fileName))) {
           files.add(new SourceFile(fileName, () -> openBundledSourceFile(classLoader, fileName)));
         }
       }
