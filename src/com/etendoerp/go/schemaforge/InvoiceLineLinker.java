@@ -38,6 +38,10 @@ final class InvoiceLineLinker {
    */
   private static final String SYSTEM_USER_ID = "0";
 
+  /** Named-parameter keys shared by the native statements below. */
+  private static final String PARAM_INOUT_LINE_ID = "inoutLineId";
+  private static final String PARAM_USER_ID = "userId";
+
   private InvoiceLineLinker() {
   }
 
@@ -58,8 +62,8 @@ final class InvoiceLineLinker {
             + "    UpdatedBy = :userId "
             + "WHERE C_OrderLine_ID = :orderLineId "
             + "  AND M_InOutLine_ID IS NULL")
-        .setParameter("inoutLineId", newInoutLine.getId())
-        .setParameter("userId", currentUserIdOrSystem())
+        .setParameter(PARAM_INOUT_LINE_ID, newInoutLine.getId())
+        .setParameter(PARAM_USER_ID, currentUserIdOrSystem())
         .setParameter("orderLineId", orderLineId)
         .executeUpdate();
   }
@@ -87,7 +91,7 @@ final class InvoiceLineLinker {
             + "  AND EXISTS ("
             + "    SELECT 1 FROM M_InOutLine iol "
             + "    WHERE iol.C_OrderLine_ID = il.C_OrderLine_ID)")
-        .setParameter("userId", currentUserIdOrSystem())
+        .setParameter(PARAM_USER_ID, currentUserIdOrSystem())
         .setParameter("invoiceId", invoiceId)
         .executeUpdate();
   }
@@ -136,8 +140,8 @@ final class InvoiceLineLinker {
             + "    UpdatedBy = :userId "
             + "WHERE C_InvoiceLine_ID = :invoiceLineId "
             + "  AND M_InOutLine_ID IS NULL")
-        .setParameter("inoutLineId", inoutLineId)
-        .setParameter("userId", userId)
+        .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
+        .setParameter(PARAM_USER_ID, userId)
         .setParameter("invoiceLineId", invoiceLineId)
         .executeUpdate();
     if (updated > 0) {
@@ -160,9 +164,9 @@ final class InvoiceLineLinker {
             + "AND NOT EXISTS (SELECT 1 FROM " + table + " mt "
             + "  WHERE mt.m_inoutline_id = iol.m_inoutline_id "
             + "    AND mt.c_invoiceline_id = il.c_invoiceline_id)")
-        .setParameter("userId", userId)
+        .setParameter(PARAM_USER_ID, userId)
         .setParameter("invoiceLineId", invoiceLineId)
-        .setParameter("inoutLineId", inoutLineId)
+        .setParameter(PARAM_INOUT_LINE_ID, inoutLineId)
         .executeUpdate();
   }
 
