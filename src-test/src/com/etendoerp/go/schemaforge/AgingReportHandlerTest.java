@@ -504,7 +504,7 @@ class AgingReportHandlerTest {
      * organization <id>" — a claim a live benchmark run found to be false (the schema WAS
      * configured, both via the FK and via the link table). The rewritten body must say only
      * that resolution failed, never assert the absence of configuration, and must point at the
-     * working alternative (neo_list on sales-invoice/header filtering pending+partial status).
+     * working alternative (etendo_list on sales-invoice/header filtering pending+partial status).
      */
     @Test
     @DisplayName("Missing accounting schema returns an actionable 422")
@@ -552,7 +552,7 @@ class AgingReportHandlerTest {
         assertFalse(detail.toLowerCase().contains("is not configured"),
             "detail must not assert a cause that was never verified");
         String hint = errorBody.getString("hint");
-        assertTrue(hint.contains("neo_list"));
+        assertTrue(hint.contains("etendo_list"));
         assertTrue(hint.contains("sales-invoice"));
         assertTrue(hint.contains("pending"));
         assertTrue(hint.contains("partial"));

@@ -50,7 +50,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
- * ETP-5468 — {@code neo_schema} on a report spec whose handler declares named actions
+ * ETP-5468 — {@code etendo_schema} on a report spec whose handler declares named actions
  * ({@code bank-reconciliation}) answers with the action catalog BEFORE the generic path, which
  * rejects every {@code SPEC_TYPE=R} spec as not CRUD-capable. Every other spec keeps the old path.
  *
@@ -59,7 +59,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * generic-path entry ({@code resolveIncludedEntityOrExplain}) are stubbed, so {@code validateArgs}
  * runs for real.</p>
  */
-@DisplayName("neo_schema on an action report spec (ETP-5468)")
+@DisplayName("etendo_schema on an action report spec (ETP-5468)")
 class McpSchemaReportActionsTest {
 
   private static final String SPEC = "bank-reconciliation";

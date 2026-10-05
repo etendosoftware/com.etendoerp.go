@@ -736,7 +736,7 @@ public class McpServletTest {
         .put("jsonrpc", "2.0")
         .put("id", 1)
         .put("method", "tools/call")
-        .put("params", new JSONObject().put("name", "neo_list")
+        .put("params", new JSONObject().put("name", "etendo_list")
             .put("arguments", new JSONObject().put("spec", "sales-order")))
         .toString());
 

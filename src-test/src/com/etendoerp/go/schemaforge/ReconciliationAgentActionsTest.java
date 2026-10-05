@@ -61,7 +61,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * Unit tests for {@link ReconciliationAgentActions} (ETP-5468, front A) — the {@code neo_action}
+ * Unit tests for {@link ReconciliationAgentActions} (ETP-5468, front A) — the {@code etendo_action}
  * surface of {@code bank-reconciliation} — and the regression guarantees around it:
  *
  * <ul>

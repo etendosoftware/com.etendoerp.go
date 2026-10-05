@@ -572,9 +572,9 @@ Si un selector tiene un `AD_Validation` con codigo que referencia parametros (ej
 GET /sws/neo/sales-order/OrderLine/selectors/M_Product_ID?q=laptop&M_Product_Category_ID=CAT123
 ```
 
-### Context params en MCP `neo_selectors`
+### Context params en MCP `etendo_selectors`
 
-El tool MCP `neo_selectors` acepta contexto estructurado para resolver selectors dependientes sin que el agente tenga que hardcodear ids ni conocer los nombres internos de todos los parametros de validacion.
+El tool MCP `etendo_selectors` acepta contexto estructurado para resolver selectors dependientes sin que el agente tenga que hardcodear ids ni conocer los nombres internos de todos los parametros de validacion.
 
 Campos soportados:
 
@@ -945,12 +945,12 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 > `inventoryStockReportHandler` (`inventory-stock-report`), `taxReportHandler`
 > (`tax-report`). Un `R` **sin** handler NEO-native no es invocable: GET y POST devuelven
 > **HTTP 200** con `{name, type:"report", callable:false, status:"not_configured_for_report_generation", message}`,
-> identico a `neo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
+> identico a `etendo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
 > queda fuera del alcance de ETP-4255.
 >
 > **ETP-4257 — herramientas CRUD de MCP sobre specs `R`.** Un spec `R` no expone entidades
-> listables, por lo que `neo_list`/`neo_get`/`neo_create`/`neo_update`/`neo_delete`/
-> `neo_selectors`/`neo_defaults`/`neo_schema` **no** devuelven ya el opaco `Entity not found:
+> listables, por lo que `etendo_list`/`etendo_get`/`etendo_create`/`etendo_update`/`etendo_delete`/
+> `etendo_selectors`/`etendo_defaults`/`etendo_schema` **no** devuelven ya el opaco `Entity not found:
 > <entity>`. En su lugar el guard (`McpToolRouterSupport.resolveIncludedEntityOrExplain`)
 > explica que el spec es de tipo reporte:
 > - **callable** (respaldado por handler NEO-native): `Spec '<name>' is a report type (R) and
@@ -958,7 +958,7 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 >   report.`
 > - **no callable**: el mismo mensaje `not_configured_for_report_generation` de arriba.
 >
-> Ademas, `neo_discover` añade en cada spec `R` **callable** el campo `reportTool =
+> Ademas, `etendo_discover` añade en cada spec `R` **callable** el campo `reportTool =
 > generate_<snake>` (el cliente lo ve como `etendo_generate_<snake>`), para que el agente
 > invoque directamente la herramienta de reporte en vez de adivinar una entidad.
 
@@ -1242,7 +1242,7 @@ Neo Headless aplica seguridad en multiples capas:
 3. Sin fila activa de `AD_Window_Access` para role+window -> deniega.
 4. Existe una fila activa: `GET` siempre permitido; `POST`/`PUT`/`PATCH`/`DELETE` solo si el flag `IsReadWrite` de esa fila es `true` -- una fila de solo-lectura otorga visibilidad pero deniega escritura.
 
-Este check se aplica identico en los dos puntos de entrada a datos de ventana: el servlet REST (`NeoRequestRouter.handleWindowSpecRequest`) y el router de tools MCP (`McpToolRouter`, que mapea `neo_create`->`POST`, `neo_update`->`PUT`, `neo_delete`->`DELETE`, el resto->`GET` antes de llamar al mismo helper).
+Este check se aplica identico en los dos puntos de entrada a datos de ventana: el servlet REST (`NeoRequestRouter.handleWindowSpecRequest`) y el router de tools MCP (`McpToolRouter`, que mapea `etendo_create`->`POST`, `etendo_update`->`PUT`, `etendo_delete`->`DELETE`, el resto->`GET` antes de llamar al mismo helper).
 
 ### Windowless/custom specs ("combinacion" de ventanas)
 

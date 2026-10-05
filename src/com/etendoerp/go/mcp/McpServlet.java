@@ -246,7 +246,7 @@ public class McpServlet extends HttpServlet {
       boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
       String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
 
-      // B3/D31: a neo_feedback call IS a tool call, so it produces exactly ONE row — this one —
+      // B3/D31: a etendo_feedback call IS a tool call, so it produces exactly ONE row — this one —
       // discriminated by row_type and carrying the report. It therefore inherits the session,
       // tenant, timestamp and client columns, and lands in the same sequence as the calls that
       // provoked it. The payload is stored only when the tool accepted the verdict; a rejected or

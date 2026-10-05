@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link McpNamedFilters} — the pure, DAL-free parser for the per-entity
- * {@code NAMED_FILTERS} JSON that {@code neo_list} exposes as {@code {status:"<name>"}} filters
+ * {@code NAMED_FILTERS} JSON that {@code etendo_list} exposes as {@code {status:"<name>"}} filters
  * (ETP-4601).
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects

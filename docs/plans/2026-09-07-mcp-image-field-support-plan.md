@@ -66,10 +66,10 @@ surface on top of it.
 
 1. `McpSchemaFieldBuilder.mapColumnType()` has no case for
    `4AA6C3BE9D3B4D84A3B80489505A23E5`, so it falls through to `default → "string"`.
-   Result: `neo_schema`/`formState` emit `"image": {}` — an untyped, undescribed string.
+   Result: `etendo_schema`/`formState` emit `"image": {}` — an untyped, undescribed string.
    Verified in `artifacts/product/contract.mcp.json` (`"image": {}`).
 2. An agent that guesses will either write a bogus string (FK violation from DAL) or
-   inline a base64 payload into `neo_create`/`neo_update` (which is not what the column
+   inline a base64 payload into `etendo_create`/`etendo_update` (which is not what the column
    stores, and which would burn ~100k output tokens for a 130 KB image).
 3. There is no tool that creates an `AD_Image` row, and no MCP tool/resource that lets
    an agent *see* an existing image.
@@ -125,14 +125,14 @@ Generic, type-driven support for **every** `Image BLOB` field — never a
 "image": {
   "type": "string",
   "format": "etendo-image-id",
-  "description": "AD_Image ID. Do NOT send base64 or a URL here. Obtain the id with neo_upload_image, then write it to this field. Read the current image with neo_get_image."
+  "description": "AD_Image ID. Do NOT send base64 or a URL here. Obtain the id with etendo_upload_image, then write it to this field. Read the current image with etendo_get_image."
 }
 ```
 
-3. Same treatment in `neo_schema`, `formState` and the create view
+3. Same treatment in `etendo_schema`, `formState` and the create view
    (`McpSchemaCreateView`), so discovery, defaults and create all agree.
-4. `neo_create`/`neo_update` reject a value that is not a 32-hex `AD_Image` id with a
-   **self-correctable** error naming `neo_upload_image` (this is the M4 metric in the
+4. `etendo_create`/`etendo_update` reject a value that is not a 32-hex `AD_Image` id with a
+   **self-correctable** error naming `etendo_upload_image` (this is the M4 metric in the
    MCP comparison skill — the agent must be able to fix itself without a human).
 
 Layer A alone turns a silent FK failure into a guided one. It is worth shipping first.
@@ -158,10 +158,10 @@ URL-mode elicitation** — i.e. the ticket pattern below is what the standard is
 formalizing. Building it now means the eventual migration is a host-side file picker
 sitting in front of an endpoint we already have.
 
-#### B1 — `neo_request_image_upload` (PRIMARY, ~50 tokens)
+#### B1 — `etendo_request_image_upload` (PRIMARY, ~50 tokens)
 
 ```
-neo_request_image_upload({ name?: string, mime_type?: string })
+etendo_request_image_upload({ name?: string, mime_type?: string })
   -> { uploadUrl, expiresAt, maxBytes, curlExample }
 ```
 
@@ -175,17 +175,17 @@ neo_request_image_upload({ name?: string, mime_type?: string })
 - The endpoint validates, calls `NeoImageHelper.createImage(...)`, consumes the token and
   responds `{ imageId, name, mimeType, bytes, width, height }`.
 - Because the response of the PUT is what carries the `imageId`, the agent needs one more
-  cheap step only if it did not see that output: `neo_get_image_upload({ token })` →
+  cheap step only if it did not see that output: `etendo_get_image_upload({ token })` →
   `{ status, imageId }`. Same-token, read-only.
 
 Token rules: single use, TTL ≤ 10 min, opaque and unguessable (>=128 bits), bound to the
 MCP session's client/org/user, carries no session JWT, `maxBytes` enforced server-side
 (reuse the servlet's 10 MB), MIME allowlist + magic-byte sniff identical to B2.
 
-#### B2 — `neo_upload_image` (FALLBACK, small images only)
+#### B2 — `etendo_upload_image` (FALLBACK, small images only)
 
 ```
-neo_upload_image({ data_base64: string, name?: string, mime_type?: string })
+etendo_upload_image({ data_base64: string, name?: string, mime_type?: string })
   -> { imageId, name, mimeType, bytes, width, height }
 ```
 
@@ -201,23 +201,23 @@ Validation, in order, each with a self-correctable message: present/non-blank �
 `mime_type` so a lying `mime_type` cannot store an arbitrary blob.
 
 Both tools create the `AD_Image` row **only** — wiring it to a record stays an explicit
-`neo_update` of the image field, which keeps them generic and the audit trail obvious.
+`etendo_update` of the image field, which keeps them generic and the audit trail obvious.
 
 #### Tool descriptions (a deliverable, not a detail)
 
-`neo_request_image_upload`:
+`etendo_request_image_upload`:
 
 > Returns a single-use URL to upload an image to Etendo, plus a ready-to-run curl command.
-> **Prefer this over `neo_upload_image` whenever you can run a shell command or the user can
+> **Prefer this over `etendo_upload_image` whenever you can run a shell command or the user can
 > open a link: the image bytes never pass through the conversation, so it costs almost no
 > tokens.** After the upload succeeds you get an `imageId` — write it to any field of type
-> `image` with `neo_update`.
+> `image` with `etendo_update`.
 
-`neo_upload_image`:
+`etendo_upload_image`:
 
 > Uploads an image inline as base64 and returns its `imageId`. **Use only for images under
 > 256 KB: base64 in a tool argument is model output, so ~100 KB of image costs ~100k tokens.
-> If you can run a shell command, use `neo_request_image_upload` instead.** `image/png` or
+> If you can run a shell command, use `etendo_request_image_upload` instead.** `image/png` or
 > `image/jpeg` only; resize to max 1024 px on the long side before encoding.
 
 A doc test asserts both descriptions mention the cheap path and the cap, so the guidance
@@ -229,15 +229,15 @@ If the caller is a chat-only client AND the user will not open a link, base64 is
 option and the token cost is unavoidable — there is no third mechanism today. That is a
 protocol gap (SEP-2356), not something we can close in Etendo.
 
-### Layer C — `neo_get_image` + a resource (the read path)
+### Layer C — `etendo_get_image` + a resource (the read path)
 
-- `neo_get` on a record with an image field returns the id today. Additionally emit a
+- `etendo_get` on a record with an image field returns the id today. Additionally emit a
   `resource_link` to `neo://image/{imageId}` so a client can fetch it on demand without
   the agent paying for it.
 - `McpResourceProvider`: register `neo://image/{id}`, returning a binary resource
   (`blob` = base64, `mimeType` from `AD_Image.Mimetype`) — the spec-standard way to move
   binaries server→client.
-- `neo_get_image({ imageId, max_dimension?: 512 })` → MCP `ImageContent`
+- `etendo_get_image({ imageId, max_dimension?: 512 })` → MCP `ImageContent`
   (`{type:"image", data, mimeType}`) so a vision-capable agent can actually look at the
   picture. **Downscale server-side by default** (`max_dimension` 512, hard cap 1024) —
   returning a 4 MB original as base64 would blow the context (this is the ACE-v cost the
@@ -314,14 +314,14 @@ Also resolved on 2026-09-07:
      */
     ```
 
-  Accepted consequence: a Tomcat restart between `neo_request_image_upload` and the PUT
+  Accepted consequence: a Tomcat restart between `etendo_request_image_upload` and the PUT
   invalidates the ticket. With a ≤10 min TTL the agent just requests another one, and the
   error for an unknown token is the same self-correctable message as for an expired one.
 - **Ticket TTL: 10 min, single use.**
 
 Still open:
 
-1. **`neo_get_image` default size** — 512 px is a guess; confirm against the real ACE
+1. **`etendo_get_image` default size** — 512 px is a guess; confirm against the real ACE
    budget (`/mcp-ace-comparison`).
 
 ## 5. Phasing
@@ -329,10 +329,10 @@ Still open:
 | Phase | Scope | Repos | Risk |
 |---|---|---|---|
 | **P1** | Layer A (type mapping + schema description + self-correctable write error) | `.go` (+ regenerate `contract.mcp.json` in schema_forge) | very low |
-| **P2** | Extract `NeoImageHelper.createImage` + MIME sniff; `neo_upload_image` base64 fallback (256 KB cap) | `.go` | low |
-| **P3** | `neo_request_image_upload` + one-shot upload endpoint + in-memory ticket store | `.go` | medium (new endpoint + security review) |
-| **P4** | Layer C: `neo://image/{id}` resource + `resource_link` in `neo_get` | `.go` | low |
-| **P5** | `neo_get_image` returning downscaled `ImageContent` | `.go` | low (watch payload) |
+| **P2** | Extract `NeoImageHelper.createImage` + MIME sniff; `etendo_upload_image` base64 fallback (256 KB cap) | `.go` | low |
+| **P3** | `etendo_request_image_upload` + one-shot upload endpoint + in-memory ticket store | `.go` | medium (new endpoint + security review) |
+| **P4** | Layer C: `neo://image/{id}` resource + `resource_link` in `etendo_get` | `.go` | low |
+| **P5** | `etendo_get_image` returning downscaled `ImageContent` | `.go` | low (watch payload) |
 
 P1+P2 is the whole write path and closes the reported gap on its own. P3/P4 are the
 read path and can ship independently.
@@ -342,13 +342,13 @@ read path and can ship independently.
 ## 6. Tests
 
 - `mapColumnType("4AA6C3BE9D3B4D84A3B80489505A23E5")` → `"image"` (unit).
-- `neo_schema` for `product` emits `type/format/description` for `image`, not `{}`.
-- `neo_update` with a non-id value on an image field → 400 whose message names
-  `neo_upload_image` (self-correctable-error assertion).
-- `neo_upload_image` round trip: base64 in → `imageId` out → `neo_update` product →
-  `neo_get` returns that id → `GET /sws/neo/image/{id}` serves the same bytes.
+- `etendo_schema` for `product` emits `type/format/description` for `image`, not `{}`.
+- `etendo_update` with a non-id value on an image field → 400 whose message names
+  `etendo_upload_image` (self-correctable-error assertion).
+- `etendo_upload_image` round trip: base64 in → `imageId` out → `etendo_update` product →
+  `etendo_get` returns that id → `GET /sws/neo/image/{id}` serves the same bytes.
 - `data_base64` over the 256 KB decoded cap → error that names
-  `neo_request_image_upload` (assert the message, not just the status).
+  `etendo_request_image_upload` (assert the message, not just the status).
 - Ticket lifecycle: single use (second PUT rejected), expiry after TTL, unknown/forged
   token rejected, token from another MCP session rejected, oversized body rejected,
   `curlExample` in the response actually matches `uploadUrl`.
@@ -356,15 +356,15 @@ read path and can ship independently.
   per-session pending cap is enforced, and an unknown token yields the same
   self-correctable error as an expired one (so a restart is indistinguishable from an
   expiry, by design).
-- Ticket happy path: `neo_request_image_upload` → PUT bytes → `{imageId}` → `neo_update`
-  product → `neo_get` returns that id → `GET /sws/neo/image/{id}` serves the same bytes.
+- Ticket happy path: `etendo_request_image_upload` → PUT bytes → `{imageId}` → `etendo_update`
+  product → `etendo_get` returns that id → `GET /sws/neo/image/{id}` serves the same bytes.
 - `data_base64` malformed / blank → distinct, self-correctable errors.
 - `data:image/png;base64,...` prefix is stripped and still stores correct bytes.
 - MIME guard table test: a `text/html` payload, a PDF, and a PNG declared as
   `image/jpeg` — all rejected by magic-byte sniffing; `mime_type` omitted → sniffed.
 - Both tool descriptions mention the cheap path and the cap (a doc assertion, so the
   guidance cannot silently drift from the validation).
-- `neo_get_image` payload stays under the agreed byte budget for a 4000×3000 source.
+- `etendo_get_image` payload stays under the agreed byte budget for a 4000×3000 source.
 - Generic-by-type proof: the same flow works on `organization.Your_Company_Document_Image`
   with **zero** additional code.
 

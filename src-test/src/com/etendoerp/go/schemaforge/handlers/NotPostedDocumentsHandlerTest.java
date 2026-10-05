@@ -115,7 +115,7 @@ public class NotPostedDocumentsHandlerTest {
   /**
    * ETP-4254: this spec is tab-less, so the MCP catalog rule would hide it as "handler-only"
    * unless the handler declares its {@code post} / {@code bulk-post} action surface. Losing the
-   * declaration removes the spec from neo_discover AND from neo_action — a silent regression
+   * declaration removes the spec from etendo_discover AND from etendo_action — a silent regression
    * with no other failing test, which is why it is asserted here.
    */
   @Test

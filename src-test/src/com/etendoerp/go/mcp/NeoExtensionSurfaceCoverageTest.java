@@ -128,7 +128,7 @@ class NeoExtensionSurfaceCoverageTest {
         "REST CRUD must dispatch on REST_SINGLE");
     assertTrue(McpSourceScanner.read(REST_BATCH).contains("REST_BATCH"),
         "the batch service must dispatch on REST_BATCH — the channel whose divergence from "
-            + "neo_create had BATCH_TOOL_ENABLED off until ETP-5415 converged them");
+            + "etendo_create had BATCH_TOOL_ENABLED off until ETP-5415 converged them");
   }
 
   private static Set<String> surfaceLiterals(String source) {

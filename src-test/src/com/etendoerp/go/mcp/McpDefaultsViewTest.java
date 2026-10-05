@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for {@link McpDefaultsView} — the pure re-shaper behind the {@code neo_defaults}
+ * Unit tests for {@link McpDefaultsView} — the pure re-shaper behind the {@code etendo_defaults}
  * {@code view} argument (IMP-7). No DAL/model access, so these run without a live instance.
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects

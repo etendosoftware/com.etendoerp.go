@@ -42,7 +42,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * Architecture regression test for ETP-5184 — the three MCP readers of a field's curation cannot
  * disagree.
  *
- * <p>{@code neo_schema}'s field metadata, {@code neo_selectors}' editable-property set and the
+ * <p>{@code etendo_schema}'s field metadata, {@code etendo_selectors}' editable-property set and the
  * resource provider's field list each derived {@code visibility}/{@code readOnly}/
  * {@code businessCritical} straight off {@code SFField}, with their own arithmetic — one read the
  * curated string, one ignored it entirely and computed {@code isIncluded && !isReadOnly}, one read
@@ -60,8 +60,8 @@ import com.etendoerp.go.schemaforge.data.SFField;
  *
  * <p>{@code McpQuerySupport.summaryFields} was the fourth reader, found after the first three were
  * unified: it read {@code sfField.isBusinessCritical()} straight off the row, so a {@code fields}
- * override setting {@code businessCritical} was honoured by {@code neo_schema} and ignored by
- * {@code neo_list}/{@code neo_get} with {@code view:"summary"} — an agent told a field is
+ * override setting {@code businessCritical} was honoured by {@code etendo_schema} and ignored by
+ * {@code etendo_list}/{@code etendo_get} with {@code view:"summary"} — an agent told a field is
  * business-critical, then handed a projection that omits it. Routed and guarded here.</p>
  */
 @DisplayName("ETP-5184 — every MCP reader of a field's curation goes through McpFieldView")
@@ -93,8 +93,8 @@ class McpFieldViewSingleResolverCallSiteTest {
    * one they actually had: both of these used to answer the question with a
    * {@code Restrictions.eq(PROPERTY_ISINCLUDED, true)} in their own criteria. A criteria runs in
    * the database and an {@code MCP_CONFIG} {@code fields.included} override lives in a JSON column
-   * nobody joins, so the override would have been honoured by {@code neo_schema} and silently
-   * ignored by {@code neo_list} and both write verbs — rebuilding the exact three-way disagreement
+   * nobody joins, so the override would have been honoured by {@code etendo_schema} and silently
+   * ignored by {@code etendo_list} and both write verbs — rebuilding the exact three-way disagreement
    * IMP-39 exists to end, with no raw property read anywhere for the check above to catch.</p>
    *
    * <p>{@code activeFields} is listed because it is the shared query the other two draw from: a
@@ -104,7 +104,7 @@ class McpFieldViewSingleResolverCallSiteTest {
    * surfaces: {@code buildFieldsArray} backs the {@code schemaforge://} resource listing and
    * {@code buildProcessParamSchema} backs a process tool's declared parameter set. Both filtered
    * with a criteria, so a field reclaimed by a {@code fields.included} override was named by
-   * {@code neo_schema} and absent from the resource and from the tool's own schema — with no error
+   * {@code etendo_schema} and absent from the resource and from the tool's own schema — with no error
    * and no log. {@code buildFieldsArray} is the sharper case, because it was already resolving
    * {@code readOnly} through the view in the same loop: one property honoured the override and the
    * other did not, inside one method.</p>
@@ -262,8 +262,8 @@ class McpFieldViewSingleResolverCallSiteTest {
     if (!violations.isEmpty()) {
       fail("MCP readers disagree about a field's curation: " + violations
           + ". Resolve through McpFieldView.of(sfField) instead. Without it an MCP_CONFIG 'fields'"
-          + " override is honoured by some tools and not others, so neo_schema can report a field"
-          + " as editable while neo_selectors reports otherwise — and neither response says so.");
+          + " override is honoured by some tools and not others, so etendo_schema can report a field"
+          + " as editable while etendo_selectors reports otherwise — and neither response says so.");
     }
   }
 
@@ -320,7 +320,7 @@ class McpFieldViewSingleResolverCallSiteTest {
     // the row legitimately — "deliberately not overridable" is what this assertion said — and now
     // fields.included can reclaim an excluded field or exclude an exposed one for the MCP alone.
     // A reader still reading the column decides a write and a filter on the pre-override answer
-    // while neo_schema reports the override, which is the disagreement, not a style nit.
+    // while etendo_schema reports the override, which is the disagreement, not a style nit.
     String included = "{ for (SFField row : crit.list()) { boolean i = row.isIncluded(); } }";
     assertFalse(rawReadViolations("synthetic", included).isEmpty(),
         "since IMP-39 fields.included is overridable, so a raw row read of it must be flagged");
@@ -340,8 +340,8 @@ class McpFieldViewSingleResolverCallSiteTest {
    * all — and it is strictly worse than the raw read, because it is resolved in the database where
    * the {@code MCP_CONFIG} JSON is not joined. {@code excludedPropertyNames} and
    * {@code filterablePropertyNames} both queried {@code ISINCLUDED = 'Y'} before the fix, so an
-   * override would have moved {@code neo_schema} and left {@code neo_list}, {@code neo_create} and
-   * {@code neo_update} on the old answer.</p>
+   * override would have moved {@code etendo_schema} and left {@code etendo_list}, {@code etendo_create} and
+   * {@code etendo_update} on the old answer.</p>
    */
   @Test
   @DisplayName("no inclusion reader pushes ISINCLUDED into a criteria, where an override cannot "
@@ -409,7 +409,7 @@ class McpFieldViewSingleResolverCallSiteTest {
    * <p>Both directions matter and for different reasons. Reclaiming an excluded field is what
    * makes the override useful; <b>excluding an exposed one is what makes the write gate's answer
    * depend on it</b> — {@code writeGate} puts exactly this field in {@code excluded} and
-   * {@code neo_create} refuses it with {@code field_not_allowed}. Every fixture has the row and
+   * {@code etendo_create} refuses it with {@code field_not_allowed}. Every fixture has the row and
    * the override disagree, so a passing assertion can only be reading the override; the third is
    * the control that proves the row is still read at all.</p>
    */
@@ -430,7 +430,7 @@ class McpFieldViewSingleResolverCallSiteTest {
 
   /**
    * An excluded field is not editable however the exclusion was decided — the two axes stay
-   * wired together, which is what keeps {@code neo_selectors} from offering a field the write
+   * wired together, which is what keeps {@code etendo_selectors} from offering a field the write
    * gate refuses.
    */
   @Test
@@ -499,8 +499,8 @@ class McpFieldViewSingleResolverCallSiteTest {
    * The behavioural half: one {@link McpFieldView} instance is the single answer every reader
    * reports, so the properties they each consume are mutually consistent by construction.
    *
-   * <p>The drift scenario spelled out: {@code neo_schema} publishes {@code visibility} and
-   * {@code readOnly} from the view, {@code neo_selectors} publishes {@code isEditable()}, and the
+   * <p>The drift scenario spelled out: {@code etendo_schema} publishes {@code visibility} and
+   * {@code readOnly} from the view, {@code etendo_selectors} publishes {@code isEditable()}, and the
    * resource provider publishes {@code readOnly}, and {@code summaryFields} publishes
    * {@code isBusinessCritical()}. If the override moved only one of them, the readers would
    * contradict each other for the same field.</p>
@@ -510,7 +510,7 @@ class McpFieldViewSingleResolverCallSiteTest {
   void oneViewAnswersEveryReaderTheSameWay() {
     McpFieldView view = McpFieldView.of(overriddenField("editable"));
 
-    // neo_schema's two properties, neo_selectors' one, the resource provider's one.
+    // etendo_schema's two properties, etendo_selectors' one, the resource provider's one.
     assertEquals("editable", view.getVisibility());
     assertFalse(view.isReadOnly());
     assertTrue(view.isEditable());
@@ -528,7 +528,7 @@ class McpFieldViewSingleResolverCallSiteTest {
 
   /**
    * {@code businessCritical} is overridable, and {@code summaryFields} is the reader that now
-   * consumes it — {@code view:"summary"} on {@code neo_list}/{@code neo_get}. That reader has no
+   * consumes it — {@code view:"summary"} on {@code etendo_list}/{@code etendo_get}. That reader has no
    * behavioural test of its own (it needs a {@code ModelProvider} entity and a live DAL), so the
    * capability it gained is pinned here, at the seam it gained it through.
    *

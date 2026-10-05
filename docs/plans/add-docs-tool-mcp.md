@@ -16,7 +16,7 @@ The tool lets an MCP client (e.g. an AI agent) ask "search the Etendo Go docs fo
 All paths under `modules/com.etendoerp.go/`.
 
 - **Transport / server:** `src/com/etendoerp/go/mcp/McpServlet.java` — JSON-RPC 2.0 over HTTP (`/sws/mcp`), OAuth2 Bearer auth via `OAuth2Filter`.
-- **Tool catalog:** `src/com/etendoerp/go/mcp/ToolRegistry.java` — `generateTools(Set<String> scopes)` builds the `tools/list` response. Tools are generated dynamically; static tools (like `neo_discover`) are added unconditionally inside this method. Schema is built with helper methods `buildObjectSchema(props, required)`, `stringProp(...)`, `intProp(...)`, `enumProp(...)`.
+- **Tool catalog:** `src/com/etendoerp/go/mcp/ToolRegistry.java` — `generateTools(Set<String> scopes)` builds the `tools/list` response. Tools are generated dynamically; static tools (like `etendo_discover`) are added unconditionally inside this method. Schema is built with helper methods `buildObjectSchema(props, required)`, `stringProp(...)`, `intProp(...)`, `enumProp(...)`.
 - **Tool dispatch:** `src/com/etendoerp/go/mcp/McpToolRouter.java` — `route(toolName, arguments, scopes)`: a `switch` on `toolName`. Returns an MCP result via `wrapAsTextContent(String)` / `wrapAsErrorContent(String)`.
 - **Spec name resolution:** `ToolRegistry.resolveSpecName(toolName, args)` — called for every tool in `route()` before `authorizeSpecAccess(specName)`. `authorizeSpecAccess` is a no-op when the spec name is blank (`McpToolRouter.java:843-846`).
 - **Scope/RBAC:** `src/com/etendoerp/go/mcp/McpAuthorizationService.java` — `authorizeToolCall(toolName, scopes)` maps each tool to a required OAuth2 scope (`requiredScopeFor`). Unknown tool names currently fall through to `neo:process`.
@@ -35,7 +35,7 @@ All paths under `modules/com.etendoerp.go/`.
 |----------|--------|-----------|
 | Tool name | `docs` | Matches user request; short, discoverable. |
 | Required scope | `neo:read` (read-only) | Docs lookup is non-mutating. Add to `requiredScopeFor` so it doesn't default to `neo:process`. |
-| Always available? | Add when `permissions.canRead` (like `neo_discover`), independent of any spec | Not tied to a DB spec. |
+| Always available? | Add when `permissions.canRead` (like `etendo_discover`), independent of any spec | Not tied to a DB spec. |
 | Spec resolution | Treat as having no spec | Add `docs` to `isCrudTool()` **or** special-case it so `resolveSpecName` returns `null` → `authorizeSpecAccess(null)` no-ops. Prefer an explicit `isStaticTool()` check to avoid overloading `isCrudTool` semantics. |
 | HTTP client | `java.net.http.HttpClient` | JDK built-in, no new dependency. |
 | Base URL / library | Constant, overridable by preference | Default `https://context7.com/api/v1/etendosoftware/etendo-go-docs`. |
@@ -73,14 +73,14 @@ All paths under `modules/com.etendoerp.go/`.
 - Keep it dependency-free and easily mockable (inject the `HttpClient`, or wrap the call in a protected method, so tests can stub the network).
 
 ### 2. Register the tool — `ToolRegistry.java`
-- In `generateTools(...)`, after the `neo_discover` block:
+- In `generateTools(...)`, after the `etendo_discover` block:
   ```java
   if (permissions.canRead) {
     tools.add(buildDocsTool());
   }
   ```
 - Add `buildDocsTool()` using `buildObjectSchema` + `stringProp`/`intProp` per the schema above (model it on `buildListTool`).
-- Add `docs` to whatever predicate makes `resolveSpecName` return `null` for it (preferably a new `isStaticTool(toolName)` helper covering `neo_discover` + `docs`, or extend `isCrudTool` if you accept the semantic overlap). Confirm `resolveSpecName("docs", args)` does **not** fall through to `snakeToKebab("docs")` (which would make `authorizeSpecAccess` try to find a non-existent spec and throw).
+- Add `docs` to whatever predicate makes `resolveSpecName` return `null` for it (preferably a new `isStaticTool(toolName)` helper covering `etendo_discover` + `docs`, or extend `isCrudTool` if you accept the semantic overlap). Confirm `resolveSpecName("docs", args)` does **not** fall through to `snakeToKebab("docs")` (which would make `authorizeSpecAccess` try to find a non-existent spec and throw).
 
 ### 3. Dispatch the tool — `McpToolRouter.java`
 - Add a `case "docs":` in the `route(...)` switch **before** the `default` (process) branch:

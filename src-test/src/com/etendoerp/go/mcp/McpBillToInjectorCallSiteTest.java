@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Architecture regression test for ETP-5335 — both MCP write paths must derive the bill-to.
  *
- * <p>{@code neo_batch} never reaches {@code handleCreate}: it builds its own per-operation pre-pass
+ * <p>{@code etendo_batch} never reaches {@code handleCreate}: it builds its own per-operation pre-pass
  * and hands the body straight to {@code BatchService}. So a compensation wired into the create verb
  * alone covers exactly half of the MCP writes, and the uncovered half fails nowhere near the cause
  * — the order persists with a null {@code BillTo_ID} and the defect surfaces much later, when
@@ -69,7 +69,7 @@ class McpBillToInjectorCallSiteTest {
       Pattern.compile("validateMandatoryFields\\s*\\(");
 
   @Test
-  @DisplayName("neo_create derives the bill-to after FK resolution and before the mandatory check")
+  @DisplayName("etendo_create derives the bill-to after FK resolution and before the mandatory check")
   void createPathDerivesBillTo() {
     String body = routerMethod("handleCreate");
 
@@ -91,7 +91,7 @@ class McpBillToInjectorCallSiteTest {
   }
 
   @Test
-  @DisplayName("neo_batch derives the bill-to too, after its own FK resolution")
+  @DisplayName("etendo_batch derives the bill-to too, after its own FK resolution")
   void batchPathDerivesBillTo() {
     String body = routerMethod("preprocessBatchOperation");
 

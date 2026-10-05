@@ -72,7 +72,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Contract-level unit tests for {@link BankStatementAgentActions} (ETP-5447, ETP-5469) — the
- * {@code neo_action} surface of the {@code bank-statements} report spec (the routing onto each SPA
+ * {@code etendo_action} surface of the {@code bank-statements} report spec (the routing onto each SPA
  * handler method and the SPA regression: {@code BankStatementAgentActionsTest}):
  *
  * <ul>

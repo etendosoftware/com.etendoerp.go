@@ -132,7 +132,7 @@ class ContactsLocationAddressParentAndRegionTest {
     @Test
     @DisplayName("the body FK is used — the MCP path, where McpToolRouter writes the resolved FK")
     void bodyFkIsUsed() throws Exception {
-      // neo_create removes parentId from the body and puts the resolved id under
+      // etendo_create removes parentId from the body and puts the resolved id under
       // businessPartner. A 404 rather than a 400 is the proof the id was read and looked up.
       JSONObject body = new JSONObject();
       body.put(FIELD_BUSINESS_PARTNER, BODY_BP);

@@ -130,8 +130,8 @@ class NeoRecordVersionDiagnosticsTest {
   @Test
   @DisplayName("routeOf keeps the spec entity, not the DAL entity, in the third position")
   void routeOfRendersMcpStyleRoutes() {
-    assertEquals("neo_update /sales-order/lines/ABC123",
-        NeoRecordVersion.routeOf("neo_update", "sales-order", "lines", "ABC123"));
+    assertEquals("etendo_update /sales-order/lines/ABC123",
+        NeoRecordVersion.routeOf("etendo_update", "sales-order", "lines", "ABC123"));
   }
 
   /**

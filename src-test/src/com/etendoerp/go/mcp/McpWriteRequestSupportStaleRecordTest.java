@@ -66,7 +66,7 @@ class McpWriteRequestSupportStaleRecordTest {
     assertFalse(hint.trim().isEmpty());
     // The remedy is re-reading, and the tool that does it has to be named — an agent told only
     // "conflict" has no next move.
-    assertTrue(hint.contains("neo_get"));
+    assertTrue(hint.contains("etendo_get"));
     assertTrue(hint.contains(McpConstants.PARAM_UPDATED));
     // Nothing was written: an agent must not go looking for a partially updated record.
     assertTrue(detail.contains("nothing was written"));

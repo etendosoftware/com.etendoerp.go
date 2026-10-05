@@ -117,7 +117,7 @@ public final class NeoExtensionDispatcher {
   /**
    * Resolve without invoking anything, for a surface that only has a post-hook.
    *
-   * <p>{@code neo_defaults} never runs a pre-hook: it calls {@code afterHandle} over a response
+   * <p>{@code etendo_defaults} never runs a pre-hook: it calls {@code afterHandle} over a response
    * the generic service already produced. Such a caller still needs the resolution order — and
    * without this entry point it would have to reach for {@code NeoHandlerLookup} directly and
    * would then miss every annotated class, which is precisely the half-wired state this ticket

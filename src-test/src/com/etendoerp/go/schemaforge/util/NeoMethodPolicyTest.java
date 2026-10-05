@@ -232,7 +232,7 @@ class NeoMethodPolicyTest {
       assertTrue(message.contains("Enabled methods: GET"), message);
       assertTrue(message.contains("read-only"), message);
       assertTrue(message.contains("CRUD writes"), message);
-      assertTrue(message.contains("neo_action"), message);
+      assertTrue(message.contains("etendo_action"), message);
       assertTrue(message.contains("Do not retry"), message);
     }
 
@@ -244,7 +244,7 @@ class NeoMethodPolicyTest {
 
       assertTrue(message.contains("Enabled methods: none"), message);
       assertFalse(message.contains("read-only"), message);
-      assertTrue(message.contains("neo_discover"), message);
+      assertTrue(message.contains("etendo_discover"), message);
     }
 
     @Test

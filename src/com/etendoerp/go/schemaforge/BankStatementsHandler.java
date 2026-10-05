@@ -375,9 +375,9 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
-   * The bank-statement actions an agent can run through {@code neo_action} (ETP-5447, ETP-5469)
+   * The bank-statement actions an agent can run through {@code etendo_action} (ETP-5447, ETP-5469)
    * — see {@link BankStatementAgentActions}. Declaring them also makes {@link #servesActions()}
-   * true and lists {@code bank-statements} in the {@code neo_action} / {@code neo_schema} enums.
+   * true and lists {@code bank-statements} in the {@code etendo_action} / {@code etendo_schema} enums.
    *
    * @return the declared actions by name, in presentation order
    */
@@ -388,7 +388,7 @@ public class BankStatementsHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    // ETP-5447 / ETP-5469: purely additive. Only neo_action produces an ACTION context for this
+    // ETP-5447 / ETP-5469: purely additive. Only etendo_action produces an ACTION context for this
     // spec; the SPA's ?action= calls arrive as report-spec requests with no endpoint type and never
     // enter this branch, so their routing below is untouched. The dispatcher calls the handle*
     // methods directly with a derived context that carries no endpoint type, so it cannot loop back.

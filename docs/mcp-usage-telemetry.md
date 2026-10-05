@@ -5,7 +5,7 @@ measurable on real traffic rather than only on the synthetic traffic of the test
 
 Design source: `schema_forge/docs/plans/2026-09-11-mcp-test-harness-design.md`, Track B,
 decisions D23–D33. This document covers **B1 only**. The Mixpanel exporter (B2) and the
-`neo_feedback` tool (B3) are not built.
+`etendo_feedback` tool (B3) are not built.
 
 ## The two rules
 
@@ -38,7 +38,7 @@ writer. The gap is made *visible*, deliberately not *queryable* — a sentinel r
 rejected, because it would touch the `row_type` check constraint and D31's contract for something a
 log line already answers.
 
-**2. Shape, never content (D25).** The table records *that* `neo_create` was called on `sales-order`
+**2. Shape, never content (D25).** The table records *that* `etendo_create` was called on `sales-order`
 touching `businessPartner` and `orderDate`. It does not record the partner, the amount, or anything
 the user typed. `fields_touched` is built by reading JSON **keys** (`McpUsageTelemetry.fieldsTouched`);
 a `fields` array is a projection list, whose entries are field names too. The error envelope's
@@ -52,7 +52,7 @@ a `fields` array is a projection list, whose entries are field names too. The er
 | Column | Type | Meaning |
 |---|---|---|
 | `Session_Key` | VARCHAR(200) | MCP session, so a sequence of calls reads as one task |
-| `Tool_Name` | VARCHAR(200), NOT NULL | `neo_create`, `neo_list`, … |
+| `Tool_Name` | VARCHAR(200), NOT NULL | `etendo_create`, `etendo_list`, … |
 | `Verb` | VARCHAR(200) | CRUD/action verb the call resolved to |
 | `Target_Entity` | VARCHAR(200) | `spec` or `spec/entity` |
 | `Fields_Touched` | TEXT | field **names**, comma-separated, sorted |
@@ -76,7 +76,7 @@ builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
 same tenant the business code used; `doPost` clears it in its `finally`, next to the session key,
 because servlet threads are pooled. The binding happens before the context is built, so a call that
 fails inside the tool (an `error` row) is still attributed. Every `tools/call` enters
-`executeInContext`, `neo_discover` and `neo_feedback` included. When resolution finds nothing (a
+`executeInContext`, `etendo_discover` and `etendo_feedback` included. When resolution finds nothing (a
 role on client `0`, or no transactional org), the tenant bound is still `0` — the same value the
 `OBContext` was built with — so the row records `0` for that column. The fallback to the token's
 own values applies only when nothing was bound at all, i.e. a request that never entered
@@ -196,12 +196,12 @@ Read those with `jq -r 'select(.row_type=="feedback") | .payload | fromjson'`.
 
 ---
 
-## B3 — `neo_feedback`
+## B3 — `etendo_feedback`
 
 A tool the calling agent invokes to report, in its own words, what confused it, what it could not
 find, what it had to guess at, and what failed.
 
-**Why it is the highest-value row here:** B1 sees *that* an agent called `neo_schema` five times and
+**Why it is the highest-value row here:** B1 sees *that* an agent called `etendo_schema` five times and
 gave up. It cannot see what the agent was *trying to do*. That intent is what turns a metric into an
 actionable defect, and the agent is the only party that holds it.
 
@@ -278,7 +278,7 @@ is ever stored.
 
 ### One row, written by the servlet
 
-A `neo_feedback` call *is* a tool call, so it produces exactly one row (D31): `row_type = 'feedback'`
+A `etendo_feedback` call *is* a tool call, so it produces exactly one row (D31): `row_type = 'feedback'`
 with the normalized report in `Payload`, carrying the same session, tenant, timestamp and client
 columns as everything else — which is what makes the feedback readable as part of the session's
 story rather than an isolated complaint. `McpFeedbackTool` validates and rate-limits but writes
@@ -316,7 +316,7 @@ unidentified flooder is the case the limit exists for.
 > writing the invitation there would delete the more actionable pointer at exactly the moment the
 > agent needs it.
 
-`neo_feedback` is read-tier (`neo:read`): gating it behind `neo:write` would silence exactly the
+`etendo_feedback` is read-tier (`neo:read`): gating it behind `neo:write` would silence exactly the
 read-only sessions most likely to get lost.
 
 ---

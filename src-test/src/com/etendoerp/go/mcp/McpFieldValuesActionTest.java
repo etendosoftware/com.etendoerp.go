@@ -72,7 +72,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * ETP-5587 — a declared contract that describes an AD button whose parameters the SPA posts under
  * {@code fieldValues}.
  *
- * <p>{@code periodControl.openClose} could not be pressed through MCP: {@code neo_schema}
+ * <p>{@code periodControl.openClose} could not be pressed through MCP: {@code etendo_schema}
  * advertised it under {@code docAction} with the C/N/O/P reference list, while
  * {@code PeriodOpenCloseHandler} reads {@code fieldValues.openClose} — the body the SPA's process
  * dialog posts — and the SPA offers O/C/P only. Every call answered 400 "Missing required
@@ -171,7 +171,7 @@ class McpFieldValuesActionTest {
   /** The button as McpSchemaActionFields describes it from its AD reference list. */
   private static JSONObject adButton() throws Exception {
     return new JSONObject().put("name", ACTION).put("column", COLUMN).put("type", "button")
-        .put("invokeVia", "neo_action")
+        .put("invokeVia", "etendo_action")
         .put(McpConstants.KEY_ACTION_PARAMETER, McpConstants.PARAM_DOC_ACTION)
         .put(McpConstants.KEY_ACTION_VALUES, new JSONArray()
             .put(new JSONObject().put("value", "C")).put(new JSONObject().put("value", "N"))
@@ -217,7 +217,7 @@ class McpFieldValuesActionTest {
     }
   }
 
-  // ── the body neo_action sends ──────────────────────────────────────────
+  // ── the body etendo_action sends ──────────────────────────────────────────
 
   @Nested
   @DisplayName("McpToolRouter.actionBody")
@@ -252,7 +252,7 @@ class McpFieldValuesActionTest {
   // ── the precheck ───────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_action precheck")
+  @DisplayName("etendo_action precheck")
   class Precheck {
 
     @Test
@@ -288,10 +288,10 @@ class McpFieldValuesActionTest {
     }
   }
 
-  // ── neo_schema ─────────────────────────────────────────────────────────
+  // ── etendo_schema ─────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_schema")
+  @DisplayName("etendo_schema")
   class Schema {
 
     @Test
@@ -367,7 +367,7 @@ class McpFieldValuesActionTest {
   // ── the real path ──────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_action through handleAction, reaching the real handler")
+  @DisplayName("etendo_action through handleAction, reaching the real handler")
   class RealPath {
 
     private MockedStatic<McpToolRouterSupport> supportMock;
@@ -393,7 +393,7 @@ class McpFieldValuesActionTest {
       supportMock.close();
     }
 
-    /** Runs neo_action with the dispatcher handing the context to the real handler. */
+    /** Runs etendo_action with the dispatcher handing the context to the real handler. */
     private String act(String action, JSONObject parameters) throws Exception {
       try (MockedStatic<NeoActionRecordGuard> guard = mockStatic(NeoActionRecordGuard.class);
           MockedStatic<NeoExtensionDispatcher> dispatch = mockStatic(NeoExtensionDispatcher.class);

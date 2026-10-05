@@ -151,14 +151,14 @@ class McpToolRouterSupportTest {
   // ─── buildDiscoverEntity ────────────────────────────────────────────
 
   @Test
-  @DisplayName("neo_discover marks bp-stats and bp-trend as read-only")
+  @DisplayName("etendo_discover marks bp-stats and bp-trend as read-only")
   void getOnlyBusinessPartnerEntitiesAreExplicitlyReadOnly() throws Exception {
     assertReadOnlyDiscoverEntity(getOnlyEntity("bp-stats"));
     assertReadOnlyDiscoverEntity(getOnlyEntity("bp-trend"));
   }
 
   @Test
-  @DisplayName("neo_discover keeps writable tax data mutable")
+  @DisplayName("etendo_discover keeps writable tax data mutable")
   void writableSystemDataEntityIsNotMarkedReadOnly() throws Exception {
     SFEntity tax = writableEntity("tax");
 
@@ -169,7 +169,7 @@ class McpToolRouterSupportTest {
   }
 
   @Test
-  @DisplayName("neo_discover hides mutation methods denied by the role's window access")
+  @DisplayName("etendo_discover hides mutation methods denied by the role's window access")
   void discoverHidesMutationMethodsForReadOnlyWindowRole() throws Exception {
     SFEntity entity = writableEntity("sales-quotation");
     Window window = mock(Window.class);
@@ -197,7 +197,7 @@ class McpToolRouterSupportTest {
   }
 
   @Test
-  @DisplayName("neo_discover marks every individually writable entity as mutable")
+  @DisplayName("etendo_discover marks every individually writable entity as mutable")
   void eachMutationMethodPreventsReadOnly() throws Exception {
     assertMutableDiscoverEntity(entityWithMethods("post-only", true, false, true, false, false, false));
     assertMutableDiscoverEntity(entityWithMethods("put-only", true, false, false, true, false, false));
@@ -206,7 +206,7 @@ class McpToolRouterSupportTest {
   }
 
   @Test
-  @DisplayName("neo_discover does not label a fully disabled entity read-only")
+  @DisplayName("etendo_discover does not label a fully disabled entity read-only")
   void entityWithoutReadOrWriteMethodsIsNotMarkedReadOnly() throws Exception {
     SFEntity disabled = entityWithMethods("disabled", false, false, false, false, false, false);
 
@@ -340,7 +340,7 @@ class McpToolRouterSupportTest {
      * must thread the HTTP-method-equivalent through to
      * {@link NeoAccessUtils#hasWindowAccessForSpec(SFSpec, String)} so a read-only
      * {@code AD_Window_Access} role is denied — this is the exact gap that let MCP
-     * neo_create/neo_update/neo_delete/neo_batch bypass the REST tiering.
+     * etendo_create/etendo_update/etendo_delete/etendo_batch bypass the REST tiering.
      */
     @Test
     void windowSpecWriteMethodDeniedForReadOnlyAccess() {
@@ -445,7 +445,7 @@ class McpToolRouterSupportTest {
 
     /**
      * ETP-4284 / G4 + ETP-4254: a handler-only window spec (the dashboard's widgets, whose
-     * entities have no AD_Tab) is surfaced via neo_widget, so it must be excluded from the
+     * entities have no AD_Tab) is surfaced via etendo_widget, so it must be excluded from the
      * type-W CRUD discovery catalog regardless of window access. ETP-4254 replaced the
      * hardcoded {@code "dashboard"} name match with this data-driven test, so the spec is
      * built here with handler-only entities rather than with the magic name.
@@ -468,7 +468,7 @@ class McpToolRouterSupportTest {
      * ETP-4254 regression guard: "handler-only" alone must NOT hide a spec. A tab-less spec
      * whose handler serves ACTION requests ({@code not-posted-documents}' {@code post} /
      * {@code bulk-post}) has a genuine agentic surface, and this very gate also guards
-     * {@code neo_action} ({@code McpToolRouter#route}) — excluding it would take a
+     * {@code etendo_action} ({@code McpToolRouter#route}) — excluding it would take a
      * transactional business action away from agents, the opposite of ETP-4254's goal.
      */
     @Test
@@ -737,7 +737,7 @@ class McpToolRouterSupportTest {
       assertEquals(422, envelope.getInt("status"));
       assertEquals("validation_error", envelope.getString("error"));
       assertEquals("entity", envelope.getString("field"));
-      assertTrue(envelope.getString("hint").contains("neo_schema"));
+      assertTrue(envelope.getString("hint").contains("etendo_schema"));
     }
 
     @Test
@@ -918,7 +918,7 @@ class McpToolRouterSupportTest {
     // ── ETP-4254 AC#4: spec-level readOnly marker ──────────────────────
 
     /**
-     * AC#4: an agent scanning {@code neo_discover} must be able to tell writable W specs from
+     * AC#4: an agent scanning {@code etendo_discover} must be able to tell writable W specs from
      * read-only ones without inspecting every entity of every spec.
      */
     @Test
@@ -1068,7 +1068,7 @@ class McpToolRouterSupportTest {
     /**
      * ETP-4257: discover output for a CALLABLE report spec advertises the concrete report
      * tool ({@code reportTool = generate_<snake>}) so the agent calls it directly instead of
-     * guessing an entity for neo_list.
+     * guessing an entity for etendo_list.
      */
     @Test
     void callableReportSpecEmitsReportTool() throws Exception {
@@ -1782,7 +1782,7 @@ class McpToolRouterSupportTest {
 
   /**
    * Guard that turns an opaque entity-not-found error into a descriptive message when an entity-CRUD
-   * tool (neo_list/get/create/...) is called on a report-type spec, while leaving type-W entity
+   * tool (etendo_list/get/create/...) is called on a report-type spec, while leaving type-W entity
    * resolution unchanged.
    *
    * <p>ETP-4793 / IMP-17: both report branches now raise an {@link McpRoutingException} — an
@@ -1810,7 +1810,7 @@ class McpToolRouterSupportTest {
     }
 
     /**
-     * neo_list on a CALLABLE report spec: the error names the report type and points the
+     * etendo_list on a CALLABLE report spec: the error names the report type and points the
      * agent at the concrete {@code etendo_generate_<snake>} tool instead of an entity.
      */
     @Test
@@ -1839,7 +1839,7 @@ class McpToolRouterSupportTest {
     }
 
     /**
-     * neo_list on a NON-callable report spec: the error is the stable ETP-4255
+     * etendo_list on a NON-callable report spec: the error is the stable ETP-4255
      * not_configured_for_report_generation message.
      */
     @Test
@@ -1858,7 +1858,7 @@ class McpToolRouterSupportTest {
             org.openbravo.base.exception.OBException.class,
             () -> McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, "header"));
 
-        assertTrue(ex.getMessage().contains("not configured for Etendo Go/MCP report"),
+        assertTrue(ex.getMessage().contains("is not configured for report generation"),
             "message must be the ETP-4255 not-configured text: " + ex.getMessage());
       }
     }
@@ -2425,7 +2425,7 @@ class McpToolRouterSupportTest {
     void carriesCommitted() throws Exception {
       JSONObject body = McpBatchEnvelope.toMcpBatchPreflightFailure(fkError(), 1, "l1");
 
-      // The whole of clause (i): this key was absent, so an agent following neo_batch's own
+      // The whole of clause (i): this key was absent, so an agent following etendo_batch's own
       // documented contract read false from a missing key by luck rather than by promise.
       assertTrue(body.has("committed"));
       assertFalse(body.getBoolean("committed"));

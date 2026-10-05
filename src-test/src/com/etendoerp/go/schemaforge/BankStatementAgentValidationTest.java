@@ -422,7 +422,7 @@ class BankStatementAgentValidationTest {
       assertRefused(BankStatementAgentValidation.check(handler, IMPORT, importOf(1_398_105)),
           "contentBase64 is 1398105 characters; importStatement accepts at most 1398104 (a "
               + "1024 KB file). Split the statement into smaller files, or import it from the "
-              + "Etendo GO UI.");
+              + "Etendo UI.");
     }
 
     private JSONObject importOf(int length) throws Exception {

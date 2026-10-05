@@ -174,7 +174,7 @@ public class AddressVirtualSelectorPolicyTest {
           entityOnTable(WRAPPER_TABLE), "Address1"));
       assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
           entityOnTable(WRAPPER_TABLE), "RegionName"));
-      // Also refused under the property spelling, which is the name neo_schema publishes.
+      // Also refused under the property spelling, which is the name etendo_schema publishes.
       assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
           entityOnTable(WRAPPER_TABLE), "addressLine1"));
     }
@@ -184,7 +184,7 @@ public class AddressVirtualSelectorPolicyTest {
   public void foreignKeyVirtualColumnResolvesUnderEitherSpelling() {
     // The counterweight to the test above: the refusal there has to be about SELECTOR_COLUMNS, not
     // about nothing ever resolving. C_Region_ID does resolve, and under both names the two front
-    // doors use — the SPA's selector URL names the DB column, neo_schema publishes the property.
+    // doors use — the SPA's selector URL names the DB column, etendo_schema publishes the property.
     Map<String, String> columns = new LinkedHashMap<>();
     columns.put("C_Region_ID", "region");
     columns.put("RegionName", "regionName");
@@ -285,7 +285,7 @@ public class AddressVirtualSelectorPolicyTest {
 
   @Test
   public void unmappedTableReportsNoServerResolvedField() {
-    // This runs on every neo_schema call, for every entity — an unmapped table must answer empty
+    // This runs on every etendo_schema call, for every entity — an unmapped table must answer empty
     // rather than NPE its way out of the whole schema response.
     ModelProvider modelProvider = mock(ModelProvider.class);
     when(modelProvider.getEntityByTableName("C_BPartner_Location")).thenReturn(null);

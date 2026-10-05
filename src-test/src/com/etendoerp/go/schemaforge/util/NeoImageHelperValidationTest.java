@@ -45,7 +45,7 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper.ImageValidationException
 class NeoImageHelperValidationTest {
 
   private static final int CAP = 256 * 1024;
-  private static final String ADVICE = "Use neo_request_image_upload instead.";
+  private static final String ADVICE = "Use etendo_request_image_upload instead.";
 
   /** A real 2x3 PNG, produced by ImageIO so the magic bytes and the header are genuine. */
   private static byte[] realPng() throws Exception {
@@ -248,7 +248,7 @@ class NeoImageHelperValidationTest {
   void allowlistIsPngAndJpeg() {
     assertEquals(java.util.List.of("image/png", "image/jpeg"), NeoImageHelper.ALLOWED_MIME_TYPES);
     assertNotNull(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE);
-    assertTrue(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE.contains("neo_request_image_upload"),
+    assertTrue(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE.contains("etendo_request_image_upload"),
         "the 403 must tell the caller how to get a working link");
   }
 }

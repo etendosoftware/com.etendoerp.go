@@ -104,8 +104,8 @@ class McpWindowDeclaredActionsTest {
     lookupMock = mockStatic(NeoHandlerLookup.class);
     lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly(anyString())).thenReturn(handler);
     when(handler.actionContracts()).thenReturn(contracts());
-    // The AD buttons neo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
-    // by DB column name or by field name. The DAL names each column the way neo_schema does.
+    // The AD buttons etendo_action can fire, as NeoButtonActionHelper.findButtonColumn resolves them:
+    // by DB column name or by field name. The DAL names each column the way etendo_schema does.
     buttonMock = mockStatic(NeoButtonActionHelper.class);
     ModelProvider provider = mock(ModelProvider.class);
     Entity dal = mock(Entity.class);
@@ -194,7 +194,7 @@ class McpWindowDeclaredActionsTest {
   private static JSONArray buttons() throws Exception {
     JSONArray fields = new JSONArray();
     fields.put(new JSONObject("{\"name\":\"documentAction\",\"type\":\"button\","
-        + "\"invokeVia\":\"neo_action\"}"));
+        + "\"invokeVia\":\"etendo_action\"}"));
     fields.put(new JSONObject("{\"name\":\"aPRMAddpayment\",\"type\":\"button\","
         + "\"invokable\":false,\"notInvokableReason\":\"discarded\"}"));
     fields.put(new JSONObject("{\"name\":\"psd2GenerateBankPayment\",\"type\":\"button\","
@@ -245,10 +245,10 @@ class McpWindowDeclaredActionsTest {
     }
   }
 
-  // ── neo_schema view:"actions" ─────────────────────────────────────────
+  // ── etendo_schema view:"actions" ─────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_schema view:\"actions\" on a window entity")
+  @DisplayName("etendo_schema view:\"actions\" on a window entity")
   class ActionsView {
 
     @Test
@@ -324,10 +324,10 @@ class McpWindowDeclaredActionsTest {
     }
   }
 
-  // ── neo_action precheck ───────────────────────────────────────────────
+  // ── etendo_action precheck ───────────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_action precheck")
+  @DisplayName("etendo_action precheck")
   class Precheck {
 
     @Test
@@ -394,7 +394,7 @@ class McpWindowDeclaredActionsTest {
   // ── reject cycle 1: the same action under another spelling, fail closed, honest discovery ──
 
   @Nested
-  @DisplayName("neo_action through handleAction (the real path)")
+  @DisplayName("etendo_action through handleAction (the real path)")
   class RealPath {
 
     private MockedStatic<McpToolRouterSupport> supportMock;
@@ -599,7 +599,7 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_discover says the declared actions cannot be run")
+    @DisplayName("etendo_discover says the declared actions cannot be run")
     void discoverIsHonest() throws Exception {
       JSONObject item = McpSupportInternals.buildDiscoverEntity(entity("W", BROKEN));
       assertFalse(item.getBoolean("actionsInvokable"));
@@ -650,15 +650,15 @@ class McpWindowDeclaredActionsTest {
     private JSONArray processButton() throws Exception {
       JSONArray fields = new JSONArray();
       fields.put(new JSONObject("{\"name\":\"aPRMProcessPayment\",\"type\":\"button\","
-          + "\"invokeVia\":\"neo_action\",\"actionValues\":[{\"value\":\"P\","
+          + "\"invokeVia\":\"etendo_action\",\"actionValues\":[{\"value\":\"P\","
           + "\"label\":\"Process\"},{\"value\":\"R\",\"label\":\"Reactivate\"},"
           + "{\"value\":\"RE\",\"label\":\"Reactivate and delete\"},"
           + "{\"value\":\"V\",\"label\":\"Void\"}]}"));
       fields.put(new JSONObject("{\"name\":\"documentAction\",\"type\":\"button\","
-          + "\"invokeVia\":\"neo_action\",\"actionValues\":[{\"value\":\"CO\"},"
+          + "\"invokeVia\":\"etendo_action\",\"actionValues\":[{\"value\":\"CO\"},"
           + "{\"value\":\"VO\"}]}"));
       fields.put(new JSONObject("{\"name\":\"posted\",\"type\":\"button\","
-          + "\"invokeVia\":\"neo_action\"}"));
+          + "\"invokeVia\":\"etendo_action\"}"));
       return fields;
     }
 
@@ -756,9 +756,9 @@ class McpWindowDeclaredActionsTest {
       fields.put(new JSONObject("{\"name\":\"amount\",\"type\":\"amount\","
           + "\"column\":\"Amount\"}"));
       fields.put(new JSONObject("{\"name\":\"psd2GenerateBankPayment\",\"type\":\"button\","
-          + "\"column\":\"EM_Psd2_Generate_Bank_Payment\",\"invokeVia\":\"neo_action\"}"));
+          + "\"column\":\"EM_Psd2_Generate_Bank_Payment\",\"invokeVia\":\"etendo_action\"}"));
       fields.put(new JSONObject("{\"name\":\"aPRMAddpayment\",\"type\":\"button\","
-          + "\"column\":\"EM_APRM_Addpayment\",\"invokeVia\":\"neo_action\"}"));
+          + "\"column\":\"EM_APRM_Addpayment\",\"invokeVia\":\"etendo_action\"}"));
       return fields;
     }
 
@@ -1039,7 +1039,7 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_action prechecks before dispatching to the handler")
+    @DisplayName("etendo_action prechecks before dispatching to the handler")
     void actionPrechecksFirst() {
       String body = method("handleAction");
       Matcher pre = Pattern.compile("McpDeclaredActions\\s*\\.\\s*precheck\\s*\\(").matcher(body);
@@ -1051,7 +1051,7 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_action calls a declared action on the HTTP method its contract names")
+    @DisplayName("etendo_action calls a declared action on the HTTP method its contract names")
     void actionUsesTheDeclaredMethod() {
       String body = method("handleAction");
       Matcher method = Pattern.compile("(\\w+)\\s*=\\s*\\w+\\s*!=\\s*null\\s*\\?\\s*\\w+\\s*\\."
@@ -1063,7 +1063,7 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_schema replaces only when isActionOnlyEntity says so, and merges otherwise")
+    @DisplayName("etendo_schema replaces only when isActionOnlyEntity says so, and merges otherwise")
     void schemaMergesForWindows() {
       String body = method("handleSchema");
       assertTrue(Pattern.compile("McpReportActionsSchema\\s*\\.\\s*isActionOnlyEntity\\s*\\(")
@@ -1083,7 +1083,7 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_schema shapes the buttons once, before every projection (full view too)")
+    @DisplayName("etendo_schema shapes the buttons once, before every projection (full view too)")
     void schemaShapesButtonsBeforeEveryView() {
       String body = McpSourceScanner.stripComments(method("handleSchema"));
       Matcher shaped = Pattern.compile("(\\w+)\\s*=\\s*McpActionsView\\s*\\.\\s*applyConfig\\s*"
@@ -1111,7 +1111,7 @@ class McpWindowDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("neo_discover lists the declared actions of a window entity")
+    @DisplayName("etendo_discover lists the declared actions of a window entity")
     void discoverListsThem() throws Exception {
       JSONObject item = McpSupportInternals.buildDiscoverEntity(entity("W", HIDE_PIS));
       assertEquals(List.of("registerPayment", "currencyOptions"),

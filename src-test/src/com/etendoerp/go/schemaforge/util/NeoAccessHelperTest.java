@@ -738,7 +738,7 @@ public class NeoAccessHelperTest {
   /**
    * The tier this ticket adds. The constituent-window check passes (no tab data at all, so it
    * has nothing to deny with) and the handler's own declaration is what refuses — which is the
-   * whole point: without it, {@code neo_discover} advertised a report that answered 403 when
+   * whole point: without it, {@code etendo_discover} advertised a report that answered 403 when
    * called, and the report tool was published to a role that could not use it.
    */
   @Test

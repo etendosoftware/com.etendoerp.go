@@ -931,7 +931,7 @@ public class BankStatementsHandlerTest {
         .contains(BankStatementsHandler.FIELD_TRANSACTION_DATE));
   }
 
-  // ── ETP-5447 / ETP-5469: neo_action surface ────────────────────────────
+  // ── ETP-5447 / ETP-5469: etendo_action surface ────────────────────────────
 
   @Test
   public void testActionContractsReturnsTheNineAgentActions() {
@@ -944,7 +944,7 @@ public class BankStatementsHandlerTest {
     assertTrue(handler.servesActions());
   }
 
-  /** An ACTION context as neo_action builds it for the bank-statements spec. */
+  /** An ACTION context as etendo_action builds it for the bank-statements spec. */
   private static NeoContext agentActionCtx(String action, String recordId, JSONObject params,
       Map<String, String> queryParams) {
     return NeoContext.builder()

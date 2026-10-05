@@ -733,7 +733,7 @@ class McpResourceProviderTest {
     /**
      * The reason the filter had to move: an {@code MCP_CONFIG} {@code fields.included} override
      * lives in a JSON column no criteria joins, so this listing answered on the pre-override value
-     * while {@code neo_schema} answered on the override.
+     * while {@code etendo_schema} answered on the override.
      *
      * <p><b>The exclusion direction on purpose.</b> The reclaim direction cannot be asserted here
      * and it would be a mute test if it were: the criteria is mocked, so its rows reach the loop

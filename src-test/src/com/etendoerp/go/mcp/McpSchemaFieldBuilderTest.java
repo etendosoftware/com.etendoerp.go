@@ -66,7 +66,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * <p>Extracted from {@code McpToolRouterSupportTest} together with the production class
  * (ETP-4510, Sonar S1448) — covers AD_Column → JSON field mapping (type/selector inference,
  * visibility, defaults, business-critical flags, button/process metadata) and the
- * per-entity field metadata load used by neo_schema.</p>
+ * per-entity field metadata load used by etendo_schema.</p>
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -121,7 +121,7 @@ class McpSchemaFieldBuilderTest {
         "'18', foreignKey",
         "'30', foreignKey",
         // ETP-5184: Image BLOB. Before this case existed it fell through to "string", so
-        // neo_schema advertised an image column as ordinary text.
+        // etendo_schema advertised an image column as ordinary text.
         "'4AA6C3BE9D3B4D84A3B80489505A23E5', image"
     })
     void knownRefIdsMappedCorrectly(String refId, String expectedType) {
@@ -379,8 +379,8 @@ class McpSchemaFieldBuilderTest {
     /**
      * ETP-4288: "0" is a legacy AD placeholder on FK (`_ID`) columns meaning "resolve via
      * callout/session logic" — it is not a usable FK value (see DocTypeResolver on the write
-     * path). neo_schema must never surface it as a literal defaultExpression, since an agent
-     * reading only the schema would treat "0" as a valid id and fail on neo_create/neo_update.
+     * path). etendo_schema must never surface it as a literal defaultExpression, since an agent
+     * reading only the schema would treat "0" as a valid id and fail on etendo_create/etendo_update.
      */
     @Test
     void legacyZeroFkSentinelReplacedWithDynamicHint() throws Exception {
@@ -396,7 +396,7 @@ class McpSchemaFieldBuilderTest {
       assertFalse(fieldObj.has("defaultExpression"));
       assertEquals("server", fieldObj.getString("defaultSource"));
       assertEquals("32-char hex ID (FK)", fieldObj.getString("defaultFormat"));
-      assertEquals("Resolved per-tenant at request time — call neo_defaults to get the value",
+      assertEquals("Resolved per-tenant at request time — call etendo_defaults to get the value",
           fieldObj.getString("defaultHint"));
     }
 
@@ -645,7 +645,7 @@ class McpSchemaFieldBuilderTest {
    * Rewritten for IMP-39 (ETP-5335): the predicate gained a third argument and a third question.
    *
    * <p>It used to answer "is this column active and not an audit column". It now also asks whether
-   * the spec exposes it — {@code neo_schema} stopped naming a field the write verbs and the filter
+   * the spec exposes it — {@code etendo_schema} stopped naming a field the write verbs and the filter
    * path refuse, which is the three-way agreement IMP-39 exists to produce. The two exemptions it
    * carries are the reason this is a predicate and not a set lookup, and both are asserted below
    * because each was a measured decision: a button is always published (IMP-21 — an excluded action
@@ -707,8 +707,8 @@ class McpSchemaFieldBuilderTest {
     }
 
     /**
-     * IMP-39. Before this, {@code neo_schema} named a field that {@code neo_create} now refuses
-     * with {@code field_not_allowed} and that {@code neo_list} refuses as a filter key — an agent
+     * IMP-39. Before this, {@code etendo_schema} named a field that {@code etendo_create} now refuses
+     * with {@code field_not_allowed} and that {@code etendo_list} refuses as a filter key — an agent
      * was told a field existed by one tool and denied it by three.
      */
     @Test
@@ -863,7 +863,7 @@ class McpSchemaFieldBuilderTest {
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("Processed", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("etendo_action", fieldObj.getString("invokeVia"));
       assertEquals("OBUIAPP", fieldObj.getString("processType"));
       assertEquals("Complete Order", fieldObj.getString("processName"));
       assertEquals("OBUIAPP-PROC-001", fieldObj.getString("processId"));
@@ -890,14 +890,14 @@ class McpSchemaFieldBuilderTest {
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("DocAction", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("etendo_action", fieldObj.getString("invokeVia"));
       assertEquals("Classic", fieldObj.getString("processType"));
       assertEquals("Post Document", fieldObj.getString("processName"));
       assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
     }
 
     /**
-     * IMP-21: a button with no process behind it has nothing for {@code neo_action} to run, so it
+     * IMP-21: a button with no process behind it has nothing for {@code etendo_action} to run, so it
      * must not claim {@code invokeVia} — it used to, which is how {@code CreateFrom} was advertised
      * as callable while carrying neither {@code processName} nor {@code processId}.
      */
@@ -931,7 +931,7 @@ class McpSchemaFieldBuilderTest {
 
     /**
      * IMP-21: 17 of the 22 sales-invoice actions were curated {@code discarded} and still
-     * advertised {@code invokeVia:"neo_action"}. A discarded action stays in the catalog — the
+     * advertised {@code invokeVia:"etendo_action"}. A discarded action stays in the catalog — the
      * agent should know it exists — but is reported as out of scope, not as callable.
      */
     @Test
@@ -984,7 +984,7 @@ class McpSchemaFieldBuilderTest {
               String.class, boolean.class },
           fieldObj, col, "system", false);
 
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("etendo_action", fieldObj.getString("invokeVia"));
       assertFalse(fieldObj.has("invokable"));
       assertFalse(fieldObj.has("notInvokableReason"));
     }

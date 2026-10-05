@@ -26,7 +26,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Architecture regression test for ETP-5009 — {@code neo_list} must AND the entity
+ * Architecture regression test for ETP-5009 — {@code etendo_list} must AND the entity
  * customization's {@code NeoHandler#readPredicates} into its query, the way the REST list GET and
  * its {@code ?_distinct=} fetch do.
  *
@@ -58,7 +58,7 @@ class McpListReadPredicatesCallSiteTest {
   void listResolvesReadPredicatesOnMcp() {
     assertTrue(RESOLVE_ON_MCP.matcher(listBody()).find(),
         "handleList no longer calls NeoReadPredicates.resolve(..., NeoExtensionChannel.MCP)."
-            + " Without it neo_list returns rows the REST list excludes in the query (ETP-5009).");
+            + " Without it etendo_list returns rows the REST list excludes in the query (ETP-5009).");
   }
 
   @Test

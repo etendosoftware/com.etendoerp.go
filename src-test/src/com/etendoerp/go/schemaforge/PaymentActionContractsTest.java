@@ -69,7 +69,7 @@ class PaymentActionContractsTest {
 
   @ParameterizedTest
   @ValueSource(booleans = { true, false })
-  @DisplayName("every contract says what the neo_action id is: the invoice")
+  @DisplayName("every contract says what the etendo_action id is: the invoice")
   void everyContractNamesItsId(boolean isReceipt) {
     for (NeoActionContract c : PaymentActionHandlerSupport.actionContracts(isReceipt).values()) {
       assertNotNull(c.getIdDescription(), c.getName());

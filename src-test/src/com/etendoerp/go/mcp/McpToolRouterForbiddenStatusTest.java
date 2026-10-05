@@ -122,13 +122,13 @@ class McpToolRouterForbiddenStatusTest {
     supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
         .thenThrow(new SecurityException("Access denied to spec 'sales-order' for the current role"));
 
-    JSONObject result = router.route("neo_list", crudArgs(), READ_SCOPES);
+    JSONObject result = router.route("etendo_list", crudArgs(), READ_SCOPES);
 
     assertTrue(result.getBoolean("isError"));
     JSONObject envelope = envelopeOf(result);
     assertEquals(403, envelope.getInt("status"));
     assertEquals("forbidden", envelope.getString("error"));
-    assertEquals("neo_list", envelope.getString("tool"));
+    assertEquals("etendo_list", envelope.getString("tool"));
     assertTrue(envelope.getString("detail").contains("Access denied"),
         "The refusal's own message must survive into the envelope");
   }
@@ -139,7 +139,7 @@ class McpToolRouterForbiddenStatusTest {
     supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
         .thenThrow(new OBSecurityException("You do not have access to this entity"));
 
-    JSONObject result = router.route("neo_list", crudArgs(), READ_SCOPES);
+    JSONObject result = router.route("etendo_list", crudArgs(), READ_SCOPES);
 
     assertTrue(result.getBoolean("isError"));
     JSONObject envelope = envelopeOf(result);
@@ -155,13 +155,13 @@ class McpToolRouterForbiddenStatusTest {
     supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
         .thenThrow(new SecurityException("Access denied"));
 
-    JSONObject envelope = envelopeOf(router.route("neo_list", crudArgs(), READ_SCOPES));
+    JSONObject envelope = envelopeOf(router.route("etendo_list", crudArgs(), READ_SCOPES));
 
     String hint = envelope.getString("hint");
     assertTrue(hint.contains("do not retry"),
         "A permanent decision must say so; the status class alone is what made clients loop. "
             + "Hint was: " + hint);
-    assertTrue(hint.contains("neo_discover"),
+    assertTrue(hint.contains("etendo_discover"),
         "The hint must point at the way to find what this role may reach. Hint was: " + hint);
   }
 
@@ -174,7 +174,7 @@ class McpToolRouterForbiddenStatusTest {
     supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
         .thenReturn(false);
 
-    JSONObject envelope = envelopeOf(router.route("neo_list", crudArgs(), READ_SCOPES));
+    JSONObject envelope = envelopeOf(router.route("etendo_list", crudArgs(), READ_SCOPES));
 
     assertEquals(403, envelope.getInt("status"));
     assertEquals("forbidden", envelope.getString("error"));
@@ -186,7 +186,7 @@ class McpToolRouterForbiddenStatusTest {
     supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
         .thenThrow(new IllegalStateException("the DAL went away"));
 
-    JSONObject envelope = envelopeOf(router.route("neo_list", crudArgs(), READ_SCOPES));
+    JSONObject envelope = envelopeOf(router.route("etendo_list", crudArgs(), READ_SCOPES));
 
     assertEquals(500, envelope.getInt("status"),
         "Only a refusal is a 403; a genuine fault must keep its server_error class");

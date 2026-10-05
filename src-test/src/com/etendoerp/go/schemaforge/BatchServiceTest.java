@@ -193,7 +193,7 @@ public class BatchServiceTest {
   }
 
   /**
-   * ETP-4254: {@code /batch} (and MCP {@code neo_batch}, which shares
+   * ETP-4254: {@code /batch} (and MCP {@code etendo_batch}, which shares
    * {@code BatchService#createRecord}) enters the CRUD pipeline at
    * {@code NeoCrudHandler#handleDefault} — i.e. AFTER the method-flag gate in
    * {@code handleWindowEntityCrud}. Before the fix a read-only entity (every mutation flag

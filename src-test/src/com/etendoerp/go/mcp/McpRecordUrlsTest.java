@@ -198,7 +198,7 @@ class McpRecordUrlsTest {
     }
 
     @Test
-    @DisplayName("reads the id back from the response when the caller has none (neo_create)")
+    @DisplayName("reads the id back from the response when the caller has none (etendo_create)")
     void readsIdFromTheResponse() throws Exception {
       JSONObject flat = singleRecordResult(RECORD_ID);
 

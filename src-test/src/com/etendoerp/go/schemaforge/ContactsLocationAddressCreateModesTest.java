@@ -50,7 +50,7 @@ import org.openbravo.model.common.geography.Location;
 /**
  * ETP-5234 for {@link ContactsLocationAddressHandler}: the two create modes.
  *
- * <p>{@code neo_schema} advertises {@code locationAddress} — an FK to an existing C_Location — as
+ * <p>{@code etendo_schema} advertises {@code locationAddress} — an FK to an existing C_Location — as
  * this entity's own field, so an MCP client naturally creates the address through
  * {@code bp-location/bpLocation} first and then hands the resulting id here. The handler ignored
  * that id and always built a brand new C_Location from the body's raw fields, which for such a

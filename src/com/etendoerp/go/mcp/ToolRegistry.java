@@ -65,12 +65,12 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * <p>
  * Tool generation strategy:
  * <ul>
- *   <li><b>CRUD tools</b> (neo_list, neo_get, neo_create, neo_update, neo_delete, neo_selectors,
- *       neo_defaults): registered ONCE with a required {@code spec} parameter that has an enum
+ *   <li><b>CRUD tools</b> (etendo_list, etendo_get, etendo_create, etendo_update, etendo_delete, etendo_selectors,
+ *       etendo_defaults): registered ONCE with a required {@code spec} parameter that has an enum
  *       listing all accessible window spec names. This avoids MCP tool name collisions.</li>
  *   <li><b>Process tools</b>: one per process spec, named by spec (e.g. "complete_order")</li>
  *   <li><b>Report tools</b>: one per report spec, prefixed with "generate_"</li>
- *   <li><b>neo_discover</b>: always included when the user has read access</li>
+ *   <li><b>etendo_discover</b>: always included when the user has read access</li>
  * </ul>
  */
 public class ToolRegistry {
@@ -90,11 +90,11 @@ public class ToolRegistry {
     List<McpToolDefinition> tools = new ArrayList<>();
     ScopePermissions permissions = resolvePermissions(scopes);
 
-    // Always add neo_discover if user can read
+    // Always add etendo_discover if user can read
     if (permissions.canRead) {
       tools.add(buildDiscoverTool());
       tools.add(buildDocsTool());
-      // neo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
+      // etendo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
       // built-in read tool, not gated on any accessible window spec.
       tools.add(buildWidgetTool());
       tools.add(buildVectorSearchTool());
@@ -117,8 +117,8 @@ public class ToolRegistry {
     List<String> deletableWindowSpecs = new ArrayList<>();
 
     // ETP-5468: report specs whose handler declares named actions (bank-reconciliation). They
-    // are not window specs — neo_list/neo_get cannot serve them — so they join ONLY the enums of
-    // the two tools that can: neo_schema (to read the action contracts) and neo_action.
+    // are not window specs — etendo_list/etendo_get cannot serve them — so they join ONLY the enums of
+    // the two tools that can: etendo_schema (to read the action contracts) and etendo_action.
     List<String> actionReportSpecs = new ArrayList<>();
 
     for (SFSpec spec : specs) {
@@ -193,10 +193,10 @@ public class ToolRegistry {
       List<String> creatableWindowSpecs, List<String> updatableWindowSpecs,
       List<String> deletableWindowSpecs) {
     // A spec with neither a CRUD nor an action surface (the dashboard's widgets) is exposed
-    // via the neo_widget tool and must not pollute the CRUD spec enum (ETP-4284 / G4).
+    // via the etendo_widget tool and must not pollute the CRUD spec enum (ETP-4284 / G4).
     // ETP-4254 made this data-driven instead of matching the literal "dashboard" name. A
     // tab-less spec that still serves actions (not-posted-documents) is NOT excluded — it
-    // belongs in accessibleWindowSpecs so neo_action can still offer it.
+    // belongs in accessibleWindowSpecs so etendo_action can still offer it.
     if (McpToolRouterSupport.isCatalogExcludedSpec(spec)) {
       return;
     }
@@ -206,8 +206,8 @@ public class ToolRegistry {
     accessibleWindowSpecs.add(spec.getName());
 
     // Split the write catalog per method. A spec with one PUT/PATCH entity but no POST or
-    // DELETE entity (monitor-verifactu) belongs only in neo_update; a shared "writable"
-    // enum would incorrectly advertise it to neo_create and neo_delete.
+    // DELETE entity (monitor-verifactu) belongs only in etendo_update; a shared "writable"
+    // enum would incorrectly advertise it to etendo_create and etendo_delete.
     if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")
         && NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")) {
       creatableWindowSpecs.add(spec.getName());
@@ -233,17 +233,17 @@ public class ToolRegistry {
    * <p>ETP-4254 splits the enum by capability:</p>
    * <ul>
    *   <li>{@code accessibleWindowSpecs} — every readable window spec. Used by the read tools
-   *       AND by {@code neo_action}: button actions/processes are served by the
+   *       AND by {@code etendo_action}: button actions/processes are served by the
    *       {@code /action/*} sub-endpoint, which is deliberately NOT gated by the
    *       {@code ETGO_SF_ENTITY} method flags, so a read-only-CRUD monitor window can still
    *       legitimately fire an action.</li>
    *   <li>{@code creatableWindowSpecs}/{@code updatableWindowSpecs}/
    *       {@code deletableWindowSpecs} — specs with at least one entity enabling the exact
    *       verb each MCP write tool uses. This matters for mixed specs: monitor-verifactu has
-   *       PUT/PATCH on one entity but no POST or DELETE, so only neo_update may offer it.</li>
+   *       PUT/PATCH on one entity but no POST or DELETE, so only etendo_update may offer it.</li>
    * </ul>
    *
-   * <p>{@code neo_batch} takes no spec enum (its operations name their spec inline); its
+   * <p>{@code etendo_batch} takes no spec enum (its operations name their spec inline); its
    * per-entity gate is enforced at runtime in {@code BatchService#createRecord}.</p>
    */
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
@@ -276,8 +276,8 @@ public class ToolRegistry {
       if (!deletableWindowSpecs.isEmpty()) {
         tools.add(buildDeleteTool(deletableWindowSpecs));
       }
-      // Published only while the flag is on. ETP-5335 switched it off because neo_batch was a
-      // second create implementation that had drifted from neo_create in both directions, and
+      // Published only while the flag is on. ETP-5335 switched it off because etendo_batch was a
+      // second create implementation that had drifted from etendo_create in both directions, and
       // ETP-5415 closed those divergences and turned it back on. The accessor is a method, not
       // the constant, so a partial rebuild cannot leave this class publishing a tool the router
       // still refuses. See McpConstants#batchToolEnabled.
@@ -312,7 +312,7 @@ public class ToolRegistry {
   /**
    * Resolve the spec name associated with a tool name.
    * <p>
-   * For CRUD tools (neo_list, etc.), the spec comes from the "spec" argument.
+   * For CRUD tools (etendo_list, etc.), the spec comes from the "spec" argument.
    * For process tools, the tool name IS the snake_case version of the spec name.
    * For report tools, strip the "generate_" prefix and convert back to kebab.
    *
@@ -349,7 +349,7 @@ public class ToolRegistry {
    */
   public static boolean isCrudTool(String toolName) {
     switch (toolName) {
-      case "neo_discover":
+      case "etendo_discover":
       case McpConstants.TOOL_NEO_LIST:
       case McpConstants.TOOL_NEO_GET:
       case McpConstants.TOOL_NEO_CREATE:
@@ -358,8 +358,8 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_SELECTORS:
       case McpConstants.TOOL_NEO_DEFAULTS:
       case McpConstants.TOOL_NEO_SCHEMA:
-      case "neo_batch":
-      case "neo_action":
+      case "etendo_batch":
+      case "etendo_action":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
       // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
@@ -380,11 +380,11 @@ public class ToolRegistry {
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", McpConstants.TYPE_OBJECT);
     schema.put(McpConstants.KEY_DESCRIPTION,
-        "Discover all available NEO Headless API specs and their entities");
+        "Discover all available Etendo API specs and their entities");
     schema.put(McpConstants.KEY_PROPERTIES, new HashMap<>());
     return new McpToolDefinition(
-        "neo_discover",
-        "List all available NEO Headless API specs the current user can access. "
+        "etendo_discover",
+        "List all available Etendo API specs the current user can access. "
             + "Returns spec names, types, entities, and available HTTP methods. "
             + "Use this first to discover what specs and entities are available.",
         schema);
@@ -395,7 +395,7 @@ public class ToolRegistry {
   private McpToolDefinition buildDocsTool() {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("topic", stringProp(
-        "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
+        "Term/topic to search in the Etendo docs (e.g. 'finance', 'payment')."));
     props.put("tokens", numericProp(TYPE_INTEGER,
         "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
     props.put("type", stringProp(
@@ -403,17 +403,17 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "docs",
-        "Search the Etendo Go documentation (etendosoftware/etendo-go-docs via Context7) "
+        "Search the Etendo documentation (via Context7) "
             + "for a given topic and return the relevant documentation text inline. "
             + "Use this to look up how-tos, concepts, and reference material before "
-            + "answering questions about Etendo Go.",
+            + "answering questions about Etendo.",
         buildObjectSchema(props, List.of("topic")));
   }
 
   // ── Feedback tool (B3) ─────────────────────────────────────────────────
 
   /**
-   * The {@code neo_feedback} tool definition.
+   * The {@code etendo_feedback} tool definition.
    *
    * <p>The description does real work here. An agent will not volunteer feedback it was never
    * invited to give, so the text says plainly that reporting friction is wanted, that it costs
@@ -515,7 +515,7 @@ public class ToolRegistry {
   // ── Widget tool (business widgets enum, gap G4) ───────────────────────
 
   /**
-   * Canonical mapping of {@code neo_widget} enum value → backing {@code dashboard}
+   * Canonical mapping of {@code etendo_widget} enum value → backing {@code dashboard}
    * spec entity name (whose {@code Java_Qualifier} resolves the {@code NeoHandler}).
    * Single source of truth shared with {@link McpToolRouter#handleWidget}.
    * Order is preserved for a stable enum/description listing.
@@ -553,7 +553,7 @@ public class ToolRegistry {
   }
 
   /**
-   * Build the {@code neo_widget} tool: a single enum tool wrapping the 9 handler-backed
+   * Build the {@code etendo_widget} tool: a single enum tool wrapping the 9 handler-backed
    * business widgets (gap G4, ETP-4284). The enum value selects the widget; {@code params}
    * is a free-form object forwarded to the handler (e.g. {@code {"range": "last30d"}}).
    */
@@ -577,10 +577,10 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_WIDGET,
-        "Get pre-computed business analytics from an Etendo Go dashboard widget "
+        "Get pre-computed business analytics from an Etendo dashboard widget "
             + "(KPIs, revenue trend, pending tasks, activity, top clients, best sellers/products, "
             + "recent invoices, pending amounts). Returns the widget's JSON payload "
-            + "{response:{data,count}}. Use this for business analysis instead of neo_list; "
+            + "{response:{data,count}}. Use this for business analysis instead of etendo_list; "
             + "these widgets aggregate data that has no single CRUD entity.",
         buildObjectSchema(props, List.of(McpConstants.PARAM_WIDGET)));
   }
@@ -596,7 +596,7 @@ public class ToolRegistry {
   /**
    * IMP-41: {@code targets} carries the configured keys as an enum instead of being a free string
    * array. Nothing on the MCP surface used to name a single legal key — not the input schema, not
-   * {@code neo_discover} — so guessing was the only strategy available, and a wrong guess came back
+   * {@code etendo_discover} — so guessing was the only strategy available, and a wrong guess came back
    * as {@code 403 "Access denied"}, which reads as "not for you" rather than "not that name".
    *
    * <p>An empty catalogue deliberately keeps the free-form array: an empty {@code enum} makes the
@@ -617,7 +617,7 @@ public class ToolRegistry {
         : stringEnumArrayProp("Optional. Which indexes to search. These are the only valid values — "
             + "a key that is not listed here does not exist, however plausible it looks. Each one "
             + "is the name of the spec that owns it, so a match found in target X is read with "
-            + "neo_get(spec:X, entity:<that spec's primaryEntity, from neo_discover>, "
+            + "etendo_get(spec:X, entity:<that spec's primaryEntity, from etendo_discover>, "
             + "id:<match.id>) — the match itself carries no pointer to where its record lives. "
             + "Omit it to search every "
             + "index you have access to, which is the right choice when you do not already know "
@@ -681,7 +681,7 @@ public class ToolRegistry {
 
   private McpToolDefinition buildListTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
+    props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put("filters", objectProp(
@@ -689,10 +689,10 @@ public class ToolRegistry {
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
-            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema with "
+            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call etendo_schema with "
             + "view:\"full\" to see the named filters available for a given spec; an unknown name "
             + "returns the valid list."));
-    // IMP-40: neo_discover already advertises "parentRequiredFor":["list",...] on every child
+    // IMP-40: etendo_discover already advertises "parentRequiredFor":["list",...] on every child
     // entity, and until now this tool had no argument that could satisfy it — so the only way to
     // scope a list to one parent was a filter on a field name the agent had to work out itself.
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
@@ -717,7 +717,7 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_LIST,
-        "List records from a NEO Headless API spec. "
+        "List records from an Etendo API spec. "
             + "Supports filtering (exact match, range operators, named document status), "
             + "pagination, sorting, and field projection (`fields` / view:\"summary\").",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
@@ -741,7 +741,7 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_GET,
-        "Get a single record by ID from a NEO Headless API spec. Supports field projection "
+        "Get a single record by ID from an Etendo API spec. Supports field projection "
             + "(`fields` / view:\"summary\"). "
             + McpConstants.RECORD_URL_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
@@ -750,7 +750,7 @@ public class ToolRegistry {
   private McpToolDefinition buildCreateTool(List<String> specNames) {
     // IMP-18: the write verbs used to drop an unrecognised key in silence, so a create carrying a
     // misspelt field returned 201 and no later read could contradict it. They now name it in
-    // `unknownFields`, the way neo_schema/neo_list/neo_get already did - and the description says
+    // `unknownFields`, the way etendo_schema/etendo_list/etendo_get already did - and the description says
     // so, because a warning nobody is told to look for is only marginally better than silence.
     String unknownFieldsNote = "A name this entity does not recognise comes back in "
         + "\"unknownFields\" on the response - check it if a value you sent is not on the record, "
@@ -760,7 +760,7 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put(McpConstants.PARAM_FIELDS, objectProp("Field values for the new record"));
     // IMP-40: parentId was accepted ONLY inside `fields` and was declared nowhere. Every other
-    // parent-aware tool (neo_defaults, neo_list, neo_get) takes it as a top-level argument and
+    // parent-aware tool (etendo_defaults, etendo_list, etendo_get) takes it as a top-level argument and
     // says so at length, so an agent learns that shape from three tools and applies it to this
     // one — where it was silently discarded. Nothing errored: the parent link simply never
     // arrived, so parent-derived values (a line's order date, its price-list version, its running
@@ -777,17 +777,17 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_CREATE,
-        "Create a new record in a NEO Headless API spec. "
+        "Create a new record in an Etendo API spec. "
             + "Creating a child/line record? Pass parentId with the parent's id — without it the "
             + "server cannot derive the values it inherits from the parent. "
-            + "Recommended: call neo_defaults first to get the initial/base set of field values "
+            + "Recommended: call etendo_defaults first to get the initial/base set of field values "
             + "for this record type, then build the fields object by overriding only the values "
             + "the user actually wants to change on top of that base — instead of asking the "
             + "user for every field or guessing values that already have a sensible default "
             + "(document number, dates, prices, etc.). Send back only what the user chose or what "
             + "you need on the record: a value you send is deliberate, and it is protected from "
             + "the callouts that would otherwise derive it from this record's real context — a "
-            + "generic default echoed back can pin the wrong one (neo_defaults resolves before "
+            + "generic default echoed back can pin the wrong one (etendo_defaults resolves before "
             + "there is a business partner). Any field where that happened comes back in "
             + "\"supersededDefaults\" with the value the callout had resolved. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
@@ -801,7 +801,7 @@ public class ToolRegistry {
   private McpToolDefinition buildUpdateTool(List<String> specNames) {
     // IMP-18: the write verbs used to drop an unrecognised key in silence, so a create carrying a
     // misspelt field returned 201 and no later read could contradict it. They now name it in
-    // `unknownFields`, the way neo_schema/neo_list/neo_get already did - and the description says
+    // `unknownFields`, the way etendo_schema/etendo_list/etendo_get already did - and the description says
     // so, because a warning nobody is told to look for is only marginally better than silence.
     String unknownFieldsNote = "A name this entity does not recognise comes back in "
         + "\"unknownFields\" on the response - check it if a value you sent is not on the record, "
@@ -812,18 +812,18 @@ public class ToolRegistry {
     props.put("id", stringProp("Record ID to update"));
     props.put(McpConstants.PARAM_FIELDS, objectProp("Field values to update"));
     // ETP-5073 / DOC-04: required, and described in terms of where to obtain it. The schema alone
-    // would only tell an agent that something is missing; naming neo_get as the source is what
+    // would only tell an agent that something is missing; naming etendo_get as the source is what
     // lets it recover on the first retry instead of guessing a timestamp (which cannot work — any
     // value other than the one actually stored is rejected as a conflict).
     props.put(McpConstants.PARAM_UPDATED, stringProp(
-        "The record's 'updated' value exactly as neo_get returned it. Required: it is how the "
+        "The record's 'updated' value exactly as etendo_get returned it. Required: it is how the "
             + "server verifies nobody else changed the record since you read it. Copy it verbatim "
-            + "— do not reformat, round or invent it. If you do not have it, call neo_get first."));
+            + "— do not reformat, round or invent it. If you do not have it, call etendo_get first."));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_UPDATE,
-        "Update an existing record in a NEO Headless API spec. "
-            + "Read the record with neo_get first: its 'updated' value is a required argument and "
+        "Update an existing record in an Etendo API spec. "
+            + "Read the record with etendo_get first: its 'updated' value is a required argument and "
             + "guards against overwriting somebody else's concurrent edit. A 409 with "
             + "error 'stale_record' means the record changed since that read — re-read it, reapply "
             + "your changes and retry; re-sending the same payload will fail identically. "
@@ -843,7 +843,7 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_DELETE,
-        "Delete a record from a NEO Headless API spec.",
+        "Delete a record from an Etendo API spec.",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
@@ -899,7 +899,7 @@ public class ToolRegistry {
     props.put(McpDefaultsView.PARAM_VIEW, enumProp(
         "Optional response shape. Omit (or \"full\") for the historical flat map of every default. "
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
-            + "override before neo_create) and `systemManaged` (compliance/audit flags the server "
+            + "override before etendo_create) and `systemManaged` (compliance/audit flags the server "
             + "owns — leave them alone). \"minimal\" returns only the `confirm` block. Use "
             + "grouped/minimal on compliance-heavy specs (invoices, orders) to avoid wading "
             + "through ~65 fields when only ~5 matter. In both grouped views a field the server "
@@ -913,20 +913,20 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_DEFAULTS,
         "Get the initial/base set of field values for a new record — field types, which fields "
             + "are required vs optional, and computed/system defaults (document number, dates, "
-            + "prices, etc.). Recommended: call this BEFORE neo_create, then use its result as "
+            + "prices, etc.). Recommended: call this BEFORE etendo_create, then use its result as "
             + "the starting point and only override the fields the user actually wants to set — "
-            + "instead of asking the user for every value from scratch. neo_create only auto-fills "
+            + "instead of asking the user for every value from scratch. etendo_create only auto-fills "
             + "what it needs to satisfy a NOT-NULL column or a computed value (sequence numbers, "
             + "dates, currency, ...) — an optional field this call resolved (a price list, payment "
             + "terms, a financial account, ...) is NOT copied into the record unless you send it "
             + "explicitly in fields, even though it showed a value here. Copy across the fields "
-            + "from this result you want on the record; do not assume omitting one lets neo_create "
+            + "from this result you want on the record; do not assume omitting one lets etendo_create "
             + "fill it in the same way. BUT these values are resolved with no business partner and "
             + "no record context, so a value here can be superseded the moment you choose one: on "
             + "sales-order/header this call answers paymentTerms \"30 Días\" and the partner you "
             + "pick may imply \"Inmediato\". A value you send is treated as deliberate and is "
             + "protected from the callout that would have corrected it, so re-send a value from "
-            + "here only when the user actually chose it — not as a blanket echo. neo_create "
+            + "here only when the user actually chose it — not as a blanket echo. etendo_create "
             + "reports anything your value displaced in \"supersededDefaults\"; read it. "
             + "When entity is a child/line tab (not the spec's top-level "
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
@@ -935,14 +935,14 @@ public class ToolRegistry {
             + "erroring. Pass view:\"minimal\" (or \"grouped\") to collapse server-managed "
             + "compliance flags and focus on the fields you actually confirm. "
             + "Date values come back ISO-8601 ('YYYY-MM-DD', or 'YYYY-MM-DDTHH:MM:SS' for "
-            + "datetime fields) and can be passed straight back to neo_create unchanged.",
+            + "datetime fields) and can be passed straight back to etendo_create unchanged.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
   // ── Batch tool (cross-spec, sequential — not atomic, see IMP-23) ──────
 
   /**
-   * Build the {@code neo_batch} tool definition. Unlike the per-spec CRUD tools,
+   * Build the {@code etendo_batch} tool definition. Unlike the per-spec CRUD tools,
    * each operation in the batch carries its own {@code spec}, so this tool is
    * registered once with no top-level enum.
    *
@@ -981,7 +981,7 @@ public class ToolRegistry {
     Map<String, Object> bodyProp = new LinkedHashMap<>();
     bodyProp.put("type", McpConstants.TYPE_OBJECT);
     bodyProp.put(McpConstants.KEY_DESCRIPTION,
-        "Field values for the new record, in the same format neo_create accepts: a foreign key "
+        "Field values for the new record, in the same format etendo_create accepts: a foreign key "
             + "may be a record id (32-char hex or a legacy numeric one such as '102') or a display "
             + "name resolved server-side (e.g. currency:'EUR'). String values of the form "
             + "'$ref:<opId>' are replaced with the resolved recordId of an earlier op.");
@@ -1002,7 +1002,7 @@ public class ToolRegistry {
     props.put("operations", operationsProp);
 
     return new McpToolDefinition(
-        "neo_batch",
+        "etendo_batch",
         "Run a sequence of cross-spec create operations in order, atomically: a failure rolls "
             + "the whole batch back, so retry the whole batch after fixing the reported operation. "
             + "One exception, and the response states it explicitly: if an operation triggers an "
@@ -1015,7 +1015,7 @@ public class ToolRegistry {
             + "Use 'parentRef':<earlierOpId> to set the parent FK on a child-tab op, "
             + "and string values of the form '$ref:<earlierOpId>' anywhere in 'body' "
             + "to substitute the resolved recordId of an earlier op. Typically call "
-            + "neo_list / neo_selectors first to look up existing records and only "
+            + "etendo_list / etendo_selectors first to look up existing records and only "
             + "include create ops for what is genuinely new. "
             + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
             + "or {committed:false, atomic:true, failedAt:{id,index}, persisted:[], hint, "
@@ -1029,7 +1029,7 @@ public class ToolRegistry {
 
   private McpToolDefinition buildSchemaTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
+    props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
     // IMP-44: REQUIRED, and "full" is now a value you ask for rather than what you get for not
@@ -1040,11 +1040,11 @@ public class ToolRegistry {
     // the lever is the argument, not more prose.
     props.put(McpActionsView.PARAM_VIEW, enumProp(
         "REQUIRED — which projection you want. \"create\": ONLY the fields you may send to "
-            + "neo_create/neo_update, split into required/optional. This is the one you want "
+            + "etendo_create/etendo_update, split into required/optional. This is the one you want "
             + "before a write, and it is by far the smallest (~5 kB on sales-order/header). "
             + "\"actions\": only the buttons/processes ({name, label, action, processName, "
             + "processId, ...}) — use it when you need to know what can be triggered on this "
-            + "entity, not every column. Fire only the ones carrying invokeVia:\"neo_action\"; the "
+            + "entity, not every column. Fire only the ones carrying invokeVia:\"etendo_action\"; the "
             + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
             + "to \"actionCount\" tells you the split up front. \"full\": every field, including "
             + "read-only and system ones — ~40 kB on sales-order/header and more on "
@@ -1063,7 +1063,7 @@ public class ToolRegistry {
         McpConstants.TOOL_NEO_SCHEMA,
         "Get the field schema for an entity: field names, types, required flag, "
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
-            + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
+            + "and which fields have FK selectors. Call this BEFORE etendo_create to know which "
             + "fields exist and which are required. \"view\" is REQUIRED and decides the size of "
             + "the answer: use view:\"create\" before a write — only the fields you may send, "
             + "already split into required/optional, and several times smaller than the full "
@@ -1097,9 +1097,9 @@ public class ToolRegistry {
             + "named by the field's 'actionParameter' — e.g. {\"docAction\": \"CO\"}"));
 
     return new McpToolDefinition(
-        "neo_action",
+        "etendo_action",
         "Fire a type:button action on a record and return the process result. "
-            + "Call neo_schema with view:\"actions\" first: each button field carries 'action' "
+            + "Call etendo_schema with view:\"actions\" first: each button field carries 'action' "
             + "(the name to pass "
             + "here), and list-backed buttons also carry 'actionValues' (the values it "
             + "accepts, e.g. CO=Book / VO=Void / RE=Reactivate for documentAction) and "
@@ -1108,9 +1108,9 @@ public class ToolRegistry {
             + "id:'<orderId>', action:'documentAction', parameters:{docAction:'CO'}}. "
             + "Which values are legal depends on the record's current state (e.g. "
             + "documentStatus): read the field's 'agentPrompt' for the document's workflow "
-            + "rules, and neo_get the record first if unsure. "
+            + "rules, and etendo_get the record first if unsure. "
             + "Returns {processResult: success|error|warning, processMessage: ...}. "
-            + "Handler-served actions are listed by neo_schema view:\"actions\" with a JSON "
+            + "Handler-served actions are listed by etendo_schema view:\"actions\" with a JSON "
             + "Schema for 'parameters' and an 'idDescription' saying what 'id' is; they return "
             + "the handler's own JSON.",
         buildObjectSchema(props,
@@ -1242,7 +1242,7 @@ public class ToolRegistry {
         for (SFField field : fields) {
           // Field inclusion goes through McpFieldView, never a criteria: the MCP_CONFIG
           // fields.included override lives in JSON the database does not join, so a restriction
-          // here would advertise a different parameter set than neo_schema reports. The entity
+          // here would advertise a different parameter set than etendo_schema reports. The entity
           // restriction above stays a criteria on purpose - MCP_CONFIG overrides field inclusion
           // only, so there is nothing for a resolver to add at the entity level.
           if (field.getADColumn() != null && McpFieldView.of(field).isIncluded()) {
@@ -1272,7 +1272,7 @@ public class ToolRegistry {
       + "Prefer this over " + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " whenever you can run a shell "
       + "command or the user can open a link: the image bytes never pass through the conversation, "
       + "so it costs almost no tokens. After the upload succeeds you get an imageId — write it to "
-      + "any field of type 'image' with neo_update. The URL works exactly once and expires in 10 "
+      + "any field of type 'image' with etendo_update. The URL works exactly once and expires in 10 "
       + "minutes.";
 
   /** Description of {@link McpConstants#TOOL_NEO_UPLOAD_IMAGE}. See above for why it is a constant. */
