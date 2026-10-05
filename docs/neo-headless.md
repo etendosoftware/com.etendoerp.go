@@ -1095,9 +1095,37 @@ Authorization: Bearer {token}
 `{tableName}` is the AD_Table physical name (case-insensitive, e.g. `C_Invoice`, `C_Order`,
 `M_InOut`). Returns `200 { "items": [...] }`, one entry per attachment
 (`id`, `name`, `size`, `dataType`, `description`, `uploadedAt`, `updatedAt`, `uploadedBy`).
-Excludes whichever attachment is currently marked as the record's "main" document (see below) —
-that one belongs to the sidebar/preview, not the generic list. Returns `400` if `tableName` or
-`recordId` is missing, `404` if `tableName` does not resolve to a known active table.
+Includes whichever attachment is currently marked as the record's "main" document (see below) —
+since ETP-4855 a file attached from the preview must also be visible in the Attachments tab.
+Returns `400` if `tableName` or `recordId` is missing, `404` if `tableName` does not resolve to a
+known active table.
+
+#### GET — Count attachments (ETP-5526)
+
+```
+GET /sws/neo/attachments/{tableName}/{recordId}/count
+Authorization: Bearer {token}
+```
+
+Returns `200 { "count": N }`, where `N` is exactly the number of items the list endpoint above
+would return for the same record — same criteria (table + record, organization filter off, the
+"main" attachment included), executed as a `COUNT` query without loading the attachments. Same
+errors as the list: `400` if `tableName` or `recordId` is missing, `404` if `tableName` does not
+resolve to a known active table, `500` on any other failure; `405` for any verb other than `GET`.
+Authorization is the list's: a bearer-authenticated read with no write-tier check (see above).
+
+Why it exists: the React Attachments tab loads its list lazily, only when the tab is opened
+(ETP-4564), but every other counted tab shows its badge as soon as the record opens. The SPA calls
+this endpoint on record open to show the real number without fetching the list. The endpoint is
+optional for the SPA, not a hard dependency. A backend that predates it does **not** answer `404`:
+its record route ignores an unknown third segment, so `GET .../{recordId}/count` falls through to
+the list and answers `200 { "items": [...] }` — one full list read per record open on that backend.
+The SPA rejects that body as an invalid count and shows no number until the tab is opened; a
+`404`/`405`, a network error or any other failure is handled the same way, silently.
+
+Routing note: `count` is a third path segment, so it cannot collide with a record whose id is
+literally `count` — `/attachments/{table}/count` (two segments) is still the list of that record,
+and `/attachments/{table}/count/count` its count. Same rule as the existing `/zip` and `/main`.
 
 #### GET — Fetch the "main" (sidebar/preview) attachment
 
@@ -1182,8 +1210,8 @@ GET /sws/neo/attachments/{tableName}/{recordId}?zip=true
 Authorization: Bearer {token}
 ```
 
-Streams a zip of every attachment for the record, **excluding** whichever one is marked as main
-(it already has its own dedicated download button in the preview panel).
+Streams a zip of every attachment for the record, including whichever one is marked as main — same
+set as the list above.
 
 #### DELETE — Remove an attachment
 
