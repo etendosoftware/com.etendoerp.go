@@ -326,6 +326,24 @@ class OAuth2AuthorizeSupportTest {
     }
 
     @Test
+    @DisplayName("an etendo: allow-list grants the requested neo: alias, echoing the requested name")
+    void etendoAllowListGrantsLegacyRequest() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("neo:read"), set("etendo:read"), 1000L);
+
+      assertEquals("neo:read", data.scopes);
+    }
+
+    @Test
+    @DisplayName("a neo: allow-list grants the requested etendo: name")
+    void legacyAllowListGrantsEtendoRequest() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("etendo:read"), set("neo:read"), 1000L);
+
+      assertEquals("etendo:read", data.scopes);
+    }
+
+    @Test
     @DisplayName("the etendo:* wildcard grants a requested neo: scope")
     void etendoWildcardGrantsLegacyScope() {
       OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
