@@ -96,6 +96,20 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The current name of a fixed tool called by its pre-ETP-5602 {@code neo_<x>} name.
+   *
+   * @param toolName the name the caller used
+   * @return the {@code etendo_<x>} name, or {@code null} when the name is not a renamed tool
+   */
+  static String renamedToolName(String toolName) {
+    if (toolName == null || !toolName.startsWith(McpConstants.LEGACY_TOOL_PREFIX)) {
+      return null;
+    }
+    String candidate = "etendo_" + toolName.substring(McpConstants.LEGACY_TOOL_PREFIX.length());
+    return McpConstants.TOOLS_RENAMED_FROM_NEO.contains(candidate) ? candidate : null;
+  }
+
+  /**
    * The tool was called by the name it carried before ETP-5602 renamed the fixed tools from
    * {@code neo_<x>} to {@code etendo_<x>}. Answered with the new name instead of falling through
    * to the process-tool branch, which would have asked for a scope or a spec that has nothing to

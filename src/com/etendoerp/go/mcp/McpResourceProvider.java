@@ -144,7 +144,7 @@ public class McpResourceProvider {
   /**
    * Read a specific resource by URI.
    *
-   * @param uri the MCP resource URI (e.g. "etendo://specs/purchase-order";
+   * @param requestedUri the MCP resource URI (e.g. "etendo://specs/purchase-order";
    *     the deprecated "neo://" scheme is accepted too)
    * @return the resource content as a JSONObject
    * @throws IllegalArgumentException if the URI is unknown or the resource is not found

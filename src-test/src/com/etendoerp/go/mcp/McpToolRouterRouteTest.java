@@ -91,6 +91,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * wrapper methods.
  *
  * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpRoutingException
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -353,10 +354,10 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("an unrelated neo_ name is not treated as a rename")
     void unrelatedNeoNameIsNotARename() {
-      org.junit.jupiter.api.Assertions.assertNull(McpToolRouter.renamedToolName("neo_whatever"));
-      org.junit.jupiter.api.Assertions.assertNull(McpToolRouter.renamedToolName("etendo_list"));
-      org.junit.jupiter.api.Assertions.assertNull(McpToolRouter.renamedToolName(null));
-      assertEquals("etendo_list", McpToolRouter.renamedToolName("neo_list"));
+      org.junit.jupiter.api.Assertions.assertNull(McpRoutingException.renamedToolName("neo_whatever"));
+      org.junit.jupiter.api.Assertions.assertNull(McpRoutingException.renamedToolName("etendo_list"));
+      org.junit.jupiter.api.Assertions.assertNull(McpRoutingException.renamedToolName(null));
+      assertEquals("etendo_list", McpRoutingException.renamedToolName("neo_list"));
     }
   }
 

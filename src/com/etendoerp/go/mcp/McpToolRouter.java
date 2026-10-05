@@ -127,20 +127,6 @@ public class McpToolRouter {
 
 
   /**
-   * The current name of a fixed tool called by its pre-ETP-5602 {@code neo_<x>} name.
-   *
-   * @param toolName the name the caller used
-   * @return the {@code etendo_<x>} name, or {@code null} when the name is not a renamed tool
-   */
-  static String renamedToolName(String toolName) {
-    if (toolName == null || !toolName.startsWith(McpConstants.LEGACY_TOOL_PREFIX)) {
-      return null;
-    }
-    String candidate = "etendo_" + toolName.substring(McpConstants.LEGACY_TOOL_PREFIX.length());
-    return McpConstants.TOOLS_RENAMED_FROM_NEO.contains(candidate) ? candidate : null;
-  }
-
-  /**
    * Route a tool call to its handler.
    * <p>
    * For CRUD tools (etendo_list, etendo_get, etc.), the spec name is extracted from the
@@ -153,7 +139,7 @@ public class McpToolRouter {
    * @return MCP result object with "content" array
    */
   public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
-    String renamedTo = renamedToolName(toolName);
+    String renamedTo = McpRoutingException.renamedToolName(toolName);
     if (renamedTo != null) {
       // ETP-5602: answer a removed neo_<x> name with its new name before anything else — the
       // default branch would read it as a process tool and refuse it for an unrelated reason.
