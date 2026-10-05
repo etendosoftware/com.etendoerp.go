@@ -436,6 +436,85 @@ public class Fiscal303SourcesSupportTest {
     assertEquals(new BigDecimal("21.00"), row.get("vat"));
   }
 
+  /**
+   * ETP-5599 regression guard: a rectificativa de importación no-UE with a NEGATIVE amount must
+   * keep redirecting to the purchase corrective pair 40/41, exactly as it already did before this
+   * fix via the sign-only check — this fix only ADDS the flag-based path, it must not have
+   * disturbed the pre-existing negative-sign path.
+   */
+  @Test
+  public void testCollectSources_negativeRectificativaImportNonEu_showsCorrectiveBoxes() {
+    Invoice inv = buildRectificativeInvoice(
+        "inv-rect-neg-import-1", "RECT-2000003", date(2026, 3, 15), date(2026, 3, 15));
+    InvoiceTax importLine = buildInvoiceTax(inv, "-100.00", "-21.00");
+
+    List<Map<String, Object>> rows = runCollectSources(
+        Collections.singletonList(importLine),
+        Collections.singletonList("rate-import-rect-neg"),
+        Collections.singletonList(java.util.Arrays.asList(32, 33)));
+
+    assertEquals(1, rows.size());
+    Map<String, Object> row = rows.get(0);
+    assertEquals("deductible", row.get("type"));
+    assertEquals("40,41", row.get(Fiscal303BoxesHandler.BOXES));
+    assertEquals(new BigDecimal("-100.00"), row.get("base"));
+    assertEquals(new BigDecimal("-21.00"), row.get("vat"));
+  }
+
+  /**
+   * A plain (non-rectificativa) import-no-UE purchase invoice, positive amount, box pair 32/33
+   * (Import_Goods) must stay at its normal box pair — {@code isCorrectiveInvoiceTax} must NOT
+   * redirect it to 40/41 just because it belongs to the purchase-deduction box family. This pins
+   * the "else" branch of the redirection for this specific box pair, previously untested.
+   */
+  @Test
+  public void testCollectSources_normalImportNonEuInvoice_staysAtNormalBoxes() {
+    Invoice inv = buildInvoice(
+        "inv-import-normal-1", "F-2026-0200", date(2026, 3, 16), date(2026, 3, 16));
+    InvoiceTax importLine = buildInvoiceTax(inv, "100.00", "21.00");
+
+    List<Map<String, Object>> rows = runCollectSources(
+        Collections.singletonList(importLine),
+        Collections.singletonList("rate-import-normal"),
+        Collections.singletonList(java.util.Arrays.asList(32, 33)));
+
+    assertEquals(1, rows.size());
+    Map<String, Object> row = rows.get(0);
+    assertEquals("deductible", row.get("type"));
+    assertEquals("32,33", row.get(Fiscal303BoxesHandler.BOXES));
+    assertEquals(new BigDecimal("100.00"), row.get("base"));
+    assertEquals(new BigDecimal("21.00"), row.get("vat"));
+  }
+
+  /**
+   * A historical invoice flagged as a document reversal must be classified as corrective
+   * unconditionally — regardless of amount sign and regardless of {@code
+   * EM_ETSG_IsRectificative} (which pre-ETP-5599 doc types such as the retired "Reversed Sales
+   * Invoice" never set). This is pre-existing behavior in {@code isCorrectiveInvoiceTax},
+   * untouched by this fix's diff, reachable because {@code com.etendoerp.go}'s own sample data
+   * (now-inactive-but-FK-valid doc types, ETP-4737/ETP-5274) keeps these doc types resolvable on
+   * historical invoices that a Modelo 303 declaration can still include.
+   */
+  @Test
+  public void testCollectSources_reversalDocumentType_classifiedAsCorrective() {
+    Invoice inv = buildInvoice(
+        "inv-reversal-1", "F-2026-0300", date(2026, 3, 17), date(2026, 3, 17));
+    when(inv.getDocumentType().isReversal()).thenReturn(Boolean.TRUE);
+    InvoiceTax salesLine = buildInvoiceTax(inv, "70.00", "14.70");
+
+    List<Map<String, Object>> rows = runCollectSources(
+        Collections.singletonList(salesLine),
+        Collections.singletonList("rate-reversal"),
+        Collections.singletonList(java.util.Arrays.asList(7, 9)));
+
+    assertEquals(1, rows.size());
+    Map<String, Object> row = rows.get(0);
+    assertEquals("accrued", row.get("type"));
+    assertEquals("14,15", row.get(Fiscal303BoxesHandler.BOXES));
+    assertEquals(new BigDecimal("70.00"), row.get("base"));
+    assertEquals(new BigDecimal("14.70"), row.get("vat"));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   @SuppressWarnings("unchecked")
