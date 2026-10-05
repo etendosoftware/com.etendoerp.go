@@ -58,8 +58,14 @@ public class GoSessionAuthenticator {
     if (sessionRecord == null) {
       return GoSessionAuthResult.unauthenticated();
     }
-    if (!GoSessionSecurity.isUnsafeRequestAuthorized(request, sessionRecord.getCsrfToken())) {
-      return GoSessionAuthResult.csrfFailed();
+    if (!GoSessionSecurity.isSafeMethod(request.getMethod())) {
+      // ETP-5550: the origin goes first, so a cross-site request is never told its token is stale.
+      if (!GoSessionSecurity.isOriginAllowed(request)) {
+        return GoSessionAuthResult.originRejected();
+      }
+      if (!GoSessionSecurity.isCsrfValid(request, sessionRecord.getCsrfToken())) {
+        return GoSessionAuthResult.csrfFailed();
+      }
     }
     // ETP-5465: only a fully authorized request keeps the session alive.
     sessionService.renewIdleExpiry(sessionRecord);
