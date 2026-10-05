@@ -4592,6 +4592,35 @@ The generated HQL fragment is injected as a `whereAndFilterClause` parameter int
 
 Tabs with `DisableParentKeyProperty = Y` skip parent filtering.
 
+### 6.1 Default order of child-tab lists (ETP-5611)
+
+A child-tab list (`tabLevel > 0`) that arrives with **no** `_sortBy`/`_orderBy` is ordered by the
+AD tab's `HQL_OrderBy_Clause` — the order Classic always showed (`lineNo` on every document-lines
+tab). Before ETP-5611 NEO ignored that clause, so `DefaultJsonDataService` fell back to `id` —
+random UUIDs — and lines came back in an arbitrary order that visibly jumped after a save (most
+visible on Manual Journals, where entry order matters).
+
+Implemented in `NeoTabDefaultSort` and applied by both channels, so they agree:
+
+- REST: `NeoCrudHandler.buildDalParams`, list `GET` only (no record id).
+- MCP: `McpToolRouter` `neo_list`, when the call passes no `orderBy`.
+
+Rules:
+
+- An explicit sort always wins: a `_sortBy`/`_orderBy` query param, MCP `orderBy`, or a handler
+  pre-hook default (e.g. `ProductCostingHandler`).
+- Only a plain comma-separated list of property paths is used: an `e.` prefix, a leading `-` or a
+  trailing `asc`/`desc` is accepted and normalised to `_sortBy` syntax (`e.a desc, b` → `-a,b`).
+- Every path must exist on the DAL entity (case-sensitive, walked through many-to-one targets).
+  Any unusable term — a function (`abs(debit) desc`), a foreign alias (`fa.type`, `trx.movementDate`),
+  a stale or Classic-only name (`Debit`, `sEQNoAsset`) — skips the **whole** clause and the list
+  keeps the old id order. A bad clause can never turn a working list into a 500.
+- `DefaultJsonDataService` still appends `,id`, so ties stay deterministic.
+- Unpaginated child lists are capped at 100 rows (`applyPaginationDefaults`), so on a long tab the
+  change also decides **which** 100 rows come back.
+
+The criterion is AD structure (tab level and tab metadata), never entity identity.
+
 ---
 
 ## 7. Security
