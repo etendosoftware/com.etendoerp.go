@@ -915,19 +915,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * with a new productive. Onboarding applies the same rule again in
    * {@code rejectDuplicateProductiveName}; this pre-payment copy fails open, because the onboarding
    * one still refuses the collision and records it as non-retryable.
+   *
+   * <p>Runs through {@link SystemContext}, so the caller gets its own OBContext and admin-mode
+   * state back on every path — {@code restorePreviousMode()} alone would leave the system context
+   * installed for the rest of the request (ETP-5045). Failing open happens inside the system
+   * scope, so the context is restored on that path too.
    */
   private boolean isProductiveNameTakenByAccount(String clientName, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return ownsProductiveNamed(clientName, accountEmail);
-    } catch (RuntimeException e) {
-      log.warn("Could not check whether company name is in use before checkout; the onboarding "
-          + "check still applies", e);
-      return false;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return SystemContext.call("the pre-checkout company name check", () -> {
+      try {
+        return ownsProductiveNamed(clientName, accountEmail);
+      } catch (RuntimeException e) {
+        log.warn("Could not check whether company name is in use before checkout; the onboarding "
+            + "check still applies", e);
+        return false;
+      }
+    });
   }
 
   /** Caller provides the admin context. Case and surrounding blanks are ignored. */
@@ -3249,14 +3252,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /** Scoped like {@link #isProductiveNameTakenByAccount}: the caller's context is restored. */
   private boolean isAssociatedDemo(String clientId) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return tenantEnvironmentLifecycleService.isAssociatedWithProductive(clientId);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return SystemContext.call("the associated-demo check",
+        () -> tenantEnvironmentLifecycleService.isAssociatedWithProductive(clientId));
   }
 
   private void writeInvalidDemoSelection(HttpServletResponse response) throws IOException {

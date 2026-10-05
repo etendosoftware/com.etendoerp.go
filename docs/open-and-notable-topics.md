@@ -475,7 +475,7 @@ line below is the result of reading the code, not of counting matches.
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
 | `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |
-| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 28 raw system installs (counted 2026-09-28); the lifecycle webhook is the one site routed through `payment/SystemContext` |
+| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 28 raw system installs (recounted 2026-10-05); routed through `payment/SystemContext`: the lifecycle webhook, and the two ETP-5548 checks develop brought in (`isProductiveNameTakenByAccount`, `isAssociatedDemo`). Note the checkout paths still run in system context after the name check: `requireBillingOwner` → `hasOwnedEnvironment` installs it first, raw |
 
 **`CompanyInvitationService` — the real one.** Two sites, both `restorePreviousMode()`-only:
 
