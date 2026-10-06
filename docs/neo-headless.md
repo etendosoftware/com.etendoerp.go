@@ -6686,8 +6686,9 @@ or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — i
 composed template roles; the array is never padded or nulled out for a single unresolved entry.
 
 **`isClientAdmin` (ETP-5329, QA follow-up).** Every `roleList` entry carries a boolean
-`isClientAdmin` (`AD_Role.Is_Client_Admin = 'Y'`), on login and on `SFRefreshToken` alike (both
-build the list through `EtendoGoJwtSupport.loadRoleListData`). It exists because a tenant
+`isClientAdmin` (`AD_Role.Is_Client_Admin = 'Y'`) wherever `roleList` is returned — login,
+`SFRefreshToken`, `GET /sws/go/session` and `POST /sws/go/session/environment` alike, since all of
+them build the list through `EtendoGoJwtSupport.loadRoleListData`. It exists because a tenant
 admin's default role IS the client-admin `AD_Role` itself: it has no composed templates (so no
 `effectiveRoleNames`) and its raw `name` is tenant-specific (`"<Company> Admin"`). Frontends must
 check it first and render the localized "Administrator" label (`roleNameAdmin`), the same one
