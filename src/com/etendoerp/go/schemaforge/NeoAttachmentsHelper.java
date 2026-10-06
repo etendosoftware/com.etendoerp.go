@@ -152,6 +152,46 @@ public final class NeoAttachmentsHelper {
     }
   }
 
+  // ── Count ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Counts the attachments bound to the given record with exactly the same
+   * criteria as {@link #handleList} (table + record, organization filter off),
+   * so the number always equals the length of the list the Attachments tab
+   * would show — including the one marked as "main".
+   *
+   * <p>Runs a {@code COUNT} query instead of loading the entities: the React
+   * Attachments tab loads its full list lazily (ETP-4564) and only needs this
+   * number to show the tab badge as soon as a record opens (ETP-5526).</p>
+   *
+   * @param tableName the AD_Table.name (case-insensitive, e.g. {@code "C_Order"})
+   * @param recordId  the record's primary key (string; all AD IDs are VARCHAR)
+   * @return a NeoResponse wrapping {@code { "count": N }}
+   */
+  public static NeoResponse handleCount(String tableName, String recordId) {
+    if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
+    }
+    try {
+      String tableId = resolveTableId(tableName);
+
+      OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
+      criteria.setFilterOnReadableOrganization(false);
+
+      JSONObject body = new JSONObject();
+      body.put("count", criteria.count());
+      return NeoResponse.ok(body);
+    } catch (OBException e) {
+      log.warn("Attachments count failed: {}", e.getMessage());
+      return NeoResponse.error(404, e.getMessage());
+    } catch (Exception e) {
+      log.error("Attachments count failed for {}/{}", tableName, recordId, e);
+      return NeoResponse.error(500, "Internal error counting attachments");
+    }
+  }
+
   // ── Main document (sidebar/preview) ──────────────────────────────────────────
 
   /**

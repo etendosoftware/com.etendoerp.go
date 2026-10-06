@@ -362,6 +362,24 @@ class EtendoGoJwtSupportTest {
     }
 
     @Test
+    @DisplayName("findClientIdsByName returns every same-named client, ignoring case")
+    void findClientIdsByName() {
+      Client first = mock(Client.class);
+      when(first.getId()).thenReturn("client-1");
+      Client second = mock(Client.class);
+      when(second.getId()).thenReturn("client-2");
+      when(obDal.createQuery(eq(Client.class), anyString())).thenReturn(clientQuery);
+      when(clientQuery.list()).thenReturn(Arrays.asList(first, second));
+
+      assertEquals(Arrays.asList("client-1", "client-2"),
+          EtendoGoJwtSupport.findClientIdsByName("  Acme "));
+      verify(clientQuery).setNamedParameter("clientName", "Acme");
+      verify(clientQuery).setFilterOnReadableClients(false);
+      verify(clientQuery).setFilterOnReadableOrganization(false);
+      assertTrue(EtendoGoJwtSupport.findClientIdsByName("  ").isEmpty());
+    }
+
+    @Test
     @DisplayName("findStarOrgId returns the star org id, falling back to '0' when absent")
     void starOrganizationHelpers() {
       Organization star = mock(Organization.class);
@@ -394,7 +412,7 @@ class EtendoGoJwtSupportTest {
     @Mock private OBQuery<User> userQuery;
 
     @Test
-    @DisplayName("returns plain email when no active AD user exists")
+    @DisplayName("returns plain email when no AD user has it")
     void noExistingUser() {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
       when(userQuery.uniqueResult()).thenReturn(null);
@@ -407,17 +425,44 @@ class EtendoGoJwtSupportTest {
     @DisplayName("returns email plus sanitized client name when user exists")
     void existingUser() {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
-      when(userQuery.uniqueResult()).thenReturn(mock(User.class));
+      when(userQuery.uniqueResult()).thenReturn(mock(User.class), (User) null);
 
       assertEquals("user@test.com+my123company",
           EtendoGoJwtSupport.buildClientUsername("user@test.com", "My-123 Company!"));
     }
 
     @Test
+    @DisplayName("ETP-5548: numbers the suffix while email+company is taken, counting inactive users")
+    void numbersTheSuffixWhileTaken() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      User taken = mock(User.class);
+      // email, email+acme and email+acme2 taken; email+acme3 free.
+      when(userQuery.uniqueResult()).thenReturn(taken, taken, taken, null);
+
+      assertEquals("user@test.com+acme3",
+          EtendoGoJwtSupport.buildClientUsername("user@test.com", "Acme!"));
+      verify(userQuery, times(4)).setFilterOnActive(false);
+    }
+
+    @Test
+    @DisplayName("ETP-5548: a numbered suffix still fits AD_USER.USERNAME(60)")
+    void numberedSuffixFitsTheColumn() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      User taken = mock(User.class);
+      when(userQuery.uniqueResult()).thenReturn(taken, taken, null);
+      String email = "a".repeat(40) + "@test.com";
+
+      String username = EtendoGoJwtSupport.buildClientUsername(email, "Extremely Long Company Name SL");
+
+      assertEquals(OnboardingFieldLimits.EMAIL, username.length());
+      assertEquals(email + "+extremely2", username);
+    }
+
+    @Test
     @DisplayName("ETP-4665: trims the company suffix so the username fits AD_USER.USERNAME(60)")
     void suffixTrimmedToColumnSize() {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
-      when(userQuery.uniqueResult()).thenReturn(mock(User.class));
+      when(userQuery.uniqueResult()).thenReturn(mock(User.class), (User) null);
 
       // A 49-char email leaves 60 - (49 + 1) = 10 characters for the company suffix,
       // so "extremelylongcompanynamesl" is cut down to "extremelyl".

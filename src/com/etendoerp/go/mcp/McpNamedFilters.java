@@ -112,6 +112,23 @@ final class McpNamedFilters {
   }
 
   /**
+   * Named business filters (ETP-4601): advertise the spec's hand-authored status filters, each
+   * keyed by name, so the agent can discover them instead of guessing. Only the
+   * name/label/description are exposed — the HQL where fragment stays server-side. Nothing is
+   * added when the entity declares none.
+   *
+   * @param entitySchema the {@code neo_schema} full response being built
+   * @param json         the entity's {@code NAMED_FILTERS} JSON, may be {@code null}
+   * @throws JSONException if the descriptors cannot be added
+   */
+  static void publishInto(JSONObject entitySchema, String json) throws JSONException {
+    JSONArray namedFilters = describe(json);
+    if (namedFilters.length() > 0) {
+      entitySchema.put("namedFilters", namedFilters);
+    }
+  }
+
+  /**
    * Build one filter descriptor (name, optional label/description) for {@link #describe}. Returns
    * {@code null} — so the caller skips it — when the entry is absent or its {@code name}/{@code where}
    * is blank. The {@code where} fragment itself is intentionally never emitted.

@@ -429,6 +429,40 @@ public class NeoExchangeRateServiceTest {
     return request;
   }
 
+  /** Runs a rate lookup over a mocked connection and returns the organization it bound (4th). */
+  private static String boundOrg(java.util.concurrent.Callable<Double> lookup) throws Exception {
+    Connection conn = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true);
+    when(rs.getDouble("multiplyrate")).thenReturn(1.17);
+    PreparedStatement ps = wirePreparedStatement(conn, rs);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      stubContext(ctxMock);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.getConnection()).thenReturn(conn);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      assertEquals(1.17, lookup.call(), 0.0001);
+    }
+    ArgumentCaptor<String> bound = ArgumentCaptor.forClass(String.class);
+    verify(ps).setString(org.mockito.ArgumentMatchers.eq(4), bound.capture());
+    return bound.getValue();
+  }
+
+  // ETP-5558: the funds-transfer action asks for the SOURCE account's organization.
+  @Test
+  public void testRateForAnOrganizationBindsThatOrganization() throws Exception {
+    assertEquals("org-account", boundOrg(() -> NeoExchangeRateService.rate("EUR-ID", "USD-ID",
+        LocalDate.of(2026, 10, 1), "org-account")));
+  }
+
+  // ETP-5558: the endpoint (and so the SPA modal) keeps the session's organization.
+  @Test
+  public void testRateWithoutOrganizationKeepsTheSessionOrganization() throws Exception {
+    assertEquals("org-1", boundOrg(() -> NeoExchangeRateService.rate("EUR-ID", "USD-ID",
+        LocalDate.of(2026, 10, 1))));
+  }
+
   private static void stubContext(MockedStatic<OBContext> ctxMock) {
     OBContext obCtx = mock(OBContext.class);
     Client client = mock(Client.class);

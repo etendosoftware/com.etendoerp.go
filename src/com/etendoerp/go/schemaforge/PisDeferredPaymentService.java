@@ -274,7 +274,7 @@ public final class PisDeferredPaymentService {
     try {
       OBContext.setAdminMode(true);
       try {
-        PisPayment failed = OBDal.getInstance().get(PisPayment.class, pisPaymentId);
+        PisPayment failed = TenantOwnership.loadOwned(PisPayment.class, pisPaymentId);
         if (failed == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
         }

@@ -20,7 +20,6 @@ package com.etendoerp.go.mcp;
 import java.util.Iterator;
 import java.util.List;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -39,13 +38,11 @@ import org.openbravo.model.ad.ui.Tab;
 
 import org.openbravo.service.json.JsonConstants;
 
-import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
-import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
@@ -203,7 +200,7 @@ final class McpToolRouterSupport {
 
   static JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
-    for (String method : NeoMethodPolicy.enabledMethods(entity)) {
+    for (String method : McpMethodPolicy.enabledMethods(entity)) {
       methods.put(method);
     }
     return methods;
@@ -233,13 +230,37 @@ final class McpToolRouterSupport {
    * @throws OBException when the method is not enabled on the entity
    */
   static void requireMethodEnabled(SFSpec spec, SFEntity entity, String method) {
-    if (NeoMethodPolicy.isMethodEnabled(entity, method)) {
-      return;
-    }
     String specName = spec != null ? spec.getName() : null;
     String entityName = entity != null ? entity.getName() : null;
-    throw McpRoutingException.methodNotAllowed(
-        NeoMethodPolicy.buildMcpNotEnabledMessage(specName, entityName, method, entity));
+    // A flag that is off keeps its historical refusal; neither REST nor MCP may use the method.
+    if (!McpMethodPolicy.isFlagEnabled(entity, method)) {
+      throw McpRoutingException.methodNotAllowed(
+          McpMethodPolicy.buildNotEnabledMessage(specName, entityName, method, entity));
+    }
+    requireVerbNotHidden(spec, entity, method);
+  }
+
+  /**
+   * Refuse a method {@code MCP_CONFIG.verbs} hides from the MCP (ETP-5558), whatever the
+   * {@code ETGO_SF_ENTITY} flag says.
+   *
+   * <p>Split from {@link #requireMethodEnabled} for {@code neo_schema view:"create"}, which must
+   * refuse a hidden create without starting to refuse entities whose {@code ISPOST} is merely off
+   * (its long-standing behaviour).</p>
+   *
+   * @param spec   the resolved spec (used for the message only)
+   * @param entity the resolved included entity
+   * @param method the HTTP-method equivalent of the MCP operation
+   * @throws McpRoutingException {@code method_not_allowed} (405) when the verb is hidden
+   */
+  static void requireVerbNotHidden(SFSpec spec, SFEntity entity, String method) {
+    McpVerbsSection.Hidden hidden = McpVerbsSection.hiddenFor(entity, method);
+    if (hidden == null) {
+      return;
+    }
+    throw McpRoutingException.verbHidden(spec != null ? spec.getName() : null,
+        entity != null ? entity.getName() : null, method, hidden.getReason(),
+        hidden.getInstead());
   }
 
   /**
@@ -327,7 +348,7 @@ final class McpToolRouterSupport {
     try {
       List<SFEntity> entities = listIncludedEntities(spec.getId());
       return entities == null || entities.isEmpty() || entities.stream()
-          .anyMatch(entity -> NeoMethodPolicy.isMethodEnabled(entity, method));
+          .anyMatch(entity -> McpMethodPolicy.isMethodEnabled(entity, method));
     } catch (Exception e) {
       log.warn("Could not inspect method {} for spec '{}': {}", method, spec.getName(),
           e.getMessage());
@@ -348,7 +369,7 @@ final class McpToolRouterSupport {
     if (entities == null || entities.isEmpty()) {
       return false;
     }
-    return entities.stream().noneMatch(NeoMethodPolicy::hasMutableMethod);
+    return entities.stream().noneMatch(McpMethodPolicy::hasMutableMethod);
   }
 
   /**
@@ -962,100 +983,5 @@ final class McpToolRouterSupport {
     }
     body.remove(McpConstants.KEY_ERROR);
     return status;
-  }
-
-  /**
-   * Report a batch rejected by the MCP FK pre-pass in the same outcome envelope a batch failure
-   * always uses (ETP-4793 / IMP-5 clause (i)).
-   *
-   * <p><b>The envelope used to differ by failure class.</b> A batch that failed inside
-   * {@code executeBatch} came back as {@code {committed:false, atomic, persisted, hint, failedAt,
-   * error:{…}}}. A batch rejected by the FK-by-name pre-pass — which runs <em>before</em>
-   * {@code executeBatch} — came back as the resolver's flat error with a {@code failedAt} bolted on
-   * and <b>no {@code committed} key at all</b> (evidence C9), so an agent branching on
-   * {@code committed}, exactly as the tool description tells it to, read {@code false} from a missing
-   * key by luck or crashed on it. One condition, two shapes, and the difference was invisible from
-   * the call site.</p>
-   *
-   * <p><b>{@code atomic:true} / {@code persisted:[]} are true here by construction</b>, not by
-   * observation — a stronger guarantee than {@code executeBatch} can give. IMP-23 §1 found that the
-   * discriminator three benchmark runs had missed was exactly this: a pre-pass failure happens before
-   * the transaction opens, so nothing can have persisted, which is why these failures always
-   * <em>looked</em> atomic while persist-time failures were not. What used to be an accident of
-   * timing is now a claim the response makes. The hint says so specifically rather than reusing
-   * {@code BatchService}'s "rolled back as a unit" wording: no rollback happened, because no
-   * transaction was opened.</p>
-   *
-   * @param fkError the resolver's structured error for the first op that failed to resolve
-   * @param index   the index of that operation in the {@code operations} array
-   * @param opId    that operation's caller-supplied {@code id}, or {@code null} when it declared none
-   * @return the batch outcome envelope
-   * @throws JSONException never in practice (all values are plain strings/ints)
-   */
-  static JSONObject toMcpBatchPreflightFailure(JSONObject fkError, int index, String opId)
-      throws JSONException {
-    JSONObject body = new JSONObject();
-    body.put(BatchService.FIELD_COMMITTED, false);
-    body.put(BatchService.FIELD_ATOMIC, true);
-    body.put(BatchService.FIELD_PERSISTED, new JSONArray());
-    body.put(BatchService.FIELD_HINT, "Nothing was persisted: the batch was rejected before the "
-        + "transaction opened, so no records were created and none need cleaning up. Fix the "
-        + "operation reported in 'failedAt' and retry the whole batch.");
-    JSONObject failedAt = new JSONObject();
-    failedAt.put("index", index);
-    if (StringUtils.isNotBlank(opId)) {
-      failedAt.put("id", opId);
-    }
-    body.put("failedAt", failedAt);
-    body.put(McpConstants.KEY_ERROR, fkError);
-    return body;
-  }
-
-  /**
-   * Rewrite a {@code BatchService} failure body into the IMP-5 error envelope (IMP-15).
-   * <p>
-   * {@code BatchService} serves both the REST {@code /batch} endpoint and {@code neo_batch}, and it
-   * forwards the failing operation's sub-response verbatim as {@code error.detail}. For an MCP agent
-   * that meant a raw DAL payload — {@code {"response":{"status":-4,"errors":{"id":"New object
-   * Currency(null) (key: EUR_Currency) refered to but not present in the import set"}}}} — with no
-   * error code, no field and no next step, while the single-record verbs had carried a structured
-   * envelope since IMP-5. The translation happens here rather than in {@code BatchService} so the
-   * REST contract, and any non-MCP caller reading {@code detail}, stay untouched.
-   * <p>
-   * Success bodies ({@code committed:true}) and bodies with no {@code error} object pass through
-   * unchanged. The {@code failedAt} pointer is always preserved — it is what tells the agent which
-   * operation to fix.
-   *
-   * @param result the body returned by {@code BatchService#executeBatch}, mutated in place
-   * @return the same object, for call chaining
-   * @throws JSONException never in practice (all values are plain strings/ints)
-   */
-  static JSONObject toMcpBatchFailure(JSONObject result) throws JSONException {
-    if (result == null || result.optBoolean("committed", false)) {
-      return result;
-    }
-    JSONObject rawError = result.optJSONObject(McpConstants.KEY_ERROR);
-    if (rawError == null) {
-      return result;
-    }
-    int status = rawError.optInt(McpConstants.KEY_STATUS, 500);
-    String message = rawError.optString(McpConstants.KEY_MESSAGE, "Batch operation failed");
-    JSONObject detail = rawError.optJSONObject(McpConstants.KEY_DETAIL);
-
-    JSONArray missingFields = McpSupportInternals.extractMissingFields(detail);
-    if (missingFields != null) {
-      result.put(McpConstants.KEY_ERROR, McpSupportInternals.buildBatchMissingFieldsError(missingFields));
-      return result;
-    }
-
-    String dalMessage = McpSupportInternals.extractDalMessage(detail);
-
-    JSONObject clean = new JSONObject();
-    clean.put(McpConstants.KEY_STATUS, status);
-    clean.put(McpConstants.KEY_ERROR, McpSupportInternals.errorCodeForStatus(status));
-    clean.put(McpConstants.KEY_DETAIL, dalMessage == null ? message : message + ": " + dalMessage);
-    clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
-    result.put(McpConstants.KEY_ERROR, clean);
-    return result;
   }
 }

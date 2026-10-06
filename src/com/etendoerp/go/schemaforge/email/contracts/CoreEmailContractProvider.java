@@ -102,6 +102,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new AccountNoticeEmailContract("auth-method-removed", contractResolver, NOTE_WARNING),
         new LoginAlertEmailContract(contractResolver),
         new OrganizationJoinedEmailContract(contractResolver),
-        new CompanyInvitationEmailContract());
+        new CompanyInvitationEmailContract(),
+        new com.etendoerp.go.schemaforge.email.InternalAlertEmailContract());
   }
 }
