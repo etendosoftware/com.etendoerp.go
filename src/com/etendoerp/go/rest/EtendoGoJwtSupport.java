@@ -215,7 +215,10 @@ public final class EtendoGoJwtSupport {
     for (JSONObject roleObj : rolesById.values()) {
       roleArray.put(roleObj);
     }
-    return new RoleListData(firstRoleId, roleArray);
+    // ETP-5096 — only a default role the user actually holds can be entered with.
+    String heldDefaultRoleId = defaultRoleId != null && rolesById.containsKey(defaultRoleId)
+        ? defaultRoleId : null;
+    return new RoleListData(firstRoleId, heldDefaultRoleId, roleArray);
   }
 
   private static String stringValue(Object value) {
@@ -409,28 +412,53 @@ public final class EtendoGoJwtSupport {
 
   /**
    * The resolved set of roles (and their available organizations) a user is currently
-   * assignable to, plus a convenience pointer to the first one — the same shape both the
-   * login flow ({@code EtendoGoJwtServlet}) and the silent-refresh webhook
+   * assignable to, plus pointers to the oldest one and to the one to enter with — the same shape
+   * both the login flow ({@code EtendoGoJwtServlet}) and the silent-refresh webhook
    * ({@code SFRefreshToken}) need for their own {@code roleList} responses.
    */
   public static final class RoleListData {
     private final String firstRoleId;
+    private final String defaultRoleId;
     private final JSONArray roleArray;
 
     /**
-     * Builds an immutable {@link RoleListData} snapshot.
+     * Builds an immutable {@link RoleListData} snapshot with no default role among the held ones.
      *
      * @param firstRoleId the first resolved role's {@code AD_Role_ID}, or {@code null}
      * @param roleArray the full resolved role list
      */
     public RoleListData(String firstRoleId, JSONArray roleArray) {
+      this(firstRoleId, null, roleArray);
+    }
+
+    /**
+     * Builds an immutable {@link RoleListData} snapshot.
+     *
+     * @param firstRoleId the first resolved role's {@code AD_Role_ID}, or {@code null}
+     * @param defaultRoleId the user's {@code Default_AD_Role_ID} when it is one of the resolved
+     *     roles, otherwise {@code null}
+     * @param roleArray the full resolved role list
+     */
+    public RoleListData(String firstRoleId, String defaultRoleId, JSONArray roleArray) {
       this.firstRoleId = firstRoleId;
+      this.defaultRoleId = defaultRoleId;
       this.roleArray = roleArray;
     }
 
     /** @return the first resolved role's {@code AD_Role_ID}, or {@code null} if none resolved */
     public String getFirstRoleId() {
       return firstRoleId;
+    }
+
+    /**
+     * ETP-5096 — the role an entry with no explicit role uses: the user's default role when they
+     * hold it (the same preference {@code GoSessionRoleReconciler} applies when it rebinds),
+     * otherwise the oldest one.
+     *
+     * @return the {@code AD_Role_ID} to enter with, or {@code null} if none resolved
+     */
+    public String getEntryRoleId() {
+      return defaultRoleId != null ? defaultRoleId : firstRoleId;
     }
 
     /** @return the full resolved role list, each entry carrying its available organizations */

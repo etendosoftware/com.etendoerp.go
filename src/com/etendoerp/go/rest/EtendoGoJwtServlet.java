@@ -4332,9 +4332,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
         return;
       }
-      Role role = roleListData.getFirstRoleId() != null
-          ? OBDal.getInstance().get(Role.class, roleListData.getFirstRoleId())
-          : null;
+      String entryRoleId = roleListData.getEntryRoleId();
+      Role role = entryRoleId != null ? OBDal.getInstance().get(Role.class, entryRoleId) : null;
       String jwtToken = SecureWebServicesUtils.generateToken(user, role);
 
       JSONObject result = new JSONObject();
@@ -5310,14 +5309,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Resolve and validate the requested role (and, if given, organization) for an environment
-   * switch: defaults to the user's first role when none is requested, checks the role is one of
-   * the user's own, and that the requested organization (if any) belongs to that role. Writes the
-   * matching error response and returns {@code null} when the request is invalid.
+   * switch: defaults to the user's entry role when none is requested (see
+   * {@link #defaultEntryRoleId}), checks the role is one of the user's own, and that the requested
+   * organization (if any) belongs to that role. Writes the matching error response and returns
+   * {@code null} when the request is invalid.
    */
   private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
       String requestedRoleId, String requestedOrgId, HttpServletResponse response)
       throws IOException, JSONException {
-    String roleId = requestedRoleId.isEmpty() ? roleListData.getFirstRoleId() : requestedRoleId;
+    String roleId = requestedRoleId.isEmpty()
+        ? defaultEntryRoleId(roleListData, requestedOrgId)
+        : requestedRoleId;
     JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
     if (roleId == null || selectedRole == null) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
@@ -5335,6 +5337,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Requested role is not available to this user");
     }
     return role;
+  }
+
+  /**
+   * ETP-5096 — the role an entry with no explicit role uses: the user's default role
+   * ({@link EtendoGoJwtSupport.RoleListData#getEntryRoleId()}), not the oldest one. The client
+   * always sends its first organization, so when the default role cannot open that organization
+   * the oldest role (the one entry used before) is kept: a user who could enter must not start
+   * getting a 403 because their default role is narrower.
+   */
+  private static String defaultEntryRoleId(EtendoGoJwtSupport.RoleListData roleListData,
+      String requestedOrgId) throws JSONException {
+    String entryRoleId = roleListData.getEntryRoleId();
+    if (requestedOrgId.isEmpty() || entryRoleId == null
+        || entryRoleId.equals(roleListData.getFirstRoleId())) {
+      return entryRoleId;
+    }
+    JSONObject entryRole = findRole(roleListData.getRoleArray(), entryRoleId);
+    return entryRole != null && roleContainsOrganization(entryRole, requestedOrgId)
+        ? entryRoleId
+        : roleListData.getFirstRoleId();
   }
 
   /**
