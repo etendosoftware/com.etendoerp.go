@@ -479,6 +479,11 @@ class NeoCrudHandler {
 
     applyWhereClause(params, adTab, parentId, NeoReadPredicates.forRestListGet(context));
     applyPaginationDefaults(params);
+    // ETP-5611: a child-tab list with no explicit sort follows the AD tab's order-by (e.g. lineNo)
+    // instead of DefaultJsonDataService's id (random UUID) order.
+    if ("GET".equals(context.getHttpMethod()) && context.getRecordId() == null) {
+      NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
+    }
     return params;
   }
 

@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -92,6 +93,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 /**
  * Unit tests for {@link NeoCrudHandler}.
  * Uses JUnit 5 (Jupiter) and Mockito.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
 class NeoCrudHandlerTest {
 
@@ -3399,6 +3402,40 @@ class NeoCrudHandlerTest {
 
       assertEquals("documentNo", params.get("_sortBy"));
       assertEquals("val", params.get("customParam"));
+    }
+
+    private Tab childTab() {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getId()).thenReturn("TAB-L");
+      Window window = mock(Window.class);
+      when(window.getId()).thenReturn("WIN-1");
+      when(adTab.getWindow()).thenReturn(window);
+      when(adTab.getTabLevel()).thenReturn(1L);
+      return adTab;
+    }
+
+    @Test
+    @DisplayName("ETP-5611: a list GET applies the tab's default sort")
+    void listGetAppliesTabDefaultSort() throws Exception {
+      Tab adTab = childTab();
+      NeoContext context = buildContext("GET", null, adTab, mock(SFEntity.class), null, null);
+      try (MockedStatic<NeoTabDefaultSort> sort = mockStatic(NeoTabDefaultSort.class)) {
+        Map<String, String> params = invokeBuildDalParams(context, adTab, "GL_JournalLine");
+        sort.verify(() -> NeoTabDefaultSort.applyIfAbsent(params, adTab, "GL_JournalLine"));
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5611: a single-record GET or a write never gets the default sort")
+    void recordGetAndWritesSkipTabDefaultSort() throws Exception {
+      Tab adTab = childTab();
+      try (MockedStatic<NeoTabDefaultSort> sort = mockStatic(NeoTabDefaultSort.class)) {
+        invokeBuildDalParams(buildContext("GET", "REC-1", adTab, mock(SFEntity.class), null, null),
+            adTab, "GL_JournalLine");
+        invokeBuildDalParams(buildContext("POST", null, adTab, mock(SFEntity.class), null, null),
+            adTab, "GL_JournalLine");
+        sort.verify(() -> NeoTabDefaultSort.applyIfAbsent(any(), any(Tab.class), anyString()), never());
+      }
     }
 
     @Test
