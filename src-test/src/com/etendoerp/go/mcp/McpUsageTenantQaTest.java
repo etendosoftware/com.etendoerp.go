@@ -31,6 +31,7 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Field;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -48,6 +49,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /** QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows). */
@@ -56,8 +58,14 @@ public class McpUsageTenantQaTest {
   private McpServlet servlet;
 
   @Before
-  public void setUp() {
+  public void setUp() throws Exception {
     servlet = new McpServlet();
+    // ETP-5047 — doPost asks the commercial access guard first, which runs as system against the
+    // DAL. A mock that allows every tenant (null denial) keeps these telemetry specs DB-free, as
+    // McpServletTest does; the refusal itself is pinned there.
+    Field guardField = McpServlet.class.getDeclaredField("environmentAccessGuard");
+    guardField.setAccessible(true);
+    guardField.set(servlet, mock(EnvironmentAccessGuard.class));
     System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
     McpUsageTelemetry.clearCurrentTenant();
   }

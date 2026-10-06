@@ -62,6 +62,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Subscription;
@@ -836,7 +837,7 @@ class EtendoGoJwtDalHelperTest {
       return anchor;
     }
 
-    /** A demo whose 15-day trial started 40 days ago, with no subscription row. */
+    /** A demo whose default-length trial started 40 days ago, with no subscription row. */
     private java.time.Instant givenExpiredDemo() {
       java.time.Instant started = java.time.Instant.now().minus(java.time.Duration.ofDays(40));
       givenOpenRow(null);
@@ -939,7 +940,8 @@ class EtendoGoJwtDalHelperTest {
       for (JSONObject result : List.of(enforced, switchedOff)) {
         assertEquals("DEMO", result.getString("environmentType"));
         assertEquals(started.toString(), result.getString("trialStartedAt"));
-        assertEquals(started.plus(java.time.Duration.ofDays(15)).toString(),
+        assertEquals(started.plus(java.time.Duration.ofDays(
+            TenantEnvironmentLifecycleService.DEFAULT_TRIAL_DAYS)).toString(),
             result.getString("trialExpiresAt"));
         assertTrue(result.has("trialDaysRemaining"));
       }
