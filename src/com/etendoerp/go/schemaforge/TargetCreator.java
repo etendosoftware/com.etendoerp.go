@@ -37,12 +37,21 @@ interface TargetCreator {
    * anything is persisted, failing with {@link FollowUpException.Reason#MISSING_SETUP}; the
    * caller rolls the transaction back on any exception.
    *
+   * <p><b>Caller choices.</b> {@code inputs} carries the optional choices of the request body. A
+   * creator reads only the keys it defines, validates them before persisting anything
+   * ({@link FollowUpException.Reason#INVALID_INPUT} when unacceptable), and ignores the rest.
+   * When it needs a choice it cannot make on its own, it throws a {@link FollowUpException}
+   * carrying a {@link FollowUpException.RequiredInput} (key + options) so the client can ask the
+   * user and retry.
+   *
    * @param sourceId the source record
    * @param pendingLines the lines {@link PendingResolver#loadSources} declared for this source
    *     (non-empty)
+   * @param inputs the caller's optional choices; never {@code null} ({@link FollowUpInputs#none()})
    * @return the created target document (id, documentNo, line count)
    */
-  Result createTarget(String sourceId, List<PendingResolver.SourceLine> pendingLines);
+  Result createTarget(String sourceId, List<PendingResolver.SourceLine> pendingLines,
+      FollowUpInputs inputs);
 
   /**
    * The created target document. Which follow-up it is (key, spec, entity) is the

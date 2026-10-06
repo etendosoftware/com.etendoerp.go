@@ -18,11 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -37,6 +40,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,6 +49,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -54,7 +59,8 @@ import org.openbravo.model.common.invoice.Invoice;
 /**
  * Unit tests for {@link FollowUpActionHandler} — the HTTP envelope of the follow-up create path
  * (ETP-5576): which requests it serves, the tenant guard, the status and body of every outcome,
- * and the rollback on every non-2xx. It replaces the guard / error-path / 201 cases of the removed
+ * the caller's request-body choices handed to the creator, the {@code input} block of a rejection
+ * that asks for a choice, and the rollback on every non-2xx. It replaces the guard / error-path / 201 cases of the removed
  * {@code CreateInvoiceShipmentHandlerTest}; the handler is identity-free, so the former "wrong
  * spec name" guard became "action name not served by any registered flow".
  *
@@ -158,21 +164,62 @@ class FollowUpActionHandlerTest {
 
   // ── failures ──────────────────────────────────────────────────────────────
 
-  @Test
-  void businessRejectionAnswersItsReasonStatusCodeAndMessageAndRollsBack() throws Exception {
+  /** A rejection that asks for no choice carries no {@code input} member. */
+  @ParameterizedTest(name = "{0} -> {1}")
+  @CsvSource({
+      "MISSING_SETUP,400,FOLLOW_UP_MISSING_SETUP",
+      "INVALID_INPUT,400,FOLLOW_UP_INVALID_INPUT",
+  })
+  void businessRejectionAnswersItsReasonStatusCodeAndMessageAndRollsBack(String reason,
+      int status, String code) throws Exception {
     ownedInvoice("inv-1");
     pendingLines(shipmentResolver, "inv-1");
-    when(shipmentCreator.createTarget("inv-1", PENDING))
-        .thenThrow(new FollowUpException(FollowUpException.Reason.MISSING_SETUP,
+    when(shipmentCreator.createTarget("inv-1", PENDING, FollowUpInputs.none()))
+        .thenThrow(new FollowUpException(FollowUpException.Reason.valueOf(reason),
             "No storage bin found for warehouse: Main"));
 
     NeoResponse response = handler.handle(actionCtx("createShipment", "inv-1"));
 
-    assertEquals(400, response.getHttpStatus());
+    assertEquals(status, response.getHttpStatus());
     JSONObject error = response.getBody().getJSONObject("error");
-    assertEquals("FOLLOW_UP_MISSING_SETUP", error.getString("code"));
-    assertEquals(400, error.getInt("status"));
+    assertEquals(code, error.getString("code"));
+    assertEquals(status, error.getInt("status"));
     assertEquals("No storage bin found for warehouse: Main", error.getString("message"));
+    assertFalse(error.has("input"));
+    verify(sessionHandler).rollback();
+  }
+
+  /**
+   * A rejection that asks for a choice answers 409 with the key to send back and every option;
+   * an option without a name is serialized as JSON {@code null}, not omitted.
+   */
+  @Test
+  void warehouseRequiredAnswers409WithTheInputToChooseAndRollsBack() throws Exception {
+    ownedInvoice("inv-1");
+    pendingLines(shipmentResolver, "inv-1");
+    FollowUpException.RequiredInput choice = new FollowUpException.RequiredInput("warehouseId",
+        Arrays.asList(new FollowUpException.RequiredInput.Option("wh-a", "Almacen A"),
+            new FollowUpException.RequiredInput.Option("wh-b", null)));
+    when(shipmentCreator.createTarget("inv-1", PENDING, FollowUpInputs.none()))
+        .thenThrow(new FollowUpException(FollowUpException.Reason.WAREHOUSE_REQUIRED,
+            "Choose a warehouse", choice));
+
+    NeoResponse response = handler.handle(actionCtx("createShipment", "inv-1"));
+
+    assertEquals(409, response.getHttpStatus());
+    JSONObject error = response.getBody().getJSONObject("error");
+    assertEquals("FOLLOW_UP_WAREHOUSE_REQUIRED", error.getString("code"));
+    assertEquals(409, error.getInt("status"));
+    assertEquals("Choose a warehouse", error.getString("message"));
+    JSONObject input = error.getJSONObject("input");
+    assertEquals("warehouseId", input.getString("key"));
+    JSONArray options = input.getJSONArray("options");
+    assertEquals(2, options.length());
+    assertEquals("wh-a", options.getJSONObject(0).getString("id"));
+    assertEquals("Almacen A", options.getJSONObject(0).getString("name"));
+    assertEquals("wh-b", options.getJSONObject(1).getString("id"));
+    assertTrue(options.getJSONObject(1).has("name"));
+    assertTrue(options.getJSONObject(1).isNull("name"));
     verify(sessionHandler).rollback();
   }
 
@@ -196,7 +243,7 @@ class FollowUpActionHandlerTest {
   void otherDalErrorIsABadRequestWithItsMessageAndRollsBack() throws Exception {
     ownedInvoice("inv-1");
     pendingLines(shipmentResolver, "inv-1");
-    when(shipmentCreator.createTarget("inv-1", PENDING))
+    when(shipmentCreator.createTarget("inv-1", PENDING, FollowUpInputs.none()))
         .thenThrow(new OBException("Product is not active"));
 
     NeoResponse response = handler.handle(actionCtx("createShipment", "inv-1"));
@@ -211,7 +258,7 @@ class FollowUpActionHandlerTest {
   void unexpectedErrorIsA500WithAGenericMessageAndRollsBack() throws Exception {
     ownedInvoice("inv-1");
     pendingLines(shipmentResolver, "inv-1");
-    when(shipmentCreator.createTarget("inv-1", PENDING))
+    when(shipmentCreator.createTarget("inv-1", PENDING, FollowUpInputs.none()))
         .thenThrow(new IllegalStateException("secret internals"));
 
     NeoResponse response = handler.handle(actionCtx("createShipment", "inv-1"));
@@ -239,7 +286,7 @@ class FollowUpActionHandlerTest {
     ownedInvoice("inv-1");
     pendingLines(resolver, "inv-1");
     TargetCreator.Result created = new TargetCreator.Result("io-1", "DOC-0001", 2);
-    when(creator.createTarget("inv-1", PENDING)).thenReturn(created);
+    when(creator.createTarget("inv-1", PENDING, FollowUpInputs.none())).thenReturn(created);
 
     NeoResponse response = handler.handle(actionCtx(action, "inv-1"));
 
@@ -256,6 +303,25 @@ class FollowUpActionHandlerTest {
     verify(sessionHandler, never()).rollback();
     obContextStatic.verify(() -> OBContext.setAdminMode(true));
     obContextStatic.verify(OBContext::restorePreviousMode);
+  }
+
+  @Test
+  void theRequestBodyReachesTheCreatorAsTheCallersInputs() throws Exception {
+    ownedInvoice("inv-1");
+    pendingLines(shipmentResolver, "inv-1");
+    TargetCreator.Result created = new TargetCreator.Result("io-1", "DOC-0001", 2);
+    ArgumentCaptor<FollowUpInputs> inputs = ArgumentCaptor.forClass(FollowUpInputs.class);
+    when(shipmentCreator.createTarget(eq("inv-1"), eq(PENDING), inputs.capture()))
+        .thenReturn(created);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("createShipment").recordId("inv-1")
+        .requestBody(new JSONObject().put("warehouseId", " wh-1 ")).build();
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals("wh-1", inputs.getValue().get("warehouseId"));
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

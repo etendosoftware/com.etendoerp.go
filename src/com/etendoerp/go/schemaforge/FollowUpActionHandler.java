@@ -24,6 +24,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
@@ -45,8 +46,17 @@ import org.openbravo.dal.core.SessionHandler;
  * <p>Response — {@code 201}:
  * <pre>{"response":{"data":{"id":"…","documentNo":"…","followUp":"shipment",
  *   "spec":"goods-shipment","entity":"goodsShipment","lineCount":2}}}</pre>
- * Business rejection — {@link FollowUpException.Reason#getHttpStatus()} (404 / 400):
+ * Request body — optional. Its top-level members are the caller's choices
+ * ({@link FollowUpInputs}), e.g. {@code {"warehouseId":"…"}}; an empty or absent body means none.
+ * Each creator reads and validates only its own keys.
+ *
+ * <p>Business rejection — {@link FollowUpException.Reason#getHttpStatus()} (404 / 400 / 409):
  * <pre>{"error":{"code":"FOLLOW_UP_NOTHING_PENDING","status":400,"message":"…"}}</pre>
+ * When the creator needs a choice ({@link FollowUpException#getRequiredInput()}), the body also
+ * carries it, so the client renders a selector for {@code input.key} and retries the POST with
+ * {@code {"<key>":"<option id>"}}:
+ * <pre>{"error":{"code":"FOLLOW_UP_WAREHOUSE_REQUIRED","status":409,"message":"…",
+ *   "input":{"key":"warehouseId","options":[{"id":"…","name":"…"}]}}}</pre>
  * A record outside the caller's readable clients/organizations ({@link TenantOwnership}) answers
  * {@code FOLLOW_UP_SOURCE_NOT_FOUND}, indistinguishable from a missing one.
  * Unexpected failure — {@code 500} with a generic message. Every non-2xx path rolls the
@@ -89,7 +99,8 @@ final class FollowUpActionHandler implements NeoHandler {
         if (TenantOwnership.loadOwned(flow.sourceEntity(), recordId) == null) {
           throw new FollowUpException(FollowUpException.Reason.NOT_FOUND);
         }
-        TargetCreator.Result result = FollowUpDocumentService.create(recordId, flow);
+        TargetCreator.Result result = FollowUpDocumentService.create(recordId, flow,
+            FollowUpInputs.fromRequestBody(context.getRequestBody()));
         JSONObject data = new JSONObject();
         data.put("id", result.getId());
         data.put("documentNo", result.getDocumentNo());
@@ -131,7 +142,10 @@ final class FollowUpActionHandler implements NeoHandler {
     return null;
   }
 
-  /** Structured rejection body, same shape as {@code PRECONDITIONS_UNMET}. */
+  /**
+   * Structured rejection body, same shape as {@code PRECONDITIONS_UNMET}, plus an {@code input}
+   * block when the rejection asks the caller for a choice.
+   */
   static NeoResponse rejection(FollowUpException e) {
     int status = e.getReason().getHttpStatus();
     try {
@@ -139,11 +153,31 @@ final class FollowUpActionHandler implements NeoHandler {
       errorObj.put("code", e.getReason().getCode());
       errorObj.put("status", status);
       errorObj.put("message", e.getMessage());
+      FollowUpException.RequiredInput requiredInput = e.getRequiredInput();
+      if (requiredInput != null) {
+        errorObj.put("input", inputBlock(requiredInput));
+      }
       JSONObject body = new JSONObject();
       body.put("error", errorObj);
       return NeoResponse.error(status, body);
     } catch (JSONException jsonError) {
       return NeoResponse.error(status, e.getMessage());
     }
+  }
+
+  /** {@code {"key": "…", "options": [{"id": "…", "name": "…"}]}}. */
+  private static JSONObject inputBlock(FollowUpException.RequiredInput requiredInput)
+      throws JSONException {
+    JSONArray options = new JSONArray();
+    for (FollowUpException.RequiredInput.Option option : requiredInput.getOptions()) {
+      JSONObject entry = new JSONObject();
+      entry.put("id", option.getId());
+      entry.put("name", option.getName() != null ? option.getName() : JSONObject.NULL);
+      options.put(entry);
+    }
+    JSONObject input = new JSONObject();
+    input.put("key", requiredInput.getKey());
+    input.put("options", options);
+    return input;
   }
 }

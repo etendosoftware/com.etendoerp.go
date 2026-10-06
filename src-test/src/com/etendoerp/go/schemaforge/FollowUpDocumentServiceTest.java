@@ -64,7 +64,7 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Unit tests for the generic follow-up layer (ETP-5576): the pending-quantity helper, the verdict
  * factories of {@link PendingResolver.Source}, the create path's order of operations and the GET
- * annotation. Every flow is a real {@link FollowUpFlow} over a mocked {@link PendingResolver} and
+ * annotation; the caller's {@link FollowUpInputs} reach the creator. Every flow is a real {@link FollowUpFlow} over a mocked {@link PendingResolver} and
  * {@link TargetCreator}, so nothing here depends on any entity.
  *
  * @covers com.etendoerp.go.schemaforge.FollowUpDocumentService
@@ -155,7 +155,8 @@ class FollowUpDocumentServiceTest {
   // ── create ────────────────────────────────────────────────────────────────
 
   @Test
-  void createLocksTheSourceBeforeEvaluatingItAndPassesThePendingLinesToTheCreator() {
+  void createLocksTheSourceBeforeEvaluatingItAndPassesThePendingLinesAndInputsToTheCreator()
+      throws Exception {
     PendingResolver resolver = mock(PendingResolver.class);
     TargetCreator creator = mock(TargetCreator.class);
     List<PendingResolver.SourceLine> lines = Arrays.asList(LINE_1, LINE_2);
@@ -163,18 +164,72 @@ class FollowUpDocumentServiceTest {
         Collections.singletonMap("inv-1", PendingResolver.Source.available("inv-1", lines));
     when(resolver.loadSources(anyCollection())).thenReturn(verdicts);
     TargetCreator.Result created = new TargetCreator.Result("io-1", "ALB-1", 2);
-    when(creator.createTarget("inv-1", lines)).thenReturn(created);
+    FollowUpInputs inputs = FollowUpInputs.fromRequestBody(
+        new JSONObject().put("warehouseId", "wh-1"));
+    when(creator.createTarget("inv-1", lines, inputs)).thenReturn(created);
     FollowUpFlow flow = FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT, resolver, creator);
 
-    TargetCreator.Result result = FollowUpDocumentService.create("inv-1", flow);
+    TargetCreator.Result result = FollowUpDocumentService.create("inv-1", flow, inputs);
 
     assertSame(created, result);
     InOrder order = inOrder(resolver, creator);
     order.verify(resolver).lockSource("inv-1");
     order.verify(resolver).loadSources(Collections.singletonList("inv-1"));
-    order.verify(creator).createTarget("inv-1", lines);
+    order.verify(creator).createTarget("inv-1", lines, inputs);
     // The create path owns no savepoint: a failure there must abort the whole request.
     verifyNoInteractions(conn);
+  }
+
+  @Test
+  void createHandsNoInputsToTheCreatorWhenTheCallerPassesNull() {
+    PendingResolver resolver = mock(PendingResolver.class);
+    TargetCreator creator = mock(TargetCreator.class);
+    List<PendingResolver.SourceLine> lines = Collections.singletonList(LINE_1);
+    Map<String, PendingResolver.Source> verdicts =
+        Collections.singletonMap("inv-1", PendingResolver.Source.available("inv-1", lines));
+    when(resolver.loadSources(anyCollection())).thenReturn(verdicts);
+    TargetCreator.Result created = new TargetCreator.Result("io-1", "ALB-1", 1);
+    when(creator.createTarget("inv-1", lines, FollowUpInputs.none())).thenReturn(created);
+    FollowUpFlow flow = FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT, resolver, creator);
+
+    assertSame(created, FollowUpDocumentService.create("inv-1", flow, null));
+    verify(creator).createTarget("inv-1", lines, FollowUpInputs.none());
+  }
+
+  /**
+   * A warehouse the caller must choose is only discovered by the movement creator's mapper, after
+   * the source is locked and evaluated; the rejection carries the choice and no movement is
+   * built.
+   */
+  @Test
+  void createRejectsWithWarehouseRequiredAfterLockAndEvaluateAndBuildsNothing() {
+    PendingResolver resolver = mock(PendingResolver.class);
+    List<PendingResolver.SourceLine> lines = Collections.singletonList(LINE_1);
+    Map<String, PendingResolver.Source> verdicts =
+        Collections.singletonMap("inv-1", PendingResolver.Source.available("inv-1", lines));
+    when(resolver.loadSources(anyCollection())).thenReturn(verdicts);
+    InOutFollowUpCreator.SourceMapper mapper = mock(InOutFollowUpCreator.SourceMapper.class);
+    FollowUpException.RequiredInput choice = new FollowUpException.RequiredInput("warehouseId",
+        Collections.singletonList(new FollowUpException.RequiredInput.Option("wh-1", "Main")));
+    FollowUpException required = new FollowUpException(
+        FollowUpException.Reason.WAREHOUSE_REQUIRED, "choose", choice);
+    when(mapper.map("inv-1", lines, FollowUpInputs.none())).thenThrow(required);
+    InOutFollowUpCreator creator = new InOutFollowUpCreator(InOutTargetBuilder.Direction.SALES,
+        mapper, mock(InOutTargetBuilder.LineLinker.class));
+    FollowUpFlow flow = FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT, resolver, creator);
+
+    try (MockedStatic<InOutTargetBuilder> builder = mockStatic(InOutTargetBuilder.class)) {
+      FollowUpException e = assertThrows(FollowUpException.class,
+          () -> FollowUpDocumentService.create("inv-1", flow, FollowUpInputs.none()));
+
+      assertEquals(FollowUpException.Reason.WAREHOUSE_REQUIRED, e.getReason());
+      assertSame(choice, e.getRequiredInput());
+      InOrder order = inOrder(resolver, mapper);
+      order.verify(resolver).lockSource("inv-1");
+      order.verify(resolver).loadSources(Collections.singletonList("inv-1"));
+      order.verify(mapper).map("inv-1", lines, FollowUpInputs.none());
+      builder.verifyNoInteractions();
+    }
   }
 
   static Stream<Arguments> rejectedVerdicts() {
@@ -201,11 +256,11 @@ class FollowUpDocumentServiceTest {
     FollowUpFlow flow = FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT, resolver, creator);
 
     FollowUpException e = assertThrows(FollowUpException.class,
-        () -> FollowUpDocumentService.create("inv-1", flow));
+        () -> FollowUpDocumentService.create("inv-1", flow, FollowUpInputs.none()));
 
     assertEquals(expected, e.getReason());
     verify(resolver).lockSource("inv-1");
-    verify(creator, never()).createTarget(anyString(), anyList());
+    verify(creator, never()).createTarget(anyString(), anyList(), any());
   }
 
   // ── annotatePage ──────────────────────────────────────────────────────────

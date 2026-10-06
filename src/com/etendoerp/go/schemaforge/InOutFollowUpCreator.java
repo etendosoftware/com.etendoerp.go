@@ -46,7 +46,10 @@ final class InOutFollowUpCreator implements TargetCreator {
    * Maps one source and its pending lines to the movement's neutral input. Throws
    * {@link FollowUpException.Reason#NOT_FOUND} when the source no longer exists. Must NOT
    * persist anything: a missing warehouse is reported by leaving it {@code null} in the header
-   * (the builder rejects it as {@code MISSING_SETUP}).
+   * (the builder rejects it as {@code MISSING_SETUP}). A source without a warehouse of its own
+   * resolves it through {@link InOutWarehouseResolver}, which honors the caller's
+   * {@code warehouseId} input and may reject with {@code WAREHOUSE_REQUIRED} /
+   * {@code INVALID_INPUT}.
    */
   @FunctionalInterface
   interface SourceMapper {
@@ -55,10 +58,12 @@ final class InOutFollowUpCreator implements TargetCreator {
      *
      * @param sourceId the source record
      * @param pendingLines the lines {@link PendingResolver#loadSources} declared for this source
+     * @param inputs the caller's optional choices (never {@code null})
      * @return the neutral header and one {@link InOutTargetBuilder.Line} per pending line
      * @throws FollowUpException with {@code NOT_FOUND} when the source no longer exists
      */
-    Mapping map(String sourceId, List<PendingResolver.SourceLine> pendingLines);
+    Mapping map(String sourceId, List<PendingResolver.SourceLine> pendingLines,
+        FollowUpInputs inputs);
   }
 
   /** The neutral movement input produced by a {@link SourceMapper}. */
@@ -97,8 +102,9 @@ final class InOutFollowUpCreator implements TargetCreator {
   }
 
   @Override
-  public Result createTarget(String sourceId, List<PendingResolver.SourceLine> pendingLines) {
-    Mapping mapping = mapper.map(sourceId, pendingLines);
+  public Result createTarget(String sourceId, List<PendingResolver.SourceLine> pendingLines,
+      FollowUpInputs inputs) {
+    Mapping mapping = mapper.map(sourceId, pendingLines, inputs);
     ShipmentInOut inout = InOutTargetBuilder.build(direction, mapping.getHeader(),
         mapping.getLines(), linker);
     return new Result(inout.getId(), inout.getDocumentNo(), mapping.getLines().size());

@@ -1382,14 +1382,15 @@ public class SalesInvoiceHeaderHandlerTest {
     AtomicReference<Object[]> buildArgs = new AtomicReference<>();
     try (MockedStatic<InvoiceInOutMapping> mappingMock = Mockito.mockStatic(InvoiceInOutMapping.class);
          MockedStatic<InOutTargetBuilder> builderMock = Mockito.mockStatic(InOutTargetBuilder.class)) {
-      mappingMock.when(() -> InvoiceInOutMapping.map("inv-1", pending)).thenReturn(mapping);
+      mappingMock.when(() -> InvoiceInOutMapping.map("inv-1", pending, FollowUpInputs.none()))
+          .thenReturn(mapping);
       builderMock.when(() -> InOutTargetBuilder.build(any(), any(), any(), any()))
           .thenAnswer(inv -> {
             buildArgs.set(inv.getArguments());
             return inout;
           });
 
-      assertEquals("io-1", flow.createTarget("inv-1", pending).getId());
+      assertEquals("io-1", flow.createTarget("inv-1", pending, FollowUpInputs.none()).getId());
     }
     return buildArgs.get();
   }

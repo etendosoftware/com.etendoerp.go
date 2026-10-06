@@ -47,7 +47,8 @@ import org.openbravo.model.common.invoice.Invoice;
  * Unit tests for the wiring a header handler holds to offer follow-up documents (ETP-5576):
  * {@link FollowUpSupport} — a supplier that yields {@code null} offers no follow-up at all,
  * neither an annotation nor an action — and {@link FollowUpFlow}, the immutable composition it
- * is fed with, which rejects a missing part and only delegates.
+ * is fed with, which rejects a missing part and only delegates (the caller's
+ * {@link FollowUpInputs} included).
  *
  * @covers com.etendoerp.go.schemaforge.FollowUpSupport
  * @covers com.etendoerp.go.schemaforge.FollowUpFlow
@@ -95,7 +96,7 @@ class FollowUpSupportTest {
   }
 
   @Test
-  void flowDelegatesEveryCallToItsResolverAndCreator() {
+  void flowDelegatesEveryCallToItsResolverAndCreator() throws Exception {
     PendingResolver resolver = mock(PendingResolver.class);
     TargetCreator creator = mock(TargetCreator.class);
     doReturn(Invoice.class).when(resolver).sourceEntity();
@@ -106,7 +107,9 @@ class FollowUpSupportTest {
     List<PendingResolver.SourceLine> lines = Collections.singletonList(
         new PendingResolver.SourceLine("il-1", BigDecimal.ONE));
     TargetCreator.Result created = new TargetCreator.Result("io-1", "DOC-1", 1);
-    when(creator.createTarget("inv-1", lines)).thenReturn(created);
+    FollowUpInputs inputs = FollowUpInputs.fromRequestBody(
+        new JSONObject().put("warehouseId", "wh-1"));
+    when(creator.createTarget("inv-1", lines, inputs)).thenReturn(created);
 
     FollowUpFlow flow = FollowUpFlow.of(FollowUpTarget.GOODS_RECEIPT, resolver, creator);
     flow.lockSource("inv-1");
@@ -116,7 +119,7 @@ class FollowUpSupportTest {
     assertSame(creator, flow.creator());
     assertEquals(Invoice.class, flow.sourceEntity());
     assertSame(verdicts, flow.loadSources(ids));
-    assertSame(created, flow.createTarget("inv-1", lines));
+    assertSame(created, flow.createTarget("inv-1", lines, inputs));
     verify(resolver).lockSource("inv-1");
   }
 }

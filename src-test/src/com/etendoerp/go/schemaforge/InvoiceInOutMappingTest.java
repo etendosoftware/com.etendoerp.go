@@ -21,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -34,14 +33,13 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import org.hibernate.criterion.Criterion;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.MockedStatic;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
@@ -61,8 +59,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 /**
  * Unit tests for {@link InvoiceInOutMapping} (ETP-5576): the invoice side of an invoice → goods
  * movement follow-up — the neutral header/lines handed to {@link InOutTargetBuilder}, the
- * warehouse and order of the new movement, and the line linker of each direction. The
- * warehouse-resolution rule is unchanged from the removed {@code CreateInvoiceShipmentHandler}.
+ * warehouse and order of the new movement, and the line linker of each direction. The order's
+ * warehouse rule is unchanged from the removed {@code CreateInvoiceShipmentHandler}; without one,
+ * the warehouse is {@link InOutWarehouseResolver}'s (covered by its own test).
  *
  * @covers com.etendoerp.go.schemaforge.InvoiceInOutMapping
  */
@@ -92,7 +91,7 @@ class InvoiceInOutMappingTest {
         new PendingResolver.SourceLine("il-1", BigDecimal.ONE));
 
     FollowUpException e = assertThrows(FollowUpException.class,
-        () -> InvoiceInOutMapping.map("inv-gone", pending));
+        () -> InvoiceInOutMapping.map("inv-gone", pending, FollowUpInputs.none()));
 
     assertEquals(FollowUpException.Reason.NOT_FOUND, e.getReason());
   }
@@ -109,7 +108,7 @@ class InvoiceInOutMappingTest {
         new PendingResolver.SourceLine("il-gone", BigDecimal.ONE));
 
     FollowUpException e = assertThrows(FollowUpException.class,
-        () -> InvoiceInOutMapping.map("inv-1", pending));
+        () -> InvoiceInOutMapping.map("inv-1", pending, FollowUpInputs.none()));
 
     assertEquals(FollowUpException.Reason.NOT_FOUND, e.getReason());
     verify(dal, never()).createCriteria(Warehouse.class);
@@ -132,7 +131,7 @@ class InvoiceInOutMappingTest {
         new PendingResolver.SourceLine("il-gone", BigDecimal.ONE));
 
     FollowUpException e = assertThrows(FollowUpException.class,
-        () -> InvoiceInOutMapping.map("inv-1", pending));
+        () -> InvoiceInOutMapping.map("inv-1", pending, FollowUpInputs.none()));
 
     assertEquals(FollowUpException.Reason.NOT_FOUND, e.getReason());
     verify(dal).get(InvoiceLine.class, "il-gone");
@@ -167,7 +166,8 @@ class InvoiceInOutMappingTest {
     OrderLine orderLine = il.getSalesOrderLine();
 
     InOutFollowUpCreator.Mapping mapping = InvoiceInOutMapping.map("inv-1",
-        Collections.singletonList(new PendingResolver.SourceLine("il-1", new BigDecimal("4"))));
+        Collections.singletonList(new PendingResolver.SourceLine("il-1", new BigDecimal("4"))),
+        FollowUpInputs.none());
 
     InOutTargetBuilder.Header header = mapping.getHeader();
     assertSame(client, field(header, "client"));
@@ -209,15 +209,16 @@ class InvoiceInOutMappingTest {
     when(dal.get(InvoiceLine.class, "il-1")).thenReturn(il);
 
     InOutFollowUpCreator.Mapping mapping = InvoiceInOutMapping.map("inv-1",
-        Collections.singletonList(new PendingResolver.SourceLine("il-1", BigDecimal.ONE)));
+        Collections.singletonList(new PendingResolver.SourceLine("il-1", BigDecimal.ONE)),
+        FollowUpInputs.none());
 
     assertEquals(expected, mapping.getLines().get(0).isStockable());
   }
 
-  // ── resolveWarehouse ──────────────────────────────────────────────────────
+  // ── orderWarehouse ────────────────────────────────────────────────────────
 
   @Test
-  void resolveWarehousePrefersTheInvoiceOrderWarehouse() {
+  void orderWarehousePrefersTheInvoiceOrderWarehouse() {
     Warehouse invoiceOrderWarehouse = mock(Warehouse.class);
     Order invoiceOrder = order("ord-inv");
     when(invoiceOrder.getWarehouse()).thenReturn(invoiceOrderWarehouse);
@@ -225,12 +226,12 @@ class InvoiceInOutMappingTest {
     when(lineOrder.getWarehouse()).thenReturn(mock(Warehouse.class));
     Invoice invoice = invoice("inv-1", invoiceOrder);
 
-    assertSame(invoiceOrderWarehouse, InvoiceInOutMapping.resolveWarehouse(invoice,
+    assertSame(invoiceOrderWarehouse, InvoiceInOutMapping.orderWarehouse(invoice,
         Collections.singletonList(lineFrom(lineOrder))));
   }
 
   @Test
-  void resolveWarehouseTakesTheFirstCarriedLineOrderWithAWarehouseWhenTheInvoiceHasNoOrder() {
+  void orderWarehouseTakesTheFirstCarriedLineOrderWithAWarehouseWhenTheInvoiceHasNoOrder() {
     Warehouse lineWarehouse = mock(Warehouse.class);
     Order orderWithoutWarehouse = order("ord-no-wh");
     Order lineOrder = order("ord-line");
@@ -239,22 +240,58 @@ class InvoiceInOutMappingTest {
     List<InvoiceLine> lines = Arrays.asList(lineFrom(null), lineFrom(orderWithoutWarehouse),
         lineFrom(lineOrder));
 
-    assertSame(lineWarehouse, InvoiceInOutMapping.resolveWarehouse(invoice, lines));
+    assertSame(lineWarehouse, InvoiceInOutMapping.orderWarehouse(invoice, lines));
   }
 
-  @Test
-  @SuppressWarnings("unchecked")
-  void resolveWarehouseFallsBackToTheFirstActiveWarehouseOfTheOrganization() {
-    Warehouse orgWarehouse = mock(Warehouse.class);
-    Invoice invoice = invoice("inv-1", null);
-    OBCriteria<Warehouse> criteria = mock(OBCriteria.class);
-    when(dal.createCriteria(Warehouse.class)).thenReturn(criteria);
-    when(criteria.add(any(Criterion.class))).thenReturn(criteria);
-    when(criteria.setMaxResults(1)).thenReturn(criteria);
-    when(criteria.list()).thenReturn(Collections.singletonList(orgWarehouse));
+  // ── resolveWarehouse ──────────────────────────────────────────────────────
 
-    assertSame(orgWarehouse, InvoiceInOutMapping.resolveWarehouse(invoice,
-        Collections.singletonList(lineFrom(null))));
+  /**
+   * Without any order warehouse, the movement's warehouse is the resolver's answer for the
+   * invoice's client and organization — no longer "the first active warehouse of the invoice's
+   * exact organization", which is never queried.
+   */
+  @Test
+  void resolveWarehouseWithoutAnOrderWarehouseIsTheResolverAnswerAndNeverTheExactOrgFallback() {
+    Invoice invoice = invoice("inv-1", null);
+    Client client = mock(Client.class);
+    when(invoice.getClient()).thenReturn(client);
+    Organization org = invoice.getOrganization();
+    Warehouse resolved = mock(Warehouse.class);
+    FollowUpInputs inputs = FollowUpInputs.none();
+
+    try (MockedStatic<InOutWarehouseResolver> resolver =
+        mockStatic(InOutWarehouseResolver.class)) {
+      resolver.when(() -> InOutWarehouseResolver.resolve(client, org, null, inputs))
+          .thenReturn(resolved);
+
+      assertSame(resolved, InvoiceInOutMapping.resolveWarehouse(invoice,
+          Collections.singletonList(lineFrom(null)), inputs));
+    }
+    verify(dal, never()).createCriteria(Warehouse.class);
+  }
+
+  /** The order warehouse is handed to the resolver as the source's own, with the caller inputs. */
+  @Test
+  void resolveWarehouseHandsTheOrderWarehouseAndTheInputsToTheResolver() throws Exception {
+    Warehouse orderWarehouse = mock(Warehouse.class);
+    Order invoiceOrder = order("ord-inv");
+    when(invoiceOrder.getWarehouse()).thenReturn(orderWarehouse);
+    Invoice invoice = invoice("inv-1", invoiceOrder);
+    Client client = mock(Client.class);
+    when(invoice.getClient()).thenReturn(client);
+    Organization org = invoice.getOrganization();
+    Warehouse chosen = mock(Warehouse.class);
+    FollowUpInputs inputs = FollowUpInputs.fromRequestBody(
+        new JSONObject().put("warehouseId", "wh-chosen"));
+
+    try (MockedStatic<InOutWarehouseResolver> resolver =
+        mockStatic(InOutWarehouseResolver.class)) {
+      resolver.when(() -> InOutWarehouseResolver.resolve(client, org, orderWarehouse, inputs))
+          .thenReturn(chosen);
+
+      assertSame(chosen, InvoiceInOutMapping.resolveWarehouse(invoice,
+          Collections.singletonList(lineFrom(null)), inputs));
+    }
   }
 
   // ── resolveOrder ──────────────────────────────────────────────────────────

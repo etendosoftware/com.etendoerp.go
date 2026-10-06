@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
@@ -35,7 +34,8 @@ import org.openbravo.model.common.order.OrderLine;
  * creator stays reusable by other sources (an order mapper + its own linker).
  *
  * <p>Movement header: the invoice's client, organization, BP, address and currency; warehouse and
- * {@code C_Order_ID} as described on {@link #resolveWarehouse} / {@link #resolveOrder}. Lines:
+ * {@code C_Order_ID} as described on {@link #resolveWarehouse} / {@link #resolveOrder} (the
+ * warehouse honors the caller's optional {@code warehouseId} input). Lines:
  * product, UOM, ASI, order line and description of the invoice line, the quantity
  * {@link InvoicePendingResolver} decided, and "needs a storage bin" =
  * {@link InOutLineFromOrderFactory#isStockable} of the line's product ({@code IsStocked='Y'} and
@@ -51,10 +51,11 @@ final class InvoiceInOutMapping {
    * {@link InOutFollowUpCreator.SourceMapper} for an invoice.
    *
    * @throws FollowUpException {@code NOT_FOUND} when the invoice, or any of the pending lines'
-   *     invoice lines, does not exist (thrown before any movement is built)
+   *     invoice lines, does not exist; {@code INVALID_INPUT} / {@code WAREHOUSE_REQUIRED} from
+   *     {@link #resolveWarehouse} — all thrown before any movement is built
    */
   static InOutFollowUpCreator.Mapping map(String invoiceId,
-      List<PendingResolver.SourceLine> pendingLines) {
+      List<PendingResolver.SourceLine> pendingLines, FollowUpInputs inputs) {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
     if (invoice == null) {
       throw new FollowUpException(FollowUpException.Reason.NOT_FOUND);
@@ -83,7 +84,7 @@ final class InvoiceInOutMapping {
     }
     InOutTargetBuilder.Header header = new InOutTargetBuilder.Header(invoice.getClient(),
         invoice.getOrganization(), invoice.getBusinessPartner(), invoice.getPartnerAddress(),
-        resolveWarehouse(invoice, invoiceLines), invoice.getCurrency(),
+        resolveWarehouse(invoice, invoiceLines, inputs), invoice.getCurrency(),
         resolveOrder(invoice, invoiceLines));
     return new InOutFollowUpCreator.Mapping(header, lines);
   }
@@ -100,11 +101,29 @@ final class InvoiceInOutMapping {
   }
 
   /**
-   * Warehouse of the new movement, unchanged from the former {@code CreateInvoiceShipmentHandler}:
-   * the invoice's order, else the order of the first carried line that has one, else the first
-   * active warehouse of the invoice's organization.
+   * Warehouse of the new movement: {@link InOutWarehouseResolver#resolve} with the invoice's
+   * client and organization, the caller's {@code inputs}, and as the source's own warehouse
+   * {@link #orderWarehouse} (the invoice's order, else the first carried line's order that has
+   * one). Without an order, the caller's default warehouse, else the only usable one; several
+   * usable → {@code WAREHOUSE_REQUIRED}, none → {@code null} ({@code MISSING_SETUP}). The former
+   * "first active warehouse of the invoice's exact organization" fallback is gone: it ignored
+   * warehouses of parent organizations ({@code *}) and picked arbitrarily among several.
+   *
+   * @throws FollowUpException {@code INVALID_INPUT} for a rejected {@code warehouseId} input;
+   *     {@code WAREHOUSE_REQUIRED} when several warehouses are usable and none is designated
    */
-  static Warehouse resolveWarehouse(Invoice invoice, List<InvoiceLine> lines) {
+  static Warehouse resolveWarehouse(Invoice invoice, List<InvoiceLine> lines,
+      FollowUpInputs inputs) {
+    return InOutWarehouseResolver.resolve(invoice.getClient(), invoice.getOrganization(),
+        orderWarehouse(invoice, lines), inputs);
+  }
+
+  /**
+   * The warehouse the invoice's orders designate, unchanged from the former
+   * {@code CreateInvoiceShipmentHandler}: the invoice's order, else the order of the first carried
+   * line that has one with a warehouse; {@code null} when none does.
+   */
+  static Warehouse orderWarehouse(Invoice invoice, List<InvoiceLine> lines) {
     if (invoice.getSalesOrder() != null && invoice.getSalesOrder().getWarehouse() != null) {
       return invoice.getSalesOrder().getWarehouse();
     }
@@ -115,12 +134,7 @@ final class InvoiceInOutMapping {
         return orderLine.getSalesOrder().getWarehouse();
       }
     }
-    List<Warehouse> results = OBDal.getInstance().createCriteria(Warehouse.class)
-        .add(Restrictions.eq(Warehouse.PROPERTY_ORGANIZATION, invoice.getOrganization()))
-        .add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    return results.isEmpty() ? null : results.get(0);
+    return null;
   }
 
   /**

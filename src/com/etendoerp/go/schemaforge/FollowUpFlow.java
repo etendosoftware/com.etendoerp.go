@@ -96,7 +96,7 @@ final class FollowUpFlow {
 
   /** {@link TargetCreator#createTarget}. */
   TargetCreator.Result createTarget(String sourceId,
-      List<PendingResolver.SourceLine> pendingLines) {
-    return creator.createTarget(sourceId, pendingLines);
+      List<PendingResolver.SourceLine> pendingLines, FollowUpInputs inputs) {
+    return creator.createTarget(sourceId, pendingLines, inputs);
   }
 }

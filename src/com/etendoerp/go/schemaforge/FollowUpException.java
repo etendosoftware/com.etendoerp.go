@@ -16,6 +16,11 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+
 import javax.servlet.http.HttpServletResponse;
 
 import org.openbravo.base.exception.OBException;
@@ -55,7 +60,20 @@ class FollowUpException extends OBException {
         "A draft follow-up document already exists"),
     /** A configuration prerequisite is missing (warehouse, document type, storage bin, …). */
     MISSING_SETUP("FOLLOW_UP_MISSING_SETUP", HttpServletResponse.SC_BAD_REQUEST,
-        "A required configuration is missing");
+        "A required configuration is missing"),
+    /**
+     * Several warehouses could receive the document and nothing designates one: the caller must
+     * choose. Always thrown with a {@link RequiredInput} listing the choices; the client retries
+     * with {@code {"<input.key>": "<option id>"}}.
+     */
+    WAREHOUSE_REQUIRED("FOLLOW_UP_WAREHOUSE_REQUIRED", HttpServletResponse.SC_CONFLICT,
+        "Several warehouses are available for this document; choose one"),
+    /**
+     * A caller choice sent in the request body ({@link FollowUpInputs}) is not acceptable: unknown,
+     * inactive, of another client, not usable by the source's organization, or not readable.
+     */
+    INVALID_INPUT("FOLLOW_UP_INVALID_INPUT", HttpServletResponse.SC_BAD_REQUEST,
+        "A value sent in the request is not valid for this document");
 
     private final String code;
     private final int httpStatus;
@@ -80,18 +98,76 @@ class FollowUpException extends OBException {
     }
   }
 
+  /**
+   * The choice a rejection asks the caller to make: the request-body {@link #getKey() key} to send
+   * on retry and the acceptable {@link #getOptions() options}. Serialized by
+   * {@link FollowUpActionHandler#rejection} as
+   * {@code "input": {"key": "…", "options": [{"id": "…", "name": "…"}]}} — a generic shape, so a
+   * client renders a selector for {@code key} without knowing what is being chosen.
+   */
+  static final class RequiredInput {
+    private final String key;
+    private final List<Option> options;
+
+    RequiredInput(String key, List<Option> options) {
+      this.key = Objects.requireNonNull(key, "key");
+      this.options = Collections.unmodifiableList(new ArrayList<>(options));
+    }
+
+    String getKey() {
+      return key;
+    }
+
+    List<Option> getOptions() {
+      return options;
+    }
+
+    /** One acceptable value: the id to send back and a display name. */
+    static final class Option {
+      private final String id;
+      private final String name;
+
+      Option(String id, String name) {
+        this.id = Objects.requireNonNull(id, "id");
+        this.name = name;
+      }
+
+      String getId() {
+        return id;
+      }
+
+      String getName() {
+        return name;
+      }
+    }
+  }
+
   private final Reason reason;
+  private final transient RequiredInput requiredInput;
 
   FollowUpException(Reason reason) {
     this(reason, reason.getDefaultMessage());
   }
 
   FollowUpException(Reason reason, String message) {
+    this(reason, message, null);
+  }
+
+  /**
+   * @param requiredInput the choice the caller must make to retry, or {@code null}
+   */
+  FollowUpException(Reason reason, String message, RequiredInput requiredInput) {
     super(message);
     this.reason = reason;
+    this.requiredInput = requiredInput;
   }
 
   Reason getReason() {
     return reason;
+  }
+
+  /** The choice the caller must make to retry, or {@code null} when the rejection asks none. */
+  RequiredInput getRequiredInput() {
+    return requiredInput;
   }
 }

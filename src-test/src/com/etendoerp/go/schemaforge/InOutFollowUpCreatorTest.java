@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -29,9 +30,10 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.MockedStatic;
@@ -41,7 +43,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  * Unit tests for {@link InOutFollowUpCreator} (ETP-5576): the reusable "→ goods movement"
  * creator only composes its source mapper with {@link InOutTargetBuilder#build} — the mapping is
  * resolved first, the builder gets the creator's direction with the mapper's header and lines and
- * the creator's linker, and the result describes the persisted movement.
+ * the creator's linker, and the result describes the persisted movement. The caller's
+ * {@link FollowUpInputs} reach the mapper as given.
  *
  * @covers com.etendoerp.go.schemaforge.InOutFollowUpCreator
  */
@@ -49,6 +52,7 @@ class InOutFollowUpCreatorTest {
 
   private static final List<PendingResolver.SourceLine> PENDING = Collections.singletonList(
       new PendingResolver.SourceLine("src-line-1", BigDecimal.ONE));
+  private static final FollowUpInputs INPUTS = inputs();
 
   private MockedStatic<InOutTargetBuilder> builderStatic;
   private InOutFollowUpCreator.SourceMapper mapper;
@@ -66,17 +70,23 @@ class InOutFollowUpCreatorTest {
     builderStatic.close();
   }
 
-  @Test
-  void aSourceTheMapperCannotFindIsNotFoundAndNothingIsBuilt() {
-    when(mapper.map("src-gone", PENDING))
-        .thenThrow(new FollowUpException(FollowUpException.Reason.NOT_FOUND));
+  /**
+   * Whatever the mapper rejects with — a vanished source, a warehouse the caller must choose, a
+   * choice that is not acceptable — reaches the caller unchanged and nothing is built.
+   */
+  @ParameterizedTest
+  @EnumSource(value = FollowUpException.Reason.class,
+      names = { "NOT_FOUND", "WAREHOUSE_REQUIRED", "INVALID_INPUT" })
+  void aMapperRejectionReachesTheCallerAndNothingIsBuilt(FollowUpException.Reason reason) {
+    FollowUpException rejection = new FollowUpException(reason);
+    when(mapper.map("src-1", PENDING, INPUTS)).thenThrow(rejection);
     InOutFollowUpCreator creator =
         new InOutFollowUpCreator(InOutTargetBuilder.Direction.SALES, mapper, linker);
 
     FollowUpException e = assertThrows(FollowUpException.class,
-        () -> creator.createTarget("src-gone", PENDING));
+        () -> creator.createTarget("src-1", PENDING, INPUTS));
 
-    assertEquals(FollowUpException.Reason.NOT_FOUND, e.getReason());
+    assertSame(rejection, e);
     builderStatic.verifyNoInteractions();
   }
 
@@ -88,7 +98,7 @@ class InOutFollowUpCreatorTest {
         null, null);
     List<InOutTargetBuilder.Line> lines = Arrays.asList(line("src-line-1"), line("src-line-2"));
     InOutFollowUpCreator.Mapping mapping = new InOutFollowUpCreator.Mapping(header, lines);
-    when(mapper.map("src-1", PENDING)).thenReturn(mapping);
+    when(mapper.map("src-1", PENDING, INPUTS)).thenReturn(mapping);
     ShipmentInOut inout = mock(ShipmentInOut.class);
     when(inout.getId()).thenReturn("io-1");
     when(inout.getDocumentNo()).thenReturn("DOC-0001");
@@ -96,13 +106,22 @@ class InOutFollowUpCreatorTest {
         .thenReturn(inout);
     InOutFollowUpCreator creator = new InOutFollowUpCreator(direction, mapper, linker);
 
-    TargetCreator.Result result = creator.createTarget("src-1", PENDING);
+    TargetCreator.Result result = creator.createTarget("src-1", PENDING, INPUTS);
 
     builderStatic.verify(() -> InOutTargetBuilder.build(direction, header, mapping.getLines(),
         linker));
     assertEquals("io-1", result.getId());
     assertEquals("DOC-0001", result.getDocumentNo());
     assertEquals(2, result.getLineCount());
+  }
+
+  /** The caller's choices, which the creator hands to its mapper unread. */
+  private static FollowUpInputs inputs() {
+    try {
+      return FollowUpInputs.fromRequestBody(new JSONObject().put("warehouseId", "wh-1"));
+    } catch (JSONException e) {
+      throw new IllegalStateException(e);
+    }
   }
 
   private static InOutTargetBuilder.Line line(String sourceLineId) {

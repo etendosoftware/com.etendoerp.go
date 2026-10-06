@@ -287,14 +287,17 @@ final class FollowUpDocumentService {
    *       {@code DRAFT_IN_PROGRESS}, …);</li>
    *   <li>available but no line to carry → {@link FollowUpException.Reason#NOTHING_PENDING}
    *       (a document with no line is never created, whatever the resolver measures);</li>
-   *   <li>{@link TargetCreator#createTarget} (which resolves its own setup first).</li>
+   *   <li>{@link TargetCreator#createTarget} (which validates the caller's {@code inputs} and
+   *       resolves its own setup first).</li>
    * </ol>
    * The caller owns the transaction and must roll it back on any exception
    * ({@link FollowUpActionHandler} does).
    *
+   * @param inputs the caller's optional choices (request body), handed to the creator as is;
+   *     {@code null} is read as {@link FollowUpInputs#none()}
    * @throws FollowUpException on any business rejection
    */
-  static TargetCreator.Result create(String sourceId, FollowUpFlow flow) {
+  static TargetCreator.Result create(String sourceId, FollowUpFlow flow, FollowUpInputs inputs) {
     flow.lockSource(sourceId);
     PendingResolver.Source source = evaluate(sourceId, flow);
     if (!source.isAvailable()) {
@@ -303,7 +306,8 @@ final class FollowUpDocumentService {
     if (source.getLines().isEmpty()) {
       throw new FollowUpException(FollowUpException.Reason.NOTHING_PENDING);
     }
-    return flow.createTarget(sourceId, source.getLines());
+    return flow.createTarget(sourceId, source.getLines(),
+        inputs != null ? inputs : FollowUpInputs.none());
   }
 
   private static BigDecimal zeroIfNull(BigDecimal value) {
