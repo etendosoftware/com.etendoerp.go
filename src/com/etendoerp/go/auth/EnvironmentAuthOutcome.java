@@ -44,7 +44,12 @@ public final class EnvironmentAuthOutcome {
     CSRF_REJECTED(HttpServletResponse.SC_FORBIDDEN),
     UNAUTHENTICATED(HttpServletResponse.SC_UNAUTHORIZED),
     /** javax.servlet predates RFC 7231 and has no constant for 402. */
-    PAYMENT_REQUIRED(402);
+    PAYMENT_REQUIRED(402),
+    /**
+     * ETP-5047 — the credential's tenant could not be resolved (the role lookup failed), so the
+     * request can be neither judged nor bound: refused, and safe to retry.
+     */
+    SERVICE_UNAVAILABLE(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
 
     private final int httpStatus;
 

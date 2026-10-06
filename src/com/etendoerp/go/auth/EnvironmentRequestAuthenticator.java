@@ -92,6 +92,9 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
+  /** ETP-5047 — the role lookup that resolves a wildcard client failed; retry. */
+  static final String MSG_TENANT_UNRESOLVED =
+      "The environment of this credential could not be verified; retry later";
 
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";
@@ -335,7 +338,20 @@ public class EnvironmentRequestAuthenticator {
 
   /** The one post-authentication step. Every scheme reaches it, and nothing here asks which. */
   private EnvironmentAuthOutcome bind(HttpServletRequest request, SurfacePolicy policy,
-      Identity identity, String entryPoint) {
+      Identity credential, String entryPoint) {
+    // ETP-5047 — the tenant the request acts on, resolved ONCE and used for both the commercial
+    // check and the context: an OAuth2 token on org 0 carries the System client "0", which the
+    // guard allows, while the request runs on the role's tenant.
+    Identity identity;
+    try {
+      identity = credential.withClientId(
+          EffectiveClientResolver.effectiveClientId(credential.clientId, credential.roleId));
+    } catch (EffectiveClientResolver.ResolutionException e) {
+      log.warn("Refusing {} request of user {}: {}", entryPoint, credential.userId,
+          e.getMessage(), e);
+      return EnvironmentAuthOutcome.refused(Status.SERVICE_UNAVAILABLE, MSG_TENANT_UNRESOLVED,
+          credential.scheme);
+    }
     OBContext context = createContext(identity, identity.warehouseId);
     if (!isWarehouseReadable(context)) {
       log.warn("Warehouse '{}' is not in user '{}' readable orgs — resolving an accessible one",
@@ -404,6 +420,12 @@ public class EnvironmentRequestAuthenticator {
 
     private boolean isIncomplete() {
       return StringUtils.isAnyBlank(userId, roleId, orgId, clientId);
+    }
+
+    /** The same credential acting on {@code effectiveClientId}; {@code this} when unchanged. */
+    private Identity withClientId(String effectiveClientId) {
+      return StringUtils.equals(clientId, effectiveClientId) ? this
+          : new Identity(scheme, userId, roleId, orgId, warehouseId, effectiveClientId);
     }
   }
 
