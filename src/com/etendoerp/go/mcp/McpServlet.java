@@ -310,7 +310,7 @@ public class McpServlet extends HttpServlet {
       String identityClient = identity != null ? identity.clientId : null;
       String identityOrg = identity != null ? identity.orgId : null;
 
-      McpUsageLogger.enqueue(McpUsageRow.builder()
+      McpUsageRow row = McpUsageRow.builder()
           .clientId(tenant != null ? tenant.getClientId() : identityClient)
           .orgId(tenant != null ? tenant.getOrgId() : identityOrg)
           .userId(identity != null ? identity.userId : null)
@@ -328,7 +328,12 @@ public class McpServlet extends HttpServlet {
           .clientVersion(client.getVersion())
           .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
           .payload(payload)
-          .build());
+          .build();
+      McpUsageLogger.enqueue(row);
+      if (payload != null) {
+        // ETP-5639: Datadog sees an accepted report, and where to read it — counts only.
+        McpFeedbackTool.logReceived(row);
+      }
     } catch (Throwable t) { // NOSONAR — telemetry never escalates to the caller.
       log.debug("Could not record MCP usage for tool '{}'.", toolName, t);
     }

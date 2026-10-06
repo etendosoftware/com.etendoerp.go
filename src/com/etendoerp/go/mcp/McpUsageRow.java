@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.mcp;
 
+import org.openbravo.erpCommon.utility.SequenceIdData;
+
 /**
  * One {@code ETGO_MCP_USAGE} row, fully resolved on the request thread before it is handed to
  * {@link McpUsageLogger}.
@@ -63,6 +65,7 @@ package com.etendoerp.go.mcp;
  * @param payload       reserved for feedback rows (Track B3); null on every tool-call row
  */
 record McpUsageRow(
+    String id,
     String clientId,
     String orgId,
     String userId,
@@ -99,6 +102,7 @@ record McpUsageRow(
    * declares NOT NULL, which are defaulted here.
    */
   static final class Builder {
+    private String id;
     private String clientId;
     private String orgId;
     private String userId;
@@ -116,6 +120,15 @@ record McpUsageRow(
     private String clientVersion;
     private String rowType = ROW_TYPE_TOOL_CALL;
     private String payload;
+
+    /**
+     * The {@code ETGO_MCP_USAGE} primary key. Minted here when not set, so the row id exists
+     * before the asynchronous insert — the feedback log line points at it (ETP-5639).
+     */
+    Builder id(String v) {
+      this.id = v;
+      return this;
+    }
 
     Builder clientId(String v) {
       this.clientId = v;
@@ -210,7 +223,7 @@ record McpUsageRow(
     }
 
     McpUsageRow build() {
-      return new McpUsageRow(clientId, orgId, userId, sessionKey, toolName, verb, targetEntity,
+      return new McpUsageRow(id != null ? id : SequenceIdData.getUUID(), clientId, orgId, userId, sessionKey, toolName, verb, targetEntity,
           fieldsTouched, outcome, errorCode, durationMs, reqBytes, respBytes, clientName,
           clientVersion, rowType, payload);
     }

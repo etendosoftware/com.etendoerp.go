@@ -369,7 +369,8 @@ final class McpUsageLogger {
 
   private static void bind(PreparedStatement statement, McpUsageRow row) throws SQLException {
     int i = 1;
-    statement.setString(i++, SequenceIdData.getUUID());
+    // Minted when the row was built (McpUsageRow.Builder), so a log line can name it first.
+    statement.setString(i++, StringUtils.defaultIfBlank(row.id(), SequenceIdData.getUUID()));
     statement.setString(i++, StringUtils.defaultIfBlank(row.clientId(), DEFAULT_CLIENT));
     statement.setString(i++, StringUtils.defaultIfBlank(row.orgId(), DEFAULT_ORG));
     String auditUser = StringUtils.defaultIfBlank(row.userId(), SYSTEM_USER);

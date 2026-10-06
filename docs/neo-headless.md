@@ -7466,3 +7466,18 @@ so a failure seen in Datadog (`VECTOR_COLLECTION_NOT_FOUND`, `accounting_schema_
 traced to its tenant without a DB lookup. The id (never a name) rides on `NeoTelemetryEvent.getClientId()`,
 **not** in the properties: properties are what every sink receives, Mixpanel included, and the
 tenant id stays in our own log. Events emitted without a tenant keep the previous line unchanged.
+
+**An accepted `neo_feedback` report leaves one `INFO` line pointing at its row.** The report stays
+in `ETGO_MCP_USAGE.Payload` (the source of truth); Datadog gets:
+
+```
+INFO McpFeedbackTool - MCP feedback received: usageId=<ETGO_MCP_USAGE_ID> session=<sessionKey> clientId=<AD_Client_ID> client=claude-code frictions=2 failures=1 wasted=0 suggestions=1 tools=[neo_create]
+```
+
+Counts per section and the tool names named in `failures`/`wastedCalls` only — the report fields
+are agent-written free text that can carry tenant data, so none of it is logged, and a `tool` entry
+that does not look like a tool name is left out. To read the report, fetch the row by `usageId`.
+The id is minted when the row is built (`McpUsageRow.Builder`), not inside the asynchronous insert,
+so the line can name it; if the writer later drops the row (queue full, insert failed) the id points
+at nothing and the drop logs its own `WARN`. A rejected or rate-limited report logs no such line. The
+former `neo_feedback accepted for session …` line is now `DEBUG`.

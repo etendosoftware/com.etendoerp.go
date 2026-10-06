@@ -786,13 +786,20 @@ public class McpServletTest {
    */
   private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,
       String resolvedOrg, String resolvedClient, boolean routerThrows) throws Exception {
+    return recordedRowForToolsCall(tokenClient, tokenOrg, resolvedOrg, resolvedClient,
+        routerThrows, "neo_list", new JSONObject().put("spec", "sales-order"));
+  }
+
+  private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,
+      String resolvedOrg, String resolvedClient, boolean routerThrows, String toolName,
+      JSONObject arguments) throws Exception {
     setOAuth2FilterAttributes("user1", "role1", tokenClient, tokenOrg, "neo:read");
     setRequestBody(new JSONObject()
         .put("jsonrpc", "2.0")
         .put("id", 1)
         .put("method", "tools/call")
-        .put("params", new JSONObject().put("name", "neo_list")
-            .put("arguments", new JSONObject().put("spec", "sales-order")))
+        .put("params", new JSONObject().put("name", toolName)
+            .put("arguments", arguments))
         .toString());
 
     org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
@@ -859,6 +866,36 @@ public class McpServletTest {
 
     assertEquals("client1", row.clientId());
     assertEquals("org1", row.orgId());
+  }
+
+  /**
+   * ETP-5639: an accepted feedback report leaves exactly one INFO line, and its usageId is the id
+   * of the row handed to the writer — so the report can be read from the DB by that id.
+   */
+  @Test
+  public void acceptedFeedbackLogsOneInfoLineWithTheRowId() throws Exception {
+    JSONObject verdict = new JSONObject().put("outcome", "OKAY").put("summary", "s")
+        .put("achieved", "a");
+    try (LogCapture logs = LogCapture.of(McpFeedbackTool.class)) {
+      McpUsageRow row = recordedRowForToolsCall("client1", "org1", null, null, false,
+          McpConstants.TOOL_NEO_FEEDBACK, verdict);
+
+      assertNotNull(row.payload());
+      assertEquals(1, logs.messages(Level.INFO).size());
+      assertTrue(logs.messages(Level.INFO).get(0),
+          logs.messages(Level.INFO).get(0).contains("usageId=" + row.id() + " "));
+    }
+  }
+
+  @Test
+  public void rejectedFeedbackLogsNoReceivedLine() throws Exception {
+    try (LogCapture logs = LogCapture.of(McpFeedbackTool.class)) {
+      McpUsageRow row = recordedRowForToolsCall("client1", "org1", null, null, true,
+          McpConstants.TOOL_NEO_FEEDBACK, new JSONObject().put("outcome", "OKAY"));
+
+      assertNull(row.payload());
+      assertTrue(logs.messages(Level.INFO).isEmpty());
+    }
   }
 
   @Test
