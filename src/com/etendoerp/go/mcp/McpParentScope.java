@@ -300,7 +300,11 @@ final class McpParentScope {
       if (!required.isEmpty()) {
         item.put("parentRequiredFor", new JSONArray(required));
       }
-      if (reason != null) {
+      // ETP-5639: the declared reason explains why the parent may be omitted, so it is published
+      // only when some verb really lets it be omitted. A child that declares parent.field with a
+      // reason but relaxes no verb used to show parentOptionalReason next to a parentRequiredFor
+      // naming every verb — telling the agent the parent was optional when it never was.
+      if (reason != null && required.size() < McpParentSection.ALL_VERBS.size()) {
         item.put("parentOptionalReason", reason);
       }
       if (problem != null) {

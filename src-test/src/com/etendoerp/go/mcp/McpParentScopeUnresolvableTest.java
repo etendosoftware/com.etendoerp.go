@@ -268,4 +268,42 @@ class McpParentScopeUnresolvableTest {
 
     assertEquals(McpParentScope.Kind.UNRESOLVABLE, McpParentScope.forEntity(child).getKind());
   }
+
+  /**
+   * A declared parent.field with a reason and no relaxed verb: the parent is required on every
+   * verb, so the reason must not be published as parentOptionalReason (it would say the opposite).
+   */
+  @Test
+  @DisplayName("a declared parent.field reason is not published as optional when nothing is")
+  void declaredReasonNotPublishedAsOptionalWhenEveryVerbRequiresTheParent() throws Exception {
+    Entity lineEntity = ModelProvider.getInstance().getEntityByTableId("tbl-psd");
+    Property link = lineEntity.getPropertyByColumnName("FIN_Payment_Detail_ID");
+    when(lineEntity.getProperty("paymentDetails", false)).thenReturn(link);
+    when(child.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(
+        "{\"parent\":{\"field\":\"paymentDetails\",\"reason\":\"the link is paymentDetails\"}}");
+
+    McpParentScope.Scope scope = McpParentScope.forEntity(child);
+    org.codehaus.jettison.json.JSONObject described = new org.codehaus.jettison.json.JSONObject();
+    McpParentScope.publishInto(described, scope);
+
+    assertEquals(McpParentScope.Kind.RESOLVED, scope.getKind());
+    assertEquals(McpParentSection.ALL_VERBS.size(), scope.requiredVerbs().size());
+    assertFalse(described.has("parentOptionalReason"), described.toString());
+  }
+
+  @Test
+  @DisplayName("a reason is still published when a verb is relaxed")
+  void reasonPublishedWhenAVerbIsOptional() throws Exception {
+    Entity lineEntity = ModelProvider.getInstance().getEntityByTableId("tbl-psd");
+    Property link = lineEntity.getPropertyByColumnName("FIN_Payment_Detail_ID");
+    when(lineEntity.getProperty("paymentDetails", false)).thenReturn(link);
+    when(child.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(
+        "{\"parent\":{\"field\":\"paymentDetails\",\"optionalFor\":[\"list\"],"
+            + "\"reason\":\"lists are global\"}}");
+
+    org.codehaus.jettison.json.JSONObject described = new org.codehaus.jettison.json.JSONObject();
+    McpParentScope.publishInto(described, McpParentScope.forEntity(child));
+
+    assertEquals("lists are global", described.getString("parentOptionalReason"));
+  }
 }

@@ -3012,12 +3012,20 @@ entity decision — a `parent.field` that is genuinely the link — not a change
 **Update (ETP-5639).** None of the three is `UNRESOLVABLE` any more, and they stopped logging
 `Parent scope unresolvable` on every resolution (118 WARN/week in production):
 
-- `product/transactionAdjustments` declares `MCP_CONFIG` `"parent": {"field": "inventoryTransaction"}`
-  — `M_Costing_Transactions_HQL`'s id is the `M_Transaction` id, so the field is genuinely the link.
+- `product/transactionAdjustments` declares `MCP_CONFIG`
+  `"parent": {"field": "inventoryTransaction", "entity": "transactions"}` —
+  `M_Costing_Transactions_HQL`'s id is the `M_Transaction` id, so the field is genuinely the link.
+  `entity` is declared because the tab's own parent (`averageCostTransactions`, over the HQL view)
+  is not an included entity of the spec, so it cannot be named; `transactions` (over
+  `M_Transaction`) holds the same ids, and naming it lets the `parent_required` refusal and
+  `etendo_schema` tell the agent where to find the parent.
   This also fixes a silent read bug: the tab's where clause (`costAdjustmentLine != null`) has no
   parent placeholder, so `etendo_list` with a `parentId` used to return the adjustments of **every**
   transaction. Now the list gate adds `inventoryTransaction = parentId`. `create` stays off through
-  `verbs` (the tab is read-only in the UI).
+  `verbs` (the tab is read-only in the UI). A `parent.reason` is published as
+  `parentOptionalReason` only when some verb really lets the parent be omitted (`parentRequiredFor`
+  shorter than the five verbs); next to a parent required on every verb it used to say the
+  opposite of the truth.
 - The payment Lines (`payment-in/finPaymentScheduleDetail`, `payment-out/lines`) reach `FIN_Payment`
   in two hops (`FIN_Payment_Detail_ID` → `FIN_Payment`), which `parent.field` cannot express. Their
   tab where clause carries the parent placeholder
