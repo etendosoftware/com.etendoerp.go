@@ -225,16 +225,18 @@ public class McpToolRouter {
       // used to fall into the generic handler below and surface as 500 server_error, whose own
       // hint invites no retry but whose status class does: a client with a retry-on-5xx rule
       // loops forever on a decision that will never change.
-      log.warn("MCP tool '{}' refused for the current role: {}", toolName, e.getMessage());
+      log.warn("MCP tool '{}' refused for the current role: {} session={}", toolName,
+          e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (org.openbravo.base.exception.OBSecurityException e) {
       // Openbravo's own refusal does NOT extend SecurityException, so without this clause it
       // reached the generic handler and answered 500 for the same kind of decision.
-      log.warn("MCP tool '{}' refused by the platform for the current role: {}",
-          toolName, e.getMessage());
+      log.warn("MCP tool '{}' refused by the platform for the current role: {} session={}",
+          toolName, e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}'", toolName, e);
+      log.error("Error routing MCP tool '{}' session={}", toolName,
+          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
   }
@@ -244,10 +246,12 @@ public class McpToolRouter {
    *
    * @param toolName the tool that was called
    * @param e        the refusal
-   * @return e.g. {@code MCP tool 'neo_update' rejected (read_only_field): Field 'x' is read-only…}
+   * @return e.g. {@code MCP tool 'neo_update' rejected (read_only_field): Field 'x' is read-only…
+   *         session=<key>}
    */
   static String routingRejectionLogLine(String toolName, McpRoutingException e) {
-    return "MCP tool '" + toolName + "' rejected (" + e.getErrorCode() + "): " + e.getMessage();
+    return "MCP tool '" + toolName + "' rejected (" + e.getErrorCode() + "): " + e.getMessage()
+        + " session=" + McpUsageTelemetry.sessionForLog();
   }
 
   /** Route semantic search through the same authenticated DB Extended contract as REST. */
@@ -352,7 +356,8 @@ public class McpToolRouter {
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
     } catch (Exception e) {
-      log.error("Error fetching docs for topic '{}'", topic, e);
+      log.error("Error fetching docs for topic '{}' session={}", topic,
+          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
     }
   }
@@ -1649,10 +1654,10 @@ public class McpToolRouter {
       }
       return wrapAsTextContent(result);
     } catch (SecurityException e) {
-      log.warn("neo_batch access denied", e);
+      log.warn("neo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
     } catch (Exception e) {
-      log.error("Error executing neo_batch", e);
+      log.error("Error executing neo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
     }
   }

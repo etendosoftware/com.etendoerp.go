@@ -515,6 +515,7 @@ public class McpServletTest {
       String warn = logs.messages(Level.WARN).get(0);
       assertTrue(warn, warn.contains("'server/discover'"));
       assertTrue(warn, warn.contains("client=claude-code"));
+      assertTrue(warn, warn.contains("session=" + McpUsageTelemetry.NO_SESSION));
       assertNull("one line, no stack trace", logs.events(Level.WARN).get(0).getThrown());
     }
   }

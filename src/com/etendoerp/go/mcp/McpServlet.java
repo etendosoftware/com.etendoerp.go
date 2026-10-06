@@ -190,11 +190,12 @@ public class McpServlet extends HttpServlet {
       // server/discover before falling back to initialize. Not a server failure: one WARN line, no
       // stack trace, and the same -32601 as before. No telemetry row: only tools/call has a tool
       // name, and an unknown method is never one.
-      log.warn("MCP client called unsupported method '{}' (client={})", method,
-          clientNameFor(callParams));
+      log.warn("MCP client called unsupported method '{}' (client={}) session={}", method,
+          clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
       writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage());
     } catch (Exception e) {
-      log.error("Error processing MCP message: {}", e.getMessage(), e);
+      log.error("Error processing MCP message: {} session={}", e.getMessage(),
+          McpUsageTelemetry.sessionForLog(), e);
 
       String rendered = writeRpcError(response, body, JSON_RPC_INTERNAL_ERROR, e.getMessage());
       if (rendered != null) {

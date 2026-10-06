@@ -136,6 +136,20 @@ final class McpUsageTelemetry {
     return CURRENT_SESSION.get();
   }
 
+  /** What a log line prints when the request carries no session key. */
+  static final String NO_SESSION = "none";
+
+  /**
+   * The session key as MCP WARN/ERROR lines print it ({@code session=<key>}), so Datadog can put a
+   * session's failures next to its feedback report (ETP-5639).
+   *
+   * @return the current session key, or {@value #NO_SESSION}
+   */
+  static String sessionForLog() {
+    String key = CURRENT_SESSION.get();
+    return key != null ? key : NO_SESSION;
+  }
+
   // ── Session / client handshake ──────────────────────────────────────────
 
   /**

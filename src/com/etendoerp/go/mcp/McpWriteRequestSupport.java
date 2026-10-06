@@ -654,8 +654,8 @@ final class McpWriteRequestSupport {
         // No sibling with real value — remove to avoid DAL error. The column must
         // either have a DB default or be nullable; if not, the INSERT will fail.
         body.remove(propName);
-        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
-            propName, targetEntity);
+        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {} session={}",
+            propName, targetEntity, McpUsageTelemetry.sessionForLog());
       }
     }
   }

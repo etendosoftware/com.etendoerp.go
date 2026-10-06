@@ -7481,3 +7481,12 @@ The id is minted when the row is built (`McpUsageRow.Builder`), not inside the a
 so the line can name it; if the writer later drops the row (queue full, insert failed) the id points
 at nothing and the drop logs its own `WARN`. A rejected or rate-limited report logs no such line. The
 former `neo_feedback accepted for session …` line is now `DEBUG`.
+
+**MCP WARN/ERROR lines on the request path carry `session=<Mcp-Session-Id>`** (`none` when the
+client sent no session header), so filtering Datadog by `session=<key>` puts a session's failures
+next to its feedback line. Covered: `McpServlet` (unsupported method, `Error processing MCP
+message`), `McpToolRouter` (routing refusal, role refusals, `Error routing MCP tool`, docs fetch
+failure, `neo_batch` access denied / failure) and `McpWriteRequestSupport` (`Removed FK sentinel`).
+Not covered: authentication failures (logged before the session key is bound) and lines that are
+not per-request (configuration parsing, cached parent scopes, the telemetry writer thread). The
+production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key is in the message.
