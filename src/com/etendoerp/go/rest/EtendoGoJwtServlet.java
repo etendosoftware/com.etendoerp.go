@@ -2170,6 +2170,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Tells the owner their way in changed. It has to say which thing happened: "your password was
+   * changed" is alarming and wrong for somebody who just created a first one. A block lambda, not a
+   * ternary — sendAuthEmailBestEffort takes a Runnable, and a conditional expression is not
+   * void-compatible.
+   */
+  private void sendPasswordNotice(Account account, boolean enrolling) {
+    sendAuthEmailBestEffort(enrolling ? "password-added" : "password-changed", () -> {
+      if (enrolling) {
+        authEmailSender.sendPasswordAdded(account);
+      } else {
+        authEmailSender.sendPasswordChanged(account);
+      }
+    });
+  }
+
+  /**
    * POST /sws/go/change-password
    * Header: Authorization: Bearer <session_token>
    * Body: { "currentPassword": "...", "newPassword": "..." }
@@ -2232,17 +2248,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         result.put(FIELD_TOKEN, sessionToken);
       }
       // The notice goes out only once the change is committed, so it never announces a change
-      // that was rolled back. It tells the owner their way in changed, so it has to say which thing
-      // happened: "your password was changed" is alarming and wrong for somebody who just created a
-      // first one. A block lambda, not a ternary — sendAuthEmailBestEffort takes a Runnable, and a
-      // conditional expression is not void-compatible.
-      sendAuthEmailBestEffort(enrolling ? "password-added" : "password-changed", () -> {
-        if (enrolling) {
-          authEmailSender.sendPasswordAdded(account);
-        } else {
-          authEmailSender.sendPasswordChanged(account);
-        }
-      });
+      // that was rolled back.
+      sendPasswordNotice(account, enrolling);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("change password", e, log);
