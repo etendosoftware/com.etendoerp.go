@@ -196,7 +196,7 @@ class McpSessionManagerTest {
     }
 
     @Test
-    @DisplayName("client '0' triggers resolveClientFromRole")
+    @DisplayName("client '0' is resolved to the role's client")
     void zeroClientTriggersResolution() throws Exception {
       // org is non-zero to avoid org resolution interfering
       // First doReturningWork call is for client resolution
@@ -232,7 +232,7 @@ class McpSessionManagerTest {
     }
 
     @Test
-    @DisplayName("client '0' with resolveClientFromRole returning null keeps '0'")
+    @DisplayName("client '0' of a role with no tenant keeps '0'")
     void clientZeroWithNullResolutionKeepsZero() throws Exception {
       when(hibernateSession.doReturningWork(any())).thenReturn(null);
 

@@ -3228,7 +3228,9 @@ No longer a divergence. A token on org `0` carries the System client `0`; `/sws/
 and MCP both resolve it to the role's tenant through `EffectiveClientResolver`, judge THAT tenant
 (a blocked one gets **402**) and run the request under it; a failed role lookup is **503** on both.
 Recorded here because the two differed during the ETP-5047 review (`open-and-notable-topics.md`
-§3.12).
+§3.12). **The org still differs (declared, predates ETP-5047):** MCP resolves a token's org `0` to
+the role's first transactional org (`McpSessionManager.executeInContext`), while NEO keeps org `0`
+in the context it builds.
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 

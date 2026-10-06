@@ -74,7 +74,9 @@ MCP token commonly carries the wildcard client and org `0`. The client is resolv
 commercial access guard (ETP-5047), which then judges the same tenant; a failed role lookup refuses
 the request with 503, so no row is recorded for it — and `McpSessionManager.executeInContext`
 resolves the org as the role's first transactional org (and the client again only if it is still
-`0`) before it builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
+`0`) before it builds the `OBContext` — for a System role, whose first lookup legitimately keeps
+`0`, a failure of that second lookup surfaces as a JSON-RPC error with a fallback telemetry row
+(the token's own values), not as the 503 — and binds the result in a request-scoped `ThreadLocal`
 (`McpUsageTelemetry.setCurrentTenant`). `McpServlet.recordToolCall` reads it, so the row carries the
 same tenant the business code used; `doPost` clears it in its `finally`, next to the session key,
 because servlet threads are pooled. The binding happens before the context is built, so a call that

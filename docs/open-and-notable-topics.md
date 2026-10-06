@@ -624,8 +624,22 @@ SELECT ad_preference_id, attribute, value, isactive, created FROM ad_preference 
 
 (`ETGO_TenantPlan` is deliberately absent: that marker legitimately lives on client `0`, with the
 tenant in `visibleat_client_id`.) The rows are inert now — nothing reads client `0` any more — so
-removing them is housekeeping, not a fix. Local dev DB (`etendo_core3`, 2026-10-06): 0 rows. Delete
-this topic once the check has run on every shared environment.
+removing them is housekeeping, not a fix. Local dev DB (`etendo_core3`, 2026-10-06): 0 rows.
+
+**Business rows are a second, wider residue.** Before the fix a `/sws/neo/*` request with an org-`0`
+OAuth2 token also RAN as client `0`, so a record it created was stamped `ad_client_id = '0'` (the
+DAL takes the client from the `OBContext`) — data of a tenant filed under System. The query above
+does not see those. The writer is the user of an OAuth2 client, so this generates one count per
+table that has both columns; run its output and inspect any non-zero table by hand:
+
+```sql
+SELECT format('SELECT %L AS tbl, count(*) FROM %I WHERE ad_client_id = ''0'' AND createdby IN (SELECT ad_user_id FROM etgo_oauth2_client) HAVING count(*) > 0;', c.table_name, c.table_name) FROM information_schema.columns c JOIN information_schema.columns k ON k.table_schema = c.table_schema AND k.table_name = c.table_name AND k.column_name = 'ad_client_id' WHERE c.table_schema = current_schema() AND c.column_name = 'createdby';
+```
+
+A hit is not automatically residue (an OAuth2 client of a System role writes on `0` legitimately),
+so move a row only after confirming the role behind it belongs to a tenant. Not run locally: the
+dev DB has no OAuth2 clients or tokens. Delete this topic once both checks have run on every shared
+environment.
 
 ## 4. Known issues
 
