@@ -62,7 +62,6 @@ import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
-import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
@@ -125,6 +124,12 @@ public class UserRoleAssignmentHandlerTest {
    *  splicing tests — {@code USER_ID} itself is not hex-shaped and must never satisfy that
    *  check. */
   private static final String OWNER_ID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  /** Shape-valid {@code AD_Role_ID}s for the ETP-5188 "Rol" filter tests. */
+  private static final String ROLE_ID_A = "0123456789ABCDEF0123456789ABCDEF";
+  private static final String ROLE_ID_B = "fedcba9876543210fedcba9876543210";
+  /** The contact-only exclusion every user list read carries (ETP-5411). */
+  private static final String CONTACT_EXCLUSION =
+      "exists (select 1 from ETGO_Invitation i where i.user = e)";
 
   /**
    * ETP-4830 — bundles the three collaborators {@link
@@ -426,122 +431,98 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ─── handle(): GET list pre-hook — exclude contact-only users (ETP-5019/ETP-5411) ─
+  // ─── readPredicates(): user list restrictions (ETP-5019/ETP-5411/ETP-5188/ETP-5568) ───
 
-  @Test
-  public void handleInjectsInvitationExistsPredicateOnListGet() {
-    // ETP-5411: username-based filtering was superseded — a classic-backend Contact can now
-    // get a non-blank username too. The new signal is an ETGO_INVITATION row pointing at the
-    // user. No ObContext/client is set on this NeoContext, so no owner clause is added.
-    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    Map<String, String> queryParams = new HashMap<>();
-    NeoContext ctx = NeoContext.builder()
+  private static NeoContext listGetContext(Map<String, String> queryParams, OBContext obContext) {
+    return NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .queryParams(queryParams)
+        .obContext(obContext)
         .build();
-
-    assertNull(handler.handle(ctx));
-
-    assertEquals("exists (select 1 from ETGO_Invitation i where i.user = e)",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
   @Test
-  public void handleContactExclusionPredicateFiltersOnInvitationNotRoleCount() {
+  public void readPredicatesExcludeContactOnlyUsers() {
+    // ETP-5411: username-based filtering was superseded — a classic-backend Contact can now
+    // get a non-blank username too. The new signal is an ETGO_CONTACT_EXCLUSIONITATION row pointing at the
+    // user. No ObContext/client is set on this NeoContext, so no owner clause is added.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+
+    assertEquals(List.of(CONTACT_EXCLUSION),
+        handler.readPredicates(listGetContext(new HashMap<>(), null)));
+  }
+
+  @Test
+  public void contactExclusionPredicateFiltersOnInvitationNotRoleCount() {
     // Regression guard (ETP-5019, still true under ETP-5411): a real user can legitimately have
     // zero AD_User_Roles rows (not yet assigned any role) — see the handler's own javadoc for
-    // excludeContactOnlyUsers. The injected predicate must never reference roles or
-    // AD_User_Roles, only Invitation existence (plus the owner literal), or it would wrongly
-    // hide legitimate not-yet-assigned real users.
+    // buildContactOnlyExclusion. The predicate must never reference roles or AD_User_Roles,
+    // only Invitation existence (plus the owner literal), or it would wrongly hide legitimate
+    // not-yet-assigned real users.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    Map<String, String> queryParams = new HashMap<>();
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .queryParams(queryParams)
-        .build();
 
-    assertNull(handler.handle(ctx));
+    String predicate = handler.readPredicates(listGetContext(new HashMap<>(), null)).get(0);
 
-    String predicate = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
     assertTrue(predicate.contains("Invitation"));
     assertFalse(predicate.toLowerCase().contains("role"));
   }
 
   @Test
-  public void handleAndsExistingNeoWherePredicateWithContactExclusion() {
+  public void handleWritesNoQueryParamOnListGet() {
+    // ETP-5568: the list restrictions used to be injected into the query params as _neoWhere,
+    // the same key a caller could send on the query string. handle() must leave them alone.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     Map<String, String> queryParams = new HashMap<>();
-    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM, "e.active = true");
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .queryParams(queryParams)
-        .build();
+    queryParams.put("RoleIds", ROLE_ID_A);
 
-    assertNull(handler.handle(ctx));
+    assertNull(handler.handle(listGetContext(queryParams, null)));
 
-    assertEquals(
-        "(e.active = true) and (exists (select 1 from ETGO_Invitation i where i.user = e))",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+    assertEquals(Map.of("RoleIds", ROLE_ID_A), queryParams);
   }
 
   @Test
-  public void handleIncludesOwnerLiteralInContactExclusionPredicateWhenOwnerResolved() {
+  public void readPredicatesIncludeOwnerLiteralWhenOwnerResolved() {
     // ETP-5411: the tenant owner never gets an Invitation row (self-service onboarding, not
     // CompanyInvitationService), so it needs its own literal clause or it would wrongly
     // disappear from the Users list.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    Map<String, String> queryParams = new HashMap<>();
     Client client = mock(Client.class);
     when(client.getId()).thenReturn(CLIENT_ID);
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .queryParams(queryParams)
-        .obContext(obContext)
-        .build();
 
+    List<String> predicates;
     try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
       ownerMock.when(() -> OwnerSupport.findOwnerUserId(CLIENT_ID)).thenReturn(OWNER_ID);
 
-      assertNull(handler.handle(ctx));
+      predicates = handler.readPredicates(listGetContext(new HashMap<>(), obContext));
     }
 
-    assertEquals(
-        "e.id = '" + OWNER_ID + "' or exists (select 1 from ETGO_Invitation i where i.user = e)",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+    assertEquals(List.of(
+        "e.id = '" + OWNER_ID + "' or exists (select 1 from ETGO_Invitation i where i.user = e)"),
+        predicates);
   }
 
   @Test
-  public void handleOmitsOwnerLiteralWhenOwnerIdFailsShapeCheck() {
+  public void readPredicatesOmitOwnerLiteralWhenOwnerIdFailsShapeCheck() {
     // Fail-closed: an unexpectedly-shaped id from OwnerSupport must never reach the HQL string
-    // unvalidated (same defense _neoWhere's RoleIds splicing already relies on).
+    // unvalidated (same defense the RoleIds splicing relies on).
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    Map<String, String> queryParams = new HashMap<>();
     Client client = mock(Client.class);
     when(client.getId()).thenReturn(CLIENT_ID);
     OBContext obContext = mock(OBContext.class);
     when(obContext.getCurrentClient()).thenReturn(client);
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .queryParams(queryParams)
-        .obContext(obContext)
-        .build();
 
+    List<String> predicates;
     try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
       ownerMock.when(() -> OwnerSupport.findOwnerUserId(CLIENT_ID))
           .thenReturn("not-a-valid-id; drop table");
 
-      assertNull(handler.handle(ctx));
+      predicates = handler.readPredicates(listGetContext(new HashMap<>(), obContext));
     }
 
-    assertEquals("exists (select 1 from ETGO_Invitation i where i.user = e)",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+    assertEquals(List.of(CONTACT_EXCLUSION), predicates);
   }
 
   @Test
@@ -561,37 +542,85 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
-  public void handleToleratesNullQueryParamsOnListGet() {
+  public void readPredicatesTolerateNullQueryParams() {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .build();
 
-    assertNull(handler.handle(ctx));
+    assertEquals(List.of(CONTACT_EXCLUSION), handler.readPredicates(listGetContext(null, null)));
   }
 
   @Test
-  public void handleContactFilterAndAfterHandleBootstrapHidingCoexistOnListGetFlow()
-      throws Exception {
-    // Regression guard (ETP-5019): the new pre-hook contact-only filter (query params, handle())
-    // and the pre-existing bootstrap-user hiding (response body, afterHandle()) act on different
-    // phases of the same list GET and must not interfere with each other.
+  public void readPredicatesAddRoleFilterForValidRoleIdsOnly() {
+    // ETP-5188: RoleIds is request input spliced into HQL, so only 32-hex ids survive.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("RoleIds", ROLE_ID_A + ", x') or (1=1 ," + ROLE_ID_B);
+
+    List<String> predicates = handler.readPredicates(listGetContext(queryParams, null));
+
+    String inList = "'" + ROLE_ID_A + "','" + ROLE_ID_B + "'";
+    assertEquals(List.of(CONTACT_EXCLUSION,
+        "((e.defaultRole.id in (" + inList + ")) or "
+            + "(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+            + "ri.active = true and ri.inheritFrom.id in (" + inList + "))))"),
+        predicates);
+  }
+
+  @Test
+  public void readPredicatesAddNoRoleFilterWithoutAdminClauseWhenNoClient() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("NoRole", "true");
+
+    List<String> predicates = handler.readPredicates(listGetContext(queryParams, null));
+
+    assertEquals(List.of(CONTACT_EXCLUSION,
+        "(not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+            + "ri.active = true))"),
+        predicates);
+  }
+
+  @Test
+  public void readPredicatesNegateTheWholeRoleFilter() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("NoRole", "TRUE");
+    queryParams.put("RoleFilterNegate", "true");
+
+    List<String> predicates = handler.readPredicates(listGetContext(queryParams, null));
+
+    assertEquals(2, predicates.size());
+    assertTrue(predicates.get(1).startsWith("not ((not exists"));
+  }
+
+  @Test
+  public void readPredicatesIgnoreNegateWithoutARoleFilter() {
+    // Negating an empty filter would otherwise match every user.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("RoleIds", "not-an-id");
+    queryParams.put("RoleFilterNegate", "true");
+
+    assertEquals(List.of(CONTACT_EXCLUSION), handler.readPredicates(listGetContext(queryParams, null)));
+  }
+
+  @Test
+  public void contactPredicateAndAfterHandleBootstrapHidingCoexistOnListGetFlow()
+      throws Exception {
+    // Regression guard (ETP-5019): the contact-only read predicate (the query itself) and the
+    // pre-existing bootstrap-user hiding (response body, afterHandle()) act on different
+    // phases of the same list GET and must not interfere with each other.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject body = buildListResponseBody("0", "100", "real-user-1");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
-        .queryParams(queryParams)
+        .queryParams(new HashMap<>())
         .previousResult(NeoResponse.ok(body))
         .build();
 
-    assertNull(handler.handle(ctx));
+    assertEquals(List.of(CONTACT_EXCLUSION), handler.readPredicates(ctx));
     assertNull(handler.afterHandle(ctx));
 
-    assertEquals("exists (select 1 from ETGO_Invitation i where i.user = e)",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
     JSONObject inner = body.getJSONObject("response");
     assertEquals(1, inner.getJSONArray("data").length());
     assertEquals("real-user-1", inner.getJSONArray("data").getJSONObject(0).getString("id"));

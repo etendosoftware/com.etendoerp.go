@@ -65,6 +65,7 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoTabDefaultSort;
 import com.etendoerp.go.schemaforge.NeoExtensionChannel;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
 import com.etendoerp.go.schemaforge.NeoExtensionRequest;
@@ -585,6 +586,9 @@ public class McpToolRouter {
     if (StringUtils.isNotBlank(orderBy)) {
       params.put(JsonConstants.SORTBY_PARAMETER, orderBy);
     }
+    // ETP-5611: same default as the REST list — a child tab without orderBy follows the AD tab's
+    // order-by instead of the random id order.
+    NeoTabDefaultSort.applyIfAbsent(params, adTab, dalEntityName);
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {

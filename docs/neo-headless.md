@@ -1239,6 +1239,13 @@ attachment is marked as the record's main document immediately after upload — 
 previously-marked attachment, same as the PATCH above. Returns `201` with
 `{ "name", "message", "id"?, "isMain"? }` (the last two only present when `markAsMain=true`).
 
+**The owning record must exist (ETP-5309).** After resolving the table and tab, and before the
+file is written to disk, the record is looked up by the table's DAL entity (admin mode, the same
+lookup the core attachment manager performs). A missing record — typically the SPA's unsaved
+literal id `new` — answers `404 Record '<id>' does not exist in table '<tableName>'. Save it
+before attaching files.` Previously it reached the core, whose `OBSecurityException` surfaced as a
+raw `500`.
+
 #### GET — Download a single attachment
 
 ```
@@ -4404,6 +4411,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   | `NeoReturnReceiptService.createReturnLineShell` | source document's lines → a return (also used by `CreatePurchaseReturnHandler` and `ReturnShipmentUtils.buildAndSaveReturnLine`) |
   | `ReturnShipmentUtils.assignBinsToLines` | header-level backfill run by `ReturnMaterialReceiptHeaderHandler` / `ReturnToVendorShipmentHeaderHandler` on `documentAction` |
   | `InOutLineFromOrderFactory.createAndLinkLine` | an order's lines → a Goods Shipment / Goods Receipt |
+  | `InOutTargetBuilder.createLine` (ETP-5576) | the pending lines of any follow-up flow (today: a completed invoice) → a draft Goods Shipment / Goods Receipt — stockable lines only; a non-stockable line gets no bin and never goes through the anchor (which would resolve a fallback bin for it) |
 
   All of them route their candidate bin through `anchorLocatorToWarehouse(Locator candidate, Warehouse headerWarehouse, Logger log)`, the entity-level twin of the CRUD rule. The rule is unconditional — **the method never returns a locator belonging to another warehouse, and no call site may keep one** — resolved as a 4-step cascade:
 
@@ -4416,9 +4424,9 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   Batch callers that anchor many lines of the same header (`assignBinsToLines`) hoist steps 2–4 out of their loop via `resolveWarehouseAnchorBin` and apply `locatorBelongsToWarehouse` per line — Hibernate's L1 cache does not deduplicate criteria queries, so the naive per-line form issues one query per line needing correction.
 
-  **Scope of "one definition":** these helpers unify the CRUD path and the four DAL paths above. `NeoCommercialDocumentFactory.findDefaultLocator(Warehouse)` is still a *separate* implementation of "the warehouse's default bin" (default-flagged, else any active — the same cascade, expressed independently) used by the order→shipment/receipt and invoice→shipment handlers to pick the locator they pass IN. It was deliberately left alone: it feeds `createAndLinkLine`, whose result is re-anchored anyway, so its output can no longer reach the database unchecked.
+  **Scope of "one definition":** these helpers unify the CRUD path and the DAL paths above. `NeoCommercialDocumentFactory.findDefaultLocator(Warehouse)` is still a *separate* implementation of "the warehouse's default bin" (default-flagged, else any active — the same cascade, expressed independently) used by the order→shipment/receipt handlers and `InOutTargetBuilder` to pick the locator they pass IN. It was deliberately left alone: it feeds `createAndLinkLine` and `InOutTargetBuilder.createLine`, whose result is re-anchored anyway, so its output can no longer reach the database unchecked.
 
-  **Exempt by design — `CreateInvoiceShipmentHandler`:** it is a fifth DAL writer of `setStorageBin` (invoice → shipment) and is deliberately NOT in the table above. It already resolves its locator from the shipment header's own warehouse and throws an `OBException` when none resolves, so it is structurally incapable of persisting a foreign bin — the same reasoning that keeps `InventoryLineHandler` out of the CRUD helper. Any *new* `M_InOutLine` write path, though, belongs on the list.
+  **No exemption any more (ETP-5576).** The former invoice → shipment writer, `CreateInvoiceShipmentHandler`, used to be listed here as exempt by design. It was replaced by the generic follow-up service (§ *Extension point — Follow-up documents*, below), whose line writer is in the table above. Any *new* `M_InOutLine` write path belongs on the list.
 
   Two failure modes this closed, both observed live:
   - **Imported return lines** copied the SOURCE document's bin verbatim, so a return whose header sat in warehouse A but was built from a document whose lines sat in warehouse B booked its stock transactions in B. `M_INOUT_POST` follows the line's bin, not the header.
@@ -4512,6 +4520,115 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   **Known pre-existing defect, replicated deliberately.** When ONE invoice groups lines from SEVERAL orders, its FULL `GrandTotal` is counted against EACH of those orders, inflating the invoiced total so `needsInvoiceDoc` reads `false` too early. The form has exactly this bug today, and parity with the form is the whole point of the annotation — fixing it on one side only would replace one disagreement with another. Tracked separately; do not "fix" the backend without fixing the form in the same change.
 
+**Extension point — Follow-up documents (`FollowUpSupport` + `FollowUpFlow`, ETP-5576):** "create the next document for what is still pending" — today invoice → goods shipment/receipt, designed so that order → shipment/receipt, order → invoice and shipment/receipt → invoice are added by **composing pieces**, nothing copied. A follow-up flow is three things: a **key** (`FollowUpTarget`: annotation key, action name, target spec/entity), **what is missing** (a `PendingResolver`) and **how to create it** (a `TargetCreator`). Resolvers and creators are independent: one creator serves several sources, one resolver could feed another creator. Each header handler can offer N flows; the GET response tells the client, per record, which of them are available right now, so the UI offers only what is still missing.
+
+  | Class | Role | Names an entity? |
+  |---|---|---|
+  | `FollowUpSupport` | The one object a header handler holds. `actionHandler()` goes into its `NeoHeaderActionRouter.dispatch` chain; `annotate(dataArr)` goes into its GET `afterHandle`. Fed by a `Supplier<List<FollowUpFlow>>` (offer order). | No |
+  | `FollowUpActionHandler` | Serves `POST …/{id}/action/<name>` for every registered flow, selected by matching the action name against `FollowUpTarget.actionName`. Tenant guard (`TenantOwnership.loadOwned(flow.sourceEntity(), id)`), envelope, rollback on every non-2xx. Not a CDI bean. | No |
+  | `FollowUpDocumentService` | Enforces the resolver's verdict on the create path (lock → verdict → refuse a line-less document → `createTarget`) and writes the GET annotation (one savepoint per flow). `pendingQuantity(source, moved, upstreamCap)` = `max(0, min(source − moved, cap))` is an **opt-in** helper. It never decides what "pending" means. | No — and must not. |
+  | `FollowUpFlow` | Final composition: `FollowUpFlow.of(target, resolver, creator)`. Adds no rule; delegates `sourceEntity`/`loadSources`/`lockSource` to the resolver and `createTarget` to the creator. The shared layer works only against it. | No |
+  | `PendingResolver` | **What is missing.** `loadSources(ids)` (the verdict for a page of sources, in a fixed number of queries), `lockSource(id)`, `sourceEntity()` (the source header's DAL class, used only for the tenant guard). Owns pending, the draft rule and eligibility. Values: `Source` (`available(id, lines)` / `unavailable(id, reason)` / `fromLines(id, ineligibility, lines)`), `SourceLine` (`sourceLineId`, `pendingQty` — deliberately minimal and target-independent: the creator's source mapping reads everything else from the source line, including whether a movement line needs a storage bin). | Implementations do — they are the entity's customization. |
+  | `TargetCreator` | **How to create.** `createTarget(id, pendingLines, inputs)` → `Result` (`id`, `documentNo`, `lineCount`; which follow-up it is comes from the flow's `FollowUpTarget`, so one creator serves several flows). `inputs` (`FollowUpInputs`) are the caller's optional choices from the request body: a creator reads and validates only its own keys (`INVALID_INPUT` when unacceptable) and asks for a missing one by throwing a `FollowUpException` carrying a `RequiredInput`. | Implementations may delegate to source-supplied pieces; the reusable ones do not. |
+  | `FollowUpTarget` | Output descriptor: annotation `key`, `actionName`, target `spec`/`entity`. Constants `GOODS_SHIPMENT` (`shipment`, `createShipment`, `goods-shipment`/`goodsShipment`) and `GOODS_RECEIPT` (`receipt`, `createGoodsReceipt`, `goods-receipt`/`goodsReceipt`); `withActionName(..)` for a source that already uses another name. Never branched on. | Output data only |
+  | `FollowUpException` | Rejection `Reason` → stable `code` + HTTP status; optional `RequiredInput` (`key` + `options[{id,name}]`) when the rejection asks the caller for a choice. | No |
+  | `FollowUpInputs` | The action POST body's top-level members as strings (null/blank = absent). Knows no key; built by `FollowUpActionHandler`, handed through `FollowUpDocumentService.create` → `FollowUpFlow` → `TargetCreator`. | No |
+  | `InOutFollowUpCreator` | Reusable `TargetCreator` for goods movements, any source: `new InOutFollowUpCreator(direction, sourceMapper, lineLinker)`. The source side supplies a `SourceMapper` (source + pending lines + `inputs` → neutral `InOutTargetBuilder.Header`/`Line`s as a `Mapping`, warehouse/order resolution included; `NOT_FOUND` when the source is gone; persists nothing) and an `InOutTargetBuilder.LineLinker` (created movement line → its source line). Delegates to `InOutTargetBuilder.build`. | No |
+  | `InOutTargetBuilder` | Identity-free **target builder** for goods movements: `Direction` (`SALES`: `IsSOTrx=Y`, `C-`, `MMS`; `PURCHASE`: `N`, `V+`, `MMR` — movement facts only; how a line links back to its source is the `LineLinker`'s business), neutral `Header` (client, org, BP, address, warehouse, currency, order) and `Line` (`sourceLineId` — opaque to the builder, handed back to the `LineLinker` to link the created line to its source line — product, UOM, ASI, qty, order line, description, stockable; `stockable` is set by the source mapping, e.g. `InvoiceInOutMapping` with `InOutLineFromOrderFactory.isStockable`), a `LineLinker` callback. Resolves doc type (non-return, default first), storage bin only when a line is stockable (anchored to the header warehouse), documentNo fallback; throws `MISSING_SETUP` before persisting anything. | No |
+  | `InOutWarehouseResolver` | Warehouse of a follow-up movement for a source that does not designate one, source-agnostic (client + organization): caller's `warehouseId` input (validated) → the source's own warehouse → the caller's default warehouse → the only usable one → `WAREHOUSE_REQUIRED` with the options, or `null` (`MISSING_SETUP`) when none. See *Movement warehouse* below. | No |
+  | `InOutInvoiceLinks` | The one definition of invoice-line ↔ movement-line linkage (column + match table + the pre-existing order-line arm), shared by the invoice resolver/linker and the four related-documents queries. `MatchTable.forSalesTransaction(IsSOTrx)`. | No |
+  | `InvoicePendingResolver` | Invoice resolver, both directions: completed standard invoice, pending per line (SQL below), locks, `sourceEntity() = Invoice`. | Yes |
+  | `InvoiceInOutMapping` | The invoice side of `InOutFollowUpCreator`: `map` (invoice → `Header`/`Line`s, warehouse and order resolution, storage-bin need per line = `InOutLineFromOrderFactory.isStockable(product)`) and `linker(direction)` (`InvoiceLineLinker.linkInvoiceLineToInOutLine` with the direction's match table). | Yes |
+
+  **The resolver owns "pending" and the draft rule.** `loadSources` returns a verdict per source; the shared layer enforces it and never recomputes it. A resolver may measure by line quantities (invoice → movement), by amounts (order → invoice), or anything else, and decides itself how an existing draft of its target counts — subtracted as already moved (the invoice resolver), or `DRAFT_IN_PROGRESS` (what the order-side `needsPrimaryDoc` does today). The one rule the shared layer adds: a document with no line is never created (`NOTHING_PENDING`), whatever the resolver measured.
+
+  **Flows today and planned** (only the first two rows exist; the rest is the intended composition, not implemented):
+
+  | Flow | `FollowUpTarget` | `PendingResolver` | `TargetCreator` |
+  |---|---|---|---|
+  | Sales Invoice → Goods Shipment | `GOODS_SHIPMENT` | `InvoicePendingResolver(SALES, …)` | `InOutFollowUpCreator(SALES, InvoiceInOutMapping::map, InvoiceInOutMapping.linker(SALES))` |
+  | Purchase Invoice → Goods Receipt | `GOODS_RECEIPT` | `InvoicePendingResolver(PURCHASE, …)` | `InOutFollowUpCreator(PURCHASE, …)` (same, `PURCHASE`) |
+  | Order → Shipment / Receipt (future) | `GOODS_SHIPMENT` / `GOODS_RECEIPT` (or `withActionName`) | `OrderPendingResolver` (new) | `InOutFollowUpCreator` (**existing**) with an order mapper + a linker calling `InvoiceLineLinker.linkPendingInvoiceLinesToInout` |
+  | Order → Invoice (future) | new `invoice` target | `OrderInvoicePendingResolver` (new, by amount) | `InvoiceFollowUpCreator` (future, **shared**; may delegate to `createDraftInvoice`) |
+  | Shipment / Receipt → Invoice (future) | new `invoice` target | `InOutInvoicePendingResolver` (new) | the same shared `InvoiceFollowUpCreator` |
+
+  **Target-builder contract** (the seam for a future invoice creator): a neutral `build(direction, header, lines, linker)` that (1) resolves every prerequisite and throws `MISSING_SETUP` before persisting, (2) persists header + lines, (3) flushes, (4) calls the linker per created line, (5) returns the header; the transaction is the caller's. Only `InOutTargetBuilder` exists. An invoice creator is **not** free today: `NeoCommercialDocumentFactory.createInvoiceFromOrderHeader` / `createInvoiceFromReceiptHeader` cover the header, but invoice lines need price, tax and discount resolution (today inside `CreateDraftInvoiceHandler` / `CreatePurchaseInvoiceHandler`), which would have to be extracted into it first — or the creator delegates to the existing `createDraftInvoice` action.
+
+  **GET annotation** (every record, list and detail, of every handler that registers flows; one `loadSources` call per flow per page):
+  ```json
+  "followUp": {
+    "available": ["shipment"],
+    "shipment": { "needed": true,  "reason": null, "pendingLines": 2,
+                  "action": "createShipment", "targetSpec": "goods-shipment", "targetEntity": "goodsShipment" },
+    "invoice":  { "needed": false, "reason": "FOLLOW_UP_NOTHING_PENDING", "pendingLines": 0, "action": "…", … }
+  }
+  ```
+  Every registered key is always present, so "not offered" (key absent) differs from "not needed now". `available` lists the keys with `needed: true` **in registration order**: the client builds its option list from it and hides the action when it is empty. `pendingLines` is a line count (UOMs may differ), `0` when not needed. If one flow's lookup fails, it is logged at ERROR and only that key reads `needed: false, reason: FOLLOW_UP_LOOKUP_FAILED`. Each lookup runs inside a JDBC **savepoint** on the OBDal connection (so `loadSources` must query through `OBDal.getInstance()`): on PostgreSQL a failed statement would otherwise abort the transaction and break every later enricher and the GET itself. The former flat `needsFollowUpDoc`/`pendingFollowUpLines` fields of the first delivery were dropped before any consumer existed.
+
+  **Action request body (optional).** The POST may carry a JSON object whose top-level members are the caller's choices (`FollowUpInputs`); an empty or absent body means none, a `null` or blank member is treated as absent, unknown members are ignored. The only key read today is `warehouseId` (goods-movement creators, see *Movement warehouse*): `POST …/action/createGoodsReceipt` with `{"warehouseId":"<M_Warehouse_ID>"}`. Through MCP, the same members go in `neo_action`'s `params`.
+
+  **Action response.** `201 {"response":{"data":{"id","documentNo","followUp":"<key>","spec","entity","lineCount"}}}`. Rejection: `{"error":{"code","status","message"}}` (same shape as `PRECONDITIONS_UNMET`), transaction rolled back. Messages are English; clients translate by `code`. A rejection that asks the caller for a choice also carries a generic `input` block — the client renders a selector for `input.key` from `input.options` and retries the same POST with `{"<key>":"<option id>"}`; it needs to know nothing about what is being chosen:
+  ```json
+  {"error":{"code":"FOLLOW_UP_WAREHOUSE_REQUIRED","status":409,"message":"Several warehouses are available for this document; choose one",
+            "input":{"key":"warehouseId","options":[{"id":"1FF18B068AA94146A2A49C51E13C739C","name":"Almacen Principal"},
+                                                    {"id":"081A28467A2948529BB65C902289AFDF","name":"Almacén Secundario"}]}}}
+  ```
+
+  | `code` | Status | Meaning |
+  |---|---|---|
+  | `FOLLOW_UP_SOURCE_NOT_FOUND` | 404 | no such source |
+  | `FOLLOW_UP_WRONG_DIRECTION` | 400 | source of the other `IsSOTrx` |
+  | `FOLLOW_UP_SOURCE_NOT_COMPLETED` | 400 | source status does not allow it |
+  | `FOLLOW_UP_SOURCE_TYPE_NOT_ELIGIBLE` | 400 | source document type does not allow it |
+  | `FOLLOW_UP_NOTHING_PENDING` | 400 | nothing left (by the resolver's measure), or no line to carry |
+  | `FOLLOW_UP_DRAFT_IN_PROGRESS` | 400 | a draft target exists and the resolver waits for it |
+  | `FOLLOW_UP_MISSING_SETUP` | 400 | no usable warehouse at all / doc type / storage bin missing (a stockable line needs a bin in the chosen warehouse) |
+  | `FOLLOW_UP_WAREHOUSE_REQUIRED` | 409 | several warehouses are usable and nothing designates one; carries `input: {key: "warehouseId", options: [{id, name}]}` |
+  | `FOLLOW_UP_INVALID_INPUT` | 400 | a request-body choice is not acceptable (e.g. `warehouseId` unknown, inactive, of another client, not usable by the source's organization, or not readable by the caller) |
+  | `FOLLOW_UP_LOOKUP_FAILED` | — | annotation only (`FollowUpDocumentService.REASON_LOOKUP_FAILED`, not an exception reason; never an HTTP answer) |
+
+  **Recipe — adding a follow-up flow:** pick or write a resolver, pick or write a creator, register one line.
+  1. **Resolver (what is missing).** Reuse one if the source already has it; otherwise write `<Source>PendingResolver implements PendingResolver`. Example `OrderPendingResolver` for order → shipment: `loadSources` = one query over `C_OrderLine` with the per-line rule of `InOutLineFromOrderFactory.pendingQuantityFor` (`QtyOrdered − QtyDelivered`, non-zero, Total Discount line excluded — reused, not copied; `pendingQuantity` is not used because it floors at 0) plus one for draft `M_InOut` by `C_Order_ID` → `Source.unavailable(id, DRAFT_IN_PROGRESS)` when a draft exists, otherwise `Source.fromLines(id, ineligibility, lines)` — exactly today's `needsPrimaryDoc`; `lockSource` = `SELECT … FROM c_order … FOR UPDATE`; `sourceEntity()` = `Order.class`. For order → invoice: the `needsInvoiceDoc` rule — `GrandTotal − Σ completed linked invoices ≠ 0` and no draft linked invoice → `Source.available(id, linesStillToInvoice)`, otherwise `Source.unavailable(id, NOTHING_PENDING / DRAFT_IN_PROGRESS)`; the verdict is by **amount**, the lines returned are what the document will carry.
+  2. **Creator (how to create).** Goods movement → reuse `InOutFollowUpCreator`, supplying only the source side: a `SourceMapper` (order → `Header`/`Line`s, warehouse = the order's) and a `LineLinker` (for an order: `InvoiceLineLinker.linkPendingInvoiceLinesToInout(created, orderLineId)` — the same call `InOutLineFromOrderFactory.createAndLinkLine` makes today). Invoice → write the shared `InvoiceFollowUpCreator` once (see the contract above) and reuse it for order → invoice and shipment → invoice. Any other process is just another `TargetCreator`.
+  3. **Register**, in the source's header handler: `protected final FollowUpSupport followUp = new FollowUpSupport(this::followUpFlows);`, a `followUpFlows()` returning e.g. `List.of(FollowUpFlow.of(GOODS_SHIPMENT, orderResolver, inOutCreator), FollowUpFlow.of(invoiceTarget, orderInvoiceResolver, invoiceCreator))` (offer order), `followUp.actionHandler()` in the dispatch chain (replacing the handler that served the same action name), `followUp.annotate(dataArr)` in the GET post-hook. Nothing in the shared classes changes.
+  4. Frontend: read `followUp.available`; each key's `action` is the endpoint to POST, `targetSpec`/`targetEntity` where to open the result. Nothing per window.
+
+  **Invoice binding today.** `AbstractInvoiceHeaderHandler` holds `followUp`, the default `followUpFlows()` (empty) and `isStandardInvoiceDocType` (the handler's own `classifyDocType` → `FAC`). `SalesInvoiceHeaderHandler` registers `FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT, new InvoicePendingResolver(Direction.SALES, this::isStandardInvoiceDocType), new InOutFollowUpCreator(Direction.SALES, InvoiceInOutMapping::map, InvoiceInOutMapping.linker(Direction.SALES)))`, `PurchaseInvoiceHeaderHandler` the `PURCHASE`/`GOODS_RECEIPT` twin. Endpoints: `POST /sws/neo/sales-invoice/header/{id}/action/createShipment`, `POST /sws/neo/purchase-invoice/header/{id}/action/createGoodsReceipt` (names match the order-side actions). The former `CreateInvoiceShipmentHandler` (guarded by `"sales-invoice".equals(specName)`) was removed.
+
+  **Invoice verdict and pending** (`InvoicePendingResolver.pendingSql`, one statement per page). First failing rule wins: wrong `IsSOTrx` → `WRONG_DIRECTION`; not `CO` → `NOT_COMPLETED`; not `FAC` → `NOT_ELIGIBLE_TYPE`; no line with pending > 0 → `NOTHING_PENDING`. Candidate lines: active, with product and UOM, `QtyInvoiced > 0`, services included (bin only when `IsStocked='Y'` and `ProductType='I'`, decided by `InvoiceInOutMapping` through `InOutLineFromOrderFactory.isStockable`, not by the pending SQL), the Total Discount product (`ETGO_DTO`) excluded by id. Per line:
+  ```
+  moved        = SUM(MovementQty) over the DISTINCT movement lines linked through
+                 C_InvoiceLine.M_InOutLine_ID ∪ M_MatchSI / M_MatchInv; voided and return doc types
+                 excluded; DRAFT movements COUNT (the invoice resolver's draft rule)
+  own          = max(0, QtyInvoiced - moved)
+  orderPending = QtyOrdered - QtyDelivered - SUM(MovementQty of DRAFT non-return movement lines on
+                 the same order line)                   -- upstream cap, only with C_OrderLine_ID
+  remaining    = orderPending - SUM(own of the PRECEDING lines of the same invoice on the same
+                 order line, ordered by Line, C_InvoiceLine_ID)          -- window function
+  pending      = max(0, min(own, remaining))
+  ```
+  **The order cap is shared, not per line.** Two invoice lines on one order line split what the order line still has open, in line order: order line of 10 with 4 delivered and invoice lines 5 + 5 → 5 + 1, not 5 + 5 (each line capped by the whole remainder would over-receive silently on the purchase side, where there is no `MovementQtyCheck`). Verified on real data (invoices with sibling lines on one order line, all fully moved, still read 0) and on the review's scenario.
+  Each movement line counts once per invoice line however it is reached (an invoice line matched twice to the same movement line does not read as double-moved). The movement line's own `MovementQty` is used, as Classic's "create lines from invoice" does — a match row written at draft time freezes a quantity the user may still edit. Within one invoice the result never exceeds what the order line still has open (the shared cap above) nor what the invoice line itself has not moved; a movement line split across several invoices counts in full for each, which can under-state pending. Movement header (`InvoiceInOutMapping.map`): the invoice's BP, address, currency, organization; warehouse as in *Movement warehouse* below, with the invoice's order (else the first carried line's order that has a warehouse) as the source's own warehouse; `C_Order_ID` = the invoice's order, else the single order all carried lines share.
+
+  **Movement warehouse** (`InOutWarehouseResolver.resolve`, ETP-5576). First match wins; nothing is persisted before it, so every rejection leaves nothing behind:
+  1. the request body's `warehouseId`, when present — **validated, never trusted**: it must exist, be active, belong to the source's client, be *usable* by the source's organization and be readable by the caller (`OBContext.getReadableOrganizations()`); otherwise `FOLLOW_UP_INVALID_INPUT` (400). It overrides steps 2–4;
+  2. the warehouse the source designates (invoice: its order's, else the first carried line's order's), as before;
+  3. the caller's **default warehouse** — `OBContext.getWarehouse()`, the same value NEO exposes as `#M_Warehouse_ID` (`NeoCalloutService.buildVars`) and that the `@#M_Warehouse_ID@` default of the goods receipt / goods shipment `warehouse` field resolves to when a user creates the document by hand (the token's `m_warehouse_id` claim, else the user's `Default_M_Warehouse_ID`, see `OBContext` initialization) — when *usable*;
+  4. the **only** usable warehouse of the client, when there is exactly one;
+  5. several usable → `FOLLOW_UP_WAREHOUSE_REQUIRED` (409) with the usable warehouses (by name) as `input.options`; none → `FOLLOW_UP_MISSING_SETUP`. It never picks one of several: the former fallback ("first active warehouse of the invoice's exact organization") both missed warehouses defined in a parent organization such as `*` (a tenant whose warehouses all live in `*` always failed with `MISSING_SETUP`) and would have chosen arbitrarily among several.
+
+  *Usable* = active, of the source's client, in the **natural tree** of the source's organization plus `*` (`OrganizationStructureProvider.getNaturalTree(org)` + `"0"`), and readable by the caller (`OBContext.getReadableOrganizations()`). This is the same organization rule NEO's selectors apply (`SelectorOrgFilter`), so the usable set is exactly what the user could pick by hand in the `warehouse` selector of a goods receipt / shipment. The context default is re-read from the session (`OBDal.get`) before its active flag is checked. The storage bin stays anchored to the chosen warehouse: a stockable line needs an active bin there, otherwise `MISSING_SETUP`. The GET annotation is unchanged — the warehouse choice is only asked when the POST needs it, so `followUp.<key>.needed` never reads `WAREHOUSE_REQUIRED`.
+
+  **Linking (`InvoiceLineLinker.linkInvoiceLineToInOutLine`)**, pair-wise, same rule both directions: invoice line without `M_InOutLine_ID` → set it and write no match row (`M_INOUT_POST` creates it at completion with the final quantity: unconditionally in the purchase `M_MatchInv` loop — a draft-time row would be duplicated — and with a `NOT EXISTS` guard in the sales `M_MatchSI` loop); invoice line already linked to another movement line (second partial movement) → insert the match row now, idempotently, Classic's `insertMatchSI`/`insertMatchInv`. Native SQL on the completed invoice (`C_INVOICELINE_TRG` lets a link-only update through); match rows cascade-delete with the movement line, the column is `ON DELETE SET NULL`.
+
+  **Related documents, both directions.** `linkedShipments` / `linkedReceipts` (invoices) and `linkedInvoices` (goods shipment / receipt) now also read the match table, via `InOutInvoiceLinks.linkedInOutLineIdsSql` / `linkedInvoiceIdsSql`, so a second partial movement shows on both sides. The two pre-existing arms are unchanged — including the movement-side order-line arm, which still over-links an invoice line already linked to another movement (known, left as it was).
+
+  **Concurrency and access.** `lockSource` takes `FOR UPDATE` on the invoice row, then on every order line its lines come from, in `C_OrderLine_ID` order — so two invoices of the same order line serialise on the shared cap, and overlapping lock sets are always acquired in the same sequence (no deadlock between two follow-ups). The order-line lock can still deadlock against a concurrent `M_INOUT_POST` that updates `C_OrderLine` in its own order; PostgreSQL detects the deadlock, aborts one side, and this request then returns the generic 500 — acceptable, the user retries. Before anything runs in admin mode, `FollowUpActionHandler` checks the record with `TenantOwnership.loadOwned` (readable clients and organizations of the role): the router only checks the role's access to the spec's window for the method (`NeoRequestRouter#handleWindowSpecRequest`), not that the record id belongs to the caller's tenant. Another tenant's invoice answers `FOLLOW_UP_SOURCE_NOT_FOUND`, like a missing one. The FAC check that gates the write (`isStandardInvoiceDocType`) fails **closed** on a lookup error, unlike the display-only `resolveSubtype`, which keeps failing open to `FAC`.
+
+  **Match rows for 2nd+ partial movements and the delivery status.** A second or later partial movement keeps Classic's draft-time match row (`M_MatchSI`/`M_MatchInv` written when the draft is created, because `C_InvoiceLine.M_InOutLine_ID` already points elsewhere and `M_INOUT_POST` will not create one). So that a draft is not reported as delivered, `ETGO_GET_DELIVERY_STATUS` (behind the virtual column `C_Invoice.EM_ETGO_Delivery_Status`) counts only match rows whose movement is `CO` or `CL`. Voided movements are excluded too: before, a voided movement's original and reversal match rows were both summed through `ABS(qty)`, overstating delivery (no such rows exist today). A match row is also never trusted beyond what its movement line actually moved: core can insert a match whose `qty` exceeds the movement line (an invoice created with *Add from order* for 10 units, matched against a completed shipment line that moved 4, gets `M_MatchSI.qty = 10`, and the invoice read *Delivered 100%* instead of 40%). The function therefore aggregates the match rows of both tables per `M_InOutLine` first and caps each aggregate at `ABS(M_InOutLine.MovementQty)`, so several match rows of the same invoice line on the same movement line cannot together exceed it; the per-invoice-line cap at `ABS(QtyInvoiced)` still applies on top. **Known limitation:** matches from *different* invoice lines or invoices on the same movement line are not capped across them — e.g. one shipment line that moved 1 unit is matched by both FV1000003 and FV1000006, and each still reads 100%. Splitting one movement across several invoices would need an allocation rule, which is out of scope. Being a virtual (`SQLLogic`) column it is computed at read time — completing the movement is reflected immediately, no stored-column refresh involved. **Known risk, not addressed here:** an `M_MatchInv` row pointing at a DRAFT receipt line is an accountable record (`DocMatchInv`, `Processed='Y'`, `Posted='N'`); whether the accounting server can post it before the receipt is completed has not been verified.
+
+  **Channels.** REST action, MCP `neo_action` (`McpHookExecutor.buildActionHookContext` builds the same ACTION/POST context, its `params` being the request body, so `warehouseId` is accepted there too) and the GET annotation on `neo_get`/`neo_list` all go through the same handler. No divergence to declare in §4.12.9.
+
 **Real-world example — `FinancialAccountTransactionsHandler` field-acceptance by movement state (ETP-4500, tightened by ETP-4879):** `schemaforge/FinancialAccountTransactionsHandler.java` (wired on the `financial-account-transactions` entity) restricts which fields an `update` actually persists, keyed off the transaction's own `Processed`/`Posted` state rather than the request body's shape — `handleUpdate` dispatches to one of two private appliers:
 
 | State | Applier | Fields persisted |
@@ -4539,7 +4656,7 @@ private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "
 
 **Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
 
-**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a THIRD pre-hook concern, `applyRoleFilter`, alongside the existing `excludeContactOnlyUsers` (ETP-5019) — both run unconditionally on every `user` list fetch, in `handle()`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
+**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a role filter, `buildRoleFilter`, alongside the existing contact-only exclusion `buildContactOnlyExclusion` (ETP-5019) — both are declared as `readPredicates` (ETP-5568; until then they were injected from `handle()` as `_neoWhere`, see below), so they apply to every `user` list read: list, count, paging, `?_distinct=` and MCP `neo_list`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
 
 | Query param | Meaning |
 |---|---|
@@ -4584,17 +4701,14 @@ and (e.defaultRole is null or e.defaultRole.id <> '<clientAdminRoleId>')
 already uses) and simply omitted from the predicate — never inlined as a literal `null` — when it
 cannot be resolved.
 
-**Injection mechanism and id sanitization.** Both predicates are injected as an HQL `_neoWhere`
-predicate (`NeoCrudHelper.NEO_WHERE_PARAM`, the exact same query-param mechanism
-`excludeContactOnlyUsers` already uses on this same list `GET`) — combined with any EXISTING
-`_neoWhere` predicate (from `excludeContactOnlyUsers` or elsewhere) via `and`, while `RoleIds` and
-`NoRole` combine with `or` BETWEEN themselves (two chips of the same multi-select filter, not two
-independent filters). `RoleFilterNegate`, when present, wraps that `or`-joined combination in one
-outer `not (...)` — applied AFTER the combination is built and BEFORE it is merged into any existing
-`_neoWhere` predicate.
+**Mechanism and id sanitization.** Both predicates are returned from
+`UserRoleAssignmentHandler#readPredicates` (§ "Read predicates", ETP-5009) — ANDed with the
+contact-only exclusion, while `RoleIds` and `NoRole` combine with `or` BETWEEN themselves (two chips
+of the same multi-select filter, not two independent filters). `RoleFilterNegate`, when present,
+wraps that `or`-joined combination in one outer `not (...)` — applied AFTER the combination is built
+and BEFORE it is ANDed with the other predicates.
 
-`NEO_WHERE_PARAM` has **no bind-parameter mechanism** — `NeoCrudHelper#buildWhereClause` splices the
-predicate string into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
+A read predicate has **no bind-parameter mechanism** — it is spliced into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
 therefore validated against `^[A-Fa-f0-9]{32}$` (`sanitizeRoleIds`, Etendo AD ids are 32 hex chars,
 case-insensitive) before being spliced in — an entry that doesn't match is logged at WARN and
 silently dropped rather than reaching the HQL string unescaped, so one malformed id in `RoleIds`
@@ -4603,16 +4717,27 @@ and needs no sanitization — it only decides whether to prepend the literal `"n
 parsed with the same strict `"true"`-only (case-insensitive), anything-else-is-absent convention
 `NoRole` already uses.
 
-**No-op contract.** `applyRoleFilter` returns immediately, touching nothing, when both `RoleIds` is
+**`_neoWhere` is gone (ETP-5568).** It was a query param that `NeoCrudHandler#applyWhereClause`
+ANDed verbatim into the list HQL. It was meant to be written only by hooks, but `buildDalParams`
+copies every query-string param, so any authenticated caller could append raw HQL to any REST list
+(subqueries included, so a boolean oracle over any table). Its one legitimate user was this handler;
+with both predicates moved to `readPredicates` nothing reads it any more. `buildDalParams` also drops
+`whereAndFilterClause` and `_where` from the query string — core reads both as raw HQL, and the
+first one used to pass straight through whenever NEO had no where clause of its own to set. The
+where clause of a REST read is now built only by the server: the tab where, the parent filter and
+the read predicates. A customization that needs to restrict a list declares `readPredicates`.
+
+**No-op contract.** `buildRoleFilter` declares no predicate when both `RoleIds` is
 empty/absent AND `NoRole` is absent — regardless of `RoleFilterNegate` (negating an empty/no-op
 filter would otherwise wrongly match every user). Every other `user` entity concern in this class
-(the invitation flow above, the write-path guards, `excludeContactOnlyUsers`) is unaffected — this
+(the invitation flow above, the write-path guards, the contact-only exclusion) is unaffected — this
 is purely additive to the list `GET` path.
 
-*As of this writing, `applyRoleFilter`/`sanitizeRoleIds`/`buildComposedOrDirectPredicate`/
-`buildNoRolePredicate` have no dedicated unit test in `UserRoleAssignmentHandlerTest` — this feature
-was verified live/manually against `localhost:3100` instead (see `etendo_schema_forge`'s
-`docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live verification performed").*
+*`UserRoleAssignmentHandlerTest` covers the predicates through `readPredicates` (`RoleIds`
+sanitization, `NoRole`, `RoleFilterNegate`, the contact-only exclusion and its owner literal) since
+ETP-5568. The original ETP-5188 rollout was verified live against `localhost:3100` (see
+`etendo_schema_forge`'s `docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live
+verification performed").*
 
 #### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
 
@@ -4657,7 +4782,7 @@ Each string is a complete HQL boolean expression over the alias `e`. `NeoReadPre
 
 | Read | Applied | Where |
 |---|---|---|
-| REST list `GET /sws/neo/{spec}/{entity}` (and its `totalRows`, paging, `export=csv\|xlsx`) | yes | `NeoCrudHandler#buildDalParams` → `applyWhereClause`, after the tab where, the parent filter and `_neoWhere` |
+| REST list `GET /sws/neo/{spec}/{entity}` (and its `totalRows`, paging, `export=csv\|xlsx`) | yes | `NeoCrudHandler#buildDalParams` → `applyWhereClause`, after the tab where and the parent filter |
 | REST `GET …?_distinct=<field>` (the filter-value picker) | yes | `NeoCrudHandler#handleDistinctFetch` |
 | MCP `etendo_list` | yes | `McpToolRouter#handleList`, after the filters and the tab where |
 | Read by id (REST `GET …/{id}`, REST `GET …?id=<id>`, MCP `etendo_get`) | **no** | core's `DefaultJsonDataService.fetch` resolves an id with its own `id = :bobId` query and ignores the where clause |
@@ -4670,7 +4795,7 @@ So there is no channel divergence to declare: list, count and distinct agree on 
 **Why the post-filter was wrong.** Core cuts the page (`LIMIT`/`OFFSET`) and counts `totalRows` before `afterHandle` sees the rows, so removing rows there returns short or empty pages and a wrong count. Worse, the `?_distinct=` fetch short-circuits in `handleWindowEntityCrud` and never reaches `afterHandle` at all, so it kept offering values only the hidden rows carried: the Product window's Categoría filter offered the internal "Discounts" category, and its Tipo filter offered "Servicio", both carried only by the hidden `ETGO_DTO` product — selecting either gave an empty grid. The distinct fetch still runs no pre/post hook; it applies the predicates only.
 
 **Contract.**
-- **Server-side constants only.** The predicate is spliced into the HQL text verbatim — there is no bind-parameter mechanism, the same limitation `_neoWhere` has (§5.3, ETP-5188). Never build one from request input; a value the server resolved itself must be shape-validated before it is inlined.
+- **Server-side constants only.** The predicate is spliced into the HQL text verbatim — there is no bind-parameter mechanism, (§5.3, ETP-5188). Never build one from request input; a value the server resolved itself must be shape-validated before it is inlined.
 - **Stateless.** It is resolved on its own instance through `NeoExtensionDispatcher.resolveOnly` (annotation first, `Java_Qualifier` second, the channel's own resolver), separately from the instance that runs `handle`/`afterHandle`. Per-request state set by those is not visible to it.
 - **Fails closed on a throwing predicate — but not on a failed resolution.** A `readPredicates` implementation that throws is not swallowed: the list answers 500 and `_distinct` answers 500 ("Failed to compute distinct values"), rather than silently returning the rows it was meant to hide. Resolving the customization is a different matter and **fails open**: on REST the `Java_Qualifier` fallback goes through `NeoServletSupport.lookupHandler`, which logs and returns `null` when no handler matches or the CDI lookup throws ("No NeoHandler found with @Named(...)" at WARN, "Failed to lookup handler with qualifier" at ERROR). A `null` customization declares no predicate, so the read proceeds unrestricted — the same outcome as an entity with no customization at all, and the same outcome `handle`/`afterHandle` already get from that lookup. Bind new read predicates with `@NeoExtension` (resolved by `NeoExtensionIndex` first) and watch for those log lines; a hidden row reappearing in a list is the symptom.
 - **Readable client/org filtering is untouched.** The predicate is ANDed onto whatever core and `OBQuery` already apply; it can only narrow a read.
@@ -4698,6 +4823,38 @@ The servlet resolves the parent-child relationship using Etendo's built-in utili
 The generated HQL fragment is injected as a `whereAndFilterClause` parameter into the wrapped request passed to the DataSourceServlet. The `tabId` and `windowId` are also always passed so that the DataSourceServlet applies any tab-level HQL where clauses defined in the AD.
 
 Tabs with `DisableParentKeyProperty = Y` skip parent filtering.
+
+### 6.1 Default order of child-tab lists (ETP-5611)
+
+A child-tab list (`tabLevel > 0`) that arrives with **no** `_sortBy`/`_orderBy` is ordered by the
+AD tab's `HQL_OrderBy_Clause` — the order Classic always showed (`lineNo` on every document-lines
+tab). Before ETP-5611 NEO ignored that clause, so `DefaultJsonDataService` fell back to `id` —
+random UUIDs — and lines came back in an arbitrary order that visibly jumped after a save (most
+visible on Manual Journals, where entry order matters).
+
+Implemented in `NeoTabDefaultSort` and applied by both channels, so they agree:
+
+- REST: `NeoCrudHandler.buildDalParams`, list `GET` only (no record id).
+- MCP: `McpToolRouter` `neo_list`, when the call passes no `orderBy`.
+
+Rules:
+
+- An explicit sort always wins: a `_sortBy`/`_orderBy` query param, MCP `orderBy`, or a handler
+  pre-hook default (e.g. `ProductCostingHandler`).
+- An aggregate request (`_summary`) never gets the default: an `order by` on a plain column breaks
+  an aggregate query.
+- Only a plain comma-separated list of property paths is used: an `e.` prefix, a leading `-` or a
+  trailing `asc`/`desc` is accepted and normalised to `_sortBy` syntax (`e.a desc, b` → `-a,b`).
+- Every path must exist on the DAL entity (case-sensitive, walked through many-to-one targets;
+  an empty segment such as `a..b` is rejected).
+  Any unusable term — a function (`abs(debit) desc`), a foreign alias (`fa.type`, `trx.movementDate`),
+  a stale or Classic-only name (`Debit`, `sEQNoAsset`) — skips the **whole** clause and the list
+  keeps the old id order. A bad clause can never turn a working list into a 500.
+- `DefaultJsonDataService` still appends `,id`, so ties stay deterministic.
+- Unpaginated child lists are capped at 100 rows (`applyPaginationDefaults`), so on a long tab the
+  change also decides **which** 100 rows come back.
+
+The criterion is AD structure (tab level and tab metadata), never entity identity.
 
 ---
 
@@ -4824,6 +4981,13 @@ NEO Headless enforces security at multiple levels:
 **Known limitations (ETP-4596):** one report spec — `tax-report` — is wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so it still hits `hasReportSpecAccess`'s permissive fallback and remains reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on its process/window mapping (pending, tracked separately); once linked, it gates with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
 
 **`inventory-stock-report` is no longer on this list — resolved by a still-later ETP-5116 pass.** Same underlying gap as above (no `AD_Process`, no `AD_TAB_ID`, so `hasReportSpecAccess`'s discovery-listing fallback still applies), but this one was confirmed over-permissive in **production** — every authenticated role, including ones that should have none, could retrieve this data — so it was closed at the handler level directly rather than waiting on the generic mechanism: a brand-new pseudo-`AD_Window` (`6346B88619F948F9A42224BDB0B239FA`, 0 tabs, permission anchor only) was created, `TemplateRoleWindowAccess` grants it to Compras/Financiero/Almacén (not Ventas), and `InventoryStockReportHandler#handle` now calls `NeoAccessHelper.hasWindowAccess` on that window id explicitly at the top of the method — a real, explicit gate, not a proxy hoping the discovery-listing fallback happens to line up. The MCP tool-discovery/listing path is unaffected (still permissive, a separate and smaller informational-leak issue, tracked separately) — only the actual data-serving `handle()` call is now denied.
+
+**Fiscal models (`fiscal303`/`fiscal349`/`fiscal-models-catalog`) had NO access control at all until ETP-5546.** Unlike the two gaps above, these endpoints aren't report specs — `AbstractFiscalHandler` is a plain `NeoHandler`, so none of the `hasReportSpecAccess`/discovery-listing machinery in items 4/6 above ever applied to them, and nothing else filled the gap either: any authenticated role got `200` from `GET /fiscal303/declarations`, `GET /fiscal303/boxes`, `POST /fiscal303/submit`, `GET /fiscal349/boxes` and `POST /fiscal349/validate-vies` regardless of whether its role held the "Modelos Fiscales" grant. "Modelos Fiscales" access is represented in `AD_Window_Access` by the role's grant on the Tax Report window (`NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID = 3E8FEA1EA7404D979306C9EE7FD2E7E8`, proxy per ETP-5116 — only the Finanzas template grants it), the same convention as the other window-grant proxies in this section — but prior to ETP-5546 nothing ever checked it for these entities. Fixed with two gates, both calling the same item-3 helper (`NeoAccessHelper.hasWindowAccess(TAX_REPORT_WINDOW_ID, httpMethod)`, tiered read/write exactly as in item 3):
+
+- `AbstractFiscalHandler.handle(String entityName, String method, HttpServletRequest, HttpServletResponse)` — the single entry point every `/fiscal303/*` and `/fiscal349/*` sub-route funnels through (`declarations`, `incidents`, `boxes`, `submit`, `modified`, `validate-vies`) — now checks access as the very first thing it does, before any entity routing. A denied request gets `403 Forbidden` ("Access denied") regardless of which sub-route it named.
+- `NeoBuiltInEndpointHandler.handleFiscalModelsCatalogEndpoint` — `GET`/`PUT /sws/neo/fiscal-models-catalog` isn't routed through `AbstractFiscalHandler` at all, so it needed its own, separate call to the same helper at the top of the method.
+
+The Go SPA's corresponding fix (`tools/app-shell/src/windows/custom/fiscal-models/index.jsx` in `etendo_schema_forge`) gates the `/fiscal-models` route itself on the same window id via `useWindowAccess`/`WindowAccessGuard` — the sidebar already hid the entry for a role without the grant, but before ETP-5546 the route rendered fully on direct navigation regardless of role. See that repo's `docs/generated-custom-windows/fiscal-models.md` for the frontend side.
 
 **Document-number writes at org `*` — the one deliberate, scoped bypass of item 2 (ETP-5230):** item 2 above says every DAL query respects the user's organization access. One narrow class of write cannot: bumping a document-number sequence. Every fixed GO role and every per-user personal composition role carries `AD_Role.UserLevel = "  O"` (`SystemRoleTemplates#FIXED_ROLE_USER_LEVEL`), and core's `OBContext#setWritableOrganizations` removes `"0"` from the writable-organization set of any role at exactly that level — silently, and regardless of the role actually holding `AD_Role_OrgAccess` to `*`. Meanwhile every document sequence the onboarding dataset ships lives at org `*`. The APRM numbering path (`FIN_Utility#getDocumentNo` → `Fin_UtilityLegacy#incrementSeqIfUpdateNext`) increments the counter through the DAL, so the write is security-checked and rejected with `Organization 0 of object (ADSequence(…)) is not present in OrganizationList […]`. Net effect before the fix: no invited user could reconcile, register a payment or close a cash drawer — only the tenant owner, whose role ships `" CO"` and therefore keeps `"0"`. Classic's own equivalent flows are still affected; only GO's five call sites are covered.
 
@@ -6759,6 +6923,7 @@ check above), the response carries a `session` object alongside the token:
     "roleList": [{
       "id": "...",
       "name": "...",
+      "isClientAdmin": false,
       "orgList": [{ "id": "...", "name": "..." }],
       "effectiveRoleNames": ["Finance", "Sales"]
     }]
@@ -6790,6 +6955,15 @@ role's own `name` in that case. A template role id with no matching (active) `Ro
 or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — is silently skipped
 (logged as a `warn`, not thrown), so `effectiveRoleNames.length` can be smaller than the number of
 composed template roles; the array is never padded or nulled out for a single unresolved entry.
+
+**`isClientAdmin` (ETP-5329, QA follow-up).** Every `roleList` entry carries a boolean
+`isClientAdmin` (`AD_Role.Is_Client_Admin = 'Y'`) wherever `roleList` is returned — login,
+`SFRefreshToken`, `GET /sws/go/session` and `POST /sws/go/session/environment` alike, since all of
+them build the list through `EtendoGoJwtSupport.loadRoleListData`. It exists because a tenant
+admin's default role IS the client-admin `AD_Role` itself: it has no composed templates (so no
+`effectiveRoleNames`) and its raw `name` is tenant-specific (`"<Company> Admin"`). Frontends must
+check it first and render the localized "Administrator" label (`roleNameAdmin`), the same one
+Settings > Users shows — precedence: `isClientAdmin` → `effectiveRoleNames` → `name`.
 
 The `currentRole == null` case is UNCHANGED: the response stays the bare
 `{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still

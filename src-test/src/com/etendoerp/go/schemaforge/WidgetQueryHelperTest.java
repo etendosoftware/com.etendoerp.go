@@ -45,6 +45,8 @@ import org.junit.jupiter.params.provider.ValueSource;
  * Unit tests for {@link WidgetQueryHelper}.
  * Tests the pure utility methods (rangeToSqlDateFrom, buildDataResponse) that
  * don't require database mocking.
+ *
+ * @covers com.etendoerp.go.schemaforge.WidgetQueryHelper
  */
 class WidgetQueryHelperTest {
 
@@ -205,6 +207,34 @@ class WidgetQueryHelperTest {
     @ValueSource(strings = { "last30d", "last90d", "lastYear" })
     void prevToMatchesCurrentDateFromForRollingRanges(String range) throws Exception {
       assertEquals(invokeRangeToSqlDateFrom(range), invokeRangeToSqlPrevTo(range));
+    }
+  }
+
+  @Nested
+  @DisplayName("day-aligned rolling bounds (ETP-5493)")
+  class DayAlignedBounds {
+
+    /**
+     * dateinvoiced is a timestamp; a raw NOW() - INTERVAL bound carries the current time of day and
+     * made the kpis count boundary-day invoices the trend dropped. Every rolling bound (current
+     * from, previous from, previous to) must be rounded up to the first midnight.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "last30d", "last90d", "lastYear", "custom" })
+    void rollingBoundsAreRoundedUpToTheFirstMidnight(String range) throws Exception {
+      for (String expr : new String[] { invokeRangeToSqlDateFrom(range),
+          invokeRangeToSqlPrevFrom(range), invokeRangeToSqlPrevTo(range) }) {
+        assertTrue(expr.startsWith("CASE WHEN date_trunc('day', NOW() - INTERVAL"), expr);
+        assertTrue(expr.contains(" + INTERVAL '1 day' ELSE date_trunc('day', NOW() - INTERVAL"), expr);
+        assertTrue(expr.endsWith(") END"), expr);
+      }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "mtd", "ytd" })
+    void calendarStartsAreAlreadyMidnightAndStayUntouched(String range) throws Exception {
+      assertFalse(invokeRangeToSqlDateFrom(range).contains("CASE"));
+      assertFalse(invokeRangeToSqlPrevFrom(range).contains("CASE"));
     }
   }
 
