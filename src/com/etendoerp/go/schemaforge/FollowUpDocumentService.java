@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -139,9 +140,10 @@ final class FollowUpDocumentService {
         ids.add(id);
       }
     }
+    // A null element marks a flow whose lookup failed (see unavailabilityReason).
     List<Map<String, PendingResolver.Source>> verdicts = new ArrayList<>(flows.size());
     for (FollowUpFlow flow : flows) {
-      verdicts.add(loadForAnnotation(flow, ids));
+      verdicts.add(loadForAnnotation(flow, ids).orElse(null));
     }
     for (int i = 0; i < dataArr.length(); i++) {
       annotateRecord(dataArr.getJSONObject(i), flows, verdicts);
@@ -156,13 +158,14 @@ final class FollowUpDocumentService {
    * failure to this flow's key (ETP-5576 review W3). The create path does not use this: there
    * a failure must abort the request.
    *
-   * @return the verdicts, or {@code null} when the lookup failed (the page reads
-   *     {@value #REASON_LOOKUP_FAILED} for this flow)
+   * @return the verdicts, or empty when the lookup failed (the page reads
+   *     {@value #REASON_LOOKUP_FAILED} for this flow) — distinct from an empty map, which means
+   *     the lookup succeeded and found nothing
    */
-  private static Map<String, PendingResolver.Source> loadForAnnotation(FollowUpFlow flow,
-      List<String> ids) {
+  private static Optional<Map<String, PendingResolver.Source>> loadForAnnotation(
+      FollowUpFlow flow, List<String> ids) {
     if (ids.isEmpty()) {
-      return Collections.emptyMap();
+      return Optional.of(Collections.emptyMap());
     }
     Connection conn = null;
     Savepoint savepoint = null;
@@ -171,12 +174,12 @@ final class FollowUpDocumentService {
       savepoint = conn.setSavepoint();
       Map<String, PendingResolver.Source> verdicts = flow.loadSources(ids);
       conn.releaseSavepoint(savepoint);
-      return verdicts;
+      return Optional.ofNullable(verdicts);
     } catch (Exception e) {
       rollbackTo(conn, savepoint);
       log.error("Could not compute follow-up '{}' for {} record(s); annotating needed=false",
           flow.target().getKey(), ids.size(), e);
-      return null;
+      return Optional.empty();
     }
   }
 
