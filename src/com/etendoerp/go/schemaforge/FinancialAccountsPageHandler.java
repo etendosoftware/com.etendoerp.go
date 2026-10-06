@@ -66,7 +66,8 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  *           "currencyIso": "EUR",
  *           "iban": "ES12...",
  *           "isDefault": true,
- *           "pendingCount": 4
+ *           "pendingCount": 4,
+ *           "lastSyncDate": "2026-10-06T09:15:00Z"
  *         },
  *         ...
  *       ],
@@ -132,7 +133,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // and from the account detail page — so without this column there was nothing to echo
           // and every save through it 400'd with `missing_updated`, exactly as it did on
           // ChartOfAccountsHandler's own bypass-the-generic-service path.
-          + "       fa.updated "
+          + "       fa.updated, "
+          // Appended at the END for the same positional-read reason as the columns above
+          // (ETP-5582). Written by the PSD2 module after each successful sync; NULL until the
+          // account has synced once.
+          + "       fa.em_psd2_last_sync_date "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -364,6 +369,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // null, when there is no value — this row's serialiser distinguishes the two.
           String auditToken = NeoDateFormat.toAuditToken(rs.getTimestamp(24));
           row.updated = auditToken != null ? auditToken : "";
+          // Left null when the account never synced (ETP-5582): the UI shows "never synced".
+          row.lastSyncDate = rs.getTimestamp(25);
           rows.add(row);
         }
       }
@@ -454,6 +461,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       // transfer picker (useFinancialAccounts) read this flat name. Only the W spec's generic
       // CRUD, which derives its keys from the AD column, exposes it as `eTGOPendingCount`.
       json.put("pendingCount", account.pendingCount);
+      // Explicit JSONObject.NULL: a plain put(key, null) would REMOVE the key, and the UI needs
+      // to tell "never synced" (null) apart from an old response without the field (ETP-5582).
+      json.put("lastSyncDate", account.lastSyncDate != null
+          ? FinancialAccountBankConnectionSupport.formatInstant(account.lastSyncDate)
+          : JSONObject.NULL);
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
       // JSONObject.put(String, Object) with null REMOVES the key, which is exactly what we want:
@@ -566,6 +578,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
      * the loader; 0 both when nothing is pending and when the engine has not populated the row yet.
      */
     int pendingCount = 0;
+    /**
+     * Last successful bank sync ({@code EM_PSD2_Last_Sync_Date}, ETP-5582), written by the PSD2
+     * module. {@code null} when the account never synced. Set by the loader.
+     */
+    java.util.Date lastSyncDate = null;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */

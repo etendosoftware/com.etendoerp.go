@@ -102,6 +102,8 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  *   <li>delete: hard delete → 204; blockers → 409; missing id → 400; unknown
  *       account → 404 (ETP-5474).</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerTest {
@@ -1903,6 +1905,8 @@ public class FinancialAccountHandlerTest {
     FinancialAccountsPageHandler.AccountRow loaded2 = accountRow("acc-2", "0.00", "100", "USD", false);
     loaded2.active = false;
     loaded2.maskedPan = "**** 4321";
+    loaded1.lastSyncDate = java.util.Date.from(java.time.Instant.parse("2026-10-05T10:30:00Z"));
+    // loaded2.lastSyncDate stays null — never synced, must serialise as JSON null (key kept).
     // loaded2.country stays null — a Cash/never-set-up account, exercising the "" fallback below.
 
     Map<String, Integer> pending = new LinkedHashMap<>();
@@ -1933,8 +1937,12 @@ public class FinancialAccountHandlerTest {
       assertEquals("106", first.getString("countryId"));
       assertEquals("ES", first.getString("countryIso"));
       assertEquals("Spain", first.getString("countryName"));
+      assertEquals("2026-10-05T10:30:00Z", first.getString("lastSyncDate"));
 
       JSONObject second = outArr.getJSONObject(1);
+      assertTrue("lastSyncDate key is present for a never-synced account",
+          second.has("lastSyncDate"));
+      assertTrue("never synced serialises as JSON null", second.isNull("lastSyncDate"));
       assertFalse("account without transactions leaves the Currency field editable",
           second.getBoolean("hasTransactions"));
       assertFalse("not injected for any row, pending or not", second.has("pendingCount"));

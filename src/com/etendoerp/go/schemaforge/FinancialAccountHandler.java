@@ -150,6 +150,7 @@ public class FinancialAccountHandler implements NeoHandler {
    * --------------------------------------------------------------------------- */
   /** {@code EM_PSD2_Connection_Status = 'CO'} — drives the "Sincronizado / Sin conexión" badge. */
   private static final String FIELD_BANK_CONNECTED = "bankConnected";
+  private static final String FIELD_LAST_SYNC_DATE = "lastSyncDate";
   /** Soft-disconnected but still linked to Salt Edge — drives the "Reconectar" action. */
   private static final String FIELD_BANK_RECONNECTABLE = "bankReconnectable";
   /** {@code PSD2_Provider.Logo_Url} of the connected provider; blank when there is none. Also the
@@ -535,6 +536,9 @@ public class FinancialAccountHandler implements NeoHandler {
       return null;
     }
     rec.put(FIELD_BANK_CONNECTED, row.bankConnected);
+    rec.put(FIELD_LAST_SYNC_DATE, row.lastSyncDate != null
+        ? FinancialAccountBankConnectionSupport.formatInstant(row.lastSyncDate)
+        : JSONObject.NULL);
     rec.put(FIELD_BANK_RECONNECTABLE, row.bankReconnectable);
     rec.put(FIELD_PROVIDER_LOGO_URL, row.providerLogoUrl);
     rec.put(FIELD_BANK_CONNECTION_PENDING, row.bankConnectionPending);
