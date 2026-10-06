@@ -37,6 +37,7 @@ import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -78,6 +79,8 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
  *
  * Covers HTTP routing validation only — DB-dependent methods
  * (computeOperators, handleGenerate) are integration-tested separately.
+ *
+ * @covers com.etendoerp.go.schemaforge.Fiscal349BoxesHandler
  */
 public class Fiscal349BoxesHandlerTest {
 
@@ -629,52 +632,71 @@ public class Fiscal349BoxesHandlerTest {
 
   // ── buildInvoiceRow (pure logic) ──────────────────────────────────
 
+  private static Date day(String yyyyMmDd) throws Exception {
+    return new SimpleDateFormat("yyyy-MM-dd").parse(yyyyMmDd);
+  }
+
+  private static Invoice invoice(String id, String docNo, String amount) {
+    Invoice inv = mock(Invoice.class);
+    when(inv.getId()).thenReturn(id);
+    when(inv.getDocumentNo()).thenReturn(docNo);
+    when(inv.getSummedLineAmount()).thenReturn(amount != null ? new BigDecimal(amount) : null);
+    return inv;
+  }
+
+  private static Map<String, Map<String, BigDecimal>> keyBases(String invId, String... keyAndBase) {
+    Map<String, BigDecimal> bases = new LinkedHashMap<>();
+    for (int i = 0; i < keyAndBase.length; i += 2) {
+      bases.put(keyAndBase[i], new BigDecimal(keyAndBase[i + 1]));
+    }
+    Map<String, Map<String, BigDecimal>> m = new HashMap<>();
+    m.put(invId, bases);
+    return m;
+  }
+
   @Test
   public void testBuildInvoiceRowFullInvoice() throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
     BusinessPartner bp = mock(BusinessPartner.class);
     when(bp.getName()).thenReturn("ACME");
     when(bp.getTaxID()).thenReturn("B1");
-    Invoice inv = mock(Invoice.class);
-    when(inv.getId()).thenReturn("inv-1");
+    Invoice inv = invoice("inv-1", "INV-1", "-123.456");
     when(inv.getBusinessPartner()).thenReturn(bp);
-    when(inv.getSummedLineAmount()).thenReturn(new BigDecimal("-123.456"));
-    when(inv.getDocumentNo()).thenReturn("INV-1");
-    when(inv.getInvoiceDate()).thenReturn(new Date(0L)); // 1970-01-01 UTC-ish
+    when(inv.getInvoiceDate()).thenReturn(day("2026-03-15"));
+    when(inv.getAccountingDate()).thenReturn(day("2026-03-31"));
 
-    Map<String, String> invoiceKeys = new HashMap<>();
-    invoiceKeys.put("inv-1", "A");
+    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf, "A", null);
 
-    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf, invoiceKeys);
-
+    assertEquals("inv-1", r.getString("id"));
     assertEquals("INV-1", r.getString("ref"));
     assertEquals("Compra", r.getString("type"));
     assertEquals("ACME", r.getString("party"));
     assertEquals("B1", r.getString("nifIva"));
-    assertEquals("123.46", r.getString("base")); // abs + HALF_UP scale 2
-    assertEquals(sdf.format(new Date(0L)), r.getString("date"));
-    assertEquals("A", r.getString("key")); // resolved from invoiceKeys map
+    assertEquals("123.46", r.getString("base")); // null keyBase → summed line amount, abs + HALF_UP
+    assertEquals("2026-03-15", r.getString("date"));
+    assertEquals("2026-03-31", r.getString("accountingDate"));
+    assertEquals("A", r.getString("key"));
   }
 
   @Test
   public void testBuildInvoiceRowNullFieldsUseDefaults() throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
-    Invoice inv = mock(Invoice.class);
-    when(inv.getId()).thenReturn("inv-2");
+    Invoice inv = invoice("inv-2", "INV-2", null);
     when(inv.getBusinessPartner()).thenReturn(null);
-    when(inv.getSummedLineAmount()).thenReturn(null);
-    when(inv.getDocumentNo()).thenReturn("INV-2");
     when(inv.getInvoiceDate()).thenReturn(null);
+    when(inv.getAccountingDate()).thenReturn(null);
 
-    JSONObject r = handler.buildInvoiceRow(inv, "Venta", sdf, new HashMap<>());
+    JSONObject r = handler.buildInvoiceRow(inv, "Venta", sdf, null, null);
 
+    assertEquals("inv-2", r.getString("id"));
     assertEquals("INV-2", r.getString("ref"));
     assertEquals("Venta", r.getString("type"));
     assertEquals("", r.getString("party"));  // null bp
     assertEquals("", r.getString("nifIva")); // null bp
-    assertEquals("", r.getString("date"));   // null date
+    assertEquals("", r.getString("date"));   // null date → ""
+    assertFalse(r.has("accountingDate"));    // null accounting date → key absent
     assertEquals("0", r.getString("base"));  // null amount → ZERO
-    assertEquals("", r.getString("key"));    // no entry in invoiceKeys → ""
+    assertEquals("", r.getString("key"));    // unresolved key → ""
   }
 
   @Test
@@ -683,58 +705,136 @@ public class Fiscal349BoxesHandlerTest {
     BusinessPartner bp = mock(BusinessPartner.class);
     when(bp.getName()).thenReturn("NoNif");
     when(bp.getTaxID()).thenReturn(null);
-    Invoice inv = mock(Invoice.class);
-    when(inv.getId()).thenReturn("inv-3");
+    Invoice inv = invoice("inv-3", "INV-3", "10");
     when(inv.getBusinessPartner()).thenReturn(bp);
-    when(inv.getSummedLineAmount()).thenReturn(new BigDecimal("10"));
-    when(inv.getDocumentNo()).thenReturn("INV-3");
-    when(inv.getInvoiceDate()).thenReturn(null);
 
-    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf, null);
+    JSONObject r = handler.buildInvoiceRow(inv, "Compra", sdf, null, null);
 
     assertEquals("NoNif", r.getString("party"));
     assertEquals("", r.getString("nifIva"));
-    assertEquals("", r.getString("key")); // null invoiceKeys map → graceful ""
+    assertEquals("", r.getString("key"));
+  }
+
+  /** ETP-5597: a per-key base (mixed invoice) replaces the invoice-level summed line amount. */
+  @Test
+  public void testBuildInvoiceRowKeyBaseOverridesSummedLineAmount() throws Exception {
+    Invoice inv = invoice("inv-4", "INV-4", "1000");
+
+    JSONObject r = handler.buildInvoiceRow(inv, "Venta", new SimpleDateFormat("yyyy-MM-dd"),
+        "S", new BigDecimal("-250.005"));
+
+    assertEquals("250.01", r.getString("base")); // abs + HALF_UP of the key base, not 1000
+    assertEquals("S", r.getString("key"));
   }
 
   // ── collectInvoices (pure logic) ──────────────────────────────────
 
   @Test
   public void testCollectInvoicesCombinesPurchaseAndSales() throws Exception {
-    Invoice p = mock(Invoice.class);
-    when(p.getId()).thenReturn("p1");
-    when(p.getDocumentNo()).thenReturn("P1");
-    when(p.getSummedLineAmount()).thenReturn(new BigDecimal("1"));
-    Invoice s = mock(Invoice.class);
-    when(s.getId()).thenReturn("s1");
-    when(s.getDocumentNo()).thenReturn("S1");
-    when(s.getSummedLineAmount()).thenReturn(new BigDecimal("2"));
+    Invoice p = invoice("p1", "P1", "1");
+    Invoice s = invoice("s1", "S1", "2");
 
     Set<Invoice> purch = new LinkedHashSet<>(Collections.singletonList(p));
     Set<Invoice> sales = new LinkedHashSet<>(Collections.singletonList(s));
-    Map<String, String> invoiceKeys = new HashMap<>();
-    invoiceKeys.put("p1", "A");
-    invoiceKeys.put("s1", "E");
+    Map<String, Map<String, BigDecimal>> keys = new HashMap<>(keyBases("p1", "A", "99"));
+    keys.putAll(keyBases("s1", "E", "99"));
 
-    JSONArray arr = handler.collectInvoices(purch, sales, invoiceKeys);
+    JSONArray arr = handler.collectInvoices(purch, sales, keys);
 
     assertEquals(2, arr.length());
-    boolean hasCompra = false;
-    boolean hasVenta = false;
-    for (int i = 0; i < arr.length(); i++) {
-      JSONObject row = arr.getJSONObject(i);
-      String type = row.getString("type");
-      if ("Compra".equals(type)) {
-        hasCompra = true;
-        assertEquals("A", row.getString("key"));
-      }
-      if ("Venta".equals(type)) {
-        hasVenta = true;
-        assertEquals("E", row.getString("key"));
-      }
+    JSONObject compra = arr.getJSONObject(0);
+    JSONObject venta = arr.getJSONObject(1);
+    assertEquals("Compra", compra.getString("type"));
+    assertEquals("A", compra.getString("key"));
+    assertEquals("p1", compra.getString("id"));
+    assertEquals("Venta", venta.getString("type"));
+    assertEquals("E", venta.getString("key"));
+    assertEquals("s1", venta.getString("id"));
+  }
+
+  /**
+   * ETP-5597: a single-key invoice keeps exactly its old row — one row, invoice-level base
+   * (summed line amount), even though the per-key map carries a (possibly different) base.
+   */
+  @Test
+  public void testCollectInvoicesSingleKeyInvoiceKeepsInvoiceLevelBase() throws Exception {
+    Invoice s = invoice("s1", "S1", "120.00");
+
+    JSONArray arr = handler.collectInvoices(Collections.<Invoice>emptySet(),
+        new LinkedHashSet<>(Collections.singletonList(s)), keyBases("s1", "E", "77.00"));
+
+    assertEquals(1, arr.length());
+    assertEquals("E", arr.getJSONObject(0).getString("key"));
+    assertEquals("120.00", arr.getJSONObject(0).getString("base"));
+  }
+
+  /** ETP-5597: a sale mixing goods (E) and services (S) backs both keys, each with its own base. */
+  @Test
+  public void testCollectInvoicesMixedSaleEmitsOneRowPerKeyWithItsBase() throws Exception {
+    Invoice s = invoice("s1", "S1", "1000.00");
+    when(s.getAccountingDate()).thenReturn(day("2026-02-28"));
+
+    JSONArray arr = handler.collectInvoices(Collections.<Invoice>emptySet(),
+        new LinkedHashSet<>(Collections.singletonList(s)),
+        keyBases("s1", "E", "600.00", "S", "400.00"));
+
+    assertEquals(2, arr.length());
+    JSONObject e = arr.getJSONObject(0);
+    JSONObject sv = arr.getJSONObject(1);
+    assertEquals("E", e.getString("key"));
+    assertEquals("600.00", e.getString("base"));
+    assertEquals("S", sv.getString("key"));
+    assertEquals("400.00", sv.getString("base"));
+    for (JSONObject row : Arrays.asList(e, sv)) {
+      assertEquals("s1", row.getString("id"));
+      assertEquals("S1", row.getString("ref"));
+      assertEquals("Venta", row.getString("type"));
+      assertEquals("2026-02-28", row.getString("accountingDate"));
     }
-    assertTrue(hasCompra);
-    assertTrue(hasVenta);
+  }
+
+  /**
+   * ETP-5597: a purchase mixing goods (A) and services (I) backs both keys. The bases arrive
+   * already halved by resolveInvoiceKeyBases' purchase rule (tax amount != 0 → taxable / 2), so
+   * the rows carry them as-is and not the invoice's summed line amount.
+   */
+  @Test
+  public void testCollectInvoicesMixedPurchaseEmitsOneRowPerKeyWithItsBase() throws Exception {
+    Invoice p = invoice("p1", "P1", "300.00");
+
+    JSONArray arr = handler.collectInvoices(new LinkedHashSet<>(Collections.singletonList(p)),
+        Collections.<Invoice>emptySet(), keyBases("p1", "A", "100.00", "I", "50.00"));
+
+    assertEquals(2, arr.length());
+    assertEquals("A", arr.getJSONObject(0).getString("key"));
+    assertEquals("100.00", arr.getJSONObject(0).getString("base"));
+    assertEquals("I", arr.getJSONObject(1).getString("key"));
+    assertEquals("50.00", arr.getJSONObject(1).getString("base"));
+    assertEquals("Compra", arr.getJSONObject(1).getString("type"));
+    assertEquals("p1", arr.getJSONObject(0).getString("id"));
+    assertEquals("p1", arr.getJSONObject(1).getString("id"));
+  }
+
+  /** An invoice with no resolved key still yields one row, with key "" and its own base. */
+  @Test
+  public void testCollectInvoicesUnresolvedInvoiceKeepsOneRowWithEmptyKey() throws Exception {
+    Invoice noEntry = invoice("s1", "S1", "10");
+    Invoice emptyEntry = invoice("s2", "S2", "20");
+    Map<String, Map<String, BigDecimal>> keys = new HashMap<>();
+    keys.put("s2", new LinkedHashMap<>());
+
+    JSONArray arr = handler.collectInvoices(Collections.<Invoice>emptySet(),
+        new LinkedHashSet<>(Arrays.asList(noEntry, emptyEntry)), keys);
+    JSONArray nullMap = handler.collectInvoices(Collections.<Invoice>emptySet(),
+        new LinkedHashSet<>(Collections.singletonList(noEntry)), null);
+
+    assertEquals(2, arr.length());
+    assertEquals("", arr.getJSONObject(0).getString("key"));
+    assertEquals("10.00", arr.getJSONObject(0).getString("base"));
+    assertEquals("", arr.getJSONObject(1).getString("key"));
+    assertEquals("20.00", arr.getJSONObject(1).getString("base"));
+    assertEquals(1, nullMap.length());
+    assertEquals("", nullMap.getJSONObject(0).getString("key"));
   }
 
   @Test
@@ -1050,142 +1150,167 @@ public class Fiscal349BoxesHandlerTest {
     }
   }
 
-  // ── resolveInvoiceKeys (ETP-4755) ───────────────────────────────────
+  // ── resolveInvoiceKeyBases (ETP-4755, ETP-5597) ─────────────────────
 
   /**
-   * Installs the OBDal→Session→Query chain for the scalar per-invoice-key HQL and returns
-   * the mocked Query so tests can control {@code list()}. Unlike {@link #mockRectifQuery},
-   * this HQL also binds a scalar named parameter ({@code taxReportId}) alongside the two
-   * list parameters.
+   * Installs the OBDal→Session→Query chain for the per-invoice key/base HQL and returns the
+   * mocked Query so tests can control {@code list()}. When {@code hql} is non-null, the HQL text
+   * passed to {@code createQuery} is captured into it.
    */
   @SuppressWarnings("unchecked")
-  private static Query<Object[]> mockInvoiceKeysQuery(MockedStatic<OBDal> dalMock) {
+  private static Query<Object[]> mockInvoiceKeysQuery(MockedStatic<OBDal> dalMock,
+      String[] hql) {
     OBDal obDal = mock(OBDal.class);
     dalMock.when(OBDal::getInstance).thenReturn(obDal);
     Session session = mock(Session.class);
     when(obDal.getSession()).thenReturn(session);
     Query<Object[]> query = mock(Query.class);
-    when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenAnswer(inv -> {
+      if (hql != null) {
+        hql[0] = inv.getArgument(0);
+      }
+      return query;
+    });
     when(query.setParameter(anyString(), any())).thenReturn(query);
     when(query.setParameterList(anyString(), any(Collection.class))).thenReturn(query);
     return query;
   }
 
+  private static Query<Object[]> mockInvoiceKeysQuery(MockedStatic<OBDal> dalMock) {
+    return mockInvoiceKeysQuery(dalMock, null);
+  }
+
   @Test
-  public void testResolveInvoiceKeysEmptyInvoicesOrTaxRatesSkipsTheQuery() {
+  public void testResolveInvoiceKeyBasesEmptyInvoicesOrTaxRatesSkipsTheQuery() {
     // No OBDal static mock installed: if the empty/null guard did not short-circuit,
     // the HQL query would hit the real (unavailable) DAL and throw.
     Invoice inv = mock(Invoice.class);
     Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
     TaxRate rate = mock(TaxRate.class);
 
-    Map<String, String> emptyInvoices = handler.resolveInvoiceKeys(
-        Collections.<Invoice>emptySet(), Collections.singletonList(rate), "tr1");
-    Map<String, String> emptyRates = handler.resolveInvoiceKeys(
-        invoices, Collections.<TaxRate>emptyList(), "tr1");
-    Map<String, String> nullInvoices = handler.resolveInvoiceKeys(null, Collections.singletonList(rate), "tr1");
-    Map<String, String> nullRates = handler.resolveInvoiceKeys(invoices, null, "tr1");
-
-    assertNotNull(emptyInvoices);
-    assertTrue(emptyInvoices.isEmpty());
-    assertTrue(emptyRates.isEmpty());
-    assertTrue(nullInvoices.isEmpty());
-    assertTrue(nullRates.isEmpty());
+    assertTrue(handler.resolveInvoiceKeyBases(
+        Collections.<Invoice>emptySet(), Collections.singletonList(rate), "tr1", false).isEmpty());
+    assertTrue(handler.resolveInvoiceKeyBases(
+        invoices, Collections.<TaxRate>emptyList(), "tr1", true).isEmpty());
+    assertTrue(handler.resolveInvoiceKeyBases(
+        null, Collections.singletonList(rate), "tr1", false).isEmpty());
+    assertTrue(handler.resolveInvoiceKeyBases(invoices, null, "tr1", true).isEmpty());
   }
 
   @Test
-  public void testResolveInvoiceKeysMapsInvoiceIdToKey() {
-    Invoice inv = mock(Invoice.class);
-    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
-    TaxRate rate = mock(TaxRate.class);
-    Object[] row = { "inv-1", "E", 3L };
+  public void testResolveInvoiceKeyBasesMapsInvoiceIdToKeyAndBase() {
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(mock(Invoice.class)));
+    Object[] row = { "inv-1", "E", new BigDecimal("150.00") };
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
       when(query.list()).thenReturn(Collections.singletonList(row));
 
-      Map<String, String> result = handler.resolveInvoiceKeys(
-          invoices, Collections.singletonList(rate), "tr1");
+      Map<String, Map<String, BigDecimal>> result = handler.resolveInvoiceKeyBases(
+          invoices, Collections.singletonList(mock(TaxRate.class)), "tr1", false);
 
       assertEquals(1, result.size());
-      assertEquals("E", result.get("inv-1"));
+      assertEquals(Collections.singletonMap("E", new BigDecimal("150.00")), result.get("inv-1"));
+      verify(query).setParameter("taxReportId", "tr1");
     }
   }
 
   /**
-   * Edge case documented on {@link Fiscal349BoxesHandler#resolveInvoiceKeys}: when a single
-   * invoice groups into more than one key (e.g. lines with different tax rates), the key with
-   * the most matching InvoiceTax lines wins.
+   * ETP-5597: an invoice whose tax lines map to two keys keeps BOTH, each with its own base, in
+   * the ascending key order the HQL's {@code order by} delivers (replaces the old "most lines
+   * wins" / tie-break single-key resolution).
    */
   @Test
-  public void testResolveInvoiceKeysPicksKeyWithMoreMatchingLinesOnMultiKeyInvoice() {
-    Invoice inv = mock(Invoice.class);
-    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
-    TaxRate rate = mock(TaxRate.class);
-    // Same invoice id appears twice, once per key — "I" has more matching lines than "A".
-    Object[] rowA = { "inv-1", "A", 1L };
-    Object[] rowI = { "inv-1", "I", 4L };
+  public void testResolveInvoiceKeyBasesKeepsEveryKeyOfAMixedInvoice() {
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(mock(Invoice.class)));
+    Object[] rowE = { "inv-1", "E", new BigDecimal("600.00") };
+    Object[] rowS = { "inv-1", "S", new BigDecimal("400.00") };
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
-      when(query.list()).thenReturn(Arrays.asList(rowA, rowI));
+      when(query.list()).thenReturn(Arrays.asList(rowE, rowS));
 
-      Map<String, String> result = handler.resolveInvoiceKeys(
-          invoices, Collections.singletonList(rate), "tr1");
-
-      assertEquals(1, result.size());
-      assertEquals("I", result.get("inv-1")); // 4 lines beats 1 line
-    }
-  }
-
-  /**
-   * Exact-tie case documented on {@link Fiscal349BoxesHandler#resolveInvoiceKeys}: when two
-   * keys for the same invoice have an EQUAL InvoiceTax line count, the alphabetically first
-   * key wins. The HQL's {@code order by i.id, trp.tributaryKey.name} guarantees rows for the
-   * same invoice arrive key-ascending, so this test feeds the mocked {@code list()} in that
-   * same order ("A" before "S") to faithfully simulate what the real ORDER BY produces.
-   */
-  @Test
-  public void testResolveInvoiceKeysExactTieKeepsAlphabeticallyFirstKey() {
-    Invoice inv = mock(Invoice.class);
-    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(inv));
-    TaxRate rate = mock(TaxRate.class);
-    // Same invoice id, equal line counts — "A" sorts before "S" and is returned first by
-    // the HQL's order by trp.tributaryKey.name, so "A" must win the tie deterministically.
-    Object[] rowA = { "inv-1", "A", 2L };
-    Object[] rowS = { "inv-1", "S", 2L };
-
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
-      when(query.list()).thenReturn(Arrays.asList(rowA, rowS));
-
-      Map<String, String> result = handler.resolveInvoiceKeys(
-          invoices, Collections.singletonList(rate), "tr1");
+      Map<String, Map<String, BigDecimal>> result = handler.resolveInvoiceKeyBases(
+          invoices, Collections.singletonList(mock(TaxRate.class)), "tr1", false);
 
       assertEquals(1, result.size());
-      assertEquals("A", result.get("inv-1")); // exact tie → first-encountered (alphabetical) wins
+      Map<String, BigDecimal> bases = result.get("inv-1");
+      assertEquals(Arrays.asList("E", "S"), new ArrayList<>(bases.keySet()));
+      assertEquals(new BigDecimal("600.00"), bases.get("E"));
+      assertEquals(new BigDecimal("400.00"), bases.get("S"));
     }
   }
 
   @Test
-  public void testResolveInvoiceKeysMultipleInvoices() {
-    Invoice inv1 = mock(Invoice.class);
-    Invoice inv2 = mock(Invoice.class);
-    Set<Invoice> invoices = new LinkedHashSet<>(Arrays.asList(inv1, inv2));
-    TaxRate rate = mock(TaxRate.class);
-    Object[] row1 = { "inv-1", "S", 2L };
-    Object[] row2 = { "inv-2", "A", 1L };
+  public void testResolveInvoiceKeyBasesMultipleInvoices() {
+    Set<Invoice> invoices = new LinkedHashSet<>(
+        Arrays.asList(mock(Invoice.class), mock(Invoice.class)));
+    Object[] row1 = { "inv-1", "S", new BigDecimal("2") };
+    Object[] row2 = { "inv-2", "A", new BigDecimal("1") };
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
       when(query.list()).thenReturn(Arrays.asList(row1, row2));
 
-      Map<String, String> result = handler.resolveInvoiceKeys(
-          invoices, Collections.singletonList(rate), "tr1");
+      Map<String, Map<String, BigDecimal>> result = handler.resolveInvoiceKeyBases(
+          invoices, Collections.singletonList(mock(TaxRate.class)), "tr1", true);
 
       assertEquals(2, result.size());
-      assertEquals("S", result.get("inv-1"));
-      assertEquals("A", result.get("inv-2"));
+      assertEquals(Collections.singletonMap("S", new BigDecimal("2")), result.get("inv-1"));
+      assertEquals(Collections.singletonMap("A", new BigDecimal("1")), result.get("inv-2"));
+    }
+  }
+
+  /**
+   * ETP-5597: purchases use the AEAT3492010ReportDao amount rule — a tax line with a non-zero tax
+   * amount contributes half its taxable amount — while sales sum the taxable amount as-is. The
+   * arithmetic runs in the HQL, so this pins the expression each side sends.
+   */
+  @Test
+  public void testResolveInvoiceKeyBasesHalvesPurchaseBaseWhenTaxAmountIsNonZero() {
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(mock(Invoice.class)));
+    String[] purchaseHql = new String[1];
+    String[] salesHql = new String[1];
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      when(mockInvoiceKeysQuery(dalMock, purchaseHql).list()).thenReturn(Collections.emptyList());
+      handler.resolveInvoiceKeyBases(
+          invoices, Collections.singletonList(mock(TaxRate.class)), "tr1", true);
+
+      when(mockInvoiceKeysQuery(dalMock, salesHql).list()).thenReturn(Collections.emptyList());
+      handler.resolveInvoiceKeyBases(
+          invoices, Collections.singletonList(mock(TaxRate.class)), "tr1", false);
+    }
+
+    assertTrue(purchaseHql[0].contains("sum(case it.taxAmount when 0 then "
+        + "coalesce(it.taxableAmount, 0) else (coalesce(it.taxableAmount, 0) / 2) end)"));
+    assertTrue(salesHql[0].contains("sum(coalesce(it.taxableAmount, 0))"));
+    assertFalse(salesHql[0].contains("/ 2"));
+    assertTrue(salesHql[0].contains("group by i.id, trp.tributaryKey.name"));
+  }
+
+  /**
+   * Rows with a null key are dropped; a non-BigDecimal sum (the /2 branch may widen the type) is
+   * converted, a null sum counts as zero, and repeated (invoice, key) rows are added up.
+   */
+  @Test
+  public void testResolveInvoiceKeyBasesSkipsNullKeyAndNormalisesAmounts() {
+    Set<Invoice> invoices = new LinkedHashSet<>(Collections.singletonList(mock(Invoice.class)));
+    Object[] nullKey = { "inv-1", null, new BigDecimal("99") };
+    Object[] doubleSum = { "inv-1", "A", Double.valueOf(12.5) };
+    Object[] repeated = { "inv-1", "A", new BigDecimal("7.5") };
+    Object[] nullSum = { "inv-2", "I", null };
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Query<Object[]> query = mockInvoiceKeysQuery(dalMock);
+      when(query.list()).thenReturn(Arrays.asList(nullKey, doubleSum, repeated, nullSum));
+
+      Map<String, Map<String, BigDecimal>> result = handler.resolveInvoiceKeyBases(
+          invoices, Collections.singletonList(mock(TaxRate.class)), "tr1", true);
+
+      assertEquals(Collections.singleton("A"), result.get("inv-1").keySet());
+      assertEquals(0, new BigDecimal("20").compareTo(result.get("inv-1").get("A")));
+      assertEquals(BigDecimal.ZERO, result.get("inv-2").get("I"));
     }
   }
 
