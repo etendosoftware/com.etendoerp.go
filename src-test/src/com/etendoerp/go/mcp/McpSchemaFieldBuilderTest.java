@@ -49,10 +49,12 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -67,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * (ETP-4510, Sonar S1448) — covers AD_Column → JSON field mapping (type/selector inference,
  * visibility, defaults, business-critical flags, button/process metadata) and the
  * per-entity field metadata load used by neo_schema.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -340,15 +344,89 @@ class McpSchemaFieldBuilderTest {
   @DisplayName("addDefaultExpression")
   class AddDefaultExpression {
 
+    private void addDefaultExpression(JSONObject fieldObj, Column col, Entity dalEntity)
+        throws Exception {
+      invokeStatic("addDefaultExpression",
+          new Class<?>[]{ JSONObject.class, Column.class, Entity.class },
+          fieldObj, col, dalEntity);
+    }
+
+    /** A DAL entity whose FK property for {@code dbColName} targets {@code target}. */
+    private Entity entityWithFk(String dbColName, Entity target, Property... others) {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+      when(prop.getTargetEntity()).thenReturn(target);
+      Entity entity = mock(Entity.class);
+      when(entity.getPropertyByColumnName(dbColName)).thenReturn(prop);
+      List<Property> all = new java.util.ArrayList<>(List.of(others));
+      all.add(prop);
+      when(entity.getProperties()).thenReturn(all);
+      return entity;
+    }
+
+    /**
+     * A "0" default on an FK whose target holds a record with id "0" (AD_Org "*") is a usable
+     * value, not the resolve-later placeholder: it must be reported as the literal default.
+     */
+    @Test
+    void zeroDefaultThatIsARealRecordIsReportedAsIs() throws Exception {
+      Column col = mock(Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("AD_Org_ID");
+      Entity org = mock(Entity.class);
+      when(org.getName()).thenReturn("SchemaZeroRealOrg");
+      Entity calendar = entityWithFk("AD_Org_ID", org);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get("SchemaZeroRealOrg", "0")).thenReturn(mock(Organization.class));
+
+      JSONObject fieldObj = new JSONObject();
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        dal.when(OBDal::getInstance).thenReturn(obDal);
+        addDefaultExpression(fieldObj, col, calendar);
+      }
+
+      assertEquals("0", fieldObj.getString("defaultExpression"));
+      assertFalse(fieldObj.has("defaultSource"));
+      assertFalse(fieldObj.has("defaultHint"));
+    }
+
+    /**
+     * The document-type target holds a "0" record too ("** New **"), yet on an entity with a
+     * sibling FK to the same target "0" stays the placeholder the write path resolves from it.
+     */
+    @Test
+    void zeroDefaultWithSiblingFkStaysThePlaceholder() throws Exception {
+      Column col = mock(Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("C_DocType_ID");
+      Entity docType = mock(Entity.class);
+      when(docType.getName()).thenReturn("SchemaZeroSiblingDocType");
+      Property sibling = mock(Property.class);
+      when(sibling.isPrimitive()).thenReturn(false);
+      when(sibling.getTargetEntity()).thenReturn(docType);
+      Entity order = entityWithFk("C_DocType_ID", docType, sibling);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get("SchemaZeroSiblingDocType", "0")).thenReturn(mock(Organization.class));
+
+      JSONObject fieldObj = new JSONObject();
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        dal.when(OBDal::getInstance).thenReturn(obDal);
+        addDefaultExpression(fieldObj, col, order);
+      }
+
+      assertFalse(fieldObj.has("defaultExpression"));
+      assertEquals("server", fieldObj.getString("defaultSource"));
+    }
+
     @Test
     void addsNonBlankDefault() throws Exception {
       org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
       when(col.getDefaultValue()).thenReturn("@SQL=SELECT 1");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
       assertEquals("@SQL=SELECT 1", fieldObj.getString("defaultExpression"));
     }
 
@@ -358,9 +436,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDefaultValue()).thenReturn(null);
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
       assertFalse(fieldObj.has("defaultExpression"));
     }
 
@@ -370,9 +446,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDefaultValue()).thenReturn("   ");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
       assertFalse(fieldObj.has("defaultExpression"));
     }
 
@@ -389,9 +463,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("C_DocType_ID");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertFalse(fieldObj.has("defaultExpression"));
       assertEquals("server", fieldObj.getString("defaultSource"));
@@ -412,9 +484,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("ChargeAmt");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertEquals("0", fieldObj.getString("defaultExpression"));
       assertFalse(fieldObj.has("defaultSource"));
@@ -434,9 +504,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("C_Currency_ID");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertEquals("@C_Currency_ID@", fieldObj.getString("defaultExpression"));
       assertFalse(fieldObj.has("defaultSource"));
@@ -456,9 +524,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertFalse(fieldObj.has("defaultExpression"));
       assertEquals("server", fieldObj.getString("defaultSource"));

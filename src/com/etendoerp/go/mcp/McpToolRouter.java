@@ -836,7 +836,8 @@ public class McpToolRouter {
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
-    // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
+    // when possible (e.g. documentType="0" -> copy from transactionDocument); keep it when "0" is
+    // a real record of the target (the "*" organization), else remove.
     McpWriteRequestSupport.resolveFkSentinels(filteredBody, dalEntity, log);
 
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
