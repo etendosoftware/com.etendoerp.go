@@ -87,6 +87,12 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_ICON_SIZES = "513x513";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  /** JSON-RPC 2.0: the method does not exist or is not available. */
+  static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
+  /** JSON-RPC 2.0: internal JSON-RPC error. */
+  static final int JSON_RPC_INTERNAL_ERROR = -32603;
+  /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
+  static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
@@ -140,12 +146,13 @@ public class McpServlet extends HttpServlet {
     long startedAtNanos = System.nanoTime();
     JSONObject callParams = null;
     String toolName = null;
+    String method = null;
 
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
       JSONObject rpcMessage = new JSONObject(body);
-      String method = rpcMessage.optString("method", "");
+      method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
       toolName = TOOLS_CALL.equals(method) && callParams != null
@@ -178,23 +185,21 @@ public class McpServlet extends HttpServlet {
       recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
           toolName, callParams, result, null);
 
+    } catch (McpMethodNotFoundException e) {
+      // A client asking for something we do not offer — chiefly 2026-07-28 clients probing with
+      // server/discover before falling back to initialize. Not a server failure: one WARN line, no
+      // stack trace, and the same -32601 as before. No telemetry row: only tools/call has a tool
+      // name, and an unknown method is never one.
+      log.warn("MCP client called unsupported method '{}' (client={})", method,
+          clientNameFor(callParams));
+      writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage());
     } catch (Exception e) {
       log.error("Error processing MCP message: {}", e.getMessage(), e);
 
-      try {
-        Object rpcId = new JSONObject(body).opt("id");
-        int errorCode = (e instanceof McpMethodNotFoundException) ? -32601 : -32603;
-        JSONObject errorResponse = buildJsonRpcError(rpcId, errorCode, e.getMessage());
-
-        String rendered = errorResponse.toString();
-        response.setStatus(HttpServletResponse.SC_OK);
-        response.getWriter().write(rendered);
-
+      String rendered = writeRpcError(response, body, JSON_RPC_INTERNAL_ERROR, e.getMessage());
+      if (rendered != null) {
         recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
             toolName, callParams, null, McpConstants.ERROR_SERVER);
-      } catch (Exception ex) {
-        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-        response.getWriter().write("{\"error\":\"Internal server error\"}");
       }
     } finally {
       // Servlet threads are pooled: a leaked session key would attribute one client's calls to
@@ -202,6 +207,51 @@ public class McpServlet extends HttpServlet {
       McpUsageTelemetry.clearCurrentSessionKey();
       McpUsageTelemetry.clearCurrentTenant();
     }
+  }
+
+  /**
+   * Write a JSON-RPC error answering the request in {@code body}.
+   *
+   * @return the rendered error, or {@code null} when it could not be built — a plain 500 was
+   *         written instead
+   */
+  private String writeRpcError(HttpServletResponse response, String body, int code,
+      String message) throws IOException {
+    try {
+      Object rpcId = new JSONObject(body).opt("id");
+      String rendered = buildJsonRpcError(rpcId, code, message).toString();
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.getWriter().write(rendered);
+      return rendered;
+    } catch (Exception ex) {
+      response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      response.getWriter().write("{\"error\":\"Internal server error\"}");
+      return null;
+    }
+  }
+
+  /**
+   * The calling client's name, for log lines about a request that has no tool row.
+   *
+   * <p>From the telemetry session when the client ran {@code initialize}; otherwise from
+   * {@code params._meta["io.modelcontextprotocol/clientInfo"].name}, which 2026-07-28 requests
+   * (such as a {@code server/discover} probe) carry; else {@code unknown}. Only the name is read —
+   * never the request body.</p>
+   *
+   * @param params the request's {@code params}, may be {@code null}
+   * @return the client name, never {@code null}
+   */
+  static String clientNameFor(JSONObject params) {
+    String fromSession =
+        McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey()).getName();
+    if (StringUtils.isNotBlank(fromSession)) {
+      return fromSession;
+    }
+    JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+    JSONObject clientInfo = meta != null ? meta.optJSONObject(META_CLIENT_INFO) : null;
+    String fromMeta = clientInfo != null ? StringUtils.trimToNull(clientInfo.optString("name"))
+        : null;
+    return fromMeta != null ? fromMeta : "unknown";
   }
 
   // ── Telemetry (Track B1) ────────────────────────────────────────────────

@@ -43,6 +43,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -53,10 +54,13 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.usageevents.LogCapture;
 
 /**
  * Unit tests for {@link McpServlet} covering CORS, authentication, JSON-RPC
  * dispatch, error handling, GET endpoints, and inner classes.
+ *
+ * @covers com.etendoerp.go.mcp.McpServlet
  */
 public class McpServletTest {
 
@@ -481,6 +485,57 @@ public class McpServletTest {
     JSONObject error = rpcResponse.getJSONObject("error");
     assertEquals(-32601, error.getInt("code"));
     assertTrue(error.getString("message").contains("Method not found"));
+  }
+
+  /**
+   * A client probing with a method we do not offer (2026-07-28 {@code server/discover}) is not a
+   * server failure: no ERROR, no stack trace, one WARN naming the method and the client, whose name
+   * comes from {@code params._meta} when the client never ran {@code initialize}.
+   */
+  @Test
+  public void unknownMethodLogsOneWarnWithClientFromMetaAndNoError() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    String rpcBody = new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 31)
+        .put("method", "server/discover")
+        .put("params", new JSONObject().put("_meta", new JSONObject()
+            .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "claude-code"))))
+        .toString();
+    setRequestBody(rpcBody);
+
+    try (LogCapture logs = LogCapture.of(McpServlet.class)) {
+      servlet.doPost(request, response);
+
+      assertEquals(-32601,
+          new JSONObject(getResponseBody()).getJSONObject("error").getInt("code"));
+      assertTrue("no ERROR for a client probe: " + logs.messages(Level.ERROR),
+          logs.messages(Level.ERROR).isEmpty());
+      assertEquals(1, logs.messages(Level.WARN).size());
+      String warn = logs.messages(Level.WARN).get(0);
+      assertTrue(warn, warn.contains("'server/discover'"));
+      assertTrue(warn, warn.contains("client=claude-code"));
+      assertNull("one line, no stack trace", logs.events(Level.WARN).get(0).getThrown());
+    }
+  }
+
+  @Test
+  public void clientNameForPrefersTheTelemetrySessionThenMetaThenUnknown() throws Exception {
+    JSONObject withMeta = new JSONObject().put("_meta", new JSONObject()
+        .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "cursor")));
+    assertEquals("cursor", McpServlet.clientNameFor(withMeta));
+    assertEquals("unknown", McpServlet.clientNameFor(null));
+    assertEquals("unknown", McpServlet.clientNameFor(new JSONObject()));
+
+    String sessionKey = McpUsageTelemetry.openSession(
+        new JSONObject().put("clientInfo", new JSONObject().put("name", "claude-ai")));
+    McpUsageTelemetry.setCurrentSessionKey(sessionKey);
+    try {
+      assertEquals("the handshake name wins over _meta", "claude-ai",
+          McpServlet.clientNameFor(withMeta));
+    } finally {
+      McpUsageTelemetry.clearCurrentSessionKey();
+    }
   }
 
   @Test

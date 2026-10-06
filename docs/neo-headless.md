@@ -7427,3 +7427,23 @@ named exactly "Entregas IVA 21%" belongs to another client and is not visible to
 record as context — on `neo_batch` including `parentRef` ops, whose parent id is taken from the
 op's resolved `parentId()` rather than the body. The same input now answers `ambiguous_fk` with its candidates (substring match),
 and an unambiguous name resolves.
+
+#### 4.12.23 What the MCP server logs, and at which level (ETP-5639)
+
+Production logs are read in Datadog, so each MCP line below is one line, carries what is needed to
+act on it, and never carries agent-written free text or a request body.
+
+**Unknown JSON-RPC method → one `WARN`, no stack trace.** A client asking for a method the server
+does not offer — mostly MCP 2026-07-28 clients probing with `server/discover` before falling back to
+`initialize`, plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
+longer logged as `ERROR Error processing MCP message` with a full stack trace (~570 a week before
+this change). `McpServlet` has a dedicated `catch (McpMethodNotFoundException)`:
+
+```
+WARN McpServlet - MCP client called unsupported method 'server/discover' (client=claude-code)
+```
+
+The client name comes from the telemetry session when the client ran `initialize`, otherwise from
+`params._meta["io.modelcontextprotocol/clientInfo"].name` (which 2026-07-28 probes carry), otherwise
+`unknown` (`McpServlet.clientNameFor`). No telemetry row: only `tools/call` produces one. Every other
+failure keeps the `ERROR` with its stack trace.
