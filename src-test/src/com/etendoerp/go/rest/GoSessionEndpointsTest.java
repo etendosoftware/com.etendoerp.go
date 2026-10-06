@@ -729,6 +729,44 @@ public class GoSessionEndpointsTest {
         resp.setCookies.isEmpty());
   }
 
+  /** A rotation whose commit fails must not hand out the rotated cookie. */
+  @Test
+  public void environmentRotationWhoseCommitFailsSendsNoCookie() throws Exception {
+    GoSessionRecord sessionRecord = sessionInEnvironment("O2");
+    GoSessionRecord rotatedRecord = new GoSessionRecord();
+    rotatedRecord.setUserId("U1");
+    rotatedRecord.setCtxOrgId("O1");
+    CapturedResponse resp = new CapturedResponse();
+    resp.failCommit = true;
+    when(goSessionService.rotate(any())).thenAnswer(
+        sessionWrite(resp, new IssuedGoSession("newtok", "newref", "newcsrf", rotatedRecord)));
+
+    enterEnvironment(sessionRecord, resp);
+
+    assertEquals(500, resp.status);
+    assertTrue("no cookie may be sent for an uncommitted rotation: " + resp.setCookies,
+        resp.setCookies.isEmpty());
+  }
+
+  @Test
+  public void refreshWhoseCommitFailsSendsNoCookie() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    resp.failCommit = true;
+    when(goSessionService.refresh("rtok")).thenAnswer(sessionWrite(resp,
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord())));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(postRefresh("rtok"), resp.response);
+    }
+
+    assertEquals(500, resp.status);
+    assertTrue("no cookie may be sent for an uncommitted rotation: " + resp.setCookies,
+        resp.setCookies.isEmpty());
+  }
+
   /** Registration commits the account, its verification and the session as one unit. */
   @Test
   public void sessionRegisterCommitsTheAccountAndSessionBeforeSendingTheCookie() throws Exception {
@@ -904,10 +942,16 @@ public class GoSessionEndpointsTest {
     return account;
   }
 
-  /** A stubbed {@link OBDal} whose {@code commitAndClose()} is recorded among the response events. */
+  /**
+   * A stubbed {@link OBDal} whose {@code commitAndClose()} is recorded among the response events, or
+   * fails when {@link CapturedResponse#failCommit} is set.
+   */
   private static OBDal recordingDal(CapturedResponse resp) {
     OBDal obDal = mock(OBDal.class);
     doAnswer(inv -> {
+      if (resp.failCommit) {
+        throw new IllegalStateException("commit refused");
+      }
       resp.events.add(COMMIT);
       return null;
     }).when(obDal).commitAndClose();
@@ -1101,6 +1145,8 @@ public class GoSessionEndpointsTest {
      * {@link #SET_COOKIE} and {@link #BODY}.
      */
     final List<String> events = new ArrayList<>();
+    /** ETP-5628 — when set, the {@link #recordingDal} commit of this request fails. */
+    boolean failCommit;
     int status;
 
     CapturedResponse() {

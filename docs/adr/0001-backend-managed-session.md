@@ -126,11 +126,21 @@ writes those cookies, and each commits (`EtendoGoDalHelper.commitDalChanges`) be
 refresh (rotation, and the family revocation of a replay), change-password on a cookie session and
 logout. The commit comes after every write of the operation, so the operation still commits as one
 unit — the account, password and e-mail-verification helpers it calls already commit on their own,
-so the session row was the only uncommitted write. A failed commit throws before any cookie is set:
-the caller rolls back and answers `500` without a cookie. Any DAL work after the commit (the
-environment-entry usage record) runs in a new transaction that `DalRequestFilter` commits as before.
-Store-level writes that set no cookie (sliding the idle expiry, rebinding a revoked role) still
-commit at the end of the request.
+so the session row was the only uncommitted write of the operation itself. Two incidental writes of
+the same request transaction ride along in the early commit, harmlessly: the idle-expiry slide that
+`GoSessionAuthenticator.authenticate()` performs (environment entry, logout, change-password) and
+the lazy identity migration in `AccountIdentityDalHelper` (login and SSO account lookups); both
+would have committed at the end of the request anyway. A failed commit throws before any cookie is
+set: the caller rolls back and answers `500` without a cookie.
+
+The environment-entry usage record (`SessionLoginUsage.recordLogin`) is not DAL work of this
+request: `UsageEventRecorder.submit` hands the event to `UsageEventWriter`'s background thread,
+which inserts it on its own connection in its own transaction. `UsageEventRecorder` requires being
+called after the business transaction has committed; on the cookie path it used to be submitted
+before the rotation was committed, and now it follows the commit.
+
+Writes in requests that set no cookie (sliding the idle expiry on an ordinary authenticated request,
+rebinding a revoked role on restore) still commit at the end of the request.
 
 ### D3 — Cookie contract
 
