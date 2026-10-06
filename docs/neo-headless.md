@@ -7623,3 +7623,135 @@ and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every en
 could not reach them. An unclassified tool falls to the conservative last row.
 `McpToolAnnotationsTest` pins the read-only set and requires every fixed tool to be classified
 explicitly — a new fixed tool must be added to one of the sets.
+
+#### 4.12.26 Compact tool results and `etendo_discover({spec})` (ETP-5639, IMP-53)
+
+**Every MCP tool result is compact JSON.** The JSON a tool returns in `content[].text` used to be
+rendered with a two-space indent. Measured on 2026-10-06, `etendo_discover()` came to 76 541 bytes
+and 2 868 lines, and the same JSON without indentation is 45 051 bytes, so 41 % of the response was
+whitespace. Agent harnesses refused to show that result inline: one agent had to grep the file it
+was saved to, and another skipped discover, guessed an entity name, and got a 404. Results are now
+rendered with `JSONObject.toString()` at each place JSON becomes MCP text:
+`McpResponseSanitizer.render` (the JSON overloads of `wrapAsTextContent` / `wrapAsErrorContent`),
+the routing and unexpected-failure envelopes in `McpToolResponses`, the `etendo_feedback` refusals
+(which now go through the sanitising JSON overload too), and `resources/read` in `McpServlet`.
+**Only whitespace changes.** The keys, the values and the NEO REST output (`/sws/neo/*`) stay the
+same. A newline inside a string value still comes through as `\n`. Bodies that are text already
+(the `docs` passthrough, or a `NeoResponse` body a handler returns as a string) are passed on as
+they are. Because of this, the `resp_bytes` usage metric (`McpCallObservation` → `McpUsageLogger`) is
+about 40 % lower for JSON tools from ETP-5639 on, so values from before and after this change cannot
+be compared. The drop is whitespace, not a change in behaviour.
+
+**`_indentResponse` asks for the old, readable form, one call at a time.** Every published tool
+(`etendo_*`, `generate_*`, process tools, `docs`, `etendo_feedback` and the image tools) declares an
+optional boolean `_indentResponse`. When it is `true`, that call's JSON comes back indented by two
+spaces, as before ETP-5639, and so does its error body. When it is missing or `false`, the output is
+compact. It only changes how the JSON is rendered and is never a business argument:
+
+- `McpToolRouter.route` removes it from the arguments before anything else reads them. The
+  unknown-argument guard (IMP-40), the handlers, NEO (`fields`, `filters`, process and report
+  `parameters`) and the usage telemetry (`target_entity`, `fields_touched`) never see it. It is
+  also not in the `available` list of an `unknown_argument` refusal.
+- The mode lasts for the call only. `McpResponseSanitizer` holds it in a thread-local that `route`
+  sets and restores, and `McpResponseSanitizer.serialize` is the single place where it is applied.
+- Bodies that are already text (the `docs` passthrough, prose errors) are not affected.
+- A scope refusal (`McpAuthorizationService.authorizeToolCall`) does not produce a tool result. It
+  propagates out of `route` and `McpServlet` answers it as a JSON-RPC error, which is always compact
+  and ignores `_indentResponse`. The thread-local is reset in `route`'s `finally`, so the mode does
+  not carry over to the next request on that thread.
+- `ToolRegistry.withIndentResponse` adds the argument to every tool in `generateTools`, with one
+  shared description (`McpConstants.DESC_INDENT_RESPONSE`), so a new tool cannot miss it.
+
+**Catalog cost.** Each tool definition grows by 138 bytes in compact JSON. On the 28-tool catalog
+that `etendo-mcp-local` publishes for a full-scope role, `tools/list` grows by about 3.9 KB.
+Process tools add 138 bytes each.
+
+**`etendo_discover` takes an optional `spec`.** With it, the answer has the same envelope (`specs`,
+`count`, `guidance`, `app`) but holds only the named spec, so an agent that already knows which
+spec it needs gets only that spec's entities, `primaryEntity`, parent links and actions. The server
+also accepts a JSON array of names, although the input schema only declares a string. A missing or
+blank `spec` returns the whole catalog, as before.
+
+```json
+etendo_discover({"spec": "sales-order"})
+→ {"specs":[{"name":"sales-order",...}],"count":1,"guidance":{...}}
+```
+
+The server checks access against the whole catalog either way. A name the role cannot reach is
+refused in the same way as a name that does not exist (unknown, inactive, `SHOWINMCP = N`, or no
+window access), so a narrowed call reveals nothing the full catalog would not. An array is refused
+as a whole, and `detail` names every unknown entry in the order given, so one retry can fix them all:
+
+```json
+{"status":422,"error":"validation_error","detail":"Unknown spec 'sales-ordr' for etendo_discover",
+ "field":"spec","available":["purchase-order","sales-order",...],
+ "hint":"Retry with one of the names in 'available'. Omit 'spec' to get the whole catalog.",
+ "seeAlso":"docs(topic:\"reading records\")","tool":"etendo_discover",...}
+```
+
+This refusal includes `available`, which the `spec_not_found` refusal of the other tools leaves out on purpose. The agent
+called the catalog tool to learn the names, and the list of names is a small fraction of the full
+catalog. `etendo_discover` skips the single-spec gate that other tools use
+(`ToolRegistry.resolveSpecName` returns `null` for it), because that gate would answer 404 without
+the names and cannot read an array. Because `etendo_discover` now declares its arguments, the
+unknown-argument guard (IMP-40) covers it too: `etendo_discover({entity:"header"})` is refused
+with `unknown_argument` instead of being ignored. The tool annotations (§4.12.25) do not change:
+the tool is still read-only and idempotent.
+
+#### 4.12.27 Named filters can be found from the catalog and from the response (ETP-5639, IMP-50)
+
+A **named filter** is a business state that a human writes per entity in
+`ETGO_SF_ENTITY.NAMED_FILTERS`, as a JSON array of `{name, where, label?, description?}`. An agent
+uses one with `etendo_list(filters:{status:"<name>"})`, and `McpQuerySupport` adds the entry's HQL
+`where` to the query. The `where` is never shown to the agent.
+
+**Why this changed.** After `outstanding` was added to sales-invoice and purchase-invoice, three
+blind agents out of three still called `status:"pending"` first and missed the partially paid
+invoices. The `etendo_list` description only gave three example names. The real list was only in
+`etendo_schema view:"full"` (about 40 KB), which no agent called. Both fixes below are built from
+the data: shared code contains no spec, entity or filter name.
+
+**1. The catalog lists them.** The description of the `filters` argument of `etendo_list` ends with
+the filters configured on the entities of the specs that this role reaches. These are the same
+specs as in the tool's `spec` enum. Each entity gets one line, and each description is cut to its
+first sentence:
+
+```
+Configured named filters (spec/entity: name (meaning)):
+sales-invoice/header: completed (Fully paid invoices (payment complete).), pending (…), partial (…), outstanding (Every invoice that still owes a balance: unpaid plus partially paid.)
+```
+
+- `ToolRegistry.namedFilterSummary` builds this text with one query on every `tools/list`. Nothing
+  caches it, so a `NAMED_FILTERS` change appears on the next catalog request and there is nothing
+  to invalidate. (`McpConfigCache` holds parsed `MCP_CONFIG` and tab hierarchy, not the catalog.)
+  MCP clients that keep their own copy of `tools/list` still need to fetch it again.
+- The summary stops at `McpNamedFilters.CATALOG_CAP` (1 500 characters). Past that limit it ends
+  with `… N more: call etendo_schema view:"full"`.
+- An entity with no named filters gets no line. A failed query only removes the summary; the rest
+  of the catalog is still returned.
+- The three hard-coded example names were removed from the fixed text.
+- **Cost, measured on the local configuration (2026-10-06):** two entities have filters
+  (`sales-invoice/header`, `purchase-invoice/header`, four filters each). The summary is 658
+  characters, and the `etendo_list` definition in `tools/list` grows by **597 bytes**: 820 bytes
+  for the new `filters` tail minus 223 bytes for the old example text.
+
+**2. The response names them when one is applied.** When `filters.status` names a configured
+filter, the `etendo_list` body gets a `namedFilters` block. The block lists the entity's other
+filters, so the agent can see whether a different one was the better choice:
+
+```json
+"namedFilters": {"applied":"pending","description":"Unpaid invoices with nothing collected yet (outstanding equals the total).",
+  "available":[{"name":"completed","description":"…"},{"name":"partial","description":"…"},{"name":"outstanding","description":"…"}]}
+```
+
+- The block is missing when no named filter was applied. That includes the case where `status` is
+  read as a plain column, on an entity without named filters.
+- It is added after `fields` projection and after flattening (`McpNamedFilters.attachApplied`). It
+  is not a row column, so `fields` does not remove it. `_indentResponse` controls how it is
+  rendered, like the rest of the body.
+- A read served by a read provider (`McpHookExecutor.runReadProvider`) returns before this point
+  and does not include the block.
+
+**The unknown-status 422 (IMP-3/IMP-17)** keeps its contract: `available` is still the list of bare
+names. It now also includes `namedFilters`, which holds the same names with their first-sentence
+descriptions, in the same shape as `available` in the response block.

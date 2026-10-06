@@ -762,7 +762,8 @@ public class McpServlet extends HttpServlet {
             JSONObject content = new JSONObject();
             content.put("uri", uri);
             content.put("mimeType", "application/json");
-            content.put("text", resourceContent.toString(2));
+            // IMP-53: compact, like every tool result — the reader is an agent, not a person.
+            content.put("text", resourceContent.toString());
             contents.put(content);
             result.put("contents", contents);
             return result;

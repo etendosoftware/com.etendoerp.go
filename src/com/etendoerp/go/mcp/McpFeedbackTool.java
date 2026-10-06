@@ -106,7 +106,7 @@ final class McpFeedbackTool {
           errorBody("rate_limited",
               "This session has already submitted " + MAX_PER_WINDOW + " feedback reports in the "
                   + "last hour. Nothing is wrong — send one consolidated report per task rather "
-                  + "than one per call.").toString(2));
+                  + "than one per call."));
     }
 
     try {
@@ -114,7 +114,7 @@ final class McpFeedbackTool {
       McpFeedbackVerdict.normalize(args);
     } catch (McpFeedbackVerdict.InvalidVerdictException e) {
       return McpToolRouter.wrapAsErrorContent(
-          errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()).toString(2));
+          errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()));
     }
 
     // The INFO line, with the usage row id, is McpServlet's once the row exists (logReceived).

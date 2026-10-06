@@ -82,6 +82,14 @@ final class McpVerbsSection {
   private static final Set<String> ALLOWED_KEYS =
       Set.of(KEY_CREATE, KEY_UPDATE, KEY_DELETE, KEY_REASON, KEY_INSTEAD);
 
+  /**
+   * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
+   * every call, so two first callers registering concurrently handed the registry two different
+   * objects under one name, and the loser's call failed as a duplicate.
+   */
+  private static final McpConfigSection DECLARATION = McpConfigSection.of(NAME, ALLOWED_KEYS,
+      McpConfigSection.Merge.REPLACE, McpVerbsSection::validate);
+
   private static final Logger log = LogManager.getLogger(McpVerbsSection.class);
 
   /** The reason an agent reads when the configuration itself cannot be trusted. */
@@ -96,8 +104,7 @@ final class McpVerbsSection {
    * @return the section, with its allowed keys, {@code REPLACE} merge and validator
    */
   static McpConfigSection declaration() {
-    return McpConfigSection.of(NAME, ALLOWED_KEYS, McpConfigSection.Merge.REPLACE,
-        McpVerbsSection::validate);
+    return DECLARATION;
   }
 
   /**

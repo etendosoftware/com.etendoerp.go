@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -307,6 +308,44 @@ class ToolRegistryGenerateToolsTest {
         assertTrue(names.contains("etendo_create"));
         assertTrue(names.contains("complete_order"));
         assertTrue(names.contains("generate_print_invoice"));
+      }
+    }
+
+    @Test
+    @DisplayName("every published tool declares the optional _indentResponse boolean (IMP-53)")
+    @SuppressWarnings("unchecked")
+    void everyToolDeclaresIndentResponse() {
+      SFSpec windowSpec = createWindowSpec(SPEC_SALES_ORDER);
+      when(windowSpec.getADWindow()).thenReturn(null);
+      SFSpec processSpec = createProcessSpec(SPEC_COMPLETE_ORDER);
+      when(processSpec.getProcess()).thenReturn(null);
+      SFSpec reportSpec = createReportSpec(SPEC_PRINT_INVOICE);
+      when(reportSpec.getProcess()).thenReturn(null);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.resolveReportContract(reportSpec))
+            .thenReturn(NO_INPUT_CONTRACT);
+
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+        assertTrue(toolNames(tools).contains("complete_order"));
+        assertTrue(toolNames(tools).contains("generate_print_invoice"));
+
+        for (McpToolDefinition tool : tools) {
+          Map<String, Object> schema = tool.getInputSchema();
+          Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+          assertNotNull(props, tool.getName());
+          Map<String, Object> prop = (Map<String, Object>) props.get("_indentResponse");
+          assertNotNull(prop, tool.getName() + " must declare _indentResponse");
+          assertEquals("boolean", prop.get("type"), tool.getName());
+          // One shared description, so the catalog pays for it as little as possible.
+          assertEquals(McpConstants.DESC_INDENT_RESPONSE, prop.get("description"), tool.getName());
+          Object required = schema.get("required");
+          assertFalse(required instanceof List
+              && ((List<String>) required).contains("_indentResponse"), tool.getName());
+        }
       }
     }
 
@@ -1180,7 +1219,7 @@ class ToolRegistryGenerateToolsTest {
   class ToolSchemaTests {
 
     @Test
-    @DisplayName("etendo_discover has empty properties and no required fields")
+    @DisplayName("etendo_discover declares one optional spec property and no required fields")
     @SuppressWarnings("unchecked")
     void discoverToolSchema() {
       mockSpecCriteria(Collections.emptyList());
@@ -1197,7 +1236,93 @@ class ToolRegistryGenerateToolsTest {
       assertEquals("object", schema.get("type"));
       Map<String, Object> props = (Map<String, Object>) schema.get("properties");
       assertNotNull(props);
-      assertTrue(props.isEmpty());
+      // IMP-53: 'spec' narrows the catalog; it stays optional so a bare call keeps working.
+      // '_indentResponse' is the presentation flag every published tool carries.
+      assertEquals(Set.of("spec", "_indentResponse"), props.keySet());
+      assertEquals("string", ((Map<String, Object>) props.get("spec")).get("type"));
+      assertFalse(schema.containsKey("required"));
+    }
+
+    // ── IMP-50: the configured named filters, in the etendo_list catalog ─────
+
+    private static final String FILTERS_JSON =
+        "[{\"name\":\"completed\",\"description\":\"Paid in full. Any date.\","
+            + "\"where\":\"e.paid = true\"},{\"name\":\"outstanding\","
+            + "\"where\":\"e.paid = false\"}]";
+
+    @SuppressWarnings("unchecked")
+    private void mockEntities(SFEntity... entities) {
+      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+      when(entityCriteria.list()).thenReturn(List.of(entities));
+    }
+
+    private SFEntity entityOf(SFSpec spec, String name, String namedFilters) {
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getName()).thenReturn(name);
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      when(entity.getNamedFilters()).thenReturn(namedFilters);
+      // A tab-backed entity: a spec of tab-less entities only is kept out of the CRUD catalog.
+      when(entity.getADTab()).thenReturn(mock(org.openbravo.model.ad.ui.Tab.class));
+      return entity;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String listFiltersDescription() {
+      McpToolDefinition list = registry.generateTools(scopesOf("neo:read")).stream()
+          .filter(t -> "etendo_list".equals(t.getName())).findFirst().orElseThrow();
+      Map<String, Object> props = (Map<String, Object>) list.getInputSchema().get("properties");
+      return (String) ((Map<String, Object>) props.get("filters")).get("description");
+    }
+
+    @Test
+    @DisplayName("etendo_list's filters description lists the named filters configured per entity")
+    void listDescriptionCarriesConfiguredNamedFilters() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      mockSpecCriteria(List.of(spec));
+      mockEntities(entityOf(spec, "header", FILTERS_JSON), entityOf(spec, "lines", null));
+
+      String description = listFiltersDescription();
+
+      assertTrue(description.contains(
+          SPEC_SALES_ORDER + "/header: completed (Paid in full.), outstanding"), description);
+      assertFalse(description.contains(SPEC_SALES_ORDER + "/lines"), description);
+      // The hard-coded examples are gone: the real names are listed instead.
+      assertFalse(description.contains("e.g. \"pending\""), description);
+    }
+
+    @Test
+    @DisplayName("an entity of a spec the role cannot reach is not listed")
+    void listDescriptionSkipsUnreachableSpecs() {
+      SFSpec visible = createWindowSpec(SPEC_SALES_ORDER);
+      SFSpec hidden = createWindowSpec("hidden-spec");
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(eq(hidden), anyString()))
+          .thenReturn(false);
+      mockSpecCriteria(List.of(visible, hidden));
+      mockEntities(entityOf(visible, "header", FILTERS_JSON),
+          entityOf(hidden, "header", FILTERS_JSON));
+
+      String description = listFiltersDescription();
+
+      assertTrue(description.contains(SPEC_SALES_ORDER + "/header"), description);
+      assertFalse(description.contains("hidden-spec"), description);
+    }
+
+    @Test
+    @DisplayName("a NAMED_FILTERS change shows up on the next tools/list — nothing caches it")
+    void listDescriptionFollowsConfigChanges() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      mockSpecCriteria(List.of(spec));
+      SFEntity header = entityOf(spec, "header", FILTERS_JSON);
+      mockEntities(header);
+      assertTrue(listFiltersDescription().contains("outstanding"));
+
+      when(header.getNamedFilters()).thenReturn(
+          "[{\"name\":\"overdue\",\"where\":\"e.due < now()\"}]");
+
+      String description = listFiltersDescription();
+      assertTrue(description.contains(SPEC_SALES_ORDER + "/header: overdue"), description);
+      assertFalse(description.contains("outstanding"), description);
     }
 
     @Test

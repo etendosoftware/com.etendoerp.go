@@ -22,10 +22,12 @@ import static com.etendoerp.go.mcp.McpToolResponses.buildUnexpectedErrorBody;
 import static com.etendoerp.go.mcp.McpToolResponses.deleteConfirmation;
 import static com.etendoerp.go.mcp.McpToolResponses.imageToolResult;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -95,7 +97,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * <p>
  * Tool routing:
  * <ul>
- *   <li>{@code etendo_discover} — list all accessible specs</li>
+ *   <li>{@code etendo_discover} — list all accessible specs, or only the ones named by {@code spec}</li>
  *   <li>{@code etendo_list} — list records (GET)</li>
  *   <li>{@code etendo_get} — get single record by ID</li>
  *   <li>{@code etendo_create} — create a record (POST)</li>
@@ -133,12 +135,38 @@ public class McpToolRouter {
    * "spec" argument. For process and report tools, the spec name is derived from
    * the tool name itself via {@link ToolRegistry#resolveSpecName}.
    *
+   * <p>IMP-53: the presentation flag {@code _indentResponse} is taken out of {@code arguments}
+   * here, before anything else reads them, so it can never reach the unknown-argument guard, a
+   * handler, NEO or the usage telemetry. It only selects how this call's JSON is rendered.</p>
+   *
    * @param toolName  MCP tool name (e.g. "etendo_list", "complete_order")
-   * @param arguments tool arguments (may be null)
+   * @param arguments tool arguments (may be null); {@code _indentResponse} is removed from it
    * @param scopes    OAuth2 scopes granted to this call
    * @return MCP result object with "content" array
    */
   public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
+    boolean previous = McpResponseSanitizer.setIndented(takeIndentResponse(arguments));
+    try {
+      return routeCall(toolName, arguments, scopes);
+    } finally {
+      McpResponseSanitizer.restoreIndented(previous);
+    }
+  }
+
+  /**
+   * Remove {@code _indentResponse} from the arguments and return its value (IMP-53). Anything but
+   * {@code true} (or the string {@code "true"}) means the default, compact output.
+   */
+  private static boolean takeIndentResponse(JSONObject arguments) {
+    if (arguments == null) {
+      return false;
+    }
+    Object flag = arguments.remove(McpConstants.PARAM_INDENT_RESPONSE);
+    return "true".equalsIgnoreCase(String.valueOf(flag));
+  }
+
+  private JSONObject routeCall(String toolName, JSONObject arguments,
+      java.util.Set<String> scopes) {
     String renamedTo = McpRoutingException.renamedToolName(toolName);
     if (renamedTo != null) {
       // ETP-5602: answer a removed neo_<x> name with its new name before anything else — the
@@ -167,7 +195,7 @@ public class McpToolRouter {
 
         switch (toolName) {
           case "etendo_discover":
-            return handleDiscover();
+            return handleDiscover(arguments);
           case "etendo_list":
             return handleList(specName, arguments);
           case "etendo_get":
@@ -399,35 +427,47 @@ public class McpToolRouter {
   // ── etendo_discover ──────────────────────────────────────────────────────
 
   /**
-   * List all active specs the current user can access.
-   * Replicates NeoServlet.handleDiscovery() logic.
+   * List all active specs the current user can access, or only the ones named by the optional
+   * {@code spec} argument (IMP-53). Replicates NeoServlet.handleDiscovery() logic.
+   *
+   * <p>Access is evaluated over the whole catalog either way: the reachable names are the
+   * {@code available} list of the refusal when a requested name is not one of them, and an
+   * unreachable spec is refused exactly like a non-existent one, so the narrowed call reveals
+   * nothing the full one would not.</p>
    */
-  private JSONObject handleDiscover() throws Exception {
+  private JSONObject handleDiscover(JSONObject arguments) throws Exception {
     OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
     specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
     specCriteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> allSpecs = specCriteria.list();
 
-    JSONArray specsArray = new JSONArray();
+    List<SFSpec> reachable = new ArrayList<>();
     for (SFSpec spec : allSpecs) {
-      String specType = spec.getSpecType();
-      if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-        // ETP-4254: load the included entities ONCE per W spec — the entity summary, the
-        // caller-derived primaryEntity (IMP-9/ETP-4601) and the spec-level readOnly marker are
-        // all derived from this same list, so none of them costs an extra query.
-        List<SFEntity> includedEntities = "W".equals(specType)
-            ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
-        JSONArray entities = "W".equals(specType)
-            ? McpToolRouterSupport.buildEntitySummaryArray(includedEntities) : null;
-        // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
-        // handleDiscover already runs in the live/admin OBContext resolving tab levels needs.
-        String primaryEntity = "W".equals(specType)
-            ? McpToolRouterSupport.resolvePrimaryEntityName(includedEntities)
-            : null;
-        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(
-            spec, specType, entities, primaryEntity, includedEntities));
+      if (McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+        reachable.add(spec);
       }
+    }
+    List<SFSpec> selected = selectDiscoverSpecs(reachable,
+        arguments == null ? null : arguments.opt(McpConstants.PARAM_SPEC));
+
+    JSONArray specsArray = new JSONArray();
+    for (SFSpec spec : selected) {
+      String specType = spec.getSpecType();
+      // ETP-4254: load the included entities ONCE per W spec — the entity summary, the
+      // caller-derived primaryEntity (IMP-9/ETP-4601) and the spec-level readOnly marker are
+      // all derived from this same list, so none of them costs an extra query.
+      List<SFEntity> includedEntities = "W".equals(specType)
+          ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
+      JSONArray entities = "W".equals(specType)
+          ? McpToolRouterSupport.buildEntitySummaryArray(includedEntities) : null;
+      // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
+      // handleDiscover already runs in the live/admin OBContext resolving tab levels needs.
+      String primaryEntity = "W".equals(specType)
+          ? McpToolRouterSupport.resolvePrimaryEntityName(includedEntities)
+          : null;
+      specsArray.put(McpToolRouterSupport.buildDiscoverSpec(
+          spec, specType, entities, primaryEntity, includedEntities));
     }
 
     JSONObject result = new JSONObject();
@@ -441,6 +481,55 @@ public class McpToolRouter {
       result.put(McpRecordUrls.KEY_APP, app);
     }
     return wrapAsTextContent(result);
+  }
+
+  /**
+   * The specs an {@code etendo_discover} call answers with (IMP-53): every reachable spec when no
+   * {@code spec} argument was given, otherwise the reachable specs it names, in catalog order.
+   *
+   * @param reachable the specs this role reaches, in catalog order
+   * @param requested the raw {@code spec} argument: absent/blank, a name, or an array of names
+   * @return the specs to describe
+   * @throws McpRoutingException {@code validation_error} on {@code spec}, naming every requested
+   *     name that is not reachable (in request order) and carrying the reachable names
+   * @throws JSONException if an array element cannot be read
+   */
+  private static List<SFSpec> selectDiscoverSpecs(List<SFSpec> reachable, Object requested)
+      throws JSONException {
+    // Request order, so a refusal naming several unknown specs always lists them the same way.
+    Set<String> wanted = new LinkedHashSet<>();
+    if (requested instanceof JSONArray) {
+      JSONArray names = (JSONArray) requested;
+      for (int i = 0; i < names.length(); i++) {
+        wanted.add(String.valueOf(names.get(i)).trim());
+      }
+    } else if (requested != null && requested != JSONObject.NULL) {
+      wanted.add(String.valueOf(requested).trim());
+    }
+    wanted.remove("");
+    if (wanted.isEmpty()) {
+      return reachable;
+    }
+    List<String> reachableNames = new ArrayList<>();
+    for (SFSpec spec : reachable) {
+      reachableNames.add(spec.getName());
+    }
+    List<String> unknown = new ArrayList<>();
+    for (String name : wanted) {
+      if (!reachableNames.contains(name)) {
+        unknown.add(name);
+      }
+    }
+    if (!unknown.isEmpty()) {
+      throw McpRoutingException.unknownDiscoverSpec(unknown, reachableNames);
+    }
+    List<SFSpec> selected = new ArrayList<>();
+    for (SFSpec spec : reachable) {
+      if (wanted.contains(spec.getName())) {
+        selected.add(spec);
+      }
+    }
+    return selected;
   }
 
   // ── etendo_list ──────────────────────────────────────────────────────────
@@ -566,8 +655,12 @@ public class McpToolRouter {
 
     // IMP-5 clause (iii): flatten last, so projection and field filtering keep operating on the
     // wrapped shape core produced and only the body handed to the agent changes.
-    return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson));
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
+    // IMP-50: a call that applied a named status filter learns which one, and what the entity's
+    // other filters mean — the moment it is choosing among them. After projection on purpose:
+    // `fields` selects row columns, and this block is not one.
+    McpNamedFilters.attachApplied(flat, sfEntity.getNamedFilters(), filters);
+    return wrapAsTextContent(flat);
   }
 
   // ── etendo_get ───────────────────────────────────────────────────────────

@@ -94,6 +94,35 @@ class McpRoutingExceptionRefusalTest {
   }
 
   @Nested
+  @DisplayName("unknownDiscoverSpec (IMP-53)")
+  class UnknownDiscoverSpec {
+
+    @Test
+    @DisplayName("with no reachable spec, omits 'available' and says the role reaches none")
+    void emptyAvailableHasItsOwnHint() throws JSONException {
+      JSONObject envelope = McpRoutingException
+          .unknownDiscoverSpec(List.of("sales-order"), List.of()).toEnvelope();
+      assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
+      assertEquals(McpConstants.ERROR_VALIDATION, envelope.getString(McpConstants.KEY_ERROR));
+      assertEquals(McpConstants.PARAM_SPEC, envelope.getString(McpConstants.PARAM_FIELD));
+      assertFalse(envelope.has(McpConstants.KEY_AVAILABLE),
+          "an empty list is omitted, as on every other refusal");
+      String hint = envelope.getString(McpConstants.KEY_HINT);
+      assertTrue(hint.contains("reaches no spec"), hint);
+      assertFalse(hint.contains("'available'"), "must not point at a list that is not there");
+    }
+
+    @Test
+    @DisplayName("names every unknown spec, in the order given")
+    void namesEveryUnknownInOrder() throws JSONException {
+      JSONObject envelope = McpRoutingException
+          .unknownDiscoverSpec(List.of("zeta", "alpha"), List.of("sales-order")).toEnvelope();
+      assertEquals("Unknown specs 'zeta', 'alpha' for etendo_discover",
+          envelope.getString(McpConstants.KEY_DETAIL));
+    }
+  }
+
+  @Nested
   @DisplayName("unknownFilterField")
   class UnknownFilterField {
 

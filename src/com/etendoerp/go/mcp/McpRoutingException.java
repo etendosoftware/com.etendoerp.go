@@ -155,6 +155,30 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * {@code etendo_discover(spec)} named a spec this role does not reach — unknown, inactive, hidden
+   * from MCP or denied by window access, which are deliberately indistinguishable (IMP-53).
+   *
+   * <p>Unlike {@link #specNotFound}, the list <em>is</em> carried: the agent called the catalog tool
+   * precisely to learn the names, the handler already has the reachable ones in hand, and the list
+   * of names is a fraction of the full catalog the narrowed call exists to avoid.</p>
+   *
+   * @param unknown   every requested name that is not reachable, in request order — all of them,
+   *                  so one retry can fix an array call
+   * @param available the names of every spec this role reaches
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownDiscoverSpec(List<String> unknown, List<String> available) {
+    return new McpRoutingException((unknown.size() == 1 ? "Unknown spec '" : "Unknown specs '")
+        + String.join("', '", unknown) + "' for etendo_discover",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, McpConstants.PARAM_SPEC,
+        available,
+        available.isEmpty()
+            ? "This role reaches no spec. Call etendo_discover without arguments to confirm."
+            : RETRY_WITH_AVAILABLE + " Omit 'spec' to get the whole catalog.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * The entity named by the tool call is not an included entity of the resolved spec.
    *
    * <p>Here the list <em>is</em> carried: a spec exposes a handful of entities, the router has them
@@ -313,6 +337,30 @@ class McpRoutingException extends OBException {
         "Unknown status '" + status + "' for entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, "status", available,
         RETRY_WITH_AVAILABLE, McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * {@link #unknownNamedFilter(String, String, List)} plus what each valid name means (IMP-50):
+   * {@code available} keeps its contract — the bare names — and {@code namedFilters} carries the
+   * same names with their short descriptions, in the shape the {@code etendo_list} response uses,
+   * so the agent can pick the right one rather than the first plausible one.
+   *
+   * @param described the entity's filters as {@code McpNamedFilters#summarize} renders them
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownNamedFilter(String status, String entityName,
+      List<String> available, JSONArray described) {
+    McpRoutingException refusal = unknownNamedFilter(status, entityName, available);
+    if (described == null || described.length() == 0) {
+      return refusal;
+    }
+    JSONObject extras = new JSONObject();
+    try {
+      extras.put(McpNamedFilters.KEY_NAMED_FILTERS, described);
+    } catch (JSONException e) {
+      return refusal;
+    }
+    return refusal.withExtras(extras);
   }
 
   /**

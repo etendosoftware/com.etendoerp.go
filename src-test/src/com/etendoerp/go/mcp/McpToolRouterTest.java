@@ -47,6 +47,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * plus the authorization guard and exception-wrapping logic of {@code route()}.
  *
  * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpToolResponses
+ * @covers com.etendoerp.go.mcp.McpResponseSanitizer
  */
 public class McpToolRouterTest {
 
@@ -129,6 +131,70 @@ public class McpToolRouterTest {
 
     JSONArray content = result.getJSONArray(FIELD_CONTENT);
     assertEquals(longText, content.getJSONObject(0).getString("text"));
+  }
+
+  // ── compact serialisation of JSON tool results (ETP-5639 / IMP-53) ────────
+
+  /**
+   * A nested JSON body used by the compactness tests: an object inside an array inside an object,
+   * the shape that pretty-printing indents most.
+   */
+  private static JSONObject nestedBody() throws Exception {
+    JSONObject row = new JSONObject();
+    row.put("name", "Line 1\nsecond line");
+    row.put("qty", 2);
+    JSONArray rows = new JSONArray();
+    rows.put(row);
+    JSONObject body = new JSONObject();
+    body.put("specs", rows);
+    body.put("count", 1);
+    return body;
+  }
+
+  /**
+   * IMP-53: a JSON tool result is rendered compact — indentation was 41 % of etendo_discover's
+   * bytes. A newline inside a string value is escaped as {@code \n}, so a raw newline in the text
+   * can only be pretty-print indentation.
+   */
+  @Test
+  public void testWrapAsTextContentJsonBodyIsCompact() throws Exception {
+    JSONObject result = McpToolRouter.wrapAsTextContent(nestedBody());
+
+    String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+    assertFalse("tool result must not be pretty-printed: " + text, text.contains("\n"));
+    JSONObject parsed = new JSONObject(text);
+    assertEquals("Line 1\nsecond line",
+        parsed.getJSONArray("specs").getJSONObject(0).getString("name"));
+  }
+
+  /** IMP-53: the error counterpart is compact too — the same egress, the same rule. */
+  @Test
+  public void testWrapAsErrorContentJsonBodyIsCompact() throws Exception {
+    JSONObject result = McpToolRouter.wrapAsErrorContent(nestedBody());
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+    assertFalse("error result must not be pretty-printed: " + text, text.contains("\n"));
+  }
+
+  /** IMP-53: the unexpected-failure envelope is rendered compact. */
+  @Test
+  public void testUnexpectedErrorBodyIsCompact() throws Exception {
+    String text = McpToolResponses.buildUnexpectedErrorBody(TOOL_NEO_LIST,
+        new IllegalStateException("boom"));
+
+    assertFalse("error envelope must not be pretty-printed: " + text, text.contains("\n"));
+    assertEquals(TOOL_NEO_LIST, new JSONObject(text).getString("tool"));
+  }
+
+  /** IMP-53: the routing-failure envelope is rendered compact. */
+  @Test
+  public void testRoutingErrorBodyIsCompact() throws Exception {
+    String text = McpToolResponses.buildRoutingErrorBody(
+        McpRoutingException.specNotFound(SPEC_SALES_ORDER), TOOL_NEO_LIST);
+
+    assertFalse("error envelope must not be pretty-printed: " + text, text.contains("\n"));
+    assertEquals("spec", new JSONObject(text).getString("field"));
   }
 
   // ── wrapAsErrorContent ─────────────────────────────────────────────────

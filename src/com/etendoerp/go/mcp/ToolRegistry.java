@@ -142,6 +142,8 @@ public class ToolRegistry {
       tools.add(buildGetImageUploadTool());
     }
 
+    // IMP-53: every published tool, whatever its kind, accepts the presentation flag.
+    tools.replaceAll(ToolRegistry::withIndentResponse);
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
   }
@@ -260,7 +262,7 @@ public class ToolRegistry {
       return;
     }
     if (permissions.canRead) {
-      tools.add(buildListTool(accessibleWindowSpecs));
+      tools.add(buildListTool(accessibleWindowSpecs, namedFilterSummary(accessibleWindowSpecs)));
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
       tools.add(buildDefaultsTool(accessibleWindowSpecs));
@@ -326,6 +328,13 @@ public class ToolRegistry {
         || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)) {
       return null;
     }
+    // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
+    // The handler checks each requested name against the specs this role reaches and refuses an
+    // unknown one with the reachable names, so it must not go through the single-spec gate (which
+    // would answer 404 without them, and cannot read an array of names).
+    if (McpConstants.TOOL_NEO_DISCOVER.equals(toolName)) {
+      return null;
+    }
 
     // CRUD tools carry spec in arguments
     if (isCrudTool(toolName)) {
@@ -374,19 +383,47 @@ public class ToolRegistry {
     }
   }
 
+  /**
+   * The same tool with the optional {@code _indentResponse} boolean added to its input schema
+   * (IMP-53). Declared here, once, for every published tool rather than in each builder, so a new
+   * tool cannot miss it. The schema maps are copied: a builder may hand back an immutable one.
+   * {@code McpToolRouter.route} strips the flag before routing, so it is never a business argument.
+   */
+  static McpToolDefinition withIndentResponse(McpToolDefinition tool) {
+    Map<String, Object> schema = new LinkedHashMap<>(tool.getInputSchema());
+    schema.putIfAbsent("type", McpConstants.TYPE_OBJECT);
+    Map<String, Object> props = new LinkedHashMap<>();
+    Object existing = schema.get(McpConstants.KEY_PROPERTIES);
+    if (existing instanceof Map) {
+      for (Map.Entry<?, ?> entry : ((Map<?, ?>) existing).entrySet()) {
+        props.put(String.valueOf(entry.getKey()), entry.getValue());
+      }
+    }
+    props.put(McpConstants.PARAM_INDENT_RESPONSE, booleanProp(McpConstants.DESC_INDENT_RESPONSE));
+    schema.put(McpConstants.KEY_PROPERTIES, props);
+    return new McpToolDefinition(tool.getName(), tool.getDescription(), schema, tool.getTitle());
+  }
+
   // ── Discovery tool ─────────────────────────────────────────────────────
 
   private McpToolDefinition buildDiscoverTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    // IMP-53: optional. The full catalog runs to tens of KB; an agent that already knows the spec
+    // it needs pays only for that one.
+    props.put(McpConstants.PARAM_SPEC, stringProp(
+        "Optional spec name. Pass it to get only that spec's entities, parent links and actions "
+            + "instead of the whole catalog. An unknown name is refused with the names you can use."));
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", McpConstants.TYPE_OBJECT);
     schema.put(McpConstants.KEY_DESCRIPTION,
-        "Discover all available Etendo API specs and their entities");
-    schema.put(McpConstants.KEY_PROPERTIES, new HashMap<>());
+        "Discover the available Etendo API specs and their entities");
+    schema.put(McpConstants.KEY_PROPERTIES, props);
     return new McpToolDefinition(
-        "etendo_discover",
+        McpConstants.TOOL_NEO_DISCOVER,
         "List all available Etendo API specs the current user can access. "
             + "Returns spec names, types, entities, and available HTTP methods. "
-            + "Use this first to discover what specs and entities are available.",
+            + "Use this first to discover what specs and entities are available. "
+            + "Pass spec to get only that spec's entities, parent links and actions.",
         schema);
   }
 
@@ -666,6 +703,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_SELECTORS: definition = registry.buildSelectorsTool(List.of()); break;
       case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
       case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DISCOVER: definition = registry.buildDiscoverTool(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -679,7 +717,53 @@ public class ToolRegistry {
     return Optional.of(names);
   }
 
+  /**
+   * The named filters configured on the entities of the specs the catalog exposes, one line per
+   * entity, capped at {@link McpNamedFilters#CATALOG_CAP} (IMP-50). Read from the data on every
+   * {@code tools/list}, in one query, and cached nowhere: a {@code NAMED_FILTERS} change shows up
+   * on the next catalog request with nothing to invalidate.
+   *
+   * <p>Visibility follows the spec enum: only entities of {@code specNames} — the specs this role
+   * reaches — are listed. A failure to read them costs the hint, never the catalog.</p>
+   *
+   * @param specNames the window specs {@code etendo_list} advertises, in catalog order
+   * @return the summary, or {@code null} when no exposed entity declares a named filter
+   */
+  private String namedFilterSummary(List<String> specNames) {
+    try {
+      OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+      criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+      criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+      criteria.add(Restrictions.isNotNull(SFEntity.PROPERTY_NAMEDFILTERS));
+      criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+      Map<String, List<String>> linesBySpec = new LinkedHashMap<>();
+      for (String specName : specNames) {
+        linesBySpec.put(specName, new ArrayList<>());
+      }
+      for (SFEntity entity : criteria.list()) {
+        SFSpec spec = entity.getETGOSFSpec();
+        List<String> lines = spec == null ? null : linesBySpec.get(spec.getName());
+        String line = lines == null ? null
+            : McpNamedFilters.catalogLine(spec.getName(), entity.getName(),
+                entity.getNamedFilters());
+        if (line != null) {
+          lines.add(line);
+        }
+      }
+      List<String> ordered = new ArrayList<>();
+      linesBySpec.values().forEach(ordered::addAll);
+      return McpNamedFilters.catalogSummary(ordered, McpNamedFilters.CATALOG_CAP);
+    } catch (RuntimeException e) {
+      log.warn("Could not list the configured named filters for etendo_list: {}", e.getMessage());
+      return null;
+    }
+  }
+
   private McpToolDefinition buildListTool(List<String> specNames) {
+    return buildListTool(specNames, null);
+  }
+
+  private McpToolDefinition buildListTool(List<String> specNames, String namedFilterSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
@@ -688,10 +772,10 @@ public class ToolRegistry {
         "Filter criteria. Three shapes, combinable: (1) exact match {\"column\": value}; "
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
-            + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
-            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call etendo_schema with "
-            + "view:\"full\" to see the named filters available for a given spec; an unknown name "
-            + "returns the valid list."));
+            + "(3) named business filter {\"status\": \"<name>\"} — a hand-authored business "
+            + "state; an unknown name returns the valid list with what each one means."
+            + (namedFilterSummary == null ? ""
+                : " Configured named filters (spec/entity: name (meaning)):\n" + namedFilterSummary)));
     // IMP-40: etendo_discover already advertises "parentRequiredFor":["list",...] on every child
     // entity, and until now this tool had no argument that could satisfy it — so the only way to
     // scope a list to one parent was a filter on a field name the agent had to work out itself.
