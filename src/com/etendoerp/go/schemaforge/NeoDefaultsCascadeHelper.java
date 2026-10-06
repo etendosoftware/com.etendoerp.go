@@ -124,7 +124,7 @@ public class NeoDefaultsCascadeHelper {
       // IMP-45: hand the divergences to the context so the caller can be told. The REST path
       // never reads it — there the protected value came from a form a person filled in, so there
       // is nothing to warn about. The MCP path is the one that invites an agent to re-send what
-      // neo_defaults handed it, which is how a generic default gets pinned over the one the
+      // etendo_defaults handed it, which is how a generic default gets pinned over the one the
       // business partner actually implies.
       if (ctx != null && cascadeResult != null
           && cascadeResult.getSupersededDefaults().length() > 0) {
@@ -610,7 +610,7 @@ public class NeoDefaultsCascadeHelper {
         // IMP-45: the caller's value wins, as it always has — but this is the exact point where a
         // callout that knows the record's real context (the business partner's payment terms, for
         // one) is told to stand down in favour of a value the caller may simply have echoed back
-        // from neo_defaults. Recorded so the divergence can be reported; nothing here changes what
+        // from etendo_defaults. Recorded so the divergence can be reported; nothing here changes what
         // gets persisted.
         recordSupersededDefault(result, defaults, updatedField, updateObj);
         continue;

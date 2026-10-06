@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *       surface at all — and {@code VISIBILITY} — how it is classified once it is — are different
  *       axes, and a classification override may never flip inclusion.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.mcp.McpFieldView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -169,7 +171,7 @@ class McpFieldViewTest {
         + "exists in the data")
     void agreesWithTheOldRuleOnEveryCombinationThatExists() {
       // The seven combinations across 6661 active ETGO_SF_FIELD rows, with their row counts. If
-      // the resolver diverged on any of them, introducing it would have changed neo_selectors'
+      // the resolver diverged on any of them, introducing it would have changed etendo_selectors'
       // answer for entities nobody configured.
       assertNoOp("system", Boolean.TRUE, Boolean.TRUE, 1906);
       assertNoOp(null, Boolean.FALSE, Boolean.FALSE, 1739);
@@ -195,7 +197,7 @@ class McpFieldViewTest {
     void blankVisibilityIsUncurated() {
       McpFieldView view = McpFieldView.of(field("   ", Boolean.TRUE, Boolean.FALSE));
       assertNull(view.getVisibility(), "an uncurated field must keep an ABSENT visibility, because"
-          + " that is what neo_schema has always emitted for it");
+          + " that is what etendo_schema has always emitted for it");
       assertTrue(view.isEditable());
     }
 

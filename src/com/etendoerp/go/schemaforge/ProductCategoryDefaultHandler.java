@@ -160,7 +160,7 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
   /**
    * ETP-5009: keeps system-flagged categories out of every list read of the "Categoría del
    * producto" window — REST list and count, the {@code ?_distinct=} filter values, MCP
-   * {@code neo_list} — in the query itself, instead of post-filtering a page core had already
+   * {@code etendo_list} — in the query itself, instead of post-filtering a page core had already
    * cut and counted.
    */
   @Override

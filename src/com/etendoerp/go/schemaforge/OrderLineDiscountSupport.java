@@ -67,7 +67,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  *       re-firing {@code SL_Order_Amt} for {@code discount}, the only code that does that.</li>
  *   <li>{@link #deriveAmountsOnCreate(NeoContext)}: every created line gets its
  *       {@code lineGrossAmount} from {@link NeoCommercialLinePolicy#injectCommercialAmounts}, which
- *       {@code neo_create} never reaches through the shared path.</li>
+ *       {@code etendo_create} never reaches through the shared path.</li>
  * </ol>
  * The value rule that decides whether an amount in the body is the caller's or a stale
  * server-derived one lives in {@link LineAmountSupport}, shared with the sales invoice line
@@ -79,8 +79,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * <ul>
  *   <li>no {@code unitPrice} at all — any discount, 0 included (0 restores the list price), or</li>
  *   <li>a non-zero {@code discount} with {@code unitPrice} equal to the UNDISCOUNTED list price —
- *       the price the discount has not been applied to yet. This is what {@code neo_create} and
- *       {@code neo_batch} carry once {@code McpLinePriceInjector} has written the list's price,
+ *       the price the discount has not been applied to yet. This is what {@code etendo_create} and
+ *       {@code etendo_batch} carry once {@code McpLinePriceInjector} has written the list's price,
  *       and it is how a body that did not come from the form can be recognised without knowing
  *       which keys the caller sent.</li>
  * </ul>
@@ -99,7 +99,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * line's current price as its standard price ({@link #alignStandardPriceWithCurrentPrice}), or it
  * would misread the line's current discount.
  *
- * <p><b>Not reachable from here:</b> the IMP-45 {@code supersededDefaults} entry {@code neo_create}
+ * <p><b>Not reachable from here:</b> the IMP-45 {@code supersededDefaults} entry {@code etendo_create}
  * attaches for {@code discount} (the defaults cascade proposed 0, the caller's 5 was kept). It is
  * recorded on the router's own cascade context, not on the hook context this class receives, so it
  * is still reported although the discount is applied — declared in {@code neo-headless.md}
@@ -146,7 +146,7 @@ final class OrderLineDiscountSupport {
    * order's price list at the order date — the call core makes for a line
    * ({@link FinancialUtils#getProductPrice}), and the same one {@code McpLinePriceInjector} makes
    * for {@code unitPrice}. That is what the form persists, whatever unit price the user typed.
-   * Without it a line created through {@code neo_create} or {@code neo_batch} persisted
+   * Without it a line created through {@code etendo_create} or {@code etendo_batch} persisted
    * {@code PriceStd 0} — or, with an explicit {@code unitPrice}, the price the defaults cascade
    * copied from it ({@code SL_Order_Amt} on {@code unitPrice} publishes {@code inppricestd}).
    *
@@ -208,7 +208,7 @@ final class OrderLineDiscountSupport {
   }
 
   /**
-   * The parent order of a create body: {@code salesOrder} on {@code neo_create} (its
+   * The parent order of a create body: {@code salesOrder} on {@code etendo_create} (its
    * {@code parentId} is already resolved into the FK), {@code parentId} on REST and batch creates.
    */
   private static String parentOrderId(JSONObject body) {
@@ -356,7 +356,7 @@ final class OrderLineDiscountSupport {
 
   /**
    * On a create the body cannot say whether an amount was sent by the caller or derived by the
-   * server from the undiscounted price ({@code neo_create} runs the defaults cascade before the
+   * server from the undiscounted price ({@code etendo_create} runs the defaults cascade before the
    * pre-hook). It is judged by value: an amount is
    * server-derived when it is absent, zero, or equal (at 2 decimals) to what the undiscounted price
    * yields — {@code orderedQuantity × unitPrice} for {@code lineNetAmount} ({@code SL_Order_Amt}'s
@@ -459,7 +459,7 @@ final class OrderLineDiscountSupport {
    * (T12) over the line's final quantity, price, gross price and tax. Runs after
    * {@link #applyDiscount}, so it reads the discounted price.
    *
-   * <p><b>Why here.</b> {@code neo_create} is a separate pipeline from the REST create path and
+   * <p><b>Why here.</b> {@code etendo_create} is a separate pipeline from the REST create path and
    * never reaches {@code NeoCrudHandler#executePostCreate}, where every other channel gets these
    * amounts. Without this a line an agent created kept {@code LINE_GROSS_AMOUNT = 0} on a net price
    * list ({@code SL_Order_Amt} publishes {@code grossUnitPrice × qty}, which is 0 there). The fix
@@ -524,7 +524,7 @@ final class OrderLineDiscountSupport {
 
   /**
    * The callout publishes every value as a string. The REST paths coerce the body after the
-   * pre-hook, but {@code neo_create} and {@code neo_update} coerced it before, so the values written
+   * pre-hook, but {@code etendo_create} and {@code etendo_update} coerced it before, so the values written
    * here are coerced here — only those, so nothing the caller sent is touched a second time.
    */
   private static void coerceDerivedValues(JSONObject body, JSONObject before)

@@ -20,9 +20,12 @@ import java.math.BigDecimal;
 import java.util.Date;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
@@ -34,6 +37,7 @@ import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Shared commercial document projection helpers for order-driven documents.
@@ -75,6 +79,69 @@ final class NeoCommercialDocumentFactory {
         .setMaxResults(1)
         .list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Returns the active, non-return goods-movement ({@code M_InOut}) document type of
+   * {@code client} for the given base type and direction, preferring the one flagged default, or
+   * {@code null} when none exists. Direction-agnostic counterpart of
+   * {@link #findShipmentDocType(Client)} (which stays as it is for its existing callers): the
+   * caller passes {@code MMS}/{@code true} for a goods shipment, {@code MMR}/{@code false} for a
+   * goods receipt. {@code IsReturn = 'N'} is required on both sides — every client also carries
+   * an "RTV Shipment" ({@code MMR}, purchase, return) and an "RFC Receipt" ({@code MMS}, sales,
+   * return) that must never be picked for a regular movement (ETP-5576).
+   */
+  static DocumentType findInOutDocType(Client client, String docBaseType, boolean salesTransaction) {
+    List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
+        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client))
+        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docBaseType))
+        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, salesTransaction))
+        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, false))
+        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
+        .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
+        .setMaxResults(1)
+        .list();
+    return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Defensive fallback when {@code DocumentNoHandlerLegacy} could not resolve the movement's
+   * document number. Goods-movement document types are often configured with
+   * {@code IsDocNoControlled='N'} and no {@code DocNoSequence_ID}, so the listener leaves the
+   * placeholder (or an empty string) behind. Resolves the next number from the table-level
+   * {@code DocumentNo_M_InOut} sequence using the movement's OWN client (not
+   * {@code vars.getClient()}, which can differ under {@code OBContext.setAdminMode(true)} + NEO
+   * Headless), on the OBDal JDBC connection so the sequence advance stays in the same
+   * transaction. No-op when the movement already carries a real number.
+   *
+   * <p>Extracted unchanged from {@code CreateGoodsReceiptHandler#ensureDocumentNo} so the
+   * follow-up document service (ETP-5576) gets the same guarantee for both directions.
+   */
+  static void ensureInOutDocumentNo(ShipmentInOut inout, Logger log) {
+    String current = inout.getDocumentNo();
+    if (StringUtils.isNotBlank(current) && !current.startsWith("<")) {
+      return;
+    }
+    String docNo = Utility.getDocumentNoConnection(
+        OBDal.getInstance().getConnection(false),
+        new DalConnectionProvider(false),
+        inout.getClient().getId(),
+        "M_InOut",
+        true);
+    if (StringUtils.isBlank(docNo)) {
+      log.warn(
+          "Could not generate documentNo for goods movement {} (docType={}, client={}). "
+              + "Configure DocNoSequence_ID on the document type or activate "
+              + "AD_Sequence 'DocumentNo_M_InOut' for the client.",
+          inout.getId(),
+          inout.getDocumentType() != null ? inout.getDocumentType().getName() : "null",
+          inout.getClient().getId());
+      return;
+    }
+    log.info("Generated documentNo='{}' for goods movement {}", docNo, inout.getId());
+    inout.setDocumentNo(docNo);
+    OBDal.getInstance().save(inout);
+    OBDal.getInstance().flush();
   }
 
   /** Returns the default active locator for the given warehouse, falling back to any active one. */
@@ -145,26 +212,9 @@ final class NeoCommercialDocumentFactory {
     return shipment;
   }
 
-  static ShipmentInOut createShipmentFromInvoiceHeader(Invoice invoice, DocumentType docType,
-      boolean salesTransaction, String movementType, org.openbravo.model.common.enterprise.Warehouse warehouse) {
-    ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
-    shipment.setClient(invoice.getClient());
-    shipment.setOrganization(invoice.getOrganization());
-    shipment.setBusinessPartner(invoice.getBusinessPartner());
-    shipment.setPartnerAddress(invoice.getPartnerAddress());
-    shipment.setWarehouse(warehouse);
-    shipment.setMovementDate(new Date());
-    shipment.setAccountingDate(new Date());
-    shipment.setDocumentType(docType);
-    shipment.setDocumentNo("<*>");
-    shipment.setSalesTransaction(salesTransaction);
-    shipment.setProcessed(false);
-    shipment.setDocumentStatus("DR");
-    shipment.setMovementType(movementType);
-    // ETP-4028: EM_Etgo_Currency_ID is mandatory on M_InOut — every new record must carry it.
-    shipment.setEtgoCurrency(invoice.getCurrency());
-    return shipment;
-  }
+  // ETP-5576: createShipmentFromInvoiceHeader was removed. The invoice → movement header is now
+  // built by InOutTargetBuilder from a neutral InOutTargetBuilder.Header, shared by every
+  // "… → shipment/receipt" follow-up.
 
   /**
    * Builds a draft AP Invoice header from a goods receipt that has no linked purchase order.
