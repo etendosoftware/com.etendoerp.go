@@ -23,6 +23,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -168,6 +169,57 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return the subclass's injected {@link TotalDiscountService}
    */
   protected abstract TotalDiscountService getTotalDiscountService();
+
+  // ---------------------------------------------------------------------------
+  // Follow-up document: goods shipment / goods receipt for the pending quantities (ETP-5576)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Follow-up documents of this invoice entity (ETP-5576): the generic, identity-free
+   * {@link FollowUpSupport}, fed by {@link #followUpFlows()}. Subclasses plug
+   * {@code followUp.actionHandler()} into their dispatch chain and call
+   * {@code followUp.annotate(dataArr)} on GET.
+   */
+  protected final FollowUpSupport followUp = new FollowUpSupport(this::followUpFlows);
+
+  /**
+   * The follow-ups this invoice entity offers, in the order the UI should offer them — the ONE
+   * binding point. Default: none. The sales handler registers the goods shipment, the purchase
+   * handler the goods receipt — each an {@link InvoicePendingResolver} with
+   * {@link #isStandardInvoiceDocType} as its eligibility classifier, composed with the shared
+   * {@link InOutFollowUpCreator} — one {@link FollowUpFlow} line each.
+   */
+  protected List<FollowUpFlow> followUpFlows() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * {@code true} when {@code docTypeId} is a standard invoice (FAC) for THIS handler's own
+   * {@link #classifyDocType} — the rule behind {@code arInvoiceSubtype}/{@code apInvoiceSubtype},
+   * so credit notes, returns and rectificatives never qualify.
+   *
+   * <p><b>Fails CLOSED</b>, unlike {@link #resolveSubtype}, which fails open to {@code FAC} for
+   * the display annotation and is left as it is: this predicate gates a WRITE (creating a
+   * follow-up document), so a blank id, an unknown id or a lookup error answers {@code false}
+   * (ETP-5576 review W5). An error is logged, never swallowed silently.
+   */
+  protected boolean isStandardInvoiceDocType(String docTypeId) {
+    if (StringUtils.isBlank(docTypeId)) {
+      return false;
+    }
+    try {
+      DocumentType dt = OBDal.getInstance().get(DocumentType.class, docTypeId);
+      if (dt == null) {
+        log.warn("Document type {} not found; not eligible for a follow-up document", docTypeId);
+        return false;
+      }
+      return SUBTYPE_FAC.equals(classifyDocType(dt));
+    } catch (Exception e) {
+      log.error("Could not classify document type {}; not eligible for a follow-up document",
+          docTypeId, e);
+      return false;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Validation
