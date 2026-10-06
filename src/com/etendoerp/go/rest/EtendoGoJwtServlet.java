@@ -231,6 +231,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String INVALID_AUTHORIZATION_HEADER =
       "Missing or invalid Authorization header";
   private static final String INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token";
+  private static final String OPERATION_SESSION_REFRESH = "session refresh";
   // ETP-4664 — stable, machine-readable codes for register/login errors, so the
   // frontend can translate by code instead of showing the raw English message.
   private static final String CODE_INVALID_REQUEST = "INVALID_REQUEST";
@@ -5518,12 +5519,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       IssuedGoSession rotated = rawRefresh == null ? null : goSessionService.refresh(rawRefresh);
       if (rotated == null) {
         // A replayed refresh revokes its whole rotation family: make that durable before the 401.
-        commitAndClearSessionCookies(response, "session refresh");
+        commitAndClearSessionCookies(response, OPERATION_SESSION_REFRESH);
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
-      commitAndSetSessionCookies(response, rotated, "session refresh");
+      commitAndSetSessionCookies(response, rotated, OPERATION_SESSION_REFRESH);
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
@@ -5532,7 +5533,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("session refresh", e, log);
+      EtendoGoDalHelper.rollbackDalChanges(OPERATION_SESSION_REFRESH, e, log);
       log.error("Database error during session refresh", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
     } catch (JSONException e) {
