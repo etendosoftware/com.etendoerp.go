@@ -985,6 +985,43 @@ public class GoSessionEndpointsTest {
     verify(obDal, never()).commitAndClose();
   }
 
+  /**
+   * A change whose commit fails answers 500 with nothing announced: no rotated cookie, no notice,
+   * and the request transaction rolled back (the password and the rotation with it).
+   */
+  @Test
+  public void changePasswordWhoseCommitFailsSendsNoCookieAndNoNotice() throws Exception {
+    GoSessionRecord sessionRecord = cookieSession();
+    CapturedResponse resp = new CapturedResponse();
+    resp.failCommit = true;
+    when(goSessionService.rotate(sessionRecord)).thenAnswer(sessionWrite(resp,
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord())));
+    Account account = passwordAccount();
+
+    OBDal obDal = recordingDal(resp);
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+      // The real helper flushes and commits the request transaction (flushAndCommitDalChanges).
+      dal.when(() -> EtendoGoJwtDalHelper.changePassword(eq(account), anyString(), anyString(),
+          any())).thenAnswer(inv -> {
+            obDal.commitAndClose();
+            return null;
+          });
+
+      servlet.doPost(changePasswordRequest(), resp.response);
+    }
+
+    assertEquals(500, resp.status);
+    assertTrue("no cookie may be set for an uncommitted change: " + resp.setCookies,
+        resp.setCookies.isEmpty());
+    verifyNoInteractions(emailSender);
+    verify(obDal).rollbackAndClose();
+  }
+
   /** A live cookie session of account {@code ACC1}, resolved from cookie {@code tok}. */
   private GoSessionRecord cookieSession() {
     GoSessionRecord sessionRecord = new GoSessionRecord();

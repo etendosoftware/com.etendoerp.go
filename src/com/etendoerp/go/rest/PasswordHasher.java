@@ -23,7 +23,8 @@ import java.security.SecureRandom;
 import java.util.Base64;
 
 /**
- * ETP-4829: extracted from {@link EtendoGoJwtServlet#hashPassword}, which now delegates here.
+ * ETP-4829: extracted from the servlet's former {@code hashPassword}; ETP-5628 removed that
+ * delegate.
  * Single source of truth for the {@code etgo_account.password_hash} algorithm — anything that
  * writes an {@code etgo_account} row with a real, verifiable password (self-registration,
  * password reset/change, company-invitation {@code register-and-accept}) must hash through this

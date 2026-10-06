@@ -1629,7 +1629,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      String passwordHash = hashPassword(password);
+      String passwordHash = PasswordHasher.hash(password);
       String legacySessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
           legacySessionToken);
@@ -1969,7 +1969,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, PASSWORD_RESET_INVALID_MESSAGE);
         return;
       }
-      EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());
+      EtendoGoJwtDalHelper.consumePasswordReset(account, PasswordHasher.hash(password), new Date());
       // ETP-5003 — the security notice belongs to every password change, not only the one made
       // from inside the app. This is the path an attacker with a stolen reset link would take, so
       // it is the one where the owner most needs to be told.
@@ -2187,8 +2187,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * POST /sws/go/change-password
-   * Header: Authorization: Bearer <session_token>
-   * Body: { "currentPassword": "...", "newPassword": "..." }
+   * Authenticated by the {@code __Host-} session cookie (unsafe method, so the CSRF header is
+   * required); without a session cookie, falls back to {@code Authorization: Bearer <token>}.
+   * Body: { "currentPassword": "...", "newPassword": "..." } — {@code currentPassword} is omitted
+   * when an account with no local password enrols one (ETP-5115).
    */
   private void handleChangePassword(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -4785,19 +4787,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
 
   // --- Password utilities ---
-
-  /**
-   * Hash a plaintext password using SHA-256 with a random salt.
-   * Returns "base64(salt):base64(hash)" so the salt can be recovered for verification.
-   *
-   * @deprecated logic moved to {@link PasswordHasher#hash} (ETP-4829, so other callers could
-   *     hash passwords the same way without depending on this servlet); kept as a thin delegate
-   *     so every existing call site here is unchanged.
-   */
-  @Deprecated
-  private String hashPassword(String password) {
-    return PasswordHasher.hash(password);
-  }
 
   /**
    * Verify a plaintext password against a stored "salt:hash" string.

@@ -23,8 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 /**
- * Unit tests for {@link PasswordHasher} (ETP-4829) — extracted from {@link
- * EtendoGoJwtServlet#hashPassword}, which now delegates here.
+ * Unit tests for {@link PasswordHasher} (ETP-4829) — extracted from the servlet's former
+ * {@code hashPassword}, whose call sites now use it directly (ETP-5628).
  */
 class PasswordHasherTest {
 
