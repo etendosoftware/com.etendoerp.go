@@ -297,8 +297,8 @@ class EtendoGoJwtSupportTest {
     }
 
     @Test
-    @DisplayName("ETP-5329: flags the tenant client-admin role with isClientAdmin, every other "
-        + "entry with isClientAdmin=false")
+    @DisplayName("flags the tenant client-admin role with isClientAdmin (case-insensitive 'Y'), "
+        + "every other entry with isClientAdmin=false")
     void flagsClientAdminRole() throws JSONException {
       // A tenant admin's default role IS the client-admin AD_Role: tenant-specific raw name, no
       // composed templates -> no effectiveRoleNames. Without the flag the topbar showed the raw
@@ -306,7 +306,10 @@ class EtendoGoJwtSupportTest {
       mockRoleListQuery(Arrays.asList(
           new Object[]{ "admin-role", "Acme SL Admin", "org-1", "Main Org", 'Y' },
           new Object[]{ "role-2", "Other Role", null, null, 'N' },
-          new Object[]{ "role-3", "Null Flag Role", null, null, null }));
+          new Object[]{ "role-3", "Null Flag Role", null, null, null },
+          // Lowercase flags, as a char and as a string, must also read as client admin.
+          new Object[]{ "role-4", "Lowercase Char Admin", null, null, 'y' },
+          new Object[]{ "role-5", "Lowercase String Admin", null, null, "y" }));
       mockUserDefaultRole("admin-role");
 
       try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
@@ -320,6 +323,10 @@ class EtendoGoJwtSupportTest {
         assertFalse(admin.has("effectiveRoleNames"));
         assertFalse(data.getRoleArray().getJSONObject(1).getBoolean("isClientAdmin"));
         assertFalse(data.getRoleArray().getJSONObject(2).getBoolean("isClientAdmin"));
+        assertEquals("role-4", data.getRoleArray().getJSONObject(3).getString("id"));
+        assertTrue(data.getRoleArray().getJSONObject(3).getBoolean("isClientAdmin"));
+        assertEquals("role-5", data.getRoleArray().getJSONObject(4).getString("id"));
+        assertTrue(data.getRoleArray().getJSONObject(4).getBoolean("isClientAdmin"));
       }
     }
 
