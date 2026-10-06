@@ -12441,7 +12441,7 @@
 <!--1DF94BD83B7F4BF88BB31DCE595809E7-->  <JAVA_QUALIFIER><![CDATA[type]]></JAVA_QUALIFIER>
 <!--1DF94BD83B7F4BF88BB31DCE595809E7-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--1DF94BD83B7F4BF88BB31DCE595809E7-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
-<!--1DF94BD83B7F4BF88BB31DCE595809E7-->  <AGENT_PROMPT><![CDATA[Financial account type — a selectable list field. `neo_defaults` returns a starting value for a new account; if that default is not the type you need, do not assume how many types the domain has from source or seed code (e.g. SeedReferenceDataStep). Query the `type` selector via `neo_selectors` to get the authoritative, current set of valid values, then pick the right one.]]></AGENT_PROMPT>
+<!--1DF94BD83B7F4BF88BB31DCE595809E7-->  <AGENT_PROMPT><![CDATA[Financial account type — a selectable list field. `etendo_defaults` returns a starting value for a new account; if that default is not the type you need, do not assume how many types the domain has from source or seed code (e.g. SeedReferenceDataStep). Query the `type` selector via `etendo_selectors` to get the authoritative, current set of valid values, then pick the right one.]]></AGENT_PROMPT>
 <!--1DF94BD83B7F4BF88BB31DCE595809E7-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--1DF94BD83B7F4BF88BB31DCE595809E7--></ETGO_SF_FIELD>
 
@@ -13120,7 +13120,7 @@
 <!--1F5B746066744DB4A282CFA6E6463F27-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--1F5B746066744DB4A282CFA6E6463F27-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--1F5B746066744DB4A282CFA6E6463F27-->  <JAVA_QUALIFIER><![CDATA[deliveryStatusPurchase]]></JAVA_QUALIFIER>
-<!--1F5B746066744DB4A282CFA6E6463F27-->  <SEQNO><![CDATA[950]]></SEQNO>
+<!--1F5B746066744DB4A282CFA6E6463F27-->  <SEQNO><![CDATA[980]]></SEQNO>
 <!--1F5B746066744DB4A282CFA6E6463F27-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
 <!--1F5B746066744DB4A282CFA6E6463F27-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--1F5B746066744DB4A282CFA6E6463F27--></ETGO_SF_FIELD>
@@ -15037,6 +15037,22 @@
 <!--23EBD109078643F189141A4A467025D3-->  <SEQNO><![CDATA[220]]></SEQNO>
 <!--23EBD109078643F189141A4A467025D3-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--23EBD109078643F189141A4A467025D3--></ETGO_SF_FIELD>
+
+<!--23F70EDF3EC446308A1EBAED5BD6BC96--><ETGO_SF_FIELD>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <ETGO_SF_FIELD_ID><![CDATA[23F70EDF3EC446308A1EBAED5BD6BC96]]></ETGO_SF_FIELD_ID>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <ETGO_SF_ENTITY_ID><![CDATA[41A35A9AC111442F86CE1A6296997DCD]]></ETGO_SF_ENTITY_ID>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <AD_COLUMN_ID><![CDATA[2911D24F4C8F4A60967A5544FD0357AB]]></AD_COLUMN_ID>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <JAVA_QUALIFIER><![CDATA[eTGOInvoiceStatus]]></JAVA_QUALIFIER>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <SEQNO><![CDATA[940]]></SEQNO>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--23F70EDF3EC446308A1EBAED5BD6BC96--></ETGO_SF_FIELD>
 
 <!--23FE268ED7314289A3DDC637427AF1E8--><ETGO_SF_FIELD>
 <!--23FE268ED7314289A3DDC637427AF1E8-->  <ETGO_SF_FIELD_ID><![CDATA[23FE268ED7314289A3DDC637427AF1E8]]></ETGO_SF_FIELD_ID>
@@ -18580,7 +18596,7 @@
 <!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
-<!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1-->  <AGENT_PROMPT><![CDATA[Document workflow action for this purchase invoice. Fire it with neo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO completes the invoice — it computes taxes and totals and creates the payment plan; VO voids it. From documentStatus=CO (Completed): RE reactivates it back to DR, and the UI unposts the invoice first when it was already posted — so check the posted field and expect the accounting entries to be removed. CL closes it. Preconditions for CO: at least one line, a vendor with payment terms, and an open period for the accounting date. Completing does NOT post to the ledger: posting is a separate action on this window (not a documentAction value), so never send PO here — read the posted field to know the accounting state. Read documentStatus and posted with neo_get before acting. The remaining values offered in actionValues (AP, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
+<!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1-->  <AGENT_PROMPT><![CDATA[Document workflow action for this purchase invoice. Fire it with etendo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO completes the invoice — it computes taxes and totals and creates the payment plan; VO voids it. From documentStatus=CO (Completed): RE reactivates it back to DR, and the UI unposts the invoice first when it was already posted — so check the posted field and expect the accounting entries to be removed. CL closes it. Preconditions for CO: at least one line, a vendor with payment terms, and an open period for the accounting date. Completing does NOT post to the ledger: posting is a separate action on this window (not a documentAction value), so never send PO here — read the posted field to know the accounting state. Read documentStatus and posted with etendo_get before acting. The remaining values offered in actionValues (AP, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
 <!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--2CED4A97B06E4CFBBBDCB09C6A1FE8B1--></ETGO_SF_FIELD>
 
@@ -19225,7 +19241,7 @@
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
-<!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales order. Fire it with neo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO books the order — it validates the lines, reserves stock and makes the order shippable and invoiceable; VO voids it. From documentStatus=CO (Booked): RE reactivates it back to DR, but only while the order has no linked documents (no shipment or invoice generated from it) — the UI hides Reactivate in that case and the process will reject it. CL closes the pending quantities. Preconditions for CO: at least one line, a business partner with payment terms and a price list, and an open period for the accounting date. Read documentStatus with neo_get before acting — CO on an order that is already CO is an error. Booking recalculates the total-discount line automatically; never create that line by hand. The remaining values offered in actionValues (AP, PO, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
+<!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales order. Fire it with etendo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO books the order — it validates the lines, reserves stock and makes the order shippable and invoiceable; VO voids it. From documentStatus=CO (Booked): RE reactivates it back to DR, but only while the order has no linked documents (no shipment or invoice generated from it) — the UI hides Reactivate in that case and the process will reject it. CL closes the pending quantities. Preconditions for CO: at least one line, a business partner with payment terms and a price list, and an open period for the accounting date. Read documentStatus with etendo_get before acting — CO on an order that is already CO is an error. Booking recalculates the total-discount line automatically; never create that line by hand. The remaining values offered in actionValues (AP, PO, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--2EE3B2C5CA304B5986172A5DEF9DBF97--></ETGO_SF_FIELD>
 
@@ -21542,7 +21558,7 @@
 <!--349D4EF261ED4FF291EE10000B3AD040-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--349D4EF261ED4FF291EE10000B3AD040-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--349D4EF261ED4FF291EE10000B3AD040-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
-<!--349D4EF261ED4FF291EE10000B3AD040-->  <AGENT_PROMPT><![CDATA[Document workflow action for this purchase order. Fire it with neo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO books the order — it makes the order receivable and invoiceable; VO voids it. From documentStatus=CO (Booked): RE reactivates it back to DR, but only while the order has no linked documents (no receipt or invoice generated from it) — the UI hides Reactivate in that case and the process will reject it. CL closes the pending quantities. Preconditions for CO: at least one line, a vendor with payment terms and a purchase price list, and an open period for the accounting date. Read documentStatus with neo_get before acting — CO on an order that is already CO is an error. Booking recalculates the total-discount line automatically; never create that line by hand. The remaining values offered in actionValues (AP, PO, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
+<!--349D4EF261ED4FF291EE10000B3AD040-->  <AGENT_PROMPT><![CDATA[Document workflow action for this purchase order. Fire it with etendo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO books the order — it makes the order receivable and invoiceable; VO voids it. From documentStatus=CO (Booked): RE reactivates it back to DR, but only while the order has no linked documents (no receipt or invoice generated from it) — the UI hides Reactivate in that case and the process will reject it. CL closes the pending quantities. Preconditions for CO: at least one line, a vendor with payment terms and a purchase price list, and an open period for the accounting date. Read documentStatus with etendo_get before acting — CO on an order that is already CO is an error. Booking recalculates the total-discount line automatically; never create that line by hand. The remaining values offered in actionValues (AP, PO, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
 <!--349D4EF261ED4FF291EE10000B3AD040-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--349D4EF261ED4FF291EE10000B3AD040--></ETGO_SF_FIELD>
 
@@ -26903,7 +26919,7 @@
 <!--426B5F20FBD840EDAAE995D06FC8364E-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--426B5F20FBD840EDAAE995D06FC8364E-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--426B5F20FBD840EDAAE995D06FC8364E-->  <JAVA_QUALIFIER><![CDATA[credit]]></JAVA_QUALIFIER>
-<!--426B5F20FBD840EDAAE995D06FC8364E-->  <SEQNO><![CDATA[40]]></SEQNO>
+<!--426B5F20FBD840EDAAE995D06FC8364E-->  <SEQNO><![CDATA[30]]></SEQNO>
 <!--426B5F20FBD840EDAAE995D06FC8364E-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
 <!--426B5F20FBD840EDAAE995D06FC8364E-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--426B5F20FBD840EDAAE995D06FC8364E--></ETGO_SF_FIELD>
@@ -28082,7 +28098,7 @@
 <!--454C88B7BCA448758D18409656C014CB-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--454C88B7BCA448758D18409656C014CB-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--454C88B7BCA448758D18409656C014CB-->  <JAVA_QUALIFIER><![CDATA[deliveryStatus]]></JAVA_QUALIFIER>
-<!--454C88B7BCA448758D18409656C014CB-->  <SEQNO><![CDATA[940]]></SEQNO>
+<!--454C88B7BCA448758D18409656C014CB-->  <SEQNO><![CDATA[970]]></SEQNO>
 <!--454C88B7BCA448758D18409656C014CB-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
 <!--454C88B7BCA448758D18409656C014CB-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--454C88B7BCA448758D18409656C014CB--></ETGO_SF_FIELD>
@@ -40029,6 +40045,22 @@
 <!--62E64BA26780480B9568C9771C639B51-->  <SEQNO><![CDATA[280]]></SEQNO>
 <!--62E64BA26780480B9568C9771C639B51--></ETGO_SF_FIELD>
 
+<!--62F038E719C34318A0E215DC40F19821--><ETGO_SF_FIELD>
+<!--62F038E719C34318A0E215DC40F19821-->  <ETGO_SF_FIELD_ID><![CDATA[62F038E719C34318A0E215DC40F19821]]></ETGO_SF_FIELD_ID>
+<!--62F038E719C34318A0E215DC40F19821-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--62F038E719C34318A0E215DC40F19821-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--62F038E719C34318A0E215DC40F19821-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--62F038E719C34318A0E215DC40F19821-->  <ETGO_SF_ENTITY_ID><![CDATA[41A35A9AC111442F86CE1A6296997DCD]]></ETGO_SF_ENTITY_ID>
+<!--62F038E719C34318A0E215DC40F19821-->  <AD_COLUMN_ID><![CDATA[EF5CF2AFF9E74860A127995C6DEA2EBD]]></AD_COLUMN_ID>
+<!--62F038E719C34318A0E215DC40F19821-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--62F038E719C34318A0E215DC40F19821-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--62F038E719C34318A0E215DC40F19821-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
+<!--62F038E719C34318A0E215DC40F19821-->  <JAVA_QUALIFIER><![CDATA[eTGODelivStatusPurchase]]></JAVA_QUALIFIER>
+<!--62F038E719C34318A0E215DC40F19821-->  <SEQNO><![CDATA[960]]></SEQNO>
+<!--62F038E719C34318A0E215DC40F19821-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--62F038E719C34318A0E215DC40F19821-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--62F038E719C34318A0E215DC40F19821--></ETGO_SF_FIELD>
+
 <!--6304E6980D8A44DBAB974175058ADD85--><ETGO_SF_FIELD>
 <!--6304E6980D8A44DBAB974175058ADD85-->  <ETGO_SF_FIELD_ID><![CDATA[6304E6980D8A44DBAB974175058ADD85]]></ETGO_SF_FIELD_ID>
 <!--6304E6980D8A44DBAB974175058ADD85-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -40736,7 +40768,7 @@
 <!--64D340CB642048BEB3071ECB50BDA2AD-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--64D340CB642048BEB3071ECB50BDA2AD-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--64D340CB642048BEB3071ECB50BDA2AD-->  <JAVA_QUALIFIER><![CDATA[paymentStatus]]></JAVA_QUALIFIER>
-<!--64D340CB642048BEB3071ECB50BDA2AD-->  <SEQNO><![CDATA[970]]></SEQNO>
+<!--64D340CB642048BEB3071ECB50BDA2AD-->  <SEQNO><![CDATA[1000]]></SEQNO>
 <!--64D340CB642048BEB3071ECB50BDA2AD-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
 <!--64D340CB642048BEB3071ECB50BDA2AD-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--64D340CB642048BEB3071ECB50BDA2AD--></ETGO_SF_FIELD>
@@ -46216,7 +46248,7 @@
 <!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <ISINCLUDED><![CDATA[N]]></ISINCLUDED>
 <!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <ISREADONLY><![CDATA[N]]></ISREADONLY>
 <!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <JAVA_QUALIFIER><![CDATA[cYearCloseVID]]></JAVA_QUALIFIER>
-<!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <SEQNO><![CDATA[30]]></SEQNO>
+<!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <SEQNO><![CDATA[40]]></SEQNO>
 <!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <VISIBILITY><![CDATA[discarded]]></VISIBILITY>
 <!--71CDD5557BE04DCE8EB091ADA96AAA51-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--71CDD5557BE04DCE8EB091ADA96AAA51--></ETGO_SF_FIELD>
@@ -52342,7 +52374,7 @@
 <!--831C9379916544839AD2ECBA84EE38FB-->  <JAVA_QUALIFIER><![CDATA[documentAction]]></JAVA_QUALIFIER>
 <!--831C9379916544839AD2ECBA84EE38FB-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--831C9379916544839AD2ECBA84EE38FB-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
-<!--831C9379916544839AD2ECBA84EE38FB-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales invoice. Fire it with neo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO completes the invoice — it assigns the final document number, computes taxes and totals and creates the payment plan; VO voids it. From documentStatus=CO (Completed): RE reactivates it back to DR, and the UI unposts the invoice first when it was already posted — so check the posted field and expect the accounting entries to be removed. CL closes it. Preconditions for CO: at least one line, a customer with payment terms, and an open period for the accounting date. Completing does NOT post to the ledger: posting is a separate action on this window (not a documentAction value), so never send PO here — read the posted field to know the accounting state. Read documentStatus and posted with neo_get before acting. The remaining values offered in actionValues (AP, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
+<!--831C9379916544839AD2ECBA84EE38FB-->  <AGENT_PROMPT><![CDATA[Document workflow action for this sales invoice. Fire it with etendo_action, sending the chosen value as parameters.docAction (e.g. {"docAction":"CO"}). From documentStatus=DR (Draft): CO completes the invoice — it assigns the final document number, computes taxes and totals and creates the payment plan; VO voids it. From documentStatus=CO (Completed): RE reactivates it back to DR, and the UI unposts the invoice first when it was already posted — so check the posted field and expect the accounting entries to be removed. CL closes it. Preconditions for CO: at least one line, a customer with payment terms, and an open period for the accounting date. Completing does NOT post to the ledger: posting is a separate action on this window (not a documentAction value), so never send PO here — read the posted field to know the accounting state. Read documentStatus and posted with etendo_get before acting. The remaining values offered in actionValues (AP, PR, RA, RC, RJ, XL) come from the shared AD list and are not part of this window's flow.]]></AGENT_PROMPT>
 <!--831C9379916544839AD2ECBA84EE38FB-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--831C9379916544839AD2ECBA84EE38FB--></ETGO_SF_FIELD>
 
@@ -67023,7 +67055,7 @@
 <!--A834E242EE944B54AFDFE7120621D196-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--A834E242EE944B54AFDFE7120621D196-->  <JAVA_QUALIFIER><![CDATA[lineNo]]></JAVA_QUALIFIER>
 <!--A834E242EE944B54AFDFE7120621D196-->  <SEQNO><![CDATA[30]]></SEQNO>
-<!--A834E242EE944B54AFDFE7120621D196-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
+<!--A834E242EE944B54AFDFE7120621D196-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
 <!--A834E242EE944B54AFDFE7120621D196-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--A834E242EE944B54AFDFE7120621D196--></ETGO_SF_FIELD>
 
@@ -68461,10 +68493,10 @@
 <!--ABB199133F64468597C1398BE5E344AC-->  <AD_COLUMN_ID><![CDATA[1637]]></AD_COLUMN_ID>
 <!--ABB199133F64468597C1398BE5E344AC-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--ABB199133F64468597C1398BE5E344AC-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
-<!--ABB199133F64468597C1398BE5E344AC-->  <ISREADONLY><![CDATA[N]]></ISREADONLY>
+<!--ABB199133F64468597C1398BE5E344AC-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--ABB199133F64468597C1398BE5E344AC-->  <JAVA_QUALIFIER><![CDATA[currency]]></JAVA_QUALIFIER>
 <!--ABB199133F64468597C1398BE5E344AC-->  <SEQNO><![CDATA[190]]></SEQNO>
-<!--ABB199133F64468597C1398BE5E344AC-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--ABB199133F64468597C1398BE5E344AC-->  <VISIBILITY><![CDATA[readOnly]]></VISIBILITY>
 <!--ABB199133F64468597C1398BE5E344AC-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--ABB199133F64468597C1398BE5E344AC--></ETGO_SF_FIELD>
 
@@ -96383,6 +96415,22 @@
 <!--F268274EEB2540EBB45D029FBCBDEA19-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--F268274EEB2540EBB45D029FBCBDEA19--></ETGO_SF_FIELD>
 
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D--><ETGO_SF_FIELD>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <ETGO_SF_FIELD_ID><![CDATA[F268B70FAF414BCA8F6E7C6BBB8ECD8D]]></ETGO_SF_FIELD_ID>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <ETGO_SF_ENTITY_ID><![CDATA[41A35A9AC111442F86CE1A6296997DCD]]></ETGO_SF_ENTITY_ID>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <AD_COLUMN_ID><![CDATA[72B58984BF2A4423ABC104E2BE24B696]]></AD_COLUMN_ID>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <JAVA_QUALIFIER><![CDATA[eTGODeliveryStatus]]></JAVA_QUALIFIER>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <SEQNO><![CDATA[950]]></SEQNO>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
+<!--F268B70FAF414BCA8F6E7C6BBB8ECD8D--></ETGO_SF_FIELD>
+
 <!--F277578B0573463EA9E02FDA38251671--><ETGO_SF_FIELD>
 <!--F277578B0573463EA9E02FDA38251671-->  <ETGO_SF_FIELD_ID><![CDATA[F277578B0573463EA9E02FDA38251671]]></ETGO_SF_FIELD_ID>
 <!--F277578B0573463EA9E02FDA38251671-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -101638,7 +101686,7 @@
 <!--FEE5CDE0778947CA96F32388F8D0AA60-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--FEE5CDE0778947CA96F32388F8D0AA60-->  <ISREADONLY><![CDATA[Y]]></ISREADONLY>
 <!--FEE5CDE0778947CA96F32388F8D0AA60-->  <JAVA_QUALIFIER><![CDATA[invoiceStatus]]></JAVA_QUALIFIER>
-<!--FEE5CDE0778947CA96F32388F8D0AA60-->  <SEQNO><![CDATA[960]]></SEQNO>
+<!--FEE5CDE0778947CA96F32388F8D0AA60-->  <SEQNO><![CDATA[990]]></SEQNO>
 <!--FEE5CDE0778947CA96F32388F8D0AA60-->  <VISIBILITY><![CDATA[system]]></VISIBILITY>
 <!--FEE5CDE0778947CA96F32388F8D0AA60-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--FEE5CDE0778947CA96F32388F8D0AA60--></ETGO_SF_FIELD>

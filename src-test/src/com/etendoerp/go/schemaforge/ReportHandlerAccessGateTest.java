@@ -51,6 +51,8 @@ import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
  * {@code AD_Window_Access} / {@code AD_Process_Access} rows, and the point here is not how that
  * lookup works (covered by {@code NeoAccessHelperTest}) but that each handler asks the right
  * question and refuses before doing anything else.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoAccessHelper
  */
 class ReportHandlerAccessGateTest {
 
@@ -147,7 +149,7 @@ class ReportHandlerAccessGateTest {
 
     /**
      * {@code handle} must route through the overridable declaration rather than repeat the
-     * condition: the declaration is what {@code neo_discover} and the tool publication ask, and
+     * condition: the declaration is what {@code etendo_discover} and the tool publication ask, and
      * two copies of the rule are two places for them to disagree.
      */
     @Test

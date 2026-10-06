@@ -198,7 +198,7 @@ public class JournalEntriesReportHandler extends AbstractSqlReportHandler {
   String reportDescription() {
     return "Diario de Asientos — every accounting entry posted in the "
         + "period, nested as one object per journal entry with its account lines. Use "
-        + "doc_window + doc_record_id (per entry) with neo_get to read the source document.";
+        + "doc_window + doc_record_id (per entry) with etendo_get to read the source document.";
   }
 
   @Override

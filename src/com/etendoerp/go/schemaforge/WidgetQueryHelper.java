@@ -38,17 +38,38 @@ final class WidgetQueryHelper {
   }
 
   /**
+   * ETP-5493 — rounds a rolling-range bound UP to the first midnight at or after {@code expr}.
+   *
+   * <p>{@code c_invoice.dateinvoiced} is a {@code timestamp without time zone}: invoices created
+   * by GO carry a time of day while form-entered ones sit at 00:00. A raw {@code NOW() - INTERVAL}
+   * bound carries the current time of day, so an invoice on the boundary day dated later than that
+   * time was counted by the KPIs ({@code >= from}) but dropped by the trend, whose series starts at
+   * the first midnight. Aligning the bound once here gives every widget the same definition: the
+   * period starts on a whole day and includes that whole day.</p>
+   *
+   * <p>For date-only (00:00) data nothing changes: {@code d >= X} and
+   * {@code d >= ceil_to_midnight(X)} select the same rows when {@code d} is itself a midnight.
+   * The {@code mtd}/{@code ytd} bounds are already midnight, so they are left untouched. A CASE
+   * is used (rather than a microsecond trick) for readability.</p>
+   */
+  private static String dayAligned(String expr) {
+    return "CASE WHEN date_trunc('day', " + expr + ") < " + expr
+        + " THEN date_trunc('day', " + expr + ") + INTERVAL '1 day'"
+        + " ELSE date_trunc('day', " + expr + ") END";
+  }
+
+  /**
    * Maps a frontend range key to the "from" of the current period as a safe, hardcoded
    * PostgreSQL date expression.
    */
   static String rangeToSqlDateFrom(String range) {
     switch (range) {
-      case RANGE_LAST_30D:  return "NOW() - INTERVAL '30 days'";
-      case RANGE_LAST_90D:  return "NOW() - INTERVAL '90 days'";
+      case RANGE_LAST_30D:  return dayAligned("NOW() - INTERVAL '30 days'");
+      case RANGE_LAST_90D:  return dayAligned("NOW() - INTERVAL '90 days'");
       case RANGE_MTD:       return "date_trunc('month', NOW())";
       case RANGE_YTD:       return "date_trunc('year', NOW())";
       case RANGE_LAST_YEAR:
-      default:              return "NOW() - INTERVAL '12 months'";
+      default:              return dayAligned("NOW() - INTERVAL '12 months'");
     }
   }
 
@@ -59,12 +80,12 @@ final class WidgetQueryHelper {
    */
   static String rangeToSqlPrevFrom(String range) {
     switch (range) {
-      case RANGE_LAST_30D:  return "NOW() - INTERVAL '60 days'";
-      case RANGE_LAST_90D:  return "NOW() - INTERVAL '180 days'";
+      case RANGE_LAST_30D:  return dayAligned("NOW() - INTERVAL '60 days'");
+      case RANGE_LAST_90D:  return dayAligned("NOW() - INTERVAL '180 days'");
       case RANGE_MTD:       return "date_trunc('month', NOW() - INTERVAL '1 month')";
       case RANGE_YTD:       return "date_trunc('year', NOW() - INTERVAL '1 year')";
       case RANGE_LAST_YEAR:
-      default:              return "NOW() - INTERVAL '24 months'";
+      default:              return dayAligned("NOW() - INTERVAL '24 months'");
     }
   }
 
@@ -76,12 +97,12 @@ final class WidgetQueryHelper {
    */
   static String rangeToSqlPrevTo(String range) {
     switch (range) {
-      case RANGE_LAST_30D:  return "NOW() - INTERVAL '30 days'";
-      case RANGE_LAST_90D:  return "NOW() - INTERVAL '90 days'";
+      case RANGE_LAST_30D:  return dayAligned("NOW() - INTERVAL '30 days'");
+      case RANGE_LAST_90D:  return dayAligned("NOW() - INTERVAL '90 days'");
       case RANGE_MTD:       return "NOW() - INTERVAL '1 month'";
       case RANGE_YTD:       return "NOW() - INTERVAL '1 year'";
       case RANGE_LAST_YEAR:
-      default:              return "NOW() - INTERVAL '12 months'";
+      default:              return dayAligned("NOW() - INTERVAL '12 months'");
     }
   }
 

@@ -47,12 +47,12 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
- * Schema/field-metadata building for MCP discovery (neo_schema and related tools).
+ * Schema/field-metadata building for MCP discovery (etendo_schema and related tools).
  *
  * <p>Extracted from {@link McpToolRouterSupport} (ETP-4510, Sonar S1448 — "too many
  * methods") — this class owns AD_Column → JSON field mapping: type/selector inference,
  * visibility, defaults, business-critical flags, button/process metadata, and the
- * per-entity field metadata load (visibility + businessCritical) used by neo_schema.</p>
+ * per-entity field metadata load (visibility + businessCritical) used by etendo_schema.</p>
  */
 final class McpSchemaFieldBuilder {
 
@@ -68,11 +68,11 @@ final class McpSchemaFieldBuilder {
    */
   private static final Map<String, String> VIRTUAL_FIELD_PROMPTS = Map.of(
       "C_COUNTRY_ID",
-      "The country of the address. Also the argument the region selector needs: call neo_selectors "
+      "The country of the address. Also the argument the region selector needs: call etendo_selectors "
           + "for 'region' with recordContext {\"country\": \"<this id>\"}, since province names "
           + "exist only relative to a country.",
       "C_REGION_ID",
-      "The province, as an ID ONLY — resolve it with neo_selectors, passing the country in "
+      "The province, as an ID ONLY — resolve it with etendo_selectors, passing the country in "
           + "recordContext. A province NAME sent here is refused, not resolved; send it in "
           + "regionName instead. Mutually exclusive with regionName.",
       "REGIONNAME",
@@ -292,7 +292,7 @@ final class McpSchemaFieldBuilder {
    * Requirements are aggregated across all processes (a field required by any process is
    * reported); an unconditional rule wins over a conditional one for the same field.
    *
-   * <p>{@code neo_schema} uses this to proactively signal {@code userRequired} to the agent, so it
+   * <p>{@code etendo_schema} uses this to proactively signal {@code userRequired} to the agent, so it
    * does not have to discover the requirement by hitting the runtime process gate
    * ({@code NeoProcessPreconditionValidator}) — the two layers share this single declaration.</p>
    */
@@ -383,7 +383,7 @@ final class McpSchemaFieldBuilder {
    * Loads clean, localized {@code {label, description}} pairs for the tab's fields, keyed by
    * upper-cased DB column name. The label comes from {@code AD_Field.name} and the one-line
    * description from {@code AD_Field.description} — both translated into {@code langCode} via
-   * {@code ADFieldTrl} when a translation exists — so {@code neo_schema} surfaces the same
+   * {@code ADFieldTrl} when a translation exists — so {@code etendo_schema} surfaces the same
    * functional label the Etendo UI shows instead of the raw {@code AD_Column} name
    * (e.g. "SII Description" rather than "EM_Aeatsii_Descripcion_Sii"). (IMP-1, ref §7.1)
    *
@@ -507,7 +507,7 @@ final class McpSchemaFieldBuilder {
   }
 
   /**
-   * Builds the {@code neo_schema} field array for an entity, naming only the fields the spec
+   * Builds the {@code etendo_schema} field array for an entity, naming only the fields the spec
    * exposes.
    *
    * <p><b>IMP-39 — {@code discarded} now means absent, not annotated.</b> This loop used to walk
@@ -557,7 +557,7 @@ final class McpSchemaFieldBuilder {
    * street, city, postal code, country and province a caller actually fills live in
    * {@code C_Location}; {@code ContactsLocationAddressHandler} accepts them in the payload and
    * writes both rows in one transaction. {@link #buildSchemaFieldsArray} walks the tab's own table,
-   * so it emitted none of them: {@code neo_schema} on that entity answered with the phone, the fax
+   * so it emitted none of them: {@code etendo_schema} on that entity answered with the phone, the fax
    * and two booleans, and an agent could only reach the address by guessing field names it had no
    * way to read anywhere. The names are not guessed here either — each column is resolved to its
    * DAL property, which is what the handler reads.
@@ -694,10 +694,10 @@ final class McpSchemaFieldBuilder {
    *
    * <p><b>IMP-21 — {@code invokeVia} is now a claim, not a decoration.</b> It used to be written
    * unconditionally, so the sales-invoice catalog advertised all 22 buttons as callable via
-   * {@code neo_action} even though 17 were curated {@code visibility:"discarded"} and one
-   * ({@code CreateFrom}) resolves no process at all — there is nothing for {@code neo_action} to
+   * {@code etendo_action} even though 17 were curated {@code visibility:"discarded"} and one
+   * ({@code CreateFrom}) resolves no process at all — there is nothing for {@code etendo_action} to
    * run. An agent had no way to tell the 22 apart. Now a button carries {@code
-   * invokeVia:"neo_action"} only when it really is invokable, and otherwise says so explicitly
+   * invokeVia:"etendo_action"} only when it really is invokable, and otherwise says so explicitly
    * with {@code invokable:false} plus a machine-readable {@code notInvokableReason}. The button
    * still appears in the catalog — knowing an action exists but is out of scope is useful; being
    * told it is callable when it is not is not.</p>
@@ -856,10 +856,10 @@ final class McpSchemaFieldBuilder {
     if (isLegacyZeroFkSentinel) {
       // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
       // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
-      // baked into this structural schema; report shape/format only and point to neo_defaults.
+      // baked into this structural schema; report shape/format only and point to etendo_defaults.
       fieldObj.put(KEY_DEFAULT_SOURCE, "server");
       fieldObj.put("defaultFormat", "32-char hex ID (FK)");
-      fieldObj.put("defaultHint", "Resolved per-tenant at request time — call neo_defaults to get the value");
+      fieldObj.put("defaultHint", "Resolved per-tenant at request time — call etendo_defaults to get the value");
       return;
     }
     fieldObj.put(KEY_DEFAULT_EXPRESSION, defaultExpr);
@@ -877,8 +877,8 @@ final class McpSchemaFieldBuilder {
   }
 
   /**
-   * Flags {@code userRequired} — "the agent MUST supply this in neo_create", exactly as the
-   * {@code neo_schema} hint promises.
+   * Flags {@code userRequired} — "the agent MUST supply this in etendo_create", exactly as the
+   * {@code etendo_schema} hint promises.
    *
    * <p>Being mandatory in AD is necessary but <b>not</b> sufficient: a mandatory column that carries
    * a default is filled by the session, the server or the declaring module, so demanding it from the
