@@ -31,6 +31,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 
@@ -49,6 +50,11 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
 
+/**
+ * Unit tests for {@link CompanyInvitationService}.
+ *
+ * @covers com.etendoerp.go.rest.CompanyInvitationService
+ */
 class CompanyInvitationServiceTest {
 
   @Test
@@ -911,6 +917,11 @@ class CompanyInvitationServiceTest {
   /** Runs resendInvitation for a source invitation whose status makes it ineligible. */
   private JSONObject runResendInvitationWithExistingStatus(String status, Date expiresAt)
       throws Exception {
+    return runResendInvitationWithExistingStatus(status, expiresAt, true);
+  }
+
+  private JSONObject runResendInvitationWithExistingStatus(String status, Date expiresAt,
+      boolean userHasOwnInvitation) throws Exception {
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("client-1");
     OBContext obContext = mock(OBContext.class);
@@ -931,6 +942,8 @@ class CompanyInvitationServiceTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
           "user@example.com")).thenReturn(latest);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.existsInvitationForUser("client-1",
+          "user-1")).thenReturn(userHasOwnInvitation);
 
       CompanyInvitationService service = new CompanyInvitationService();
       return service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
@@ -973,9 +986,142 @@ class CompanyInvitationServiceTest {
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
           "user@example.com")).thenReturn(latest);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.existsInvitationForUser("client-1",
+          "user-1")).thenReturn(true);
 
       CompanyInvitationService service = new CompanyInvitationService(sender);
       return service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
     }
+  }
+
+  // ─── ETP-5194: email correction window ───────────────────────────────────────
+
+  @Test
+  @DisplayName("Only EXPIRED and DELIVERY_FAILED let an admin correct the invitee's email")
+  void isEmailCorrectableStatusAcceptsOnlyExpiredAndDeliveryFailed() {
+    assertTrue(CompanyInvitationService.isEmailCorrectableStatus("EXPIRED"));
+    assertTrue(CompanyInvitationService.isEmailCorrectableStatus("DELIVERY_FAILED"));
+    for (String status : Arrays.asList("PENDING", "SENT", "ACCEPTED", "REVOKED", null)) {
+      assertFalse(CompanyInvitationService.isEmailCorrectableStatus(status), String.valueOf(status));
+    }
+  }
+
+  @Test
+  @DisplayName("resendInvitation never invites a contact that only shares an invitee's email")
+  void resendInvitationRejectsAUserWithNoInvitationOfItsOwn() throws Exception {
+    JSONObject response = runResendInvitationWithExistingStatus("EXPIRED", null, false);
+
+    assertTrue(response.optBoolean("error"));
+    assertEquals("NO_INVITATION_TO_RESEND", response.optString("code"));
+  }
+
+  @Test
+  @DisplayName("hasInvitationForUser never queries without a client and a user")
+  void hasInvitationForUserSkipsTheQueryForBlankArguments() {
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      assertFalse(CompanyInvitationService.hasInvitationForUser(null, "user-1"));
+      assertFalse(CompanyInvitationService.hasInvitationForUser("client-1", ""));
+      dalHelperMock.verify(
+          () -> CompanyInvitationDalHelper.existsInvitationForUser(anyString(), anyString()),
+          never());
+
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.existsInvitationForUser("client-1",
+          "user-1")).thenReturn(true);
+      assertTrue(CompanyInvitationService.hasInvitationForUser("client-1", "user-1"));
+    }
+  }
+
+  @Test
+  @DisplayName("hasAcceptedInvitation never queries without a client, a user and an email")
+  void hasAcceptedInvitationSkipsTheQueryForBlankArguments() {
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      assertFalse(CompanyInvitationService.hasAcceptedInvitation(null, "user-1", "a@example.com"));
+      assertFalse(CompanyInvitationService.hasAcceptedInvitation("client-1", null, "a@example.com"));
+      assertFalse(CompanyInvitationService.hasAcceptedInvitation("client-1", "user-1", " "));
+      dalHelperMock.verify(() -> CompanyInvitationDalHelper.existsAcceptedInvitation(anyString(),
+          anyString(), anyString()), never());
+
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.existsAcceptedInvitation("client-1",
+          "user-1", "a@example.com")).thenReturn(true);
+      assertTrue(
+          CompanyInvitationService.hasAcceptedInvitation("client-1", "user-1", "a@example.com"));
+    }
+  }
+
+  @Test
+  @DisplayName("latestInvitationBelongsTo is true only for this user's own latest invitation")
+  void latestInvitationBelongsToChecksTheOwnerOfTheLatestInvitation() {
+    User owner = mock(User.class);
+    when(owner.getId()).thenReturn("user-1");
+    Invitation latest = mock(Invitation.class);
+    when(latest.getUser()).thenReturn(owner);
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
+          "new@example.com")).thenReturn(latest);
+
+      assertTrue(CompanyInvitationService.latestInvitationBelongsTo("client-1",
+          "New@Example.com", "user-1"));
+      assertFalse(CompanyInvitationService.latestInvitationBelongsTo("client-1",
+          "new@example.com", "other-user"));
+      assertFalse(CompanyInvitationService.latestInvitationBelongsTo("client-1",
+          "none@example.com", "user-1"));
+      assertFalse(CompanyInvitationService.latestInvitationBelongsTo(null,
+          "new@example.com", "user-1"));
+    }
+  }
+
+  @Test
+  @DisplayName("revokeSupersededInvitations revokes only open old-address invitations")
+  void revokeSupersededInvitationsRevokesOnlyOldAddressInvitationsStillUsable() {
+    Invitation expiredOld = invitationForEmail("old@example.com", "SENT");
+    Invitation failedOld = invitationForEmail("old@example.com", "DELIVERY_FAILED");
+    Invitation acceptedOld = invitationForEmail("old@example.com", "ACCEPTED");
+    Invitation revokedOld = invitationForEmail("old@example.com", "REVOKED");
+    Invitation freshNew = invitationForEmail("New@Example.com", "SENT");
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+            mockStatic(CompanyInvitationDalHelper.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationsForUser("client-1",
+          "user-1")).thenReturn(
+              Arrays.asList(expiredOld, failedOld, acceptedOld, revokedOld, freshNew));
+
+      int revoked = CompanyInvitationService.revokeSupersededInvitations("client-1", "user-1",
+          "new@example.com");
+
+      assertEquals(2, revoked);
+      verify(expiredOld).setStatus("REVOKED");
+      verify(failedOld).setStatus("REVOKED");
+      verify(acceptedOld, never()).setStatus(anyString());
+      verify(revokedOld, never()).setStatus(anyString());
+      verify(freshNew, never()).setStatus(anyString());
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  @DisplayName("revokeSupersededInvitations is a no-op without a current email")
+  void revokeSupersededInvitationsSkipsWithoutCurrentEmail() {
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      assertEquals(0,
+          CompanyInvitationService.revokeSupersededInvitations("client-1", "user-1", null));
+      dalHelperMock.verify(
+          () -> CompanyInvitationDalHelper.findInvitationsForUser(anyString(), anyString()),
+          never());
+    }
+  }
+
+  private static Invitation invitationForEmail(String email, String status) {
+    Invitation invitation = mock(Invitation.class);
+    when(invitation.getEmail()).thenReturn(email);
+    when(invitation.getStatus()).thenReturn(status);
+    return invitation;
   }
 }
