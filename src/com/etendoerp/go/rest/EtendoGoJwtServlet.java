@@ -2203,13 +2203,39 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (!enrolling && !currentPasswordAccepted(response, account, currentPassword)) {
         return;
       }
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, buildAccountJson(account));
+      // ETP-5628: rotate BEFORE changing the password. The rotation writes on the same DAL
+      // transaction that changePassword commits, so the new password and the rotated session
+      // commit together, and a rotation lost to a concurrent request (409) changes nothing: the
+      // client's retry still passes the current-password check.
+      IssuedGoSession rotated = null;
+      if (authenticated.sessionRecord != null) {
+        rotated = goSessionService.rotate(authenticated.sessionRecord);
+        if (rotated == null) {
+          EtendoGoDalHelper.rollbackDalChanges("change password (rotation lost)", null, log);
+          writeError(response, HttpServletResponse.SC_CONFLICT,
+              "Session changed concurrently; restore and retry");
+          return;
+        }
+        result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      }
       String sessionToken = generateToken();
+      // Commits the password together with the rotation above.
       EtendoGoJwtDalHelper.changePassword(account, hashPassword(newPassword), sessionToken,
           new Date());
-      // The notice tells the owner their way in changed, so it has to say which thing happened:
-      // "your password was changed" is alarming and wrong for somebody who just created a first one.
-      // A block lambda, not a ternary — sendAuthEmailBestEffort takes a Runnable, and a conditional
-      // expression is not void-compatible.
+      if (rotated != null) {
+        // Already committed by changePassword; this keeps every session cookie behind a commit.
+        commitAndSetSessionCookies(response, rotated, "change password");
+      } else {
+        result.put(FIELD_TOKEN, sessionToken);
+      }
+      // The notice goes out only once the change is committed, so it never announces a change
+      // that was rolled back. It tells the owner their way in changed, so it has to say which thing
+      // happened: "your password was changed" is alarming and wrong for somebody who just created a
+      // first one. A block lambda, not a ternary — sendAuthEmailBestEffort takes a Runnable, and a
+      // conditional expression is not void-compatible.
       sendAuthEmailBestEffort(enrolling ? "password-added" : "password-changed", () -> {
         if (enrolling) {
           authEmailSender.sendPasswordAdded(account);
@@ -2217,24 +2243,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           authEmailSender.sendPasswordChanged(account);
         }
       });
-
-      JSONObject accountJson = buildAccountJson(account);
-
-      JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put(FIELD_ACCOUNT, accountJson);
-      if (authenticated.sessionRecord != null) {
-        IssuedGoSession rotated = goSessionService.rotate(authenticated.sessionRecord);
-        if (rotated == null) {
-          writeError(response, HttpServletResponse.SC_CONFLICT,
-              "Session changed concurrently; restore and retry");
-          return;
-        }
-        commitAndSetSessionCookies(response, rotated, "change password");
-        result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
-      } else {
-        result.put(FIELD_TOKEN, sessionToken);
-      }
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("change password", e, log);

@@ -31,6 +31,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
@@ -90,11 +91,14 @@ public class GoSessionEndpointsTest {
   private static final String SET_COOKIE = "Set-Cookie";
   private static final String BODY = "body";
   private static final String SESSION_WRITE = "session-write";
+  private static final String PASSWORD_WRITE = "password-write";
+  private static final String EMAIL_SENT = "email";
 
   private final GoSessionService goSessionService = mock(GoSessionService.class);
   private final EtendoGoSsoProviderRegistry ssoRegistry = mock(EtendoGoSsoProviderRegistry.class);
+  private final TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(
-      mock(TransactionalAuthEmailSender.class), ssoRegistry, goSessionService);
+      emailSender, ssoRegistry, goSessionService);
   // ETP-5395 — the restore reconciles the session role against the database; these tests have
   // none, so by default the reconciler reports the role as still valid (a no-op).
   private final GoSessionRoleReconciler roleReconciler = mock(GoSessionRoleReconciler.class);
@@ -895,20 +899,22 @@ public class GoSessionEndpointsTest {
   }
 
   /**
-   * Changing the password on a cookie session rotates it: the new password and the rotated
-   * session are committed together, before the rotated cookie is sent.
+   * Changing the password on a cookie session rotates it. The rotation runs first, so the new
+   * password and the rotated session are committed by one commit (the one changePassword makes),
+   * and the rotated cookie and the change notice both follow that commit.
    */
   @Test
-  public void changePasswordOnACookieSessionCommitsBeforeSendingTheRotatedCookie()
+  public void changePasswordOnACookieSessionCommitsPasswordAndRotationTogether()
       throws Exception {
-    GoSessionRecord sessionRecord = new GoSessionRecord();
-    sessionRecord.setAccountId("ACC1");
-    sessionRecord.setCsrfToken(CSRF);
-    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    GoSessionRecord sessionRecord = cookieSession();
     CapturedResponse resp = new CapturedResponse();
     when(goSessionService.rotate(sessionRecord)).thenAnswer(sessionWrite(resp,
         new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord())));
     Account account = passwordAccount();
+    when(emailSender.sendPasswordChanged(account)).thenAnswer(inv -> {
+      resp.events.add(EMAIL_SENT);
+      return true;
+    });
 
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
@@ -917,10 +923,15 @@ public class GoSessionEndpointsTest {
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
       dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+      // The real helper flushes and commits the request transaction (flushAndCommitDalChanges).
+      dal.when(() -> EtendoGoJwtDalHelper.changePassword(eq(account), anyString(), anyString(),
+          any())).thenAnswer(inv -> {
+            resp.events.add(PASSWORD_WRITE);
+            obDal.commitAndClose();
+            return null;
+          });
 
-      servlet.doPost(postWithSession("/change-password", new JSONObject()
-          .put("currentPassword", PASSWORD)
-          .put("newPassword", "N3w!Str0ngPassw0rd").toString(), "tok", CSRF), resp.response);
+      servlet.doPost(changePasswordRequest(), resp.response);
 
       dal.verify(() -> EtendoGoJwtDalHelper.changePassword(eq(account), anyString(), anyString(),
           any()));
@@ -930,6 +941,64 @@ public class GoSessionEndpointsTest {
     assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME)
         .startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
     assertCommittedBeforeResponse(resp);
+    List<String> events = resp.events;
+    int rotation = events.indexOf(SESSION_WRITE);
+    int password = events.indexOf(PASSWORD_WRITE);
+    assertTrue("the session must be rotated before the password changes: " + events,
+        rotation >= 0 && rotation < password);
+    int commit = events.subList(rotation, events.size()).indexOf(COMMIT) + rotation;
+    assertTrue("rotation and password must commit together, in one commit: " + events,
+        commit > password);
+    assertTrue("the change notice must follow the commit: " + events,
+        events.indexOf(EMAIL_SENT) > commit);
+  }
+
+  /**
+   * A rotation lost to a concurrent request answers 409 with nothing changed: the password stays
+   * as it was (so the client's retry still passes the current-password check), no notice is sent,
+   * no cookie is set, and the request transaction is rolled back.
+   */
+  @Test
+  public void changePasswordWhoseRotationIsLostChangesNothing() throws Exception {
+    GoSessionRecord sessionRecord = cookieSession();
+    when(goSessionService.rotate(sessionRecord)).thenReturn(null);
+    Account account = passwordAccount();
+    OBDal obDal = mock(OBDal.class);
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+
+      servlet.doPost(changePasswordRequest(), resp.response);
+
+      dal.verify(() -> EtendoGoJwtDalHelper.changePassword(any(), any(), any(), any()), never());
+    }
+
+    assertEquals(409, resp.status);
+    assertTrue("no cookie may be set: " + resp.setCookies, resp.setCookies.isEmpty());
+    verifyNoInteractions(emailSender);
+    verify(obDal).rollbackAndClose();
+    verify(obDal, never()).commitAndClose();
+  }
+
+  /** A live cookie session of account {@code ACC1}, resolved from cookie {@code tok}. */
+  private GoSessionRecord cookieSession() {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    return sessionRecord;
+  }
+
+  /** {@code POST /change-password} on the cookie session, from {@link #PASSWORD} to a strong one. */
+  private static HttpServletRequest changePasswordRequest() throws Exception {
+    return postWithSession("/change-password", new JSONObject()
+        .put("currentPassword", PASSWORD)
+        .put("newPassword", "N3w!Str0ngPassw0rd").toString(), "tok", CSRF);
   }
 
   /** An account {@code ACC1} whose local password is {@link #PASSWORD}. */

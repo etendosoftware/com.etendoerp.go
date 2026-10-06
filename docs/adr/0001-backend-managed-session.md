@@ -139,6 +139,17 @@ which inserts it on its own connection in its own transaction. `UsageEventRecord
 called after the business transaction has committed; on the cookie path it used to be submitted
 before the rotation was committed, and now it follows the commit.
 
+Change-password on a cookie session rotates the session **before** it changes the password. The
+rotation writes on the same DAL connection and transaction that `EtendoGoJwtDalHelper.changePassword`
+then flushes and commits, so the new password and the rotated session commit in one commit; the
+`commitAndSetSessionCookies` that follows finds nothing left to commit and only keeps the rule that
+no session cookie leaves ahead of a commit. A rotation lost to a concurrent request (`409`) now
+changes nothing: the request transaction is rolled back, the password stays as it was (so the
+client's retry still passes the current-password check) and no notice is sent. Before, the password
+was committed first and the `409` came after it, so the retry failed with a wrong current password.
+The `password-changed` / `password-added` notice is sent only after the commit, on both the cookie
+and the Bearer path.
+
 Writes in requests that set no cookie (sliding the idle expiry on an ordinary authenticated request,
 rebinding a revoked role on restore) still commit at the end of the request.
 
