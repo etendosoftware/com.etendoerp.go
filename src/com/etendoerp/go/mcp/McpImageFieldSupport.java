@@ -35,14 +35,14 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Image;
 
 /**
- * Everything the MCP write path and {@code neo_schema} need to treat an {@code Image BLOB} column as
+ * Everything the MCP write path and {@code etendo_schema} need to treat an {@code Image BLOB} column as
  * its own type (ETP-5184).
  *
  * <p>Two responsibilities, both keyed off {@link McpConstants#REF_IMAGE_BLOB} alone and therefore
  * generic across every image column in the instance — there is no per-window branch here, and
  * enabling a new image field (e.g. {@code M_Product_Category.AD_Image_ID}) needs no code change:</p>
  * <ul>
- *   <li><b>Discovery</b> — {@link #decorateImageField} turns the descriptor {@code neo_schema},
+ *   <li><b>Discovery</b> — {@link #decorateImageField} turns the descriptor {@code etendo_schema},
  *       {@code view:"create"} and {@code fields:[…]} all emit into a self-describing contract, so an
  *       agent is told what the field holds instead of inferring "text" from an untyped string.</li>
  *   <li><b>Writes</b> — {@link #validateImageFields} refuses a value that is not an existing
@@ -62,7 +62,7 @@ final class McpImageFieldSupport {
   private static final int IMAGE_ID_LENGTH = 32;
 
   /**
-   * The guidance an {@code image} field carries in {@code neo_schema}.
+   * The guidance an {@code image} field carries in {@code etendo_schema}.
    *
    * <p>Written as a prohibition plus a route, because the two failure modes an untyped string invites
    * are exactly "send a URL" and "send base64". Naming
@@ -75,7 +75,7 @@ final class McpImageFieldSupport {
       + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + " and upload the file to the URL it returns "
       + "(cheapest — the bytes never pass through the conversation), or "
       + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " for an image under 256 KB you already hold in memory. "
-      + "Then write the returned imageId to this field with neo_update.";
+      + "Then write the returned imageId to this field with etendo_update.";
 
   /**
    * Adds the type contract to an {@code image} field descriptor: the JSON-schema {@code format}, the

@@ -71,7 +71,7 @@ final class McpSelectorContextHelper {
   }
 
   /**
-   * The names {@code neo_selectors} accepts for an entity: the field (DAL property) name of every
+   * The names {@code etendo_selectors} accepts for an entity: the field (DAL property) name of every
    * active column of the tab's table whose reference is a selector reference, sorted. Structural —
    * read off the AD, never off an entity name — so it answers the same question for every entity.
    *
@@ -114,13 +114,13 @@ final class McpSelectorContextHelper {
   /**
    * Derives selector context from an in-flight write body, on top of a base context (IMP-22).
    * <p>
-   * The read path gets its context handed to it: {@code neo_selectors} takes an explicit
+   * The read path gets its context handed to it: {@code etendo_selectors} takes an explicit
    * {@code recordContext}, so resolving {@code partnerAddress} against a parent
    * {@code businessPartner} works. The write path has no such argument — the sibling values are
    * simply the other keys of the body being created — so before this method the write-path resolver
    * ran with tab-derived context only, and a selector whose candidate set exists only relative to a
-   * parent field found nothing. That is IMP-22: {@code neo_create} rejected the byte-identical
-   * {@code $_identifier} that {@code neo_selectors} had just returned.
+   * parent field found nothing. That is IMP-22: {@code etendo_create} rejected the byte-identical
+   * {@code $_identifier} that {@code etendo_selectors} had just returned.
    * <p>
    * <b>Why the exclusion list is the whole design.</b> A body key is only usable as context once its
    * value is a real record id. A key still holding a human search string would be copied into

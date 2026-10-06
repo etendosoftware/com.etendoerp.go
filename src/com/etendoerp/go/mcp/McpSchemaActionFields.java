@@ -28,7 +28,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 
 /**
- * What {@code neo_schema} says about a button column: whether it is one, whether the current
+ * What {@code etendo_schema} says about a button column: whether it is one, whether the current
  * surface can invoke it, which values it accepts, and whether invoking it is business-critical.
  *
  * <p>Split out of {@link McpSchemaFieldBuilder} under Sonar's class-size rule (S1448). The four
@@ -80,7 +80,7 @@ final class McpSchemaActionFields {
       blocker = "no process: the AD button column has no process wired behind it";
     }
     if (blocker == null) {
-      fieldObj.put(McpSchemaFieldBuilder.KEY_INVOKE_VIA, "neo_action");
+      fieldObj.put(McpSchemaFieldBuilder.KEY_INVOKE_VIA, "etendo_action");
       return;
     }
     fieldObj.put(McpSchemaFieldBuilder.KEY_INVOKABLE, false);

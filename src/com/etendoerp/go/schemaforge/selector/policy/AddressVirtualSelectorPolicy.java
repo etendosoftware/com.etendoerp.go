@@ -51,7 +51,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * <p><b>ETP-5368 — why the list is here rather than in each caller.</b> This class used to answer
  * one question, for the REST selector endpoint only: which two FK columns a selector URL may name.
  * The MCP resolved its own columns against the wrapper's table and therefore saw none of them, so
- * {@code neo_selectors} answered {@code Column not found in table: region} and {@code neo_schema}
+ * {@code etendo_selectors} answered {@code Column not found in table: region} and {@code etendo_schema}
  * never listed a single address field — an agent could only reach them by guessing names it had
  * no way to read anywhere. The fix is one declaration both front doors consult, not a second copy
  * of the list on the MCP side, which is exactly how the two drifted apart in the first place.
@@ -94,7 +94,7 @@ public final class AddressVirtualSelectorPolicy {
    * The wrapper's OWN column that the handler resolves instead of the caller (ETP-5368).
    *
    * <p>{@code C_BPartner_Location.C_Location_ID} is {@code NOT NULL}, so AD calls it mandatory and
-   * {@code neo_schema} listed it as the one field an agent MUST send. That is true of the row and
+   * {@code etendo_schema} listed it as the one field an agent MUST send. That is true of the row and
    * false of the payload: {@code ContactsLocationAddressHandler} accepts an address in two shapes —
    * reuse an existing {@code C_Location} by id, or hand it the raw fields and let it build one —
    * and <b>sending both is refused</b>. So an agent that obeyed the schema picked the reuse mode,
@@ -202,7 +202,7 @@ public final class AddressVirtualSelectorPolicy {
    * Loads the declared {@code C_Location} columns in one query, keyed by upper-cased DB name.
    *
    * <p>One round trip for the whole set rather than one per column: {@link #resolveVirtualColumns}
-   * asks for all seven, and it runs on the {@code neo_schema} path, which is already the heaviest
+   * asks for all seven, and it runs on the {@code etendo_schema} path, which is already the heaviest
    * read an agent makes.
    */
   private static Map<String, Column> locationColumns() {
@@ -216,8 +216,8 @@ public final class AddressVirtualSelectorPolicy {
       byName.put(column.getDBColumnName().toUpperCase(), column);
       // ETP-5368, found in live verification: the caller may legitimately use either spelling, and
       // the two front doors do not use the same one. The SPA's selector URL names the DB column
-      // (C_Region_ID), while neo_schema publishes — and ContactsLocationAddressHandler reads — the
-      // DAL property (region). Keying on the DB name alone made neo_selectors answer "Column not
+      // (C_Region_ID), while etendo_schema publishes — and ContactsLocationAddressHandler reads — the
+      // DAL property (region). Keying on the DB name alone made etendo_selectors answer "Column not
       // found in table: region" for the exact name its own schema had just handed the agent, which
       // is the inconsistency this ticket exists to remove rather than relocate.
       Property property = locationEntity == null

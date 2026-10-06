@@ -59,7 +59,7 @@ import org.junit.jupiter.api.Test;
  * <p>A handler that declares {@link NeoHandler#reportParameters()}. That is the platform's own
  * callability signal, not a name convention: {@code NeoReportCallability.isReportCallable} treats a
  * spec as callable precisely when its handler declares a report contract, and that is what
- * publishes the spec's {@code generate_*} MCP tool and lists it in {@code neo_discover}. So the set
+ * publishes the spec's {@code generate_*} MCP tool and lists it in {@code etendo_discover}. So the set
  * this test walks is, by construction, the set of handlers reachable as a report — which is the set
  * that needs a rule. It is also why the criterion is not "class name ends in ReportHandler" (a
  * renamed class would escape) nor "is behind a {@code spec_type = 'R'} spec" (that lives in the
@@ -78,6 +78,8 @@ import org.junit.jupiter.api.Test;
  * class, so {@code getDeclaredMethod} answers it exactly. Classes are loaded with
  * {@code initialize = false} so no static initialiser runs: nothing here needs an
  * {@code OBContext}, a DAL or a servlet container.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoHandler
  */
 class ReportHandlerAccessDeclarationTest {
 

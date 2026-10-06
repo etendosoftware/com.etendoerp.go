@@ -351,25 +351,25 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Injects {@code linkedInvoices}: every invoice linked to one of this shipment's lines, through
+   * {@link InOutInvoiceLinks#linkedInvoiceIdsSql} — the invoice line's {@code M_InOutLine_ID}
+   * (invoice created FROM this shipment, or this shipment created from the invoice), the
+   * {@code M_MatchSI} match table (read since ETP-5576: a second partial shipment of an invoice
+   * line can only be linked there), and the pre-existing shared {@code C_OrderLine_ID} arm.
+   */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedInvoices(JSONObject shipmentRec, String shipmentId) {
-    // Covers both flows with a single scan:
-    // - invoice created FROM this shipment: c_invoiceline.m_inoutline_id = shipment line
-    // - shipment created FROM invoice (via order): shared c_orderline_id
     String sql =
         "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code " +
-        "FROM m_inoutline sil " +
-        "JOIN c_invoiceline il ON (" +
-        "  il.m_inoutline_id = sil.m_inoutline_id " +
-        "  OR (sil.c_orderline_id IS NOT NULL AND il.c_orderline_id = sil.c_orderline_id)" +
-        ") " +
-        "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
+        "FROM (" + InOutInvoiceLinks.linkedInvoiceIdsSql(InOutInvoiceLinks.MatchTable.SALES) + ") lk " +
+        "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id " +
         "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id " +
-        "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y' " +
-        "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
+        "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, shipmentId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, shipmentId, InOutInvoiceLinks.LINKED_INVOICES_PARAMS);
       JSONArray invoices = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

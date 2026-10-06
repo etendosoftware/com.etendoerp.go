@@ -30,14 +30,16 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link McpToolDefinition}.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolDefinition
  */
 class McpToolDefinitionTest {
 
   @Test
   @DisplayName("Constructor arguments are exposed through getters")
   void exposesConstructorArguments() {
-    McpToolDefinition def = new McpToolDefinition("neo_get", "Get one record", null);
-    assertEquals("neo_get", def.getName());
+    McpToolDefinition def = new McpToolDefinition("etendo_get", "Get one record", null);
+    assertEquals("etendo_get", def.getName());
     assertEquals("Get one record", def.getDescription());
     assertNotNull(def.getInputSchema());
   }
@@ -48,8 +50,8 @@ class McpToolDefinitionTest {
   class ConstructorAndGetters {
     @Test
     void storesNameAndDescription() {
-      McpToolDefinition def = new McpToolDefinition("neo_list", "List records", null);
-      assertEquals("neo_list", def.getName());
+      McpToolDefinition def = new McpToolDefinition("etendo_list", "List records", null);
+      assertEquals("etendo_list", def.getName());
       assertEquals("List records", def.getDescription());
     }
 
