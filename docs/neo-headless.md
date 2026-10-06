@@ -6652,6 +6652,7 @@ check above), the response carries a `session` object alongside the token:
     "roleList": [{
       "id": "...",
       "name": "...",
+      "isClientAdmin": false,
       "orgList": [{ "id": "...", "name": "..." }],
       "effectiveRoleNames": ["Finance", "Sales"]
     }]
@@ -6683,6 +6684,14 @@ role's own `name` in that case. A template role id with no matching (active) `Ro
 or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — is silently skipped
 (logged as a `warn`, not thrown), so `effectiveRoleNames.length` can be smaller than the number of
 composed template roles; the array is never padded or nulled out for a single unresolved entry.
+
+**`isClientAdmin` (ETP-5329, QA follow-up).** Every `roleList` entry carries a boolean
+`isClientAdmin` (`AD_Role.Is_Client_Admin = 'Y'`), on login and on `SFRefreshToken` alike (both
+build the list through `EtendoGoJwtSupport.loadRoleListData`). It exists because a tenant
+admin's default role IS the client-admin `AD_Role` itself: it has no composed templates (so no
+`effectiveRoleNames`) and its raw `name` is tenant-specific (`"<Company> Admin"`). Frontends must
+check it first and render the localized "Administrator" label (`roleNameAdmin`), the same one
+Settings > Users shows — precedence: `isClientAdmin` → `effectiveRoleNames` → `name`.
 
 The `currentRole == null` case is UNCHANGED: the response stays the bare
 `{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
