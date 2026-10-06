@@ -95,10 +95,7 @@ final class McpToolAnnotations {
     if (ADDITIVE.contains(toolName)) {
       return hints(false, false, false);
     }
-    if (DELETE.contains(toolName)) {
-      return hints(false, true, true);
-    }
-    return hints(false, true, false);
+    return hints(false, true, DELETE.contains(toolName));
   }
 
   static boolean isReadOnly(String toolName) {
