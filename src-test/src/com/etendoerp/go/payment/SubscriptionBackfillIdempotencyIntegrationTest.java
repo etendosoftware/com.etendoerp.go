@@ -51,7 +51,7 @@ import org.openbravo.test.base.OBBaseTest;
  * <p>The fix under test is
  * {@code schema_forge/cli/src/data-fixes/sql/20261005T180000Z__R37-tenant-subscription-backfill.sql}:
  * it gives every tenant that carries the legacy {@code AD_Preference ETGO_TenantPlan='productive'}
- * marker, but no active subscription row (open or closed — ETP-5047), one open
+ * marker, but no subscription row at all (active or not, open or closed — ETP-5047), one open
  * {@code ETGO_SUBSCRIPTION} row on the grandfathered {@code legacy-productive} plan.
  *
  * <p><b>Why the real file and not a paraphrase.</b> Everything that can go wrong with this fix is
@@ -676,10 +676,10 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    * route — the runtime paid-upgrade path, a manual correction, an earlier partial run — is retired
    * the next time the fix is invoked for it (Group 5 runs that positive half). The negative half is
    * asserted here because it is the dangerous one: a tenant with a marker and NO subscription row
-   * must keep its marker, since the marker is then the only record that it paid.
+   * at all must keep its marker, since the marker is then the only record that it paid.
    */
   @Test
-  public void testTheRetirementOnlyFiresForATenantThatActuallyHasAnOpenSubscription() {
+  public void testTheRetirementOnlyFiresForATenantThatHasASubscriptionRow() {
     String tenant = createTenant("retire-guard", true);
     List<String> statements = statementsOf(applySection, tenant);
 
@@ -696,7 +696,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
       OBContext.restorePreviousMode();
     }
 
-    assertEquals("Without an open subscription the retirement must remove nothing", 0, retired);
+    assertEquals("Without any subscription row the retirement must remove nothing", 0, retired);
     assertEquals("The marker is still the only record that this tenant paid", 1L,
         rawPreferenceCount(tenant));
     assertEquals("And the tenant is still a candidate for the backfill", 1,
@@ -720,7 +720,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
     // R42 shape: the subscription was already there, so only the marker went. @report must still
     // record the retirement — it is the only trace of the row it removed.
     String r42 = createTenant("report-r42", true);
-    createSubscription(r42, false);
+    createSubscription(r42, false, true);
     assertEquals(0, apply(r42));
     assertEquals("Sanity: this apply retired the R42 marker", 1, lastRetiredPreferences);
     assertTrue("@report must record the retirement of an R42 marker: " + reportText(r42),
@@ -748,7 +748,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   @Test
   public void testAnR42MarkerNextToAnOpenSubscriptionIsRetiredWithoutASecondRow() {
     String tenant = createTenant("r42-open", true);
-    createSubscription(tenant, false);
+    createSubscription(tenant, false, true);
 
     assertEquals("@check must select a marker next to an open subscription", 1,
         selectRows(substitute(checkSection, tenant)).size());
@@ -771,7 +771,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   public void testAnInactiveMarkerNextToAClosedSubscriptionIsRetiredWithoutAnInsert() {
     String tenant = createTenant("closed-inactive", true);
     deactivateMarker(tenant);
-    createSubscription(tenant, true);
+    createSubscription(tenant, true, true);
 
     assertEquals("@check must select any marker next to any subscription row", 1,
         selectRows(substitute(checkSection, tenant)).size());
@@ -790,14 +790,15 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    * carries an ACTIVE productive marker, the state develop's R42 produces for a tenant that paid
    * and canceled before its data-fix chain ran. The closed row answers for the tenant at runtime
    * ({@code SubscriptionService#findLatest}), so it reads as canceled and the marker decides
-   * nothing. The backfill must not change that: before ETP-5047 narrowed branch (A) to "no active
-   * row", it inserted a fresh open {@code legacy-productive} row here and the canceled tenant read
-   * as paying again. Now only branch (B) applies — the marker is retired, nothing is inserted.
+   * nothing. The backfill must not change that: before ETP-5047 narrowed branch (A) to "no row
+   * at all", it inserted a fresh open {@code legacy-productive} row here and the canceled tenant
+   * read as paying again. Now only branch (B) applies — the marker is retired, nothing is
+   * inserted.
    */
   @Test
   public void testAnActiveMarkerNextToAClosedSubscriptionIsRetiredWithoutABackfill() {
     String tenant = createTenant("closed-active", true);
-    createSubscription(tenant, true);
+    createSubscription(tenant, true, true);
 
     assertEquals("@check must select the marker for retirement", 1,
         selectRows(substitute(checkSection, tenant)).size());
@@ -811,6 +812,32 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
 
     assertEquals("A re-run inserts nothing", 0, apply(tenant));
     assertEquals("...and retires nothing", 0, lastRetiredPreferences);
+    assertEquals("@check converges", 0, selectRows(substitute(checkSection, tenant)).size());
+  }
+
+  /**
+   * ETP-5047 — a tenant whose only subscription row is INACTIVE, next to an active productive
+   * marker. No product code ever deactivates a row, so an inactive one is an operator's deliberate
+   * switch-off; {@code findLatest} ignores it, but a backfilled active row would silently undo the
+   * decision. Product decision: the backfill is blocked by ANY row, so the marker is retired and
+   * nothing is inserted (the tenant reads as free until the operator restores the row).
+   */
+  @Test
+  public void testAnActiveMarkerNextToAnInactiveSubscriptionIsRetiredWithoutABackfill() {
+    String tenant = createTenant("inactive-active", true);
+    createSubscription(tenant, false, false);
+
+    assertEquals("@check must select the marker for retirement", 1,
+        selectRows(substitute(checkSection, tenant)).size());
+
+    assertEquals("An inactive row blocks the backfill: nothing may be inserted", 0,
+        apply(tenant));
+    assertEquals("...and the marker is retired", 1, lastRetiredPreferences);
+    assertEquals(0L, rawPreferenceCount(tenant));
+    assertEquals("Only the inactive row the tenant had", 1L, rawTotalCount(tenant));
+    assertEquals("And no open active one appeared", 0L, rawOpenCount(tenant));
+
+    assertEquals("A re-run inserts nothing", 0, apply(tenant));
     assertEquals("@check converges", 0, selectRows(substitute(checkSection, tenant)).size());
   }
 
@@ -1127,16 +1154,19 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    * @param tenantId the tenant the row is about
    * @param closed true for a closed row ({@code END_DATE} set, status {@code canceled}), false for
    *     an open {@code active} one
+   * @param active false for a row an operator switched off ({@code ISACTIVE = 'N'}); nothing in
+   *     the product ever deactivates a subscription row
    */
-  private void createSubscription(String tenantId, boolean closed) {
+  private void createSubscription(String tenantId, boolean closed, boolean active) {
     nativeUpdateCommitted("INSERT INTO ETGO_SUBSCRIPTION (ETGO_SUBSCRIPTION_ID, AD_CLIENT_ID, "
             + "AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ENVIRONMENT_CLIENT_ID, "
             + "ETGO_PLAN_ID, STATUS, START_DATE, END_DATE) "
-            + "VALUES (:id, '0', '0', 'Y', now(), '0', now(), '0', :tenant, "
+            + "VALUES (:id, '0', '0', :active, now(), '0', now(), '0', :tenant, "
             + "(SELECT ETGO_PLAN_ID FROM ETGO_PLAN WHERE VALUE = :plan LIMIT 1), "
             + (closed ? "'canceled', now() - interval '30 days', now() - interval '1 day')"
                 : "'active', now() - interval '30 days', NULL)"),
-        "id", newId(), "tenant", tenantId, "plan", LEGACY_PLAN_VALUE);
+        "id", newId(), "tenant", tenantId, "plan", LEGACY_PLAN_VALUE,
+        "active", active ? "Y" : "N");
   }
 
   /** Turns the tenant's productive marker into an inactive leftover. */
