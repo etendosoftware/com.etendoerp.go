@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -52,6 +53,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.stubbing.Answer;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.data.Account;
@@ -75,6 +77,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * is mocked and {@code OBContext}/{@code EtendoGoJwtDalHelper} are statically stubbed, so these run
  * fast with no database — the servlet wiring (routing → service → cookie/CSRF/response envelope) is
  * what's under test. DB-level store behavior is covered by {@code JdbcGoSessionStoreIntegrationTest}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class GoSessionEndpointsTest {
 
@@ -82,6 +86,10 @@ public class GoSessionEndpointsTest {
   private static final String EMAIL = "user@example.test";
   private static final String PASSWORD = "Str0ng!Passw0rd";
   private static final String CSRF = "csrf-token-value-123456";
+  private static final String COMMIT = "commit";
+  private static final String SET_COOKIE = "Set-Cookie";
+  private static final String BODY = "body";
+  private static final String SESSION_WRITE = "session-write";
 
   private final GoSessionService goSessionService = mock(GoSessionService.class);
   private final EtendoGoSsoProviderRegistry ssoRegistry = mock(EtendoGoSsoProviderRegistry.class);
@@ -568,6 +576,12 @@ public class GoSessionEndpointsTest {
    */
   private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord)
       throws Exception {
+    return enterEnvironment(sessionRecord, new CapturedResponse());
+  }
+
+  /** As {@link #enterEnvironment(GoSessionRecord)}, answering into {@code resp}. */
+  private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord, CapturedResponse resp)
+      throws Exception {
     when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
@@ -581,7 +595,7 @@ public class GoSessionEndpointsTest {
 
     User user = mock(User.class);
     Role role = mock(Role.class);
-    OBDal obDal = mock(OBDal.class);
+    OBDal obDal = recordingDal(resp);
     when(obDal.get(User.class, "U1")).thenReturn(user);
     when(obDal.get(Role.class, "R1")).thenReturn(role);
 
@@ -597,7 +611,6 @@ public class GoSessionEndpointsTest {
     when(decoded.getClaim("organization")).thenReturn(orgClaim);
     when(decoded.getClaim("warehouse")).thenReturn(warehouseClaim);
 
-    CapturedResponse resp = new CapturedResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
         MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
         MockedStatic<EtendoGoJwtSupport> supp = mockStatic(EtendoGoJwtSupport.class);
@@ -655,6 +668,283 @@ public class GoSessionEndpointsTest {
     assertEquals("csrf-sso", body.getString("csrfToken"));
   }
 
+  // ===================== ETP-5628 — commit before the cookie leaves =====================
+  //
+  // The session row joins the request transaction, which DalRequestFilter only commits after the
+  // servlet returns; writing the body completes the HTTP response before that. The SPA's next
+  // request (/me, /environments) arrived within ~8 ms, could not see the row and got a 401, and an
+  // onboarded user was sent back to onboarding. Each test below fails if the request's writes are
+  // not committed before the first Set-Cookie and before the body.
+
+  @Test
+  public void createCommitsTheSessionBeforeSendingTheCookie() throws Exception {
+    Account account = passwordAccount();
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenAnswer(
+        sessionWrite(resp, new IssuedGoSession("sess-token-xyz", "refresh-abc", "csrf-xyz",
+            new GoSessionRecord())));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+
+      servlet.doPost(jsonPost("/session", new JSONObject().put("email", EMAIL).put("password", PASSWORD)),
+          resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  /**
+   * A commit that fails must leave the client without a cookie: the cookie would point at a row
+   * that does not exist. Committing before the cookie is what makes that possible at all.
+   */
+  @Test
+  public void createWhoseCommitFailsSendsNoCookie() throws Exception {
+    Account account = passwordAccount();
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenReturn(
+        new IssuedGoSession("sess-token-xyz", "refresh-abc", "csrf-xyz", new GoSessionRecord()));
+
+    CapturedResponse resp = new CapturedResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      OBDal obDal = mock(OBDal.class);
+      doThrow(new IllegalStateException("commit refused")).when(obDal).commitAndClose();
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+
+      servlet.doPost(jsonPost("/session", new JSONObject().put("email", EMAIL).put("password", PASSWORD)),
+          resp.response);
+    }
+
+    assertEquals(500, resp.status);
+    assertTrue("no cookie may be sent for an uncommitted session: " + resp.setCookies,
+        resp.setCookies.isEmpty());
+  }
+
+  /** Registration commits the account, its verification and the session as one unit. */
+  @Test
+  public void sessionRegisterCommitsTheAccountAndSessionBeforeSendingTheCookie() throws Exception {
+    Account account = passwordAccount();
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.create(eq("ACC1"), eq("password"), any(), any())).thenAnswer(
+        sessionWrite(resp, new IssuedGoSession("session-register", "refresh-register",
+            "csrf-register", new GoSessionRecord())));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail(EMAIL)).thenReturn(null);
+      dal.when(() -> EtendoGoJwtDalHelper.createAccount(eq(EMAIL), anyString(), eq("User"),
+          anyString())).thenReturn(account);
+
+      servlet.doPost(jsonPost("/session/register", new JSONObject()
+          .put("email", EMAIL)
+          .put("password", PASSWORD)
+          .put("name", "User")), resp.response);
+    }
+
+    assertEquals(201, resp.status);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  @Test
+  public void ssoCreateCommitsTheSessionBeforeSendingTheCookie() throws Exception {
+    EtendoGoSsoAssertion assertion = mock(EtendoGoSsoAssertion.class);
+    when(assertion.getProvider()).thenReturn("google");
+    when(assertion.getSubject()).thenReturn("sub-1");
+    when(assertion.getEmail()).thenReturn(EMAIL);
+    when(ssoRegistry.verify(eq("google"), any(), anyString())).thenReturn(assertion);
+    Account account = passwordAccount();
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.create(eq("ACC1"), eq("sso"), any(), any())).thenAnswer(
+        sessionWrite(resp, new IssuedGoSession("sess-sso", "ref-sso", "csrf-sso",
+            new GoSessionRecord())));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity("google", "sub-1"))
+          .thenReturn(account);
+
+      servlet.doPost(jsonPost("/session/sso/google",
+          new JSONObject().put("credential", "google-id-token")), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  @Test
+  public void environmentRotationCommitsBeforeSendingTheRotatedCookie() throws Exception {
+    GoSessionRecord sessionRecord = sessionInEnvironment("O2");
+    GoSessionRecord rotatedRecord = new GoSessionRecord();
+    rotatedRecord.setUserId("U1");
+    rotatedRecord.setCtxOrgId("O1");
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.rotate(any())).thenAnswer(
+        sessionWrite(resp, new IssuedGoSession("newtok", "newref", "newcsrf", rotatedRecord)));
+
+    enterEnvironment(sessionRecord, resp);
+
+    assertEquals(200, resp.status);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  @Test
+  public void refreshCommitsTheRotationBeforeSendingTheRotatedCookie() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.refresh("rtok")).thenAnswer(sessionWrite(resp,
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord())));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(postRefresh("rtok"), resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  /** A replayed refresh revokes the whole family; that revocation is durable before the 401. */
+  @Test
+  public void refreshReplayCommitsTheRevocationBeforeClearingTheCookies() throws Exception {
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.refresh("rtok")).thenAnswer(sessionWrite(resp, null));
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(postRefresh("rtok"), resp.response);
+    }
+
+    assertEquals(401, resp.status);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  @Test
+  public void logoutCommitsTheRevocationBeforeClearingTheCookies() throws Exception {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    CapturedResponse resp = new CapturedResponse();
+    doAnswer(sessionWrite(resp, null)).when(goSessionService).revoke(sessionRecord);
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doDelete(deleteRequest("tok", CSRF), resp.response);
+    }
+
+    assertEquals(204, resp.status);
+    verify(goSessionService).revoke(sessionRecord);
+    assertCommittedBeforeResponse(resp);
+  }
+
+  /**
+   * Changing the password on a cookie session rotates it: the new password and the rotated
+   * session are committed together, before the rotated cookie is sent.
+   */
+  @Test
+  public void changePasswordOnACookieSessionCommitsBeforeSendingTheRotatedCookie()
+      throws Exception {
+    GoSessionRecord sessionRecord = new GoSessionRecord();
+    sessionRecord.setAccountId("ACC1");
+    sessionRecord.setCsrfToken(CSRF);
+    when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
+    CapturedResponse resp = new CapturedResponse();
+    when(goSessionService.rotate(sessionRecord)).thenAnswer(sessionWrite(resp,
+        new IssuedGoSession("newtok", "newref", "newcsrf", new GoSessionRecord())));
+    Account account = passwordAccount();
+
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      OBDal obDal = recordingDal(resp);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      dal.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
+
+      servlet.doPost(postWithSession("/change-password", new JSONObject()
+          .put("currentPassword", PASSWORD)
+          .put("newPassword", "N3w!Str0ngPassw0rd").toString(), "tok", CSRF), resp.response);
+
+      dal.verify(() -> EtendoGoJwtDalHelper.changePassword(eq(account), anyString(), anyString(),
+          any()));
+    }
+
+    assertEquals(200, resp.status);
+    assertTrue(resp.cookie(GoSessionSecurity.COOKIE_NAME)
+        .startsWith(GoSessionSecurity.COOKIE_NAME + "=newtok"));
+    assertCommittedBeforeResponse(resp);
+  }
+
+  /** An account {@code ACC1} whose local password is {@link #PASSWORD}. */
+  private static Account passwordAccount() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC1");
+    when(account.getEmail()).thenReturn(EMAIL);
+    when(account.getName()).thenReturn("User");
+    when(account.getPasswordHash()).thenReturn(storedHash(PASSWORD));
+    return account;
+  }
+
+  /** A stubbed {@link OBDal} whose {@code commitAndClose()} is recorded among the response events. */
+  private static OBDal recordingDal(CapturedResponse resp) {
+    OBDal obDal = mock(OBDal.class);
+    doAnswer(inv -> {
+      resp.events.add(COMMIT);
+      return null;
+    }).when(obDal).commitAndClose();
+    return obDal;
+  }
+
+  /**
+   * Stands for a {@link GoSessionService} call that writes {@code etgo_go_session}: records it among
+   * the response events and answers {@code result}.
+   */
+  private static Answer<Object> sessionWrite(CapturedResponse resp, Object result) {
+    return inv -> {
+      resp.events.add(SESSION_WRITE);
+      return result;
+    };
+  }
+
+  /**
+   * ETP-5628 — the session write was committed, and nothing reached the client before that commit:
+   * no {@code Set-Cookie} and no body. A commit that happened before the session write (register
+   * commits the account first) does not count.
+   */
+  private static void assertCommittedBeforeResponse(CapturedResponse resp) {
+    int write = resp.events.lastIndexOf(SESSION_WRITE);
+    assertTrue("the request never wrote the session: " + resp.events, write >= 0);
+    int commit = resp.events.subList(write, resp.events.size()).indexOf(COMMIT);
+    assertTrue("the session write must be committed before the response is sent: "
+        + resp.events, commit >= 0);
+    List<String> beforeCommit = resp.events.subList(0, write + commit);
+    assertFalse("a cookie left before the session write was committed: " + resp.events,
+        beforeCommit.contains(SET_COOKIE));
+    assertFalse("the body was written before the session write was committed: " + resp.events,
+        beforeCommit.contains(BODY));
+    assertTrue("the response must still send its cookies: " + resp.events,
+        resp.events.contains(SET_COOKIE));
+  }
+
   private static String errorMessage(CapturedResponse resp) throws Exception {
     return new JSONObject(resp.body.toString()).getJSONObject("error").getString("message");
   }
@@ -667,15 +957,21 @@ public class GoSessionEndpointsTest {
 
   private static HttpServletRequest postEnv(String bodyJson, String cookieValue, String csrf)
       throws Exception {
+    return postWithSession("/session/environment", bodyJson, cookieValue, csrf);
+  }
+
+  /** A same-origin JSON POST to {@code path} carrying the session cookie and the CSRF proof. */
+  private static HttpServletRequest postWithSession(String path, String bodyJson,
+      String cookieValue, String csrf) throws Exception {
     HttpServletRequest req = mock(HttpServletRequest.class);
     when(req.getMethod()).thenReturn("POST");
-    when(req.getPathInfo()).thenReturn("/session/environment");
+    when(req.getPathInfo()).thenReturn(path);
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(bodyJson)));
     when(req.getHeader("Origin")).thenReturn(ORIGIN);
     when(req.getHeader("Referer")).thenReturn(null);
     when(req.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn(csrf);
-    when(req.getRequestURL()).thenReturn(new StringBuffer(ORIGIN + "/sws/go/session/environment"));
+    when(req.getRequestURL()).thenReturn(new StringBuffer(ORIGIN + "/sws/go" + path));
     if (cookieValue != null) {
       when(req.getCookies()).thenReturn(
           new Cookie[] { new Cookie(GoSessionSecurity.COOKIE_NAME, cookieValue) });
@@ -799,6 +1095,12 @@ public class GoSessionEndpointsTest {
     final Map<String, String> headers = new HashMap<>();
     final List<String> setCookies = new ArrayList<>();
     final StringWriter body = new StringWriter();
+    /**
+     * ETP-5628 — what reached the response, and when the session was written and the request
+     * transaction committed, in order: {@link #SESSION_WRITE}, {@link #COMMIT},
+     * {@link #SET_COOKIE} and {@link #BODY}.
+     */
+    final List<String> events = new ArrayList<>();
     int status;
 
     CapturedResponse() {
@@ -810,6 +1112,7 @@ public class GoSessionEndpointsTest {
         doAnswer(inv -> {
           if ("Set-Cookie".equals(inv.<String>getArgument(0))) {
             setCookies.add(inv.getArgument(1));
+            events.add(SET_COOKIE);
           }
           return null;
         }).when(response).addHeader(anyString(), anyString());
@@ -817,7 +1120,11 @@ public class GoSessionEndpointsTest {
           status = inv.getArgument(0);
           return null;
         }).when(response).setStatus(anyInt());
-        when(response.getWriter()).thenReturn(new PrintWriter(body));
+        PrintWriter writer = new PrintWriter(body);
+        when(response.getWriter()).thenAnswer(inv -> {
+          events.add(BODY);
+          return writer;
+        });
       } catch (Exception e) {
         throw new IllegalStateException(e);
       }

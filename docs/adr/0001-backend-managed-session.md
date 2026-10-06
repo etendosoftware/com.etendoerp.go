@@ -111,6 +111,27 @@ The DAL entity is **code-generated into `src-gen/`** — schema changes flow thr
 `AD_TABLE`/`AD_COLUMN` sourcedata + `migrationscripts/`, then a model regen. Do not hand-edit the
 generated entity.
 
+**Amendment (ETP-5628) — the row is committed before its cookie is sent.** `JdbcGoSessionStore`
+writes on the request's DAL connection and joins its transaction; `DalRequestFilter` commits that
+transaction only after the servlet returns. But writing the JSON body closes the writer, which
+completes the HTTP response *before* that commit. The SPA fires `GET /me` and `GET /environments`
+within milliseconds of the login response, so they carried a cookie whose row was not yet visible
+and got `401 Invalid or expired token` (8 of 12 logins in a backend-only probe; 2–5 Playwright
+logins per pre-push run), and an onboarded user was sent back to onboarding.
+
+Every response of `EtendoGoJwtServlet` that sets or clears the session cookies therefore commits
+first: `commitAndSetSessionCookies` / `commitAndClearSessionCookies` are the only way the servlet
+writes those cookies, and each commits (`EtendoGoDalHelper.commitDalChanges`) before its
+`Set-Cookie`. This covers session create, `/session/register`, SSO create, environment entry,
+refresh (rotation, and the family revocation of a replay), change-password on a cookie session and
+logout. The commit comes after every write of the operation, so the operation still commits as one
+unit — the account, password and e-mail-verification helpers it calls already commit on their own,
+so the session row was the only uncommitted write. A failed commit throws before any cookie is set:
+the caller rolls back and answers `500` without a cookie. Any DAL work after the commit (the
+environment-entry usage record) runs in a new transaction that `DalRequestFilter` commits as before.
+Store-level writes that set no cookie (sliding the idle expiry, rebinding a revoked role) still
+commit at the end of the request.
+
 ### D3 — Cookie contract
 
 ```
@@ -195,9 +216,10 @@ sequenceDiagram
     B->>GO: POST /sws/go/session {emailOrUsername,password}
     GO->>GO: verifyPassword (salted SHA-256)
     GO->>DB: insert session (token_hash, csrf, ctx=account defaults)
+    GO->>DB: commit (before any Set-Cookie — ETP-5628)
     GO-->>B: 200 {account, csrfToken} + Set-Cookie __Host-go_session
     B->>GO: POST /sws/go/session/environment {userId,roleId?,orgId?} (cookie + X-Go-CSRF)
-    GO->>DB: rotate session, set env ctx (user/role/org/client/wh)
+    GO->>DB: rotate session, set env ctx (user/role/org/client/wh), commit
     GO-->>B: 200 {environment, csrfToken} + Set-Cookie (rotated)
     B->>GO: GET /sws/neo/... (cookie only)
     GO->>DB: resolve(token_hash) -> env ctx
@@ -241,10 +263,10 @@ sequenceDiagram
     B->>GO: POST /sws/go/session/refresh (cookie + X-Go-CSRF)
     GO->>DB: lookup refresh_token_hash
     alt fresh (not yet used)
-        GO->>DB: rotate (new hashes, ROTATED_FROM_ID=old), revoke old
+        GO->>DB: rotate (new hashes, ROTATED_FROM_ID=old), revoke old, commit
         GO-->>B: 200 {csrfToken} + Set-Cookie (rotated)
     else replay (already rotated)
-        GO->>DB: revoke entire rotation family
+        GO->>DB: revoke entire rotation family, commit
         GO-->>B: 401 (force re-login)
     end
 ```
@@ -257,7 +279,7 @@ sequenceDiagram
     participant GO as /sws/go
     participant DB as ETGO_GO_SESSION
     B->>GO: DELETE /sws/go/session (cookie + X-Go-CSRF)
-    GO->>DB: set IS_REVOKED='Y'
+    GO->>DB: set IS_REVOKED='Y', commit
     GO-->>B: 204 + Set-Cookie __Host-go_session=; Max-Age=0
     B->>GO: any later request with old cookie
     GO-->>B: 401

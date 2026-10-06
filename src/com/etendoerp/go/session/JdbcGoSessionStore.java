@@ -31,6 +31,10 @@ import org.openbravo.dal.service.OBDal;
  * {@code DalRequestFilter}), mirroring the {@code OAuth2Filter} pattern — it neither opens nor
  * closes connections and participates in the current transaction. Session rows are system-owned
  * technical records ({@code ad_client_id = '0'}, {@code ad_org_id = '0'}).
+ *
+ * <p>The store never commits: that transaction is the caller's unit of work. A row behind a cookie
+ * must be committed before the cookie is sent, though, or the client's next request cannot see it
+ * (ETP-5628) — {@code EtendoGoJwtServlet} commits before every {@code Set-Cookie} of the session.
  */
 public class JdbcGoSessionStore implements GoSessionStore {
 

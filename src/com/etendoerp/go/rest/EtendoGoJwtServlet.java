@@ -1641,7 +1641,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (createCookieSession) {
         IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
             request.getHeader(HEADER_USER_AGENT), null);
-        writeSessionResponse(response, HttpServletResponse.SC_CREATED, account, issued);
+        writeSessionResponse(response, HttpServletResponse.SC_CREATED, account, issued,
+            "session register");
       } else {
         JSONObject result = new JSONObject();
         result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -1837,7 +1838,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       IssuedGoSession issued = goSessionService.create(account.getId(), "sso",
           request.getHeader(HEADER_USER_AGENT), null);
-      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued,
+          "session SSO create");
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session SSO create", e, log);
       log.error("Database error during SSO session create", e);
@@ -2227,7 +2229,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               "Session changed concurrently; restore and retry");
           return;
         }
-        setSessionCookies(response, rotated);
+        commitAndSetSessionCookies(response, rotated, "change password");
         result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       } else {
         result.put(FIELD_TOKEN, sessionToken);
@@ -5125,7 +5127,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
           request.getHeader(HEADER_USER_AGENT), null);
-      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued,
+          "session create");
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
       log.error("Database error during session create", e);
@@ -5158,7 +5161,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (auth.isAuthenticated()) {
         goSessionService.revoke(auth.getRecord());
       }
-      clearSessionCookies(response);
+      commitAndClearSessionCookies(response, "session delete");
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
@@ -5357,7 +5360,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
     if (rotated != null) {
-      setSessionCookies(response, rotated);
+      commitAndSetSessionCookies(response, rotated, "session environment");
     }
     return rotated;
   }
@@ -5514,12 +5517,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String rawRefresh = extractRefreshToken(request);
       IssuedGoSession rotated = rawRefresh == null ? null : goSessionService.refresh(rawRefresh);
       if (rotated == null) {
-        clearSessionCookies(response);
+        // A replayed refresh revokes its whole rotation family: make that durable before the 401.
+        commitAndClearSessionCookies(response, "session refresh");
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
-      setSessionCookies(response, rotated);
+      commitAndSetSessionCookies(response, rotated, "session refresh");
       response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
       response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
 
@@ -5539,12 +5543,42 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void setSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+  /**
+   * ETP-5628 — commits the request's writes, then sets the session + refresh cookies. The only way
+   * this servlet hands out a session cookie, so no cookie can leave ahead of its row.
+   *
+   * <p>{@link com.etendoerp.go.session.JdbcGoSessionStore} writes {@code etgo_go_session} on the
+   * request transaction, which {@code DalRequestFilter} only commits after the servlet returns. But
+   * {@link #writeResponse} closes the writer, which completes the HTTP response first. A browser
+   * that receives the cookie sends its next request within milliseconds, and until that late commit
+   * the row behind the cookie is invisible to it: {@code /me} and {@code /environments} answered 401
+   * and the SPA sent an onboarded user back to onboarding.
+   *
+   * <p>Call it after the operation's last write (account, password, session), so none of them is
+   * left out of the commit. A failed commit throws before any cookie is set, so the caller's
+   * {@code catch} rolls back and answers 500 without a cookie. {@code commitAndClose} also closes
+   * the Hibernate session: entities loaded before it are detached, and any later DAL work runs in a
+   * new transaction that {@code DalRequestFilter} commits as usual.
+   *
+   * @param operation names the operation in the log if the commit fails
+   */
+  private static void commitAndSetSessionCookies(HttpServletResponse response,
+      IssuedGoSession issued, String operation) {
+    EtendoGoDalHelper.commitDalChanges(operation, log);
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
   }
 
-  private void clearSessionCookies(HttpServletResponse response) {
+  /**
+   * ETP-5628 — commits the request's writes (a logout's revocation, a replayed refresh's family
+   * revocation), then expires the session + refresh cookies, so a session the response reports as
+   * gone is already gone for every other request. See {@link #commitAndSetSessionCookies}.
+   *
+   * @param operation names the operation in the log if the commit fails
+   */
+  private static void commitAndClearSessionCookies(HttpServletResponse response,
+      String operation) {
+    EtendoGoDalHelper.commitDalChanges(operation, log);
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredSessionCookie());
     response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredRefreshCookie());
   }
@@ -5575,22 +5609,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
-   * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
-   * is never placed in the body.
+   * Write a session response: commits the request's writes, sets the opaque {@code __Host-} cookie
+   * plus {@code no-store} and {@code nosniff} headers, and returns { status, account, csrfToken }.
+   * The session token itself is never placed in the body. The body is built before the commit
+   * (ETP-5628), so a JSON failure cannot answer 500 for a session that was already committed.
+   *
+   * @param operation names the operation in the log if the commit fails
    */
   private void writeSessionResponse(HttpServletResponse response, int status, Account account,
-      IssuedGoSession issued) throws IOException, JSONException {
-    setSessionCookies(response, issued);
-    response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
-    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
-
+      IssuedGoSession issued, String operation) throws IOException, JSONException {
     JSONObject accountJson = buildAccountJson(account);
 
     JSONObject result = new JSONObject();
     result.put(FIELD_STATUS, STATUS_SUCCESS);
     result.put(FIELD_ACCOUNT, accountJson);
     result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+
+    commitAndSetSessionCookies(response, issued, operation);
+    response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
     writeResponse(response, status, result);
   }
 
