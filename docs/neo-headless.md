@@ -3222,6 +3222,16 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
 | `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
 
+##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, declared)
+
+| call | REST `/sws/neo/*` and the `NEO_DATA` servlets (OAuth2 token) | MCP `/sws/mcp` |
+|---|---|---|
+| token on org `0` (client `0` after `COALESCE`) | the bind step judges client `0` — no lifecycle, **allowed** | judged on the role's tenant (`McpSessionManager.effectiveClientId`) — a blocked tenant gets **402** |
+
+Not intended: the REST side is the open half of the ETP-5047 review finding W1, tracked in
+`open-and-notable-topics.md` §3.12. Either way client `0` itself is never evaluated or written by
+the lifecycle service.
+
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 
 The payment header's defaults read `@Isreceipt@`, which Classic supplies through the tab's

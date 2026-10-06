@@ -312,7 +312,8 @@ rule/property (or setting `false`). Anything that is not a clean `true` keeps en
   from `accessState`.
 - **An API client or AI agent** gets HTTP 402 with
   `{"error":{"message":"Environment access is not available: <DECISION>","status":402,"code":"ENVIRONMENT_ACCESS_DENIED","decision":"<DECISION>"}}`
-  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error), the `NEO_DATA` servlets (favorites,
+  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error; a wildcard token is judged on its role's
+  tenant, never on the System client `0`), the `NEO_DATA` servlets (favorites,
   fiscal test mode, report selectors), the `/sws/go` tenant-session endpoints and
   `GET /sws/go/login`. (The OAuth2 API-key endpoints refuse through the same guard, in the OAuth2
   servlet's own error envelope.) One gap: an Etendo JWT minted **before** the block keeps working on Copilot

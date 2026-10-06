@@ -505,7 +505,11 @@ scheme) and `NEO_DATA` (`NeoFavoritesServlet`, `NeoFiscalTestModeServlet` throug
 `JwtAuthUtils.authenticateOrFail`, `ReportSelectorsServlet`, the OAuth2 API-key endpoints) — and
 hands its denial to the consumer as `EnvironmentAuthOutcome.getAccessDenial()`. Outside the
 pipeline it runs in MCP (`McpServlet.doPost`, every credential scheme, run as system because MCP
-has no context yet), in `EtendoGoJwtServlet.resolveTenantSession` (the `/sws/go` endpoints that act
+has no context yet — and on the **effective** tenant: an MCP token commonly carries the wildcard
+client `0`, which `McpSessionManager.effectiveClientId` resolves to the role's client before the
+guard runs, the same value `executeInContext` then builds the call's context with; asked about `0`
+the guard found no lifecycle and allowed, so a blocked tenant walked past it with a wildcard
+token), in `EtendoGoJwtServlet.resolveTenantSession` (the `/sws/go` endpoints that act
 on the session's tenant) and in the legacy `GET /sws/go/login` (it hands out a raw Etendo JWT, valid
 on every secure web service of the tenant; refusing it there is confirmed (Martin, 2026-09-28)).
 They all answer **HTTP 402** with the body below — the OAuth2 API-key endpoints excepted, which
@@ -594,6 +598,22 @@ cheaper, but it bounds the leak rather than closing it and affects every client 
   only closed rows and a leftover or R42-written `productive` marker was re-subscribed with a fresh
   active row. Branch (A) of `@check` and the guards of `@apply` statements 1-2 now key on "no row
   at all" (active or not, open or closed), so such a tenant only has its marker retired.
+
+### 🔴 3.12 The NEO bind step judges an OAuth2 token's raw client, not its role's tenant
+
+**Ticket:** no ticket — found in the ETP-5047 review (W1), which fixed the MCP half; decision owed: fix in ETP-5047 or a follow-up.
+
+`OAuth2Filter.validateToken` derives a token's client as `COALESCE(org.ad_client_id,
+oauth2_client.ad_client_id)`, so a token on org `0` — the common shape for an API key, and the
+reason MCP resolves the wildcard — carries client `0`. MCP now resolves that to the role's client
+before the guard (§3.8). The NEO bind step (`EnvironmentRequestAuthenticator.bind`) still hands the
+guard `identity.clientId` raw, so the same token used on `/sws/neo` (or a `NEO_DATA` servlet) is
+judged as the System client: no lifecycle, **allowed**, whatever the role's tenant owes. Traced, not
+run. The defensive half already holds — the lifecycle service never evaluates or writes client `0`
+(ETP-5047), so the request is merely allowed, never misrecorded. The fix is one line: judge
+`McpSessionManager.effectiveClientId(identity.clientId, identity.roleId)` (moved to a neutral
+package) instead. `EtendoGoJwtServlet`'s guard calls are not affected: they judge the session's
+context client or the entered user's own client, never a token's wildcard.
 
 ## 4. Known issues
 

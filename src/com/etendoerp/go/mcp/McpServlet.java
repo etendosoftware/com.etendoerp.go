@@ -134,10 +134,14 @@ public class McpServlet extends HttpServlet {
     setCorsHeaders(request, response);
 
     // Authenticate via OAuth2 Bearer token
-    AuthIdentity identity = authenticate(request, response);
-    if (identity == null) {
+    AuthIdentity authenticated = authenticate(request, response);
+    if (authenticated == null) {
       return; // Response already sent by authenticate()
     }
+    // ETP-5047 — the tenant the call acts on, resolved once: the guard below judges it, and
+    // McpSessionManager.executeInContext builds the call's context with the same value.
+    AuthIdentity identity = authenticated.withClientId(
+        McpSessionManager.effectiveClientId(authenticated.clientId, authenticated.roleId));
     if (!isEnvironmentAccessAllowed(response, identity)) {
       return; // 402 already sent
     }
@@ -502,9 +506,11 @@ public class McpServlet extends HttpServlet {
    * ETP-5047 — refuses an MCP request into a tenant whose commercial access was cut off (demo
    * trial expired, subscription grace elapsed), exactly as NEO does: HTTP 402 with the shared
    * {@link EnvironmentAccessGuard} error body — a plain HTTP error, deliberately not a JSON-RPC
-   * error object, so an MCP client sees the same status NEO answers. Before this, MCP was the one tenant entry point that
-   * never asked, so an agent kept reading and writing a blocked tenant's data. Every credential
-   * scheme (OAuth2, legacy JWT, cookie session) reaches it with the identity's tenant. The guard
+   * error object, so an MCP client sees the same status NEO answers. Before this, MCP was the one
+   * tenant entry point that never asked, so an agent kept reading and writing a blocked tenant's
+   * data. Every credential scheme (OAuth2, legacy JWT, cookie session) reaches it with the
+   * EFFECTIVE tenant ({@link McpSessionManager#effectiveClientId}): a wildcard token's {@code "0"}
+   * is already resolved to its role's client, since asking about System would allow. The guard
    * owns the decision and the kill switch; it runs as system because MCP has no
    * {@code OBContext} of its own at this point.
    *
@@ -819,6 +825,12 @@ public class McpServlet extends HttpServlet {
       this.clientId = clientId;
       this.orgId = orgId;
       this.scopes = scopes;
+    }
+
+    /** The same identity acting on {@code effectiveClientId}; {@code this} when it is unchanged. */
+    AuthIdentity withClientId(String effectiveClientId) {
+      return StringUtils.equals(clientId, effectiveClientId) ? this
+          : new AuthIdentity(userId, roleId, effectiveClientId, orgId, scopes);
     }
   }
 

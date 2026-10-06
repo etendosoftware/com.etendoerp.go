@@ -91,14 +91,7 @@ public class McpSessionManager {
 
       // Resolve client: if "0" (System), get the client from the role
       // Tables with access level "Organization" reject clientId=0
-      String effectiveClient = clientId;
-      if ("0".equals(clientId)) {
-        String resolvedClient = resolveClientFromRole(roleId);
-        if (resolvedClient != null) {
-          effectiveClient = resolvedClient;
-          log.debug("Resolved client from role {}: {}", roleId, effectiveClient);
-        }
-      }
+      String effectiveClient = effectiveClientId(clientId, roleId);
 
       // Telemetry only (ETP-5594): the usage row must carry the tenant the call runs under, not
       // the token's "0" wildcard. Bound before createContext so a call that fails there is still
@@ -128,6 +121,30 @@ public class McpSessionManager {
       // Always restore previous context (even if null) to prevent cross-call leakage
       OBContext.setOBContext(previousContext);
     }
+  }
+
+  /**
+   * The tenant an MCP call acts on: the token's client, except the wildcard System client
+   * {@code "0"}, which an MCP token commonly carries and which is resolved to the client of the
+   * token's role. The one resolution {@link #executeInContext} builds its {@code OBContext} with
+   * and the one {@code McpServlet} hands the commercial access guard (ETP-5047), so the guard
+   * judges the tenant the call then runs under — never the System client a wildcard token names.
+   *
+   * @param clientId the client the token carries; may be {@code "0"}
+   * @param roleId the token's role
+   * @return the role's client for a wildcard token whose role belongs to a tenant; otherwise
+   *     {@code clientId} unchanged ({@code "0"} for a System role or a failed lookup)
+   */
+  public static String effectiveClientId(String clientId, String roleId) {
+    if (!"0".equals(clientId)) {
+      return clientId;
+    }
+    String resolvedClient = resolveClientFromRole(roleId);
+    if (resolvedClient == null) {
+      return clientId;
+    }
+    log.debug("Resolved client from role {}: {}", roleId, resolvedClient);
+    return resolvedClient;
   }
 
   /**

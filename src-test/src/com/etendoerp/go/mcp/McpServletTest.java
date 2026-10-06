@@ -75,6 +75,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 /**
  * Unit tests for {@link McpServlet} covering CORS, authentication, JSON-RPC
  * dispatch, error handling, GET endpoints, and inner classes.
+ *
+ * @covers com.etendoerp.go.mcp.McpServlet
  */
 public class McpServletTest {
 
@@ -470,6 +472,36 @@ public class McpServletTest {
 
     verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
     verifyNoInteractions(environmentAccessGuard);
+  }
+
+  /**
+   * ETP-5047 review W1 — an MCP token commonly carries the wildcard client {@code "0"}; the tenant
+   * it acts on is its role's client, which {@link McpSessionManager} resolves before building the
+   * context. The guard must judge THAT tenant: asked about {@code "0"} it finds no lifecycle
+   * metadata and allows, so a blocked tenant walked past it with a wildcard token.
+   */
+  @Test
+  public void doPostWithAWildcardTokenAsksTheGuardForTheRolesTenant() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "0", "0", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 1).put("method", "ping")
+        .toString());
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    when(environmentAccessGuard.checkAsSystem("tenantOfRole1", "mcp")).thenReturn(denial);
+    OBDal obDal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    // The role lookup (SELECT ad_client_id FROM ad_role) answers the role's tenant.
+    when(session.doReturningWork(org.mockito.ArgumentMatchers.any())).thenReturn("tenantOfRole1");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(request, response);
+    }
+
+    verify(environmentAccessGuard).checkAsSystem("tenantOfRole1", "mcp");
+    verify(environmentAccessGuard, never()).checkAsSystem(eq("0"), anyString());
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
   }
 
   // ── doPost: the 402 under every credential scheme (ETP-5047) ────────────
@@ -1073,9 +1105,14 @@ public class McpServletTest {
     org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
     org.hibernate.Session session = mock(org.hibernate.Session.class);
     when(obDal.getSession()).thenReturn(session);
-    // McpSessionManager resolves the org first, then the client.
-    when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
-        .thenReturn(resolvedOrg, resolvedClient);
+    // ETP-5047 — a wildcard client is resolved once, by McpServlet, before the access guard;
+    // McpSessionManager then resolves the org, and the client again only if it is still "0".
+    if ("0".equals(tokenClient)) {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
+          .thenReturn(resolvedClient, resolvedOrg, resolvedClient);
+    } else {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any())).thenReturn(resolvedOrg);
+    }
 
     try (MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
              mockStatic(org.openbravo.dal.service.OBDal.class);

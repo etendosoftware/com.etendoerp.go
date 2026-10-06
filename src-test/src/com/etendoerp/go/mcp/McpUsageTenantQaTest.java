@@ -52,7 +52,11 @@ import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
-/** QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows). */
+/**
+ * QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows).
+ *
+ * @covers com.etendoerp.go.mcp.McpServlet
+ */
 public class McpUsageTenantQaTest {
 
   private McpServlet servlet;
@@ -122,8 +126,18 @@ public class McpUsageTenantQaTest {
     }
   }
 
+  /**
+   * The lookups of a WILDCARD token, in order (ETP-5047): McpServlet resolves the client once,
+   * before the access guard; McpSessionManager then resolves the org, and the client again only
+   * if it is still {@code "0"}.
+   */
   private static WorkStub resolves(String org, String client) {
-    return s -> when(s.doReturningWork(any())).thenReturn(org, client);
+    return s -> when(s.doReturningWork(any())).thenReturn(client, org, client);
+  }
+
+  /** A concrete-client token: only the org is looked up. */
+  private static WorkStub resolvesOrgOnly(String org) {
+    return s -> when(s.doReturningWork(any())).thenReturn(org);
   }
 
   private static JSONObject neoListArgs() throws Exception {
@@ -149,7 +163,7 @@ public class McpUsageTenantQaTest {
   @Test
   public void nullTokenOrgIsRecordedAsTheResolvedOrg() throws Exception {
     McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "client1", null,
-        resolves("realOrg", null), new JSONObject());
+        resolvesOrgOnly("realOrg"), new JSONObject());
     assertEquals("client1", row.clientId());
     assertEquals("realOrg", row.orgId());
   }
@@ -215,7 +229,7 @@ public class McpUsageTenantQaTest {
     OBDal obDal = mock(OBDal.class);
     Session session = mock(Session.class);
     when(obDal.getSession()).thenReturn(session);
-    when(session.doReturningWork(any())).thenReturn("orgA", "clientA");
+    when(session.doReturningWork(any())).thenReturn("clientA", "orgA");
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
          MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {

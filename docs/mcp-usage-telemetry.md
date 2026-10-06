@@ -69,9 +69,11 @@ Indexes: `etgo_mcp_usage_cli_created (ad_client_id, created)` and `etgo_mcp_usag
 (session_key)`.
 
 **`AD_Client_ID` / `AD_Org_ID` are the tenant the call ran under, not the token's (ETP-5594).** An
-MCP token commonly carries the wildcard client and org `0`. `McpSessionManager.executeInContext`
-resolves them — the client from the role, the org as the role's first transactional org — before it
-builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
+MCP token commonly carries the wildcard client and org `0`. The client is resolved from the role by
+`McpSessionManager.effectiveClientId` — once, in `McpServlet.doPost`, before the commercial access
+guard (ETP-5047), which then judges the same tenant — and `McpSessionManager.executeInContext`
+resolves the org as the role's first transactional org (and the client again only if it is still
+`0`) before it builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
 (`McpUsageTelemetry.setCurrentTenant`). `McpServlet.recordToolCall` reads it, so the row carries the
 same tenant the business code used; `doPost` clears it in its `finally`, next to the session key,
 because servlet threads are pooled. The binding happens before the context is built, so a call that

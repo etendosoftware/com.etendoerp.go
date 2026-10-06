@@ -60,6 +60,15 @@ public class TenantEnvironmentLifecycleService {
       "etendo.go.demo.transition.activation.at";
   public static final String LEGACY_TRANSITION_ACTIVATION_ENV = "ETGO_DEMO_TRANSITION_ACTIVATION_AT";
 
+  /**
+   * The System pseudo-client. Never a tenant: it has no lifecycle, so it is never evaluated and
+   * never written (ETP-5047). Without this, a caller that reached the service with the raw
+   * wildcard client of an MCP token sent {@code "0"} down the no-row path as a free tenant, and
+   * {@link #ensureLegacyTransitionStart} wrote a legacy-transition start on System — turning it
+   * into a demo whose lapsed trial then refused every wildcard caller.
+   */
+  static final String SYSTEM_CLIENT_ID = "0";
+
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
@@ -90,7 +99,7 @@ public class TenantEnvironmentLifecycleService {
    * @return true when lifecycle metadata was stored
    */
   public boolean markDemoReady(String clientId, Instant trialStartedAt) {
-    if (StringUtils.isBlank(clientId) || trialStartedAt == null) {
+    if (isNotATenant(clientId) || trialStartedAt == null) {
       return false;
     }
     try {
@@ -116,7 +125,7 @@ public class TenantEnvironmentLifecycleService {
    * @return true when lifecycle metadata was stored
    */
   public boolean markProductive(String clientId) {
-    if (StringUtils.isBlank(clientId)) {
+    if (isNotATenant(clientId)) {
       return false;
     }
     try {
@@ -149,10 +158,11 @@ public class TenantEnvironmentLifecycleService {
    * is the normal state of a tenant provisioned before the marker existed.
    *
    * @param clientId environment client id
-   * @return lifecycle snapshot, or null when metadata is unavailable
+   * @return lifecycle snapshot, or null when metadata is unavailable — always for the System
+   *     client {@code "0"}, which has no lifecycle and is never written one (ETP-5047)
    */
   public EnvironmentSnapshot resolve(String clientId) {
-    if (StringUtils.isBlank(clientId)) {
+    if (isNotATenant(clientId)) {
       return null;
     }
     try {
@@ -264,6 +274,11 @@ public class TenantEnvironmentLifecycleService {
     return EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT;
   }
 
+  /** A blank id, or the System pseudo-client: nothing with a lifecycle. */
+  private static boolean isNotATenant(String clientId) {
+    return StringUtils.isBlank(clientId) || SYSTEM_CLIENT_ID.equals(clientId);
+  }
+
   /**
    * Returns the current trial and grace-period configuration.
    *
@@ -280,6 +295,9 @@ public class TenantEnvironmentLifecycleService {
    * instant deliberately leaves legacy data unresolved until the rollout is explicitly enabled.
    */
   private String ensureLegacyTransitionStart(String clientId) {
+    if (isNotATenant(clientId)) {
+      return null;
+    }
     String persisted = readPreference(LEGACY_TRANSITION_STARTED_ATTRIBUTE, clientId);
     if (StringUtils.isNotBlank(persisted)) {
       return persisted;
@@ -586,17 +604,20 @@ public class TenantEnvironmentLifecycleService {
    * @param clientId environment client id
    * @param activeMembership whether the caller belongs to the environment
    * @param now current instant
-   * @return access decision, or null when lifecycle metadata is unavailable
+   * @return access decision, or null when lifecycle metadata is unavailable — always for the
+   *     System client {@code "0"}, which is never a tenant (ETP-5047)
    */
   public EnvironmentAccessPolicy.Decision evaluateAccess(String clientId, boolean activeMembership,
       Instant now) {
+    if (isNotATenant(clientId)) {
+      return null;
+    }
     EnvironmentSnapshot snapshot = resolve(clientId);
     if (snapshot == null) {
       // A legacy demo can have an association marker without a lifecycle start timestamp. The
       // association itself is enough to revoke demo access; a null snapshot would otherwise take
       // the compatibility path that allows tenants predating lifecycle metadata.
-      if (StringUtils.isNotBlank(clientId)
-          && StringUtils.isNotBlank(readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId))) {
+      if (StringUtils.isNotBlank(readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId))) {
         EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();
         return policy.evaluate(EnvironmentAccessPolicy.Environment.associatedDemo(null, null),
             activeMembership, EnvironmentAccessPolicy.SubscriptionStatus.NONE, now,
@@ -643,6 +664,12 @@ public class TenantEnvironmentLifecycleService {
    * the lookup and the save run there without depending on a context some earlier call leaked.
    */
   private void setPreference(String attribute, String value, Client client) {
+    if (isNotATenant(client.getId())) {
+      // Every public writer refuses System first; this is the last line, so no future caller can
+      // write a lifecycle preference onto it by forgetting to.
+      throw new IllegalArgumentException(
+          "Lifecycle metadata is never written for the System client");
+    }
     OBContext.setAdminMode();
     try {
       setPreferenceValue(attribute, value, client);

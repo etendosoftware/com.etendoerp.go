@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * subscription queries — and subscription saves — fail unless admin mode is active, the way
  * {@code OBDal} behaves for a role that cannot read {@code AD_Preference} / {@code ETGO_SUBSCRIPTION}
  * (same technique as {@link TenantEnvironmentLifecycleServiceAdminModeTest}, ETP-5488).
+ *
+ * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
  */
 public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
@@ -693,6 +695,34 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     assertNeverEnteredTheDemoPath(fixture);
   }
 
+  /**
+   * ETP-5047 review W1 — the System pseudo-client {@code "0"} is never a tenant. Asked about it
+   * (a wildcard MCP token used to reach the guard raw), the no-row path would treat it as a free
+   * tenant: with a legacy activation instant configured, {@code ensureLegacyTransitionStart}
+   * wrote a transition start ON SYSTEM, turning {@code "0"} into a demo whose trial later lapsed
+   * and refused every wildcard caller. The service answers "no metadata" for it and writes nothing.
+   */
+  @Test
+  public void theSystemClientIsNeverEvaluatedNorWritten() {
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture();
+
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = withLegacyActivation(
+        () -> fixture.run(() -> service.resolve("0")));
+    EnvironmentAccessPolicy.Decision decision = withLegacyActivation(
+        () -> fixture.run(() -> service.evaluateAccess("0", true, EVENT_AT)));
+    boolean demo = fixture.run(() -> service.markDemoReady("0", EVENT_AT));
+    boolean productive = fixture.run(() -> service.markProductive("0"));
+
+    assertNull(snapshot);
+    assertNull("no decision, so every entry point allows", decision);
+    assertFalse(demo);
+    assertFalse(productive);
+    assertTrue("no lifecycle preference may be written for System: "
+        + fixture.savedPreferenceAttributes, fixture.savedPreferenceAttributes.isEmpty());
+    verify(fixture.dal, never()).save(any());
+  }
+
   @Test
   public void theDemoPathIsReachedForATenantWithNoRowAndNoMarker() {
     // Control for the two specs above: without a row the same tenant does take the demo path,
@@ -1001,6 +1031,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     final List<String> queriedPreferenceAttributes = new ArrayList<>();
     final AtomicInteger adminDepth = new AtomicInteger();
     final Client client = mock(Client.class);
+    final Client systemClient = mock(Client.class);
     Subscription row;
     Subscription closedRow;
     boolean systemCaller;
@@ -1010,6 +1041,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
 
     Fixture() {
       when(client.getId()).thenReturn(CLIENT_ID);
+      when(systemClient.getId()).thenReturn("0");
     }
 
     /**
@@ -1139,6 +1171,9 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         }
         return openQuery;
       });
+      // The System pseudo-client exists in every database: a lifecycle write aimed at it would
+      // find it, so only the service's own guard can keep "0" from being written.
+      when(dal.get(Client.class, "0")).thenReturn(systemClient);
       AtomicInteger clientLookups = new AtomicInteger();
       when(dal.get(Client.class, CLIENT_ID)).thenAnswer(invocation -> {
         if (noClient || (clientVanishes && clientLookups.getAndIncrement() > 0)) {
