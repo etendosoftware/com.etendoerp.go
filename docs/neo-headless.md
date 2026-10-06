@@ -2877,7 +2877,7 @@ was deferred to its own cycle.
 
 `McpParentScope` classifies every child entity as `RESOLVED` (a link field points at the parent
 tab's table, or `parent.field` declares one), `SAME_RECORD`, `UNPARENTED` (declared by
-`parent.mode`) or `UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
+`parent.mode`), `TAB_WHERE` (scoped by its tab where clause — ETP-5639, below) or `UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
 `configError` in `neo_discover`, and every write verb still served it:
 `McpWriteRequestSupport.resolveParentFK` logged a WARN, dropped the `parentId` and let the create
 continue, and the mandatory-defaults pass then filled the link by itself.
@@ -2911,6 +2911,7 @@ at an intermediate record (a payment detail, a payment schedule) the agent has n
 | `RESOLVED` | written into the link field (unchanged) | unchanged |
 | `SAME_RECORD` | ignored — the parent is the record itself (unchanged) | unchanged |
 | `UNPARENTED` | **422 `parent_unresolvable`** | unchanged (such an entity advertises no write method anyway) |
+| `TAB_WHERE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
 | `UNRESOLVABLE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
 | header (`NOT_CHILD`) | `parentId` ignored (unchanged) | unchanged |
 
@@ -2933,6 +2934,29 @@ three carry `configError` in `neo_discover`): `payment-in/finPaymentScheduleDeta
 only link column `M_Transaction_ID` points elsewhere). All three advertise every write method; with
 this change none of them can be created through MCP. Making any of them creatable again is an
 entity decision — a `parent.field` that is genuinely the link — not a change to this gate.
+
+**Update (ETP-5639).** None of the three is `UNRESOLVABLE` any more, and they stopped logging
+`Parent scope unresolvable` on every resolution (118 WARN/week in production):
+
+- `product/transactionAdjustments` declares `MCP_CONFIG` `"parent": {"field": "inventoryTransaction"}`
+  — `M_Costing_Transactions_HQL`'s id is the `M_Transaction` id, so the field is genuinely the link.
+  This also fixes a silent read bug: the tab's where clause (`costAdjustmentLine != null`) has no
+  parent placeholder, so `neo_list` with a `parentId` used to return the adjustments of **every**
+  transaction. Now the list gate adds `inventoryTransaction = parentId`. `create` stays off through
+  `verbs` (the tab is read-only in the UI).
+- The payment Lines (`payment-in/finPaymentScheduleDetail`, `payment-out/lines`) reach `FIN_Payment`
+  in two hops (`FIN_Payment_Detail_ID` → `FIN_Payment`), which `parent.field` cannot express. Their
+  tab where clause carries the parent placeholder
+  (`... pd.finPayment.id = @FIN_Payment_ID@`), and `NeoParentTabFilterResolver.resolveTabWhere`
+  fills it from `parentId` on the MCP list as on REST (ETP-5542), so the reads were always scoped.
+  `McpParentScope` now recognises that shape as a scope of its own, **`TAB_WHERE`**: when no
+  parent-link column points at the parent tab's table but the tab's HQL where clause contains the
+  placeholder of the parent table's key column (`@<ParentTable>_ID@`, matched on the DAL and DB
+  table names), the entity is publishable, `neo_list` requires `parentId` (`parentRequiredFor:
+  ["list"]`, no `parentField`), the clause does the filtering, and creates are refused with
+  `parent_unresolvable` because there is no field to write the parent into. No WARN, no
+  `configError`, no `parentProblem`. Structural rule (tab metadata only); `mode: unparented` would
+  have declared the reads global, which they are not.
 
 #### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
 

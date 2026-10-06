@@ -746,6 +746,9 @@ final class McpWriteRequestSupport {
    *   <li>{@link McpParentScope.Kind#UNPARENTED} — only when a {@code parentId} is sent, since the
    *       entity declares it has no field to put it in. (Such an entity advertises no write
    *       method, so {@code requireMethodEnabled} normally refuses first.)</li>
+   *   <li>{@link McpParentScope.Kind#TAB_WHERE} — <b>always</b>: the parent is reached only through
+   *       the tab's where clause, so there is no field to write it into, and the defaults pass
+   *       would pick the intermediate link on its own.</li>
    * </ul>
    * <p>Not refused: a header, a same-record tab — its parent is the record itself — and a resolved
    * child. The update and delete verbs do not call this: neither runs the defaults pass, so neither
@@ -760,6 +763,7 @@ final class McpWriteRequestSupport {
     McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
     McpParentScope.Kind kind = scope.getKind();
     boolean refuse = kind == McpParentScope.Kind.UNRESOLVABLE
+        || kind == McpParentScope.Kind.TAB_WHERE
         || (kind == McpParentScope.Kind.UNPARENTED && StringUtils.isNotBlank(parentId));
     if (refuse) {
       SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();

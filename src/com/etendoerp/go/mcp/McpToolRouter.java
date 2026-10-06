@@ -656,7 +656,9 @@ public class McpToolRouter {
    * Applies the parent gate to a list call and returns the filters to run with (IMP-40).
    *
    * <p>Three outcomes. For an entity that is not a gated child, the filters pass through
-   * untouched. For a gated child with no {@code parentId}, the call is refused with the same
+   * untouched. (A child gated by its tab where clause — {@code McpParentScope.Kind#TAB_WHERE} —
+   * has no parent field: it is refused without {@code parentId} and otherwise passes through, the
+   * clause doing the scoping.) For a gated child with no {@code parentId}, the call is refused with the same
    * {@code parent_required} envelope {@code neo_defaults} already uses — one wording, one copy.
    * For a gated child with a {@code parentId}, the parent field is added to the filters, so the
    * scope is enforced by the query rather than trusted.</p>
@@ -679,12 +681,19 @@ public class McpToolRouter {
       return filters;
     }
     String parentField = scope.getParentField();
-    if (filters != null && filters.has(parentField) && !filters.isNull(parentField)) {
+    if (parentField != null && filters != null && filters.has(parentField)
+        && !filters.isNull(parentField)) {
       return filters;
     }
     if (StringUtils.isBlank(parentId)) {
       throw McpRoutingException.parentRequired(specName, entityName,
           scope.getParentEntity(), parentField);
+    }
+    if (parentField == null) {
+      // A TAB_WHERE child: the tab's where clause carries the parent placeholder, filled from
+      // parentId further down (NeoParentTabFilterResolver.resolveTabWhere). There is no field to
+      // add to the filters, and the query is still scoped to the parent.
+      return filters;
     }
     JSONObject scoped = filters == null ? new JSONObject() : new JSONObject(filters.toString());
     scoped.put(parentField, parentId);
