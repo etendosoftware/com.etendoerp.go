@@ -22,12 +22,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Covers the refusals ETP-5184 added: the three former silent filter drops, and the child-entity
@@ -39,12 +43,47 @@ import org.junit.jupiter.api.Test;
  * request" would fix the false success and leave the caller just as stuck, so every assertion here
  * is about the self-correcting half: {@code available}, {@code parentField}, {@code parentEntity},
  * and a hint that names the next call.</p>
+ *
+ * <p>Also pins the WARN line the router logs for each refusal (ETP-5639): it is keyed on the
+ * refusal's own code, where it used to say "addressed something that does not exist" for all.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpRoutingException
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
 @SuppressWarnings("java:S2187")
 @DisplayName("McpRoutingException — ETP-5184 refusals")
 class McpRoutingExceptionRefusalTest {
+
+  static Stream<Arguments> refusals() throws JSONException {
+    return Stream.of(
+        Arguments.of(McpRoutingException.specNotFound("nope"), McpConstants.ERROR_NOT_FOUND),
+        Arguments.of(McpRoutingException.entityNotFound("nope", "sales-order", List.of("lines")),
+            McpConstants.ERROR_NOT_FOUND),
+        Arguments.of(McpRoutingException.notCrudCapable("not crud"),
+            McpConstants.ERROR_VALIDATION),
+        Arguments.of(McpRoutingException.methodNotAllowed("Entity x does not enable POST"),
+            McpConstants.ERROR_METHOD_NOT_ALLOWED),
+        Arguments.of(McpRoutingException.unknownFilterField("k", "lines", List.of("a")),
+            McpConstants.ERROR_UNKNOWN_FILTER_FIELD),
+        Arguments.of(McpRoutingException.unknownSelectorColumn("c", "lines", List.of("a")),
+            McpConstants.ERROR_UNKNOWN_SELECTOR_COLUMN),
+        Arguments.of(McpRoutingException.readOnlyField("documentNo", "header"),
+            McpConstants.ERROR_READ_ONLY_FIELD),
+        Arguments.of(McpRoutingException.fieldNotAllowed("x", "header", List.of("a")),
+            McpConstants.ERROR_FIELD_NOT_ALLOWED),
+        Arguments.of(McpRoutingException.schemaViewRequired(null),
+            McpConstants.ERROR_VIEW_REQUIRED),
+        Arguments.of(McpRoutingException.unknownArgument("x", "neo_list", List.of("spec")),
+            McpConstants.ERROR_UNKNOWN_ARGUMENT),
+        Arguments.of(McpRoutingException.parentRequired("sales-order", "lines", "header",
+            "salesOrder"), McpConstants.ERROR_PARENT_REQUIRED),
+        Arguments.of(McpRoutingException.parentUnresolvable("payment-out", "lines", "header",
+            null), McpConstants.ERROR_PARENT_UNRESOLVABLE),
+        Arguments.of(McpRoutingException.missingArgument("Missing id", "id"),
+            McpConstants.ERROR_VALIDATION));
+  }
 
   private static List<String> names(int count) {
     List<String> names = new ArrayList<>();
@@ -223,6 +262,25 @@ class McpRoutingExceptionRefusalTest {
     }
 
     @Test
+    @DisplayName("reads 'the id of its parent record' when the parent cannot be named")
+    void unnamedParentSentenceReadsCorrectly() throws JSONException {
+      String detail = McpRoutingException
+          .parentRequired("payment-out", "lines", null, null).toEnvelope()
+          .getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("the id of its parent record."), detail);
+      assertFalse(detail.contains("the parent its parent"), detail);
+    }
+
+    @Test
+    @DisplayName("names the parent entity in the sentence when it is known")
+    void namedParentSentenceReadsCorrectly() throws JSONException {
+      String detail = McpRoutingException
+          .parentRequired("sales-order", "lines", "header", "salesOrder").toEnvelope()
+          .getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("the id of the parent header record."), detail);
+    }
+
+    @Test
     @DisplayName("the envelope builder and the throwable spell the refusal the same way")
     void oneSourceOfTruth() throws JSONException {
       // McpParentScope.buildParentRequiredError delegates here on purpose: two hand-written copies
@@ -233,6 +291,20 @@ class McpRoutingExceptionRefusalTest {
       assertEquals(McpConstants.ERROR_PARENT_REQUIRED,
           fromException.getString(McpConstants.KEY_ERROR));
       assertEquals(422, fromException.getInt(McpConstants.KEY_STATUS));
+    }
+  }
+
+  @Nested
+  @DisplayName("routing log line (ETP-5639)")
+  class RoutingLogLine {
+
+    @ParameterizedTest(name = "{1}")
+    @MethodSource("com.etendoerp.go.mcp.McpRoutingExceptionRefusalTest#refusals")
+    @DisplayName("is keyed on the refusal's error code and carries its detail")
+    void keyedOnErrorCode(McpRoutingException refusal, String code) {
+      assertEquals(code, refusal.getErrorCode());
+      String line = McpToolRouter.routingRejectionLogLine("neo_update", refusal);
+      assertEquals("MCP tool 'neo_update' rejected (" + code + "): " + refusal.getMessage(), line);
     }
   }
 }

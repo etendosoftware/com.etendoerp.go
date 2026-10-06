@@ -85,6 +85,16 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The machine-readable code of this refusal ({@code read_only_field}, {@code parent_required},
+   * ...), the same value the envelope carries under {@code error}.
+   *
+   * @return the error code
+   */
+  String getErrorCode() {
+    return errorCode;
+  }
+
+  /**
    * Attach extra envelope keys and return {@code this}, so a factory reads as one expression.
    *
    * @param extraKeys the keys to merge into {@link #toEnvelope()}
@@ -534,7 +544,10 @@ class McpRoutingException extends OBException {
    */
   static McpRoutingException parentRequired(String specName, String entityName,
       String parentEntity, String parentField) {
-    String parent = parentEntity == null ? "its parent" : parentEntity;
+    // "the id of its parent record" when the parent cannot be named — splicing "its parent" into
+    // "the parent … record" read "the id of the parent its parent record" (ETP-5639).
+    String parentRecord = parentEntity == null ? "its parent record"
+        : "the parent " + parentEntity + " record";
     JSONObject extras = new JSONObject();
     try {
       if (parentEntity != null) {
@@ -549,7 +562,7 @@ class McpRoutingException extends OBException {
     return new McpRoutingException(
         "'" + entityName + "' is a child entity of '" + specName
             + "'. In Etendo you browse its records inside one parent record — there is no global "
-            + "list. Pass parentId with the id of the parent " + parent + " record.",
+            + "list. Pass parentId with the id of " + parentRecord + ".",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_REQUIRED,
         McpConstants.PARAM_PARENT_ID, List.of(),
         parentEntity == null

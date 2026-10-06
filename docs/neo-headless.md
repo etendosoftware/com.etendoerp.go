@@ -7447,3 +7447,15 @@ The client name comes from the telemetry session when the client ran `initialize
 `params._meta["io.modelcontextprotocol/clientInfo"].name` (which 2026-07-28 probes carry), otherwise
 `unknown` (`McpServlet.clientNameFor`). No telemetry row: only `tools/call` produces one. Every other
 failure keeps the `ERROR` with its stack trace.
+
+**A routing refusal is logged under its own code.** Every `McpRoutingException` the router catches
+leaves one `WARN` built from the refusal's error code (`McpToolRouter.routingRejectionLogLine`):
+
+```
+WARN McpToolRouter - MCP tool 'neo_update' rejected (read_only_field): Field 'x' is read-only on entity 'y' and cannot be written
+```
+
+It used to read `addressed something that does not exist` whatever the code, which mislabelled
+read-only fields, disabled methods, a missing `view` and a missing `parentId`. The agent-facing
+envelope is unchanged. The `parent_required` detail no longer reads "the id of the parent its parent
+record" when the parent entity cannot be named: it says "the id of its parent record".

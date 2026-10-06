@@ -216,7 +216,9 @@ public class McpToolRouter {
     } catch (McpRoutingException e) {
       // ETP-4793 / IMP-17: a spec/entity that does not exist already knows its own envelope,
       // including the self-correcting `available` list (evidence B20).
-      log.warn("MCP tool '{}' addressed something that does not exist: {}", toolName, e.getMessage());
+      // ETP-5639: keyed on the refusal's own code. It used to say "addressed something that does
+      // not exist" for every code — read-only fields, disabled methods and missing parentIds too.
+      log.warn(routingRejectionLogLine(toolName, e));
       return wrapAsErrorContent(buildRoutingErrorBody(e, toolName));
     } catch (SecurityException e) {
       // An authorization refusal is a permanent answer for this role, not a server failure. It
@@ -235,6 +237,17 @@ public class McpToolRouter {
       log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
+  }
+
+  /**
+   * The single WARN line a routing refusal leaves in the log, built from its error code.
+   *
+   * @param toolName the tool that was called
+   * @param e        the refusal
+   * @return e.g. {@code MCP tool 'neo_update' rejected (read_only_field): Field 'x' is read-only…}
+   */
+  static String routingRejectionLogLine(String toolName, McpRoutingException e) {
+    return "MCP tool '" + toolName + "' rejected (" + e.getErrorCode() + "): " + e.getMessage();
   }
 
   /** Route semantic search through the same authenticated DB Extended contract as REST. */
