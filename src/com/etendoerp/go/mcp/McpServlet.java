@@ -389,7 +389,6 @@ public class McpServlet extends HttpServlet {
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     setCorsHeaders(request, response);
-    response.setContentType(CONTENT_TYPE_JSON);
 
     String pathInfo = request.getPathInfo();
     if ("/.well-known/oauth-protected-resource".equals(pathInfo)) {
@@ -398,6 +397,7 @@ public class McpServlet extends HttpServlet {
     }
 
     response.setHeader("Allow", "POST, OPTIONS");
+    // writeSimpleJsonError sets the JSON content type itself; setting it here too set it twice.
     ProtocolErrorAdapters.writeSimpleJsonError(response,
         HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "This MCP server offers no SSE stream; send JSON-RPC messages with POST");
@@ -417,6 +417,7 @@ public class McpServlet extends HttpServlet {
           HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Unable to resolve public MCP/OAuth2 URL");
       return;
     }
+    response.setContentType(CONTENT_TYPE_JSON);
     try {
       JSONObject meta = new JSONObject();
       meta.put("resource", mcpResourceUrl);

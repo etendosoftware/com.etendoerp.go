@@ -256,6 +256,8 @@ public class McpServletTest {
     servlet.doGet(request, response);
 
     verify(response).setStatus(HttpServletResponse.SC_OK);
+    // Exactly once: the metadata path owns its content type, as the 405 path's error writer does.
+    verify(response).setContentType("application/json;charset=UTF-8");
     JSONObject meta = new JSONObject(getResponseBody());
     assertEquals("https://example.com/mcp", meta.getString("resource"));
     assertEquals("https://example.com/oauth2",
