@@ -25,7 +25,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
 /**
- * The INFO line an accepted {@code neo_feedback} report leaves in the log: it points at the
+ * The INFO line an accepted {@code etendo_feedback} report leaves in the log: it points at the
  * {@code ETGO_MCP_USAGE} row and carries counts and tool names only — never the agent's text.
  *
  * @covers com.etendoerp.go.mcp.McpFeedbackTool
@@ -44,9 +44,9 @@ class McpFeedbackToolTest {
             .put(new JSONObject().put("what", SECRET).put("phase", "write"))
             .put(new JSONObject().put("what", "second").put("phase", "read")))
         .put("failures", new JSONArray()
-            .put(new JSONObject().put("tool", "neo_create").put("error", SECRET)))
+            .put(new JSONObject().put("tool", "etendo_create").put("error", SECRET)))
         .put("wastedCalls", new JSONArray()
-            .put(new JSONObject().put("tool", "neo_list"))
+            .put(new JSONObject().put("tool", "etendo_list"))
             .put(new JSONObject().put("tool", "I tried " + SECRET)))
         .put("suggestions", new JSONArray()
             .put(new JSONObject().put("what", SECRET)));
@@ -55,7 +55,7 @@ class McpFeedbackToolTest {
 
   @Test
   void rowIdIsMintedWhenTheRowIsBuilt() {
-    McpUsageRow row = McpUsageRow.builder().toolName("neo_feedback").build();
+    McpUsageRow row = McpUsageRow.builder().toolName("etendo_feedback").build();
     assertTrue(row.id() != null && row.id().matches("[0-9A-F]{32}"), row.id());
     assertEquals("FIXED", McpUsageRow.builder().id("FIXED").build().id());
   }
@@ -76,7 +76,7 @@ class McpFeedbackToolTest {
 
     assertEquals("MCP feedback received: usageId=USAGE1 session=sess-1 clientId=CLIENT1 "
         + "client=claude-code frictions=2 failures=1 wasted=2 suggestions=1 "
-        + "tools=[neo_create, neo_list]", line);
+        + "tools=[etendo_create, etendo_list]", line);
     assertFalse(line.contains("ACME"), "no free text from the report: " + line);
   }
 }

@@ -38,16 +38,16 @@ import org.junit.jupiter.api.Test;
 class McpToolAnnotationsTest {
 
   /** Every fixed tool ToolRegistry publishes; keep in step with McpToolTitlesTest.FIXED_TOOLS. */
-  private static final List<String> FIXED_TOOLS = List.of("neo_discover", "neo_list", "neo_get",
-      "neo_create", "neo_update", "neo_delete", "neo_selectors", "neo_defaults", "neo_schema",
-      "neo_batch", "neo_action", "neo_widget", "neo_vector_search", "neo_upload_image",
-      "neo_request_image_upload", "neo_get_image_upload", "neo_generate_amortization_plan",
-      "neo_feedback", "docs");
+  private static final List<String> FIXED_TOOLS = List.of("etendo_discover", "etendo_list", "etendo_get",
+      "etendo_create", "etendo_update", "etendo_delete", "etendo_selectors", "etendo_defaults", "etendo_schema",
+      "etendo_batch", "etendo_action", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
+      "etendo_request_image_upload", "etendo_get_image_upload", "etendo_generate_amortization_plan",
+      "etendo_feedback", "docs");
 
   @Test
   void readOnlySetIsPinned() {
-    assertEquals(Set.of("neo_list", "neo_get", "neo_schema", "neo_discover", "neo_selectors",
-        "neo_defaults", "docs", "neo_widget", "neo_vector_search", "neo_get_image_upload"),
+    assertEquals(Set.of("etendo_list", "etendo_get", "etendo_schema", "etendo_discover", "etendo_selectors",
+        "etendo_defaults", "docs", "etendo_widget", "etendo_vector_search", "etendo_get_image_upload"),
         McpToolAnnotations.READ_ONLY);
   }
 
@@ -63,24 +63,27 @@ class McpToolAnnotationsTest {
     for (String tool : FIXED_TOOLS) {
       assertTrue(classified.contains(tool), tool + " has no explicit annotation class");
     }
+    for (String tool : McpConstants.TOOLS_RENAMED_FROM_NEO) {
+      assertTrue(classified.contains(tool), tool + " has no explicit annotation class");
+    }
   }
 
   @Test
   void hintsFollowTheClassification() throws Exception {
-    assertHints("neo_list", true, false, true);
+    assertHints("etendo_list", true, false, true);
     assertHints("generate_balance_sheet", true, false, true);
-    assertHints("neo_create", false, false, false);
-    assertHints("neo_feedback", false, false, false);
-    assertHints("neo_delete", false, true, true);
-    assertHints("neo_update", false, true, false);
-    assertHints("neo_batch", false, true, false);
-    assertHints("neo_generate_amortization_plan", false, true, false);
+    assertHints("etendo_create", false, false, false);
+    assertHints("etendo_feedback", false, false, false);
+    assertHints("etendo_delete", false, true, true);
+    assertHints("etendo_update", false, true, false);
+    assertHints("etendo_batch", false, true, false);
+    assertHints("etendo_generate_amortization_plan", false, true, false);
     assertHints("complete_order", false, true, false);
   }
 
   @Test
   void toolsListEntryCarriesTheFourHints() throws Exception {
-    McpToolDefinition tool = new McpToolDefinition("neo_get", "Get a record",
+    McpToolDefinition tool = new McpToolDefinition("etendo_get", "Get a record",
         Map.of("type", "object"));
 
     JSONObject entry = new McpServlet().describeTool(tool, "en_US");

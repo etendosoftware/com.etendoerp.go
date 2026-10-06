@@ -41,7 +41,7 @@ import org.codehaus.jettison.json.JSONObject;
  * </table>
  *
  * <p>Fixed in code, with no {@code MCP_CONFIG} override: annotations are per tool, and the shared
- * {@code neo_update} / {@code neo_batch} / {@code neo_action} serve every entity, so a per-entity
+ * {@code etendo_update} / {@code etendo_batch} / {@code etendo_action} serve every entity, so a per-entity
  * setting could not reach them. Anything unclassified — a process tool, or a new tool nobody
  * placed — falls to the conservative {@code MODIFYING} answer; {@code McpToolAnnotationsTest} pins
  * the explicit sets so a new fixed tool has to take a position.</p>
@@ -53,7 +53,7 @@ final class McpToolAnnotations {
       McpConstants.TOOL_NEO_LIST,
       McpConstants.TOOL_NEO_GET,
       McpConstants.TOOL_NEO_SCHEMA,
-      "neo_discover",
+      McpConstants.TOOL_NEO_DISCOVER,
       McpConstants.TOOL_NEO_SELECTORS,
       McpConstants.TOOL_NEO_DEFAULTS,
       McpConstants.TOOL_DOCS,
@@ -74,8 +74,8 @@ final class McpToolAnnotations {
   /** Fixed tools that can change existing data; process tools are treated the same way. */
   static final Set<String> MODIFYING = Set.of(
       McpConstants.TOOL_NEO_UPDATE,
-      "neo_batch",
-      "neo_action",
+      McpConstants.TOOL_NEO_BATCH,
+      McpConstants.TOOL_NEO_ACTION,
       McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN);
 
   private McpToolAnnotations() {

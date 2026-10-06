@@ -253,7 +253,7 @@ public class McpToolRouter {
    *
    * @param toolName the tool that was called
    * @param e        the refusal
-   * @return e.g. {@code MCP tool 'neo_update' rejected (read_only_field): Field 'x' is read-only…
+   * @return e.g. {@code MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only…
    *         session=<key>}
    */
   static String routingRejectionLogLine(String toolName, McpRoutingException e) {

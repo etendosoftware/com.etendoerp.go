@@ -429,6 +429,13 @@ final class McpConstants {
   /** @see #TOOL_NEO_LIST */
   static final String TOOL_NEO_SCHEMA = "etendo_schema";
 
+  /** Tool name for the catalog discovery tool. */
+  static final String TOOL_NEO_DISCOVER = "etendo_discover";
+  /** Tool name for the multi-operation write tool. */
+  static final String TOOL_NEO_BATCH = "etendo_batch";
+  /** Tool name for the document action / process tool. */
+  static final String TOOL_NEO_ACTION = "etendo_action";
+
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "etendo_widget";
   /** Global semantic vector-search tool backed by DB Extended. */

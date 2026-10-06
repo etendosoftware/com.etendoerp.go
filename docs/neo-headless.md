@@ -3015,7 +3015,7 @@ entity decision — a `parent.field` that is genuinely the link — not a change
 - `product/transactionAdjustments` declares `MCP_CONFIG` `"parent": {"field": "inventoryTransaction"}`
   — `M_Costing_Transactions_HQL`'s id is the `M_Transaction` id, so the field is genuinely the link.
   This also fixes a silent read bug: the tab's where clause (`costAdjustmentLine != null`) has no
-  parent placeholder, so `neo_list` with a `parentId` used to return the adjustments of **every**
+  parent placeholder, so `etendo_list` with a `parentId` used to return the adjustments of **every**
   transaction. Now the list gate adds `inventoryTransaction = parentId`. `create` stays off through
   `verbs` (the tab is read-only in the UI).
 - The payment Lines (`payment-in/finPaymentScheduleDetail`, `payment-out/lines`) reach `FIN_Payment`
@@ -3026,7 +3026,7 @@ entity decision — a `parent.field` that is genuinely the link — not a change
   `McpParentScope` now recognises that shape as a scope of its own, **`TAB_WHERE`**: when no
   parent-link column points at the parent tab's table but the tab's HQL where clause contains the
   placeholder of the parent table's key column (`@<ParentTable>_ID@`, matched on the DAL and DB
-  table names), the entity is publishable, `neo_list` requires `parentId` (`parentRequiredFor:
+  table names), the entity is publishable, `etendo_list` requires `parentId` (`parentRequiredFor:
   ["list"]`, no `parentField`), the clause does the filtering, and creates are refused with
   `parent_unresolvable` because there is no field to write the parent into. No WARN, no
   `configError`, no `parentProblem`. Structural rule (tab metadata only); `mode: unparented` would
@@ -7527,7 +7527,7 @@ failure keeps the `ERROR` with its stack trace.
 leaves one `WARN` built from the refusal's error code (`McpToolRouter.routingRejectionLogLine`):
 
 ```
-WARN McpToolRouter - MCP tool 'neo_update' rejected (read_only_field): Field 'x' is read-only on entity 'y' and cannot be written
+WARN McpToolRouter - MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only on entity 'y' and cannot be written
 ```
 
 It used to read `addressed something that does not exist` whatever the code, which mislabelled
@@ -7542,11 +7542,11 @@ traced to its tenant without a DB lookup. The id (never a name) rides on `NeoTel
 **not** in the properties: properties are what every sink receives, Mixpanel included, and the
 tenant id stays in our own log. Events emitted without a tenant keep the previous line unchanged.
 
-**An accepted `neo_feedback` report leaves one `INFO` line pointing at its row.** The report stays
+**An accepted `etendo_feedback` report leaves one `INFO` line pointing at its row.** The report stays
 in `ETGO_MCP_USAGE.Payload` (the source of truth); Datadog gets:
 
 ```
-INFO McpFeedbackTool - MCP feedback received: usageId=<ETGO_MCP_USAGE_ID> session=<sessionKey> clientId=<AD_Client_ID> client=claude-code frictions=2 failures=1 wasted=0 suggestions=1 tools=[neo_create]
+INFO McpFeedbackTool - MCP feedback received: usageId=<ETGO_MCP_USAGE_ID> session=<sessionKey> clientId=<AD_Client_ID> client=claude-code frictions=2 failures=1 wasted=0 suggestions=1 tools=[etendo_create]
 ```
 
 Counts per section and the tool names named in `failures`/`wastedCalls` only — the report fields
@@ -7555,13 +7555,13 @@ that does not look like a tool name is left out. To read the report, fetch the r
 The id is minted when the row is built (`McpUsageRow.Builder`), not inside the asynchronous insert,
 so the line can name it; if the writer later drops the row (queue full, insert failed) the id points
 at nothing and the drop logs its own `WARN`. A rejected or rate-limited report logs no such line. The
-former `neo_feedback accepted for session …` line is now `DEBUG`.
+former `etendo_feedback accepted for session …` line is now `DEBUG`.
 
 **MCP WARN/ERROR lines on the request path carry `session=<Mcp-Session-Id>`** (`none` when the
 client sent no session header), so filtering Datadog by `session=<key>` puts a session's failures
 next to its feedback line. Covered: `McpServlet` (unsupported method, `Error processing MCP
 message`), `McpToolRouter` (routing refusal, role refusals, `Error routing MCP tool`, docs fetch
-failure, `neo_batch` access denied / failure) and `McpWriteRequestSupport` (`Removed FK sentinel`).
+failure, `etendo_batch` access denied / failure) and `McpWriteRequestSupport` (`Removed FK sentinel`).
 Not covered: authentication failures (logged before the session key is bound) and lines that are
 not per-request (configuration parsing, cached parent scopes, the telemetry writer thread). The
 production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key is in the message.
@@ -7600,18 +7600,18 @@ malformed protocol messages, not tool input, so they are outside SEP-1303; mappi
 `tools/list` gives every tool an `annotations` object with all four hints of MCP 2025-03-26, so
 clients can decide which calls to confirm with the user. All four are explicit on every tool: the
 spec defaults (`readOnlyHint=false`, **`destructiveHint=true`**, `idempotentHint=false`,
-`openWorldHint=true`) would otherwise report `neo_create` as destructive. `openWorldHint` is `false`
+`openWorldHint=true`) would otherwise report `etendo_create` as destructive. `openWorldHint` is `false`
 everywhere — every tool stays inside the ERP.
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
 |---|---|---|---|
-| `neo_list`, `neo_get`, `neo_schema`, `neo_discover`, `neo_selectors`, `neo_defaults`, `docs`, `neo_widget`, `neo_vector_search`, `neo_get_image_upload`, every `generate_*` report | true | false | true |
-| `neo_create`, `neo_request_image_upload`, `neo_upload_image`, `neo_feedback` | false | false | false |
-| `neo_delete` | false | true | true |
-| `neo_update`, `neo_batch`, `neo_action`, `neo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, every `generate_*` report | true | false | true |
+| `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback` | false | false | false |
+| `etendo_delete` | false | true | true |
+| `etendo_update`, `etendo_batch`, `etendo_action`, `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
 
 Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
-and the shared `neo_update` / `neo_batch` / `neo_action` serve every entity, so a per-entity setting
+and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
 could not reach them. An unclassified tool falls to the conservative last row.
 `McpToolAnnotationsTest` pins the read-only set and requires every fixed tool to be classified
 explicitly — a new fixed tool must be added to one of the sets.

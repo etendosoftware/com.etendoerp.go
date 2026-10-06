@@ -75,7 +75,7 @@ class McpRoutingExceptionRefusalTest {
             McpConstants.ERROR_FIELD_NOT_ALLOWED),
         Arguments.of(McpRoutingException.schemaViewRequired(null),
             McpConstants.ERROR_VIEW_REQUIRED),
-        Arguments.of(McpRoutingException.unknownArgument("x", "neo_list", List.of("spec")),
+        Arguments.of(McpRoutingException.unknownArgument("x", "etendo_list", List.of("spec")),
             McpConstants.ERROR_UNKNOWN_ARGUMENT),
         Arguments.of(McpRoutingException.parentRequired("sales-order", "lines", "header",
             "salesOrder"), McpConstants.ERROR_PARENT_REQUIRED),
@@ -303,8 +303,8 @@ class McpRoutingExceptionRefusalTest {
     @DisplayName("is keyed on the refusal's error code and carries its detail")
     void keyedOnErrorCode(McpRoutingException refusal, String code) {
       assertEquals(code, refusal.getErrorCode());
-      String line = McpToolRouter.routingRejectionLogLine("neo_update", refusal);
-      assertEquals("MCP tool 'neo_update' rejected (" + code + "): " + refusal.getMessage()
+      String line = McpToolRouter.routingRejectionLogLine("etendo_update", refusal);
+      assertEquals("MCP tool 'etendo_update' rejected (" + code + "): " + refusal.getMessage()
           + " session=" + McpUsageTelemetry.NO_SESSION, line);
     }
 
@@ -313,7 +313,7 @@ class McpRoutingExceptionRefusalTest {
     void carriesTheSessionKey() {
       McpUsageTelemetry.setCurrentSessionKey("sess-42");
       try {
-        assertTrue(McpToolRouter.routingRejectionLogLine("neo_list",
+        assertTrue(McpToolRouter.routingRejectionLogLine("etendo_list",
             McpRoutingException.specNotFound("x")).endsWith(" session=sess-42"));
       } finally {
         McpUsageTelemetry.clearCurrentSessionKey();

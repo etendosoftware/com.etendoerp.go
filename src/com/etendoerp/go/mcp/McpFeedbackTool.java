@@ -156,7 +156,7 @@ final class McpFeedbackTool {
     try {
       log.info(receivedLogLine(row));
     } catch (Exception e) { // NOSONAR — a log line must never fail the telemetry path.
-      log.debug("Could not log the neo_feedback summary.", e);
+      log.debug("Could not log the etendo_feedback summary.", e);
     }
   }
 

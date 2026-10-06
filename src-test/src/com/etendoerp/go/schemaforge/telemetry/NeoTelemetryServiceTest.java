@@ -68,14 +68,14 @@ class NeoTelemetryServiceTest {
     try (LogCapture logs = LogCapture.of(LogNeoTelemetrySink.class)) {
       NeoTelemetryService service = new NeoTelemetryService(new LogNeoTelemetrySink(), () -> 0L);
       service.emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED,
-          mapOf("status", "error", "tool", "neo_vector_search"), "CLIENT-A");
+          mapOf("status", "error", "tool", "etendo_vector_search"), "CLIENT-A");
       service.emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED,
-          mapOf("status", "ok", "tool", "neo_list"));
+          mapOf("status", "ok", "tool", "etendo_list"));
 
       List<String> lines = new ArrayList<>(logs.messages(Level.INFO));
       lines.addAll(logs.messages(Level.WARN));
       assertTrue(lines.stream().anyMatch(l -> l.contains("clientId=CLIENT-A")), lines.toString());
-      assertTrue(lines.stream().anyMatch(l -> l.contains("neo_list") && !l.contains("clientId=")),
+      assertTrue(lines.stream().anyMatch(l -> l.contains("etendo_list") && !l.contains("clientId=")),
           "an event without a tenant keeps the old line: " + lines);
     }
   }
