@@ -312,12 +312,14 @@ rule/property (or setting `false`). Anything that is not a clean `true` keeps en
   from `accessState`.
 - **An API client or AI agent** gets HTTP 402 with
   `{"error":{"message":"Environment access is not available: <DECISION>","status":402,"code":"ENVIRONMENT_ACCESS_DENIED","decision":"<DECISION>"}}`
-  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error; a wildcard token is judged on its role's
-  tenant, never on the System client `0`), the `NEO_DATA` servlets (favorites,
+  from NEO, MCP (a plain HTTP 402, not a JSON-RPC error), the `NEO_DATA` servlets (favorites,
   fiscal test mode, report selectors), the `/sws/go` tenant-session endpoints and
   `GET /sws/go/login`. (The OAuth2 API-key endpoints refuse through the same guard, in the OAuth2
-  servlet's own error envelope.) One gap: an Etendo JWT minted **before** the block keeps working on Copilot
-  until it expires (`open-and-notable-topics.md` §3.10).
+  servlet's own error envelope.) A token on org `0` (the System client after `COALESCE`) is judged
+  on its role's tenant, on NEO and MCP alike; if that role lookup fails the request gets **503**
+  (`The environment of this credential could not be verified; retry later`) — never an unjudged
+  pass (`open-and-notable-topics.md` §3.12). One gap: an Etendo JWT minted **before** the block
+  keeps working on Copilot until it expires (`open-and-notable-topics.md` §3.10).
 - **The log** has exactly one INFO line per refused request, written by `EnvironmentAccessGuard`
   whichever surface refused: `Commercial access denied at <entry point> for tenant <AD_Client_ID>:
   <DECISION>`. Entry points: `neo`, `mcp`, `report-selectors`, `oauth2-api-keys`,

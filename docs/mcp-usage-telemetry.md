@@ -70,8 +70,9 @@ Indexes: `etgo_mcp_usage_cli_created (ad_client_id, created)` and `etgo_mcp_usag
 
 **`AD_Client_ID` / `AD_Org_ID` are the tenant the call ran under, not the token's (ETP-5594).** An
 MCP token commonly carries the wildcard client and org `0`. The client is resolved from the role by
-`McpSessionManager.effectiveClientId` — once, in `McpServlet.doPost`, before the commercial access
-guard (ETP-5047), which then judges the same tenant — and `McpSessionManager.executeInContext`
+`com.etendoerp.go.auth.EffectiveClientResolver` — once, in `McpServlet.doPost`, before the
+commercial access guard (ETP-5047), which then judges the same tenant; a failed role lookup refuses
+the request with 503, so no row is recorded for it — and `McpSessionManager.executeInContext`
 resolves the org as the role's first transactional org (and the client again only if it is still
 `0`) before it builds the `OBContext`, and binds the result in a request-scoped `ThreadLocal`
 (`McpUsageTelemetry.setCurrentTenant`). `McpServlet.recordToolCall` reads it, so the row carries the

@@ -3222,15 +3222,13 @@ The transfer (§4.12.1.5) follows the same pattern:
 | `N`, `docAction` or any undeclared key | reaches the handler (unread keys ignored; `N` goes to Process 167) | **422** before anything runs |
 | `documents.openClose` | served | **405** — `MCP_CONFIG.actions` hides it (not offered by the calendar) |
 
-##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, declared)
+##### REST and MCP on the commercial access check of a wildcard token (ETP-5047, aligned)
 
-| call | REST `/sws/neo/*` and the `NEO_DATA` servlets (OAuth2 token) | MCP `/sws/mcp` |
-|---|---|---|
-| token on org `0` (client `0` after `COALESCE`) | the bind step judges client `0` — no lifecycle, **allowed** | judged on the role's tenant (`McpSessionManager.effectiveClientId`) — a blocked tenant gets **402** |
-
-Not intended: the REST side is the open half of the ETP-5047 review finding W1, tracked in
-`open-and-notable-topics.md` §3.12. Either way client `0` itself is never evaluated or written by
-the lifecycle service.
+No longer a divergence. A token on org `0` carries the System client `0`; `/sws/neo/*` (`NEO_API`)
+and MCP both resolve it to the role's tenant through `EffectiveClientResolver`, judge THAT tenant
+(a blocked one gets **402**) and run the request under it; a failed role lookup is **503** on both.
+Recorded here because the two differed during the ETP-5047 review (`open-and-notable-topics.md`
+§3.12).
 
 ##### Follow-up — NEO create does not evaluate the tab's auxiliary inputs (REST only, separate ticket)
 
@@ -4744,7 +4742,7 @@ NEO Headless enforces security at multiple levels:
 
 9. **Field-level control:** Only fields with `ISINCLUDED = 'Y'` participate in selector listings and button action discovery.
 
-9a. **Commercial access (ETP-5443 / ETP-5047 / ETP-5455).** Right after authentication, before any of the checks above, the bind step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, policy `NEO_API`) asks `EnvironmentAccessGuard` whether the tenant may be entered at all; a demo past its trial or a subscription past its payment grace answers `402 Payment Required` with `error.code = ENVIRONMENT_ACCESS_DENIED` and `error.decision` (§4.1) — `NeoAuthenticator` writes the guard's body from `EnvironmentAuthOutcome.getAccessDenial()`. The same guard runs for the other commercially gated surfaces (`NEO_DATA`: favorites, fiscal test mode, report selectors, OAuth2 API keys), MCP, the `/sws/go` tenant-session endpoints and `GET /sws/go/login`; a new tenant servlet inherits it only by authenticating through the pipeline under `NEO_API` / `NEO_DATA` (`open-and-notable-topics.md` §3.8).
+9a. **Commercial access (ETP-5443 / ETP-5047 / ETP-5455).** Right after authentication, before any of the checks above, the bind step of the shared auth pipeline (`EnvironmentRequestAuthenticator`, policy `NEO_API`) asks `EnvironmentAccessGuard` whether the tenant may be entered at all — the EFFECTIVE tenant: an OAuth2 token on org `0` carries the System client `0`, which `EffectiveClientResolver` resolves to the role's client once, for both the guard and the context (a failed lookup answers 503; ETP-5047); a demo past its trial or a subscription past its payment grace answers `402 Payment Required` with `error.code = ENVIRONMENT_ACCESS_DENIED` and `error.decision` (§4.1) — `NeoAuthenticator` writes the guard's body from `EnvironmentAuthOutcome.getAccessDenial()`. The same guard runs for the other commercially gated surfaces (`NEO_DATA`: favorites, fiscal test mode, report selectors, OAuth2 API keys), MCP, the `/sws/go` tenant-session endpoints and `GET /sws/go/login`; a new tenant servlet inherits it only by authenticating through the pipeline under `NEO_API` / `NEO_DATA` (`open-and-notable-topics.md` §3.8).
 
 10. **Tenant-owner protection (ETP-4830).** `AD_User.EM_ETGO_Is_Owner` (`char(1)`, `NOT NULL DEFAULT 'N'`, an `EM_ETGO_`-prefixed extension column on core's `AD_User` table — same convention as `AD_Role.EM_ETGO_Show_Acct_Fields`, added via the `/etendo:alter-db` webhook mechanism, never by hand-editing core's model XML) flags the ONE `AD_User` who completed self-service onboarding/registration for a client — that client's owner. Read/written via native SQL only (`OwnerSupport`, `schemaforge/util/OwnerSupport.java`), never a DAL getter/setter — the column is not mapped as a typed entity property, exactly the same reasoning `SFWindowAccessMap#resolveShowAccountingFields` documents for its own precedent column.
 
