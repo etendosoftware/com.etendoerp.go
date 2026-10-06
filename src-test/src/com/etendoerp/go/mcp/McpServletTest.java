@@ -208,31 +208,43 @@ public class McpServletTest {
     verify(response).setStatus(HttpServletResponse.SC_NO_CONTENT);
   }
 
-  // ── doGet: server info ──────────────────────────────────────────────────
+  // ── doGet: no SSE stream → 405 (ETP-5639) ───────────────────────────────
 
+  /**
+   * A Streamable HTTP server without an SSE stream MUST answer GET with 405; it used to answer an
+   * informational JSON. The .well-known metadata shares doGet and must keep answering (next tests).
+   */
   @Test
-  public void doGetReturnsServerInfo() throws Exception {
+  public void doGetOnTheEndpointAnswers405WithAllowHeader() throws Exception {
     when(request.getPathInfo()).thenReturn(null);
 
     servlet.doGet(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_OK);
-    JSONObject info = new JSONObject(getResponseBody());
-    assertEquals("etendo-mcp", info.getString("name"));
-    assertEquals("1.0.0", info.getString("version"));
-    assertEquals("2024-11-05", info.getString("protocolVersion"));
-    assertEquals("streamable-http", info.getString("transport"));
+    verify(response).setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+    verify(response).setHeader("Allow", "POST, OPTIONS");
+    assertTrue(new JSONObject(getResponseBody()).has("error"));
   }
 
   @Test
-  public void doGetWithNonWellKnownPathReturnsServerInfo() throws Exception {
+  public void doGetWithNonWellKnownPathAnswers405() throws Exception {
     when(request.getPathInfo()).thenReturn("/some/other/path");
 
     servlet.doGet(request, response);
 
+    verify(response).setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+  }
+
+  @Test
+  public void doGetWellKnownIsNotRefusedWith405() throws Exception {
+    System.setProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY, "https://example.com/oauth2");
+    when(request.getPathInfo()).thenReturn("/.well-known/oauth-protected-resource");
+
+    servlet.doGet(request, response);
+
     verify(response).setStatus(HttpServletResponse.SC_OK);
-    JSONObject info = new JSONObject(getResponseBody());
-    assertEquals("etendo-mcp", info.getString("name"));
+    org.mockito.Mockito.verify(response, org.mockito.Mockito.never())
+        .setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+    assertTrue(new JSONObject(getResponseBody()).has("resource"));
   }
 
   @Test
@@ -370,7 +382,8 @@ public class McpServletTest {
     assertEquals(10, rpcResponse.getInt("id"));
 
     JSONObject result = rpcResponse.getJSONObject("result");
-    assertEquals("2024-11-05", result.getString("protocolVersion"));
+    assertEquals("no protocolVersion asked: the latest is answered",
+        McpProtocolVersion.LATEST, result.getString("protocolVersion"));
     assertTrue(result.has("capabilities"));
     assertTrue(result.has("serverInfo"));
 
@@ -379,6 +392,7 @@ public class McpServletTest {
     assertEquals("1.0.0", serverInfo.getString("version"));
     assertEquals("Etendo MCP", serverInfo.getString("title"));
     assertEquals("https://app.etendo.ai", serverInfo.getString("websiteUrl"));
+    assertEquals(McpServlet.SERVER_DESCRIPTION, serverInfo.getString("description"));
 
     JSONArray icons = serverInfo.getJSONArray("icons");
     assertEquals(1, icons.length());
@@ -390,6 +404,92 @@ public class McpServletTest {
     JSONObject capabilities = result.getJSONObject("capabilities");
     assertTrue(capabilities.has("tools"));
     assertTrue(capabilities.has("resources"));
+  }
+
+  // ── Protocol version negotiation (ETP-5639) ─────────────────────────────
+
+  private JSONObject initializeAsking(String protocolVersion) throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 11)
+        .put("method", "initialize")
+        .put("params", new JSONObject().put("protocolVersion", protocolVersion)
+            .put("clientInfo", new JSONObject().put("name", "claude-code")))
+        .toString());
+    servlet.doPost(request, response);
+    return new JSONObject(getResponseBody()).getJSONObject("result");
+  }
+
+  @Test
+  public void initializeEchoesEverySupportedVersion() throws Exception {
+    for (String version : McpProtocolVersion.SUPPORTED) {
+      setUp();
+      assertEquals(version, initializeAsking(version).getString("protocolVersion"));
+    }
+  }
+
+  @Test
+  public void initializeWithAnUnsupportedVersionAnswersTheLatest() throws Exception {
+    assertEquals(McpProtocolVersion.LATEST,
+        initializeAsking("2026-07-28").getString("protocolVersion"));
+  }
+
+  @Test
+  public void supportedVersionsAreTheFourLegacyRevisions() {
+    assertEquals(java.util.List.of("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"),
+        McpProtocolVersion.SUPPORTED);
+    assertEquals("2025-11-25", McpProtocolVersion.LATEST);
+  }
+
+  @Test
+  public void missingProtocolHeaderIsTakenAs20250326WithoutWarning() {
+    try (LogCapture logs = LogCapture.of(McpProtocolVersion.class)) {
+      assertEquals("2025-03-26", McpProtocolVersion.forRequest(null, "2025-11-25", "x"));
+      assertTrue(logs.messages(Level.WARN).isEmpty());
+    }
+  }
+
+  @Test
+  public void supportedProtocolHeaderIsServedAsSent() {
+    assertEquals("2025-06-18", McpProtocolVersion.forRequest("2025-06-18", null, "x"));
+  }
+
+  /**
+   * Lenient policy: an unsupported header value is served — with the session's negotiated version,
+   * else the latest — and leaves one WARN naming the value and the client. Never a 400.
+   */
+  @Test
+  public void unsupportedProtocolHeaderIsServedWithOneWarn() throws Exception {
+    try (LogCapture logs = LogCapture.of(McpProtocolVersion.class)) {
+      assertEquals("2025-06-18",
+          McpProtocolVersion.forRequest("2026-07-28", "2025-06-18", "cursor"));
+      assertEquals(McpProtocolVersion.LATEST,
+          McpProtocolVersion.forRequest("bogus", null, "cursor"));
+      assertEquals(2, logs.messages(Level.WARN).size());
+      String warn = logs.messages(Level.WARN).get(0);
+      assertTrue(warn, warn.contains("'2026-07-28'") && warn.contains("client=cursor"));
+    }
+
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    when(request.getHeader(McpProtocolVersion.HEADER)).thenReturn("2026-07-28");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 12).put("method", "ping")
+        .toString());
+    servlet.doPost(request, response);
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    assertTrue(new JSONObject(getResponseBody()).has("result"));
+  }
+
+  @Test
+  public void corsAllowsTheProtocolVersionHeader() throws Exception {
+    try (MockedStatic<com.etendoerp.go.common.CorsUtils> cors =
+             mockStatic(com.etendoerp.go.common.CorsUtils.class)) {
+      servlet.doOptions(request, response);
+      cors.verify(() -> com.etendoerp.go.common.CorsUtils.apply(eq(request), eq(response),
+          anyString(),
+          org.mockito.ArgumentMatchers.contains(McpProtocolVersion.HEADER),
+          anyString(), eq(false)));
+    }
   }
 
   @Test
@@ -437,7 +537,7 @@ public class McpServletTest {
   }
 
   @Test
-  public void doPostInitializedNotificationReturns204() throws Exception {
+  public void doPostInitializedNotificationReturns202() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
     String rpcBody = new JSONObject()
         .put("jsonrpc", "2.0")
@@ -447,11 +547,11 @@ public class McpServletTest {
 
     servlet.doPost(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_NO_CONTENT);
+    verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
   }
 
   @Test
-  public void doPostNotificationsInitializedReturns204() throws Exception {
+  public void doPostNotificationsInitializedReturns202() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
     String rpcBody = new JSONObject()
         .put("jsonrpc", "2.0")
@@ -461,7 +561,7 @@ public class McpServletTest {
 
     servlet.doPost(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_NO_CONTENT);
+    verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
   }
 
   @Test
@@ -570,7 +670,7 @@ public class McpServletTest {
   }
 
   @Test
-  public void doPostNullIdNotificationReturns204WithEmptyBody() throws Exception {
+  public void doPostNullIdNotificationReturns202WithEmptyBody() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
     String rpcBody = new JSONObject()
         .put("jsonrpc", "2.0")
@@ -580,7 +680,7 @@ public class McpServletTest {
 
     servlet.doPost(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_NO_CONTENT);
+    verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
     assertEquals("", getResponseBody());
   }
 
@@ -657,7 +757,7 @@ public class McpServletTest {
   }
 
   @Test
-  public void doPostPingWithNullIdReturns204() throws Exception {
+  public void doPostPingWithNullIdReturns202() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
     String rpcBody = new JSONObject()
         .put("jsonrpc", "2.0")
@@ -667,7 +767,7 @@ public class McpServletTest {
 
     servlet.doPost(request, response);
 
-    verify(response).setStatus(HttpServletResponse.SC_NO_CONTENT);
+    verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
   }
 
   @Test

@@ -159,6 +159,18 @@ final class McpUsageTelemetry {
    * @return the new session key, to be echoed in the {@value #HEADER_SESSION_ID} response header
    */
   static String openSession(JSONObject params) {
+    return openSession(params, null);
+  }
+
+  /**
+   * Same as {@link #openSession(JSONObject)}, also remembering the protocol version the handshake
+   * negotiated, which later requests fall back to (ETP-5639).
+   *
+   * @param params          the {@code initialize} params
+   * @param protocolVersion the negotiated version, may be {@code null}
+   * @return the new session key
+   */
+  static String openSession(JSONObject params, String protocolVersion) {
     String sessionKey = UUID.randomUUID().toString();
     JSONObject clientInfo = params != null ? params.optJSONObject("clientInfo") : null;
     String name = clientInfo != null ? StringUtils.trimToNull(clientInfo.optString("name", null))
@@ -166,7 +178,7 @@ final class McpUsageTelemetry {
     String version = clientInfo != null
         ? StringUtils.trimToNull(clientInfo.optString("version", null))
         : null;
-    SESSIONS.put(sessionKey, new ClientInfo(name, version));
+    SESSIONS.put(sessionKey, new ClientInfo(name, version, protocolVersion));
     return sessionKey;
   }
 
@@ -346,17 +358,28 @@ final class McpUsageTelemetry {
     }
   }
 
-  /** What the {@code initialize} handshake reported about the calling agent. */
+  /** What the {@code initialize} handshake reported about the calling agent, and negotiated. */
   static final class ClientInfo {
 
     static final ClientInfo UNKNOWN = new ClientInfo(null, null);
 
     private final String name;
     private final String version;
+    private final String protocolVersion;
 
     ClientInfo(String name, String version) {
+      this(name, version, null);
+    }
+
+    ClientInfo(String name, String version, String protocolVersion) {
       this.name = name;
       this.version = version;
+      this.protocolVersion = protocolVersion;
+    }
+
+    /** @return the protocol version {@code initialize} negotiated, or {@code null} */
+    String getProtocolVersion() {
+      return protocolVersion;
     }
 
     String getName() {

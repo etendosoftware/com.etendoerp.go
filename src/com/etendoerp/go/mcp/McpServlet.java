@@ -71,12 +71,14 @@ public class McpServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
-  private static final String PROTOCOL_VERSION = "2024-11-05";
   private static final String SERVER_NAME = "etendo-mcp";
   private static final String SERVER_VERSION = "1.0.0";
   /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
   private static final String SERVER_TITLE = "Etendo MCP";
   private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
+  /** {@code Implementation.description} (MCP 2025-11-25). */
+  static final String SERVER_DESCRIPTION = "Etendo ERP for agents: read and write documents, "
+      + "master data and processes, and run reports, within the permissions of your role.";
   /**
    * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
    * Same file for every environment, so a fixed production URL is fine. Clients that predate the
@@ -93,6 +95,8 @@ public class McpServlet extends HttpServlet {
   static final int JSON_RPC_INTERNAL_ERROR = -32603;
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
   static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
+  /** The handshake method: the one request that carries no {@code MCP-Protocol-Version}. */
+  private static final String INITIALIZE = "initialize";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
@@ -107,7 +111,8 @@ public class McpServlet extends HttpServlet {
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept, Mcp-Session-Id, X-Go-CSRF",
+        "Content-Type, Authorization, Accept, Mcp-Session-Id, " + McpProtocolVersion.HEADER
+            + ", X-Go-CSRF",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }
 
@@ -161,12 +166,21 @@ public class McpServlet extends HttpServlet {
 
       log.debug("MCP request: method={}, id={}", method, id);
 
+      if (!INITIALIZE.equals(method)) {
+        // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
+        McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
+            McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
+                .getProtocolVersion(),
+            clientNameFor(callParams));
+      }
+
       // Dispatch the method
       JSONObject result = dispatchMethod(identity, method, callParams, response);
 
-      // Notifications (no id) don't get a response body
+      // Notifications (no id) don't get a response body: 202 Accepted (Streamable HTTP,
+      // MCP 2025-03-26 onwards).
       if (id == null) {
-        response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+        response.setStatus(HttpServletResponse.SC_ACCEPTED);
         return;
       }
 
@@ -364,8 +378,11 @@ public class McpServlet extends HttpServlet {
   // ── GET: Server info / health check ────────────────────────────────────
 
   /**
-   * Handle GET /sws/mcp — return server info for discovery.
-   * Also handles GET /sws/mcp/.well-known/oauth-protected-resource for RFC 9728.
+   * Handle GET /sws/mcp/.well-known/oauth-protected-resource (RFC 9728).
+   *
+   * <p>Any other GET answers {@code 405 Method Not Allowed}: a Streamable HTTP server that offers no
+   * SSE stream MUST (MCP 2025-03-26 onwards). It used to answer an informational JSON, which a
+   * client opening the optional GET stream could mistake for one (ETP-5639).</p>
    */
   @Override
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
@@ -379,17 +396,10 @@ public class McpServlet extends HttpServlet {
       return;
     }
 
-    response.setStatus(HttpServletResponse.SC_OK);
-    try {
-      JSONObject info = new JSONObject();
-      info.put("name", SERVER_NAME);
-      info.put("version", SERVER_VERSION);
-      info.put("protocolVersion", PROTOCOL_VERSION);
-      info.put("transport", "streamable-http");
-      response.getWriter().write(info.toString());
-    } catch (JSONException e) {
-      response.getWriter().write("{\"name\":\"" + SERVER_NAME + "\"}");
-    }
+    response.setHeader("Allow", "POST, OPTIONS");
+    ProtocolErrorAdapters.writeSimpleJsonError(response,
+        HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        "This MCP server offers no SSE stream; send JSON-RPC messages with POST");
   }
 
   /**
@@ -552,7 +562,7 @@ public class McpServlet extends HttpServlet {
   private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params,
       HttpServletResponse response) throws Exception {
     switch (method) {
-      case "initialize":
+      case INITIALIZE:
         return handleInitialize(params, response);
       case "initialized":
       case "notifications/initialized":
@@ -585,15 +595,19 @@ public class McpServlet extends HttpServlet {
    */
   private JSONObject handleInitialize(JSONObject params, HttpServletResponse response)
       throws JSONException {
+    // ETP-5639: answer the client's version when we speak it, else our latest (lifecycle rule).
+    String negotiated = McpProtocolVersion.negotiate(
+        params != null ? params.optString("protocolVersion", null) : null);
     try {
-      response.setHeader(McpUsageTelemetry.HEADER_SESSION_ID, McpUsageTelemetry.openSession(params));
+      response.setHeader(McpUsageTelemetry.HEADER_SESSION_ID,
+          McpUsageTelemetry.openSession(params, negotiated));
     } catch (Exception e) {
       // Telemetry must never break the handshake.
       log.debug("Could not open an MCP telemetry session.", e);
     }
 
     JSONObject result = new JSONObject();
-    result.put("protocolVersion", PROTOCOL_VERSION);
+    result.put("protocolVersion", negotiated);
 
     JSONObject capabilities = new JSONObject();
 
@@ -612,6 +626,7 @@ public class McpServlet extends HttpServlet {
     serverInfo.put("version", SERVER_VERSION);
     serverInfo.put("title", SERVER_TITLE);
     serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
+    serverInfo.put("description", SERVER_DESCRIPTION);
     JSONObject icon = new JSONObject();
     icon.put("src", SERVER_ICON_URL);
     icon.put("mimeType", SERVER_ICON_MIME_TYPE);

@@ -3695,8 +3695,9 @@ protected value came from a person, and there is nothing to warn about.
 
 `initialize` advertises the server as `serverInfo.name = "etendo-mcp"` with
 `title = "Etendo MCP"`, `websiteUrl` and one `icons` entry pointing at the public
-`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973). `protocolVersion` is still
-`2024-11-05`: the new fields are additive and older clients ignore them. None of this is what a
+`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973), and a one-sentence `description`
+(2025-11-25 `Implementation.description`). `protocolVersion` is negotiated — see *Protocol revision*
+below (ETP-5639); it used to be a fixed `2024-11-05`. None of this is what a
 client lists the server as — that is the alias chosen at registration (`claude mcp add <alias>`,
 `[mcp_servers.<alias>]`), and Claude does not render `serverInfo.icons` for custom connectors today.
 
@@ -7490,3 +7491,32 @@ failure, `neo_batch` access denied / failure) and `McpWriteRequestSupport` (`Rem
 Not covered: authentication failures (logged before the session key is bound) and lines that are
 not per-request (configuration parsing, cached parent scopes, the telemetry writer thread). The
 production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key is in the message.
+
+#### 4.12.24 Protocol revision: 2025-11-25, negotiated (ETP-5639)
+
+The server speaks the four `initialize`-based revisions **`2024-11-05`, `2025-03-26`,
+`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. The stateless `2026-07-28`
+revision is not served (its `server/discover` probe answers `-32601`, which makes a dual-era client
+fall back to `initialize`; see §4.12.23).
+
+| Request | Behaviour |
+|---|---|
+| `initialize` with a supported `protocolVersion` | answered with that version; remembered for the session (`McpUsageTelemetry.ClientInfo.getProtocolVersion()`) |
+| `initialize` with an unknown or missing `protocolVersion` | answered with the latest, `2025-11-25` (lifecycle rule) |
+| any later POST without `MCP-Protocol-Version` | served, taken as `2025-03-26` (spec fallback) |
+| any later POST with a supported header | served as sent |
+| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose; it turns strict when the 2026-07-28 era is added, where era detection depends on the header |
+| notification (no `id`) | `202 Accepted` (was `204 No Content`) |
+| `GET /sws/mcp` | **`405 Method Not Allowed`**, `Allow: POST, OPTIONS` — a Streamable HTTP server without an SSE stream MUST. The informational JSON it used to answer is gone |
+| `GET /sws/mcp/.well-known/oauth-protected-resource` | unchanged — RFC 9728 metadata, `200` |
+| CORS preflight | `MCP-Protocol-Version` is in `Access-Control-Allow-Headers`, so a browser client (MCP Inspector) passes the preflight |
+
+The version currently changes nothing in the answers: every 2025 field the server returns is
+additive. It is validated and logged so that a client on an unexpected revision is visible.
+
+**SEP-1303 audit (input validation errors are tool errors).** Every failure inside `tools/call` —
+unknown tool, unknown argument, invalid filter, refused write, DAL validation — is caught by
+`McpToolRouter.route` and returned as a tool result with `isError: true`. Only two shapes still
+answer a JSON-RPC error: `tools/call` with no `params`, and with no `name` (both `-32603`). Those are
+malformed protocol messages, not tool input, so they are outside SEP-1303; mapping them to `-32602`
+(Invalid params) is a possible follow-up, not done here.
