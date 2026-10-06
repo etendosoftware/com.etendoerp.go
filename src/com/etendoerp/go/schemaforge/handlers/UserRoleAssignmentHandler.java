@@ -289,7 +289,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * this spec by mistake to the one where that email is freely editable (and never invites).
    * Kept verbatim — {@code backendErrors.js} translates it by exact match.
    */
-  static final String MSG_EMAIL_NOT_A_GO_USER = "This user was never invited to Etendo GO "
+  static final String MSG_EMAIL_NOT_A_GO_USER = "This user was never invited to Etendo "
       + "(for example, a business partner contact person): edit its email through spec "
       + "'contacts', entity 'contact'";
   /** ETP-5277: fields patched onto the create response by {@link #patchUserDefaultsOntoRow}. */
