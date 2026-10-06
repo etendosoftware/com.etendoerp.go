@@ -1105,8 +1105,9 @@ public class McpServletTest {
     org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
     org.hibernate.Session session = mock(org.hibernate.Session.class);
     when(obDal.getSession()).thenReturn(session);
-    // ETP-5047 — a wildcard client is resolved once, by McpServlet, before the access guard;
-    // McpSessionManager then resolves the org, and the client again only if it is still "0".
+    // ETP-5047: the servlet resolves a wildcard client once, before the access guard. The session
+    // manager then looks up the org, and the client a second time only when it is still the
+    // wildcard.
     if ("0".equals(tokenClient)) {
       when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
           .thenReturn(resolvedClient, resolvedOrg, resolvedClient);
