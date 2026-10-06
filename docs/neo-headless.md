@@ -7459,3 +7459,10 @@ It used to read `addressed something that does not exist` whatever the code, whi
 read-only fields, disabled methods, a missing `view` and a missing `parentId`. The agent-facing
 envelope is unchanged. The `parent_required` detail no longer reads "the id of the parent its parent
 record" when the parent entity cannot be named: it says "the id of its parent record".
+
+**The MCP tool-call telemetry line names its tenant.** `LogNeoTelemetrySink` prints
+`event=backend_mcp_tool_call_completed clientId=<AD_Client_ID> properties={...}` for MCP tool calls,
+so a failure seen in Datadog (`VECTOR_COLLECTION_NOT_FOUND`, `accounting_schema_unresolved`) can be
+traced to its tenant without a DB lookup. The id (never a name) rides on `NeoTelemetryEvent.getClientId()`,
+**not** in the properties: properties are what every sink receives, Mixpanel included, and the
+tenant id stays in our own log. Events emitted without a tenant keep the previous line unchanged.

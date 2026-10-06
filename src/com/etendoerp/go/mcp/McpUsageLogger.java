@@ -360,7 +360,8 @@ final class McpUsageLogger {
       props.put("reqBytes", row.reqBytes());
       props.put("respBytes", row.respBytes());
       // row.payload() is deliberately absent and must stay absent.
-      telemetry().emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED, props);
+      // The tenant goes to the server log only, not into props (which Mixpanel receives).
+      telemetry().emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED, props, row.clientId());
     } catch (Throwable t) { // NOSONAR — the projection is best-effort by construction.
       log.debug("Could not project MCP telemetry for tool '{}'.", row.toolName(), t);
     }
