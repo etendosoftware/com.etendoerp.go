@@ -20,6 +20,7 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,11 +38,14 @@ import org.codehaus.jettison.json.JSONObject;
 
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -98,6 +102,25 @@ public class McpServlet extends HttpServlet {
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
+  // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
+  private static final int SC_PAYMENT_REQUIRED = 402;
+
+  private final transient TenantEnvironmentLifecycleService lifecycleService;
+
+  /** Production wiring: the tenant lifecycle policy every environment surface shares. */
+  public McpServlet() {
+    this(new TenantEnvironmentLifecycleService());
+  }
+
+  /**
+   * Wiring with an explicit lifecycle service, for tests.
+   *
+   * @param lifecycleService answers the commercial access decision for a client
+   */
+  McpServlet(TenantEnvironmentLifecycleService lifecycleService) {
+    this.lifecycleService = lifecycleService;
+  }
+
   // ── CORS ───────────────────────────────────────────────────────────────
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
@@ -131,6 +154,9 @@ public class McpServlet extends HttpServlet {
     AuthIdentity identity = authenticate(request, response);
     if (identity == null) {
       return; // Response already sent by authenticate()
+    }
+    if (refuseCommerciallyBlocked(request, response, identity)) {
+      return; // 402 already sent
     }
 
     response.setContentType(CONTENT_TYPE_JSON);
@@ -486,6 +512,41 @@ public class McpServlet extends HttpServlet {
     }
     return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
         session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
+  }
+
+  /**
+   * Refuse an environment whose commercial access is cut (ETP-5642).
+   *
+   * <p>NEO, Copilot and the account endpoints answer 402 once a demo trial expires or a
+   * subscription's grace elapses, but this servlet resolves its identity on its own and never
+   * asked: an MCP client kept reading and writing the blocked tenant through every scheme. The
+   * check runs once, after {@link #authenticate} and before any method dispatch, so it covers the
+   * cookie session, OAuth2 and legacy JWT alike — and {@code initialize}/{@code tools/list} too:
+   * a tool catalog for an environment that cannot be used is of no use to the client.
+   *
+   * <p>The answer is an HTTP 402 rather than an in-band tool error, with NEO's exact wording, so a
+   * client stops instead of retrying and the SPA recognizes the same decision. The decision is
+   * evaluated on the effective client — a credential carrying the System wildcard runs under its
+   * role's client — so the check sees exactly the tenant the call would touch. A null decision is
+   * a tenant that predates lifecycle metadata: the controlled legacy transition, not a refusal,
+   * exactly as in {@code EnvironmentRequestAuthenticator}.
+   *
+   * @return true when the request was refused and the response already written
+   */
+  private boolean refuseCommerciallyBlocked(HttpServletRequest request,
+      HttpServletResponse response, AuthIdentity identity) throws IOException {
+    String clientId = McpSessionManager.resolveEffectiveClientId(identity.clientId,
+        identity.roleId);
+    EnvironmentAccessPolicy.Decision decision =
+        lifecycleService.evaluateAccess(clientId, true, Instant.now());
+    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
+      return false;
+    }
+    log.warn("Refused MCP request: environment {} is commercially blocked ({})", clientId,
+        decision);
+    sendJsonError(request, response, SC_PAYMENT_REQUIRED,
+        EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX + decision.name());
+    return true;
   }
 
   // ── JSON-RPC method dispatch ────────────────────────────────────────────
