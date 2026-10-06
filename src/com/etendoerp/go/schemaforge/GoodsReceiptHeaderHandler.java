@@ -291,21 +291,23 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       + "GROUP BY iol.m_inout_id";
   }
 
+  /**
+   * Injects {@code linkedInvoices}: every invoice linked to one of this receipt's lines, through
+   * {@link InOutInvoiceLinks#linkedInvoiceIdsSql} — the invoice line's {@code M_InOutLine_ID},
+   * the {@code M_MatchInv} match table (read since ETP-5576: a second partial receipt of an
+   * invoice line can only be linked there) and the pre-existing shared {@code C_OrderLine_ID} arm.
+   */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedInvoices(JSONObject rec, String receiptId) {
     String sql =
         "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code "
-        + "FROM m_inoutline ril "
-        + "JOIN c_invoiceline il ON ("
-        + "  il.m_inoutline_id = ril.m_inoutline_id "
-        + "  OR (ril.c_orderline_id IS NOT NULL AND il.c_orderline_id = ril.c_orderline_id)"
-        + ") "
-        + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+        + "FROM (" + InOutInvoiceLinks.linkedInvoiceIdsSql(InOutInvoiceLinks.MatchTable.PURCHASE) + ") lk "
+        + "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id "
         + "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id "
-        + "WHERE ril.m_inout_id = ? AND ril.isactive = 'Y' "
-        + "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO','CL')";
+        + "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO','CL')";
     try (PreparedStatement ps = OBDal.getReadOnlyInstance().getConnection().prepareStatement(sql)) {
-      ps.setString(1, receiptId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, receiptId, InOutInvoiceLinks.LINKED_INVOICES_PARAMS);
       JSONArray invoices = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

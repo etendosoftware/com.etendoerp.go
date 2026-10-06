@@ -34,12 +34,12 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 
 /**
- * The fields the server resolves on create beyond what {@code neo_defaults} answers without input:
+ * The fields the server resolves on create beyond what {@code etendo_defaults} answers without input:
  * the selector policies' wrapper fields (ETP-5368) and the ones the entity's customization declares
  * through {@link NeoHandler#serverResolvedCreateFields()} (ETP-5535).
  *
- * <p>Read by {@code neo_schema(view:"create")}, which demotes these names to {@code optional} with
- * {@code serverDefaulted:true}. The {@code neo_create} mandatory pre-check does NOT use this set: it
+ * <p>Read by {@code etendo_schema(view:"create")}, which demotes these names to {@code optional} with
+ * {@code serverDefaulted:true}. The {@code etendo_create} mandatory pre-check does NOT use this set: it
  * runs after the create callout cascade that derives a declared field, so a declared field still
  * empty there is a real gap it should report — see
  * {@code McpWriteRequestSupport#validateMandatoryFields}. It keeps skipping only the selector
@@ -74,7 +74,7 @@ final class McpServerResolvedFields {
 
   /**
    * The customization's own declaration, looked up quietly: a resolution failure must not break
-   * {@code neo_schema} or a create for an entity that declares nothing. Answering empty is the safe
+   * {@code etendo_schema} or a create for an entity that declares nothing. Answering empty is the safe
    * direction — the field stays {@code required}, which is today's behaviour.
    */
   private static Set<String> declaredByCustomization(SFEntity sfEntity) {

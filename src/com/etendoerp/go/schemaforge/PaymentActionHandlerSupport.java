@@ -63,7 +63,7 @@ final class PaymentActionHandlerSupport {
    * The payment actions this support serves, declared for agents (ETP-5558, FR-1).
    *
    * <p>The SPA has called these from the invoice panel all along; the declaration makes them
-   * discoverable and typed through MCP ({@code neo_schema view:"actions"}, {@code neo_discover}),
+   * discoverable and typed through MCP ({@code etendo_schema view:"actions"}, {@code etendo_discover}),
    * where they used to be invisible — which is why agents built payments by hand. The REST
    * behaviour is untouched: nothing on the REST path reads these contracts.</p>
    *
@@ -83,7 +83,7 @@ final class PaymentActionHandlerSupport {
     String money = isReceipt ? "collection" : "payment";
     String idDescription = "the id of the " + doc + " the " + money + " is for";
     String spec = isReceipt ? "sales-invoice" : "purchase-invoice";
-    String installments = "neo_list(spec:'" + spec + "', entity:'paymentPlan', parentId:<invoice "
+    String installments = "etendo_list(spec:'" + spec + "', entity:'paymentPlan', parentId:<invoice "
         + "id>) lists the invoice's installments with their outstanding amount";
     Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
     contracts.put(ACTION_NAME, NeoActionContract.write(ACTION_NAME,

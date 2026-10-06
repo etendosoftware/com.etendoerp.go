@@ -122,7 +122,7 @@ final class BankStatementAgentValidation {
     }
     return refuse("contentBase64 is " + length + " characters; importStatement accepts at most "
         + MAX_IMPORT_BASE64_CHARS + " (a " + MAX_IMPORT_BYTES / 1024 + " KB file). Split the "
-        + "statement into smaller files, or import it from the Etendo GO UI.");
+        + "statement into smaller files, or import it from the Etendo UI.");
   }
 
   private static NeoResponse checkCreate(BankStatementsHandler handler, JSONObject params)

@@ -859,7 +859,7 @@ public class AgingReportHandler implements NeoHandler {
         "Could not resolve an accounting schema with a currency for organization " + orgId + ".",
         "Check that the organization (or an ancestor in its tree) has a general ledger "
             + "configured, or pass glId explicitly to select the accounting schema. To get "
-            + "comparable data without a resolved schema, call neo_list on \"sales-invoice\"/"
+            + "comparable data without a resolved schema, call etendo_list on \"sales-invoice\"/"
             + "\"header\" filtering status:\"pending\" and status:\"partial\" — both are "
             + "needed, since a partially collected invoice still owes money.",
         "docs(topic:\"reading records\")");

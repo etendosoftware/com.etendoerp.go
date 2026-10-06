@@ -49,7 +49,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * Static helpers for the image endpoints, and the one place an {@code AD_Image} row is created.
  *
  * <p>Three callers share {@link #createImage}: the servlet {@code POST /sws/neo/image} the React
- * {@code ImageField.jsx} uses, the MCP {@code neo_upload_image} base64 fallback, and the one-shot
+ * {@code ImageField.jsx} uses, the MCP {@code etendo_upload_image} base64 fallback, and the one-shot
  * ticket endpoint {@code PUT /sws/neo/image/upload/{token}} (ETP-5184). Byte validation
  * ({@link #validateImageBytes}) is deliberately NOT part of {@code createImage}: the servlet
  * endpoint predates it and accepts any MIME up to 10 MB, and tightening that would change the
@@ -103,7 +103,7 @@ public final class NeoImageHelper {
    */
   static final String INVALID_UPLOAD_LINK_MESSAGE =
       "This upload link is not valid, has already been used, or has expired. Request a new one with "
-      + "neo_request_image_upload.";
+      + "etendo_request_image_upload.";
 
   private NeoImageHelper() {
   }

@@ -60,7 +60,12 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
   private static final Logger log = LogManager.getLogger(NeoOpenAPIEndpoint.class);
 
-  private static final String TAG_NAME = "EtendoGo";
+  private static final String TAG_NAME = "Etendo";
+  /**
+   * Former tag name, kept as an accepted filter: it is also the name of the {@code EtendoGo}
+   * ETAPI_OPENAPI_FLOW, which requests this endpoint's documentation by that name.
+   */
+  private static final String LEGACY_TAG_NAME = "EtendoGo";
   private static final String BASE_PATH = "/sws/neo/";
   private static final String PUBLIC_API_KEYS_PATH_PROPERTY = "etgo.public.api.keys.path";
   private static final String PUBLIC_API_KEYS_PATH_ENV = "ETGO_PUBLIC_API_KEYS_PATH";
@@ -102,7 +107,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
   @Override
   public boolean isValid(String tag) {
-    return tag == null || TAG_NAME.equalsIgnoreCase(tag);
+    return tag == null || TAG_NAME.equalsIgnoreCase(tag)
+        || LEGACY_TAG_NAME.equalsIgnoreCase(tag);
   }
 
   @Override
@@ -115,13 +121,13 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         openAPI.setPaths(new Paths());
       }
 
-      // Add the EtendoGo tag
+      // Add the Etendo tag
       if (openAPI.getTags() == null) {
         openAPI.setTags(new ArrayList<>());
       }
       openAPI.getTags().add(new Tag()
           .name(TAG_NAME)
-          .description("NEO Headless 2.0 endpoints for SchemaForge specs"));
+          .description("Etendo API endpoints"));
 
       // Query all active specs
       OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
@@ -536,7 +542,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     PathItem rootItem = getOrCreatePathItem(openAPI, rootPath);
 
     Operation listSpecsOp = createOperation(
-        "List all NEO specs",
+        "List all specs",
         "Returns all active specs the current user can access, "
             + "including their entities and enabled HTTP methods.");
 
@@ -570,7 +576,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     PathItem specDescribeItem = getOrCreatePathItem(openAPI, specDescribePath);
 
     Operation describeSpecOp = createOperation(
-        "Describe a NEO spec",
+        "Describe a spec",
         "Returns detailed metadata for a spec, including entities, fields, "
             + "types, selectors, and enabled methods.");
     describeSpecOp.addParametersItem(new Parameter()

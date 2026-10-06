@@ -33,13 +33,18 @@ import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
+/**
+ * Unit tests for {@link McpToolTitles}.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolTitles
+ */
 class McpToolTitlesTest {
 
-  private static final String[] FIXED_TOOLS = { "neo_discover", "neo_list", "neo_get",
-      "neo_create", "neo_update", "neo_delete", "neo_selectors", "neo_defaults", "neo_schema",
-      "neo_batch", "neo_action", "neo_widget", "neo_vector_search", "neo_upload_image",
-      "neo_request_image_upload", "neo_get_image_upload", "neo_generate_amortization_plan",
-      "neo_feedback", "docs" };
+  private static final String[] FIXED_TOOLS = { "etendo_discover", "etendo_list", "etendo_get",
+      "etendo_create", "etendo_update", "etendo_delete", "etendo_selectors", "etendo_defaults", "etendo_schema",
+      "etendo_batch", "etendo_action", "etendo_widget", "etendo_vector_search", "etendo_upload_image",
+      "etendo_request_image_upload", "etendo_get_image_upload", "etendo_generate_amortization_plan",
+      "etendo_feedback", "docs" };
 
   @Test
   @DisplayName("Fixed tools resolve from the catalog in the user's language")
@@ -65,7 +70,7 @@ class McpToolTitlesTest {
 
   @ParameterizedTest
   @ValueSource(strings = { "en_US", "es_ES" })
-  @DisplayName("Every fixed tool has a catalog title and none exposes the neo prefix")
+  @DisplayName("Every fixed tool has a catalog title and none exposes the tool-name prefix")
   void everyFixedToolHasANeoFreeTitle(String language) {
     for (String tool : FIXED_TOOLS) {
       String title = McpToolTitles.of(tool, language);
@@ -75,11 +80,11 @@ class McpToolTitlesTest {
   }
 
   @Test
-  @DisplayName("Tools missing from the catalog are humanized, dropping the neo prefix")
+  @DisplayName("Tools missing from the catalog are humanized, dropping the etendo_ prefix")
   void uncatalogedToolsAreHumanized() {
     assertEquals("Complete order", McpToolTitles.of("complete_order", "es_ES"));
     assertEquals("Generate tax report", McpToolTitles.of("generate_tax_report", "en_US"));
-    assertEquals("Some new tool", McpToolTitles.of("neo_some_new_tool", "en_US"));
+    assertEquals("Some new tool", McpToolTitles.of("etendo_some_new_tool", "en_US"));
   }
 
   @Test
@@ -87,7 +92,7 @@ class McpToolTitlesTest {
   void degenerateNamesAreSafe() {
     assertEquals("", McpToolTitles.of(null, "es_ES"));
     assertEquals("", McpToolTitles.of("  ", "es_ES"));
-    assertEquals("neo_", McpToolTitles.of("neo_", "es_ES"));
+    assertEquals("etendo_", McpToolTitles.of("etendo_", "es_ES"));
   }
 
   @Test

@@ -18,17 +18,26 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import javax.servlet.http.HttpServletRequest;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.client.kernel.RequestContext;
 
 /**
  * Unit tests for {@link GlJournalHeaderHandler}.
@@ -38,8 +47,12 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
  *   <li>{@code afterHandle()} — always returns null.</li>
  *   <li>{@code handle()} pass-through for non-ACTION / non-POST endpoints.</li>
  *   <li>Complete-action detection: wrong endpoint type, wrong fieldName, wrong docAction value.</li>
- *   <li>Early-exit in {@code completeJournal()} when the record id is absent (400).</li>
+ *   <li>Early-exit in {@code runDocumentAction()} when the record id is absent (400).</li>
+ *   <li>ETP-5611: {@code inpdocaction} set on the request for CO and RE; date mirror; schema
+ *       currency on POST and DEFAULTS.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GlJournalHeaderHandler
  */
 public class GlJournalHeaderHandlerTest {
 
@@ -226,7 +239,10 @@ public class GlJournalHeaderHandlerTest {
         .requestBody(body)
         .recordId("GL-JOURNAL-001")
         .build();
-    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+    RequestContext rc = requestContextWithRequest();
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
       neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
           .thenThrow(new RuntimeException("session unavailable"));
       NeoResponse response = handler.handle(ctx);
@@ -288,5 +304,283 @@ public class GlJournalHeaderHandlerTest {
     h.setPostingService(service);
 
     assertSame(sentinel, h.handle(ctx));
+  }
+
+  // ─── ETP-5611: document action → inpdocaction request parameter ─────────
+
+  private static RequestContext requestContextWithRequest() {
+    RequestContext rc = mock(RequestContext.class);
+    when(rc.getRequest()).thenReturn(mock(HttpServletRequest.class));
+    return rc;
+  }
+
+  private static NeoContext docActionContext(String docAction) throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("docAction", docAction);
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .httpMethod("POST")
+        .requestBody(body)
+        .recordId("GL-JOURNAL-001")
+        .build();
+  }
+
+  /** Runs the action with the process stubbed to fail right after the parameter is set. */
+  private NeoResponse runActionAndCaptureParam(String docAction, RequestContext rc) throws Exception {
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenThrow(new RuntimeException("stop before the process runs"));
+      return handler.handle(docActionContext(docAction));
+    }
+  }
+
+  @Test
+  public void reactivateActionSetsInpdocactionRe() throws Exception {
+    // The journal process reads the action from the inpdocaction request parameter, not from the
+    // body. Without it the process silently completes the journal instead of reactivating it.
+    RequestContext rc = requestContextWithRequest();
+    NeoResponse response = runActionAndCaptureParam("RE", rc);
+    assertNotNull(response);
+    verify(rc).setRequestParameter("inpdocaction", "RE");
+  }
+
+  @Test
+  public void completeActionSetsInpdocactionCoExplicitly() throws Exception {
+    // The parameter outlives the operation inside a /batch request, so CO must not rely on its
+    // absence: an earlier RE in the same request would otherwise turn this CO into a reactivate.
+    RequestContext rc = requestContextWithRequest();
+    runActionAndCaptureParam("CO", rc);
+    verify(rc).setRequestParameter("inpdocaction", "CO");
+  }
+
+  @Test
+  public void reactivateDetectedUnderFieldValues() throws Exception {
+    JSONObject fieldValues = new JSONObject();
+    fieldValues.put("documentAction", "RE");
+    JSONObject body = new JSONObject();
+    body.put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .httpMethod("POST")
+        .requestBody(body)
+        .recordId("")
+        .build();
+    assertEquals(400, handler.handle(ctx).getHttpStatus());
+  }
+
+  @Test
+  public void documentActionWithoutHttpRequestReturns500WithoutRunningTheProcess() throws Exception {
+    RequestContext rc = mock(RequestContext.class);
+    when(rc.getRequest()).thenReturn(null);
+    try (MockedStatic<RequestContext> rcMock = mockStatic(RequestContext.class);
+        MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      rcMock.when(RequestContext::get).thenReturn(rc);
+      NeoResponse response = handler.handle(docActionContext("RE"));
+      assertEquals(500, response.getHttpStatus());
+      neoMock.verify(() -> NeoDefaultsService.buildVariablesSecureApp(any()), never());
+      verify(rc, never()).setRequestParameter(any(), any());
+    }
+  }
+
+  // ─── ETP-5611: single "Fecha" mirrored into documentDate ────────────────
+
+  private static NeoContext crudContext(String method, JSONObject body) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod(method)
+        .requestBody(body)
+        .build();
+  }
+
+  @Test
+  public void patchMirrorsAccountingDateIntoDocumentDate() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-09-30");
+    assertNull(handler.handle(crudContext("PATCH", body)));
+    assertEquals("2026-09-30", body.getString("documentDate"));
+  }
+
+  @Test
+  public void postOverwritesAClientSentDocumentDate() throws Exception {
+    // The UI sends documentDate=@#Date@ (today) on create; the chosen Fecha must win.
+    JSONObject body = new JSONObject();
+    body.put("multigeneralLedger", "Y"); // skip the schema/currency injection (needs a session)
+    body.put("accountingDate", "2026-09-30");
+    body.put("documentDate", "2026-10-05");
+    assertNull(handler.handle(crudContext("POST", body)));
+    assertEquals("2026-09-30", body.getString("documentDate"));
+  }
+
+  @Test
+  public void patchWithoutAccountingDateLeavesDocumentDateAlone() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("description", "x");
+    assertNull(handler.handle(crudContext("PATCH", body)));
+    assertFalse(body.has("documentDate"));
+  }
+
+  // PATCH/PUT: NEO's filterWriteRequest drops the hidden (system) documentDate from the body after
+  // this pre-hook, so the handler writes it on the record itself, in the same transaction.
+
+  private static NeoContext patchContext(String recordId, JSONObject body) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(recordId)
+        .requestBody(body)
+        .build();
+  }
+
+  private static org.openbravo.model.financialmgmt.gl.GLJournal journal(boolean processed) {
+    org.openbravo.model.financialmgmt.gl.GLJournal j =
+        mock(org.openbravo.model.financialmgmt.gl.GLJournal.class);
+    when(j.isProcessed()).thenReturn(processed);
+    return j;
+  }
+
+  @Test
+  public void patchWritesDocumentDateOnTheRecord() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    org.openbravo.model.financialmgmt.gl.GLJournal j = journal(false);
+    doReturn(j).when(h).loadJournal("GL-1");
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-09-30");
+    assertNull(h.handle(patchContext("GL-1", body)));
+    verify(j).setDocumentDate(new java.text.SimpleDateFormat("yyyy-MM-dd").parse("2026-09-30"));
+  }
+
+  @Test
+  public void patchOnAProcessedJournalLeavesTheRecordAlone() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    org.openbravo.model.financialmgmt.gl.GLJournal j = journal(true);
+    doReturn(j).when(h).loadJournal("GL-1");
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "2026-09-30");
+    h.handle(patchContext("GL-1", body));
+    verify(j, never()).setDocumentDate(any());
+  }
+
+  @Test
+  public void patchWithAnUnparseableDateLeavesTheRecordAlone() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("accountingDate", "not-a-date");
+    h.handle(patchContext("GL-1", body));
+    verify(h, never()).loadJournal(any());
+  }
+
+  @Test
+  public void patchWithoutAccountingDateNeverLoadsTheRecord() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("description", "x");
+    h.handle(patchContext("GL-1", body));
+    verify(h, never()).loadJournal(any());
+  }
+
+  @Test
+  public void postMirrorsInTheBodyOnlyAndNeverLoadsARecord() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("multigeneralLedger", "Y");
+    body.put("accountingDate", "2026-09-30");
+    h.handle(crudContext("POST", body));
+    assertEquals("2026-09-30", body.getString("documentDate"));
+    verify(h, never()).loadJournal(any());
+  }
+
+  // ─── ETP-5611: currency is always the accounting schema currency ────────
+
+  private static VariablesSecureApp sessionWithSchema(String schemaId) {
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    if (schemaId != null) {
+      vars.setSessionValue("$C_AcctSchema_ID", schemaId);
+    }
+    return vars;
+  }
+
+  @Test
+  public void postForcesSchemaCurrencyOverAClientValue() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    doReturn(new String[] { "EUR-ID", "EUR" }).when(h).resolveSchemaCurrency("SCHEMA-1");
+    JSONObject body = new JSONObject();
+    body.put("currency", "USD-ID");
+    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(sessionWithSchema("SCHEMA-1"));
+      assertNull(h.handle(crudContext("POST", body)));
+    }
+    assertEquals("SCHEMA-1", body.getString("accountingSchema"));
+    assertEquals("EUR-ID", body.getString("currency"));
+  }
+
+  @Test
+  public void postUsesTheCurrencyOfAnExplicitAccountingSchema() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    doReturn(new String[] { "USD-ID", "USD" }).when(h).resolveSchemaCurrency("SCHEMA-US");
+    JSONObject body = new JSONObject();
+    body.put("accountingSchema", "SCHEMA-US");
+    assertNull(h.handle(crudContext("POST", body)));
+    assertEquals("SCHEMA-US", body.getString("accountingSchema"));
+    assertEquals("USD-ID", body.getString("currency"));
+  }
+
+  @Test
+  public void multiLedgerPostKeepsTheClientCurrency() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject body = new JSONObject();
+    body.put("multigeneralLedger", "Y");
+    body.put("currency", "USD-ID");
+    assertNull(h.handle(crudContext("POST", body)));
+    assertEquals("USD-ID", body.getString("currency"));
+    verify(h, never()).resolveSchemaCurrency(any());
+  }
+
+  private static NeoContext defaultsContext(JSONObject defaults) throws Exception {
+    JSONObject responseBody = new JSONObject();
+    responseBody.put("defaults", defaults);
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.DEFAULTS)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(responseBody))
+        .build();
+  }
+
+  @Test
+  public void defaultsShowTheSchemaCurrencyNotTheOrgCurrency() throws Exception {
+    // @C_Currency_ID@ resolves to the org currency first (LoginUtils); the form must show the
+    // schema currency the POST will persist.
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    doReturn(new String[] { "EUR-ID", "EUR" }).when(h).resolveSchemaCurrency("SCHEMA-1");
+    JSONObject defaults = new JSONObject();
+    defaults.put("currency", "ORG-CUR");
+    defaults.put("currency$_identifier", "ARS");
+    NeoResponse response;
+    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(sessionWithSchema("SCHEMA-1"));
+      response = h.afterHandle(defaultsContext(defaults));
+    }
+    assertNotNull(response);
+    JSONObject out = response.getBody().getJSONObject("defaults");
+    assertEquals("EUR-ID", out.getString("currency"));
+    assertEquals("EUR", out.getString("currency$_identifier"));
+  }
+
+  @Test
+  public void defaultsUntouchedWhenTheSessionHasNoSchema() throws Exception {
+    GlJournalHeaderHandler h = spy(new GlJournalHeaderHandler());
+    JSONObject defaults = new JSONObject();
+    defaults.put("currency", "ORG-CUR");
+    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(sessionWithSchema(null));
+      assertNull(h.afterHandle(defaultsContext(defaults)));
+    }
+    assertEquals("ORG-CUR", defaults.getString("currency"));
   }
 }

@@ -38,12 +38,12 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * The bank-statement actions an agent can run through {@code neo_action} (ETP-5447, ETP-5469).
+ * The bank-statement actions an agent can run through {@code etendo_action} (ETP-5447, ETP-5469).
  *
  * <p><b>Purely additive.</b> The SPA keeps calling {@code /sws/neo/bank-statements?action=…} — a
  * report-spec request whose context carries no endpoint type — and
  * {@link BankStatementsHandler#handle} only enters {@link #dispatch} for
- * {@code NeoEndpointType.ACTION}, which only {@code neo_action} produces for this spec. Every action
+ * {@code NeoEndpointType.ACTION}, which only {@code etendo_action} produces for this spec. Every action
  * here re-enters the SAME handler method the SPA route uses ({@code handleCreate},
  * {@code handleUpdate}, {@code handleProcess}, …), so the required header dates, the BSF document
  * type, the line amount rules, the draft / processed state machine, the PSD2 delete guard, the
@@ -139,7 +139,7 @@ final class BankStatementAgentActions {
   private static final String CONTENT_DESC = "The file content as standard base64 (RFC 4648 "
       + "alphabet with padding, no line breaks or whitespace). At most "
       + BankStatementAgentValidation.MAX_IMPORT_BYTES / 1024 + " KB of file content through this "
-      + "action; larger files must be imported from the Etendo GO UI.";
+      + "action; larger files must be imported from the Etendo UI.";
 
   /**
    * The declared actions, in presentation order: the reads first (list, lines, preview), then the
