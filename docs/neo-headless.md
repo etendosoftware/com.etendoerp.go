@@ -4439,7 +4439,7 @@ private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "
 
 **Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
 
-**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a THIRD pre-hook concern, `applyRoleFilter`, alongside the existing `excludeContactOnlyUsers` (ETP-5019) — both run unconditionally on every `user` list fetch, in `handle()`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
+**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a role filter, `buildRoleFilter`, alongside the existing contact-only exclusion `buildContactOnlyExclusion` (ETP-5019) — both are declared as `readPredicates` (ETP-5568; until then they were injected from `handle()` as `_neoWhere`, see below), so they apply to every `user` list read: list, count, paging, `?_distinct=` and MCP `neo_list`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
 
 | Query param | Meaning |
 |---|---|
@@ -4484,17 +4484,14 @@ and (e.defaultRole is null or e.defaultRole.id <> '<clientAdminRoleId>')
 already uses) and simply omitted from the predicate — never inlined as a literal `null` — when it
 cannot be resolved.
 
-**Injection mechanism and id sanitization.** Both predicates are injected as an HQL `_neoWhere`
-predicate (`NeoCrudHelper.NEO_WHERE_PARAM`, the exact same query-param mechanism
-`excludeContactOnlyUsers` already uses on this same list `GET`) — combined with any EXISTING
-`_neoWhere` predicate (from `excludeContactOnlyUsers` or elsewhere) via `and`, while `RoleIds` and
-`NoRole` combine with `or` BETWEEN themselves (two chips of the same multi-select filter, not two
-independent filters). `RoleFilterNegate`, when present, wraps that `or`-joined combination in one
-outer `not (...)` — applied AFTER the combination is built and BEFORE it is merged into any existing
-`_neoWhere` predicate.
+**Mechanism and id sanitization.** Both predicates are returned from
+`UserRoleAssignmentHandler#readPredicates` (§ "Read predicates", ETP-5009) — ANDed with the
+contact-only exclusion, while `RoleIds` and `NoRole` combine with `or` BETWEEN themselves (two chips
+of the same multi-select filter, not two independent filters). `RoleFilterNegate`, when present,
+wraps that `or`-joined combination in one outer `not (...)` — applied AFTER the combination is built
+and BEFORE it is ANDed with the other predicates.
 
-`NEO_WHERE_PARAM` has **no bind-parameter mechanism** — `NeoCrudHelper#buildWhereClause` splices the
-predicate string into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
+A read predicate has **no bind-parameter mechanism** — it is spliced into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
 therefore validated against `^[A-Fa-f0-9]{32}$` (`sanitizeRoleIds`, Etendo AD ids are 32 hex chars,
 case-insensitive) before being spliced in — an entry that doesn't match is logged at WARN and
 silently dropped rather than reaching the HQL string unescaped, so one malformed id in `RoleIds`
@@ -4503,16 +4500,27 @@ and needs no sanitization — it only decides whether to prepend the literal `"n
 parsed with the same strict `"true"`-only (case-insensitive), anything-else-is-absent convention
 `NoRole` already uses.
 
-**No-op contract.** `applyRoleFilter` returns immediately, touching nothing, when both `RoleIds` is
+**`_neoWhere` is gone (ETP-5568).** It was a query param that `NeoCrudHandler#applyWhereClause`
+ANDed verbatim into the list HQL. It was meant to be written only by hooks, but `buildDalParams`
+copies every query-string param, so any authenticated caller could append raw HQL to any REST list
+(subqueries included, so a boolean oracle over any table). Its one legitimate user was this handler;
+with both predicates moved to `readPredicates` nothing reads it any more. `buildDalParams` also drops
+`whereAndFilterClause` and `_where` from the query string — core reads both as raw HQL, and the
+first one used to pass straight through whenever NEO had no where clause of its own to set. The
+where clause of a REST read is now built only by the server: the tab where, the parent filter and
+the read predicates. A customization that needs to restrict a list declares `readPredicates`.
+
+**No-op contract.** `buildRoleFilter` declares no predicate when both `RoleIds` is
 empty/absent AND `NoRole` is absent — regardless of `RoleFilterNegate` (negating an empty/no-op
 filter would otherwise wrongly match every user). Every other `user` entity concern in this class
-(the invitation flow above, the write-path guards, `excludeContactOnlyUsers`) is unaffected — this
+(the invitation flow above, the write-path guards, the contact-only exclusion) is unaffected — this
 is purely additive to the list `GET` path.
 
-*As of this writing, `applyRoleFilter`/`sanitizeRoleIds`/`buildComposedOrDirectPredicate`/
-`buildNoRolePredicate` have no dedicated unit test in `UserRoleAssignmentHandlerTest` — this feature
-was verified live/manually against `localhost:3100` instead (see `etendo_schema_forge`'s
-`docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live verification performed").*
+*`UserRoleAssignmentHandlerTest` covers the predicates through `readPredicates` (`RoleIds`
+sanitization, `NoRole`, `RoleFilterNegate`, the contact-only exclusion and its owner literal) since
+ETP-5568. The original ETP-5188 rollout was verified live against `localhost:3100` (see
+`etendo_schema_forge`'s `docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live
+verification performed").*
 
 #### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
 
@@ -4557,7 +4565,7 @@ Each string is a complete HQL boolean expression over the alias `e`. `NeoReadPre
 
 | Read | Applied | Where |
 |---|---|---|
-| REST list `GET /sws/neo/{spec}/{entity}` (and its `totalRows`, paging, `export=csv\|xlsx`) | yes | `NeoCrudHandler#buildDalParams` → `applyWhereClause`, after the tab where, the parent filter and `_neoWhere` |
+| REST list `GET /sws/neo/{spec}/{entity}` (and its `totalRows`, paging, `export=csv\|xlsx`) | yes | `NeoCrudHandler#buildDalParams` → `applyWhereClause`, after the tab where and the parent filter |
 | REST `GET …?_distinct=<field>` (the filter-value picker) | yes | `NeoCrudHandler#handleDistinctFetch` |
 | MCP `neo_list` | yes | `McpToolRouter#handleList`, after the filters and the tab where |
 | Read by id (REST `GET …/{id}`, REST `GET …?id=<id>`, MCP `neo_get`) | **no** | core's `DefaultJsonDataService.fetch` resolves an id with its own `id = :bobId` query and ignores the where clause |
@@ -4570,7 +4578,7 @@ So there is no channel divergence to declare: list, count and distinct agree on 
 **Why the post-filter was wrong.** Core cuts the page (`LIMIT`/`OFFSET`) and counts `totalRows` before `afterHandle` sees the rows, so removing rows there returns short or empty pages and a wrong count. Worse, the `?_distinct=` fetch short-circuits in `handleWindowEntityCrud` and never reaches `afterHandle` at all, so it kept offering values only the hidden rows carried: the Product window's Categoría filter offered the internal "Discounts" category, and its Tipo filter offered "Servicio", both carried only by the hidden `ETGO_DTO` product — selecting either gave an empty grid. The distinct fetch still runs no pre/post hook; it applies the predicates only.
 
 **Contract.**
-- **Server-side constants only.** The predicate is spliced into the HQL text verbatim — there is no bind-parameter mechanism, the same limitation `_neoWhere` has (§5.3, ETP-5188). Never build one from request input; a value the server resolved itself must be shape-validated before it is inlined.
+- **Server-side constants only.** The predicate is spliced into the HQL text verbatim — there is no bind-parameter mechanism, (§5.3, ETP-5188). Never build one from request input; a value the server resolved itself must be shape-validated before it is inlined.
 - **Stateless.** It is resolved on its own instance through `NeoExtensionDispatcher.resolveOnly` (annotation first, `Java_Qualifier` second, the channel's own resolver), separately from the instance that runs `handle`/`afterHandle`. Per-request state set by those is not visible to it.
 - **Fails closed on a throwing predicate — but not on a failed resolution.** A `readPredicates` implementation that throws is not swallowed: the list answers 500 and `_distinct` answers 500 ("Failed to compute distinct values"), rather than silently returning the rows it was meant to hide. Resolving the customization is a different matter and **fails open**: on REST the `Java_Qualifier` fallback goes through `NeoServletSupport.lookupHandler`, which logs and returns `null` when no handler matches or the CDI lookup throws ("No NeoHandler found with @Named(...)" at WARN, "Failed to lookup handler with qualifier" at ERROR). A `null` customization declares no predicate, so the read proceeds unrestricted — the same outcome as an entity with no customization at all, and the same outcome `handle`/`afterHandle` already get from that lookup. Bind new read predicates with `@NeoExtension` (resolved by `NeoExtensionIndex` first) and watch for those log lines; a hidden row reappearing in a list is the symptom.
 - **Readable client/org filtering is untouched.** The predicate is ANDed onto whatever core and `OBQuery` already apply; it can only narrow a read.
