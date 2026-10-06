@@ -1192,6 +1192,13 @@ attachment is marked as the record's main document immediately after upload — 
 previously-marked attachment, same as the PATCH above. Returns `201` with
 `{ "name", "message", "id"?, "isMain"? }` (the last two only present when `markAsMain=true`).
 
+**The owning record must exist (ETP-5309).** After resolving the table and tab, and before the
+file is written to disk, the record is looked up by the table's DAL entity (admin mode, the same
+lookup the core attachment manager performs). A missing record — typically the SPA's unsaved
+literal id `new` — answers `404 Record '<id>' does not exist in table '<tableName>'. Save it
+before attaching files.` Previously it reached the core, whose `OBSecurityException` surfaced as a
+raw `500`.
+
 #### GET — Download a single attachment
 
 ```
