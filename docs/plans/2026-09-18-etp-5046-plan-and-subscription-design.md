@@ -433,11 +433,12 @@ on the row model, so the widened guard retires the marker next to a closed row t
 path cannot do this cleanup — it runs only when it opens a row — so **the retirement end state now
 depends on R37 running after R42** for every tenant (§8.2).
 
-The backfill half of `@check` (branch A) is unchanged and still keys on "no **open** row". The
+The backfill half of `@check` (branch A) kept "no **open** row" in ETP-5046, which left an
 accepted consequence: a tenant whose only subscription row is closed and that carries an active
-productive marker — R42 can produce exactly that — gets a fresh open `legacy-productive` row before
-its marker is retired. Unreachable while nothing writes `END_DATE`; ETP-5047 must re-check it before
-closing rows on cancel (`open-and-notable-topics.md` §5.13).
+productive marker — R42 can produce exactly that — would get a fresh open `legacy-productive` row
+before its marker is retired. ETP-5047, which closes rows on cancel and makes a closed row answer
+for its tenant, made that reachable and closed it: branch (A) and the `@apply` guards now require
+no **active** row, open or closed (`open-and-notable-topics.md` §5.13).
 
 The fleet therefore converges from both ends, and the preference stops being a parallel source of
 truth: **the product writes it only when the subscription write FAILED**, which is precisely the

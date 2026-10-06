@@ -51,8 +51,8 @@ import org.openbravo.test.base.OBBaseTest;
  * <p>The fix under test is
  * {@code schema_forge/cli/src/data-fixes/sql/20261005T180000Z__R37-tenant-subscription-backfill.sql}:
  * it gives every tenant that carries the legacy {@code AD_Preference ETGO_TenantPlan='productive'}
- * marker, but no open subscription, one open {@code ETGO_SUBSCRIPTION} row on the grandfathered
- * {@code legacy-productive} plan.
+ * marker, but no active subscription row (open or closed — ETP-5047), one open
+ * {@code ETGO_SUBSCRIPTION} row on the grandfathered {@code legacy-productive} plan.
  *
  * <p><b>Why the real file and not a paraphrase.</b> Everything that can go wrong with this fix is
  * a property of the statements as written. Re-running it must create zero additional rows —
@@ -786,37 +786,32 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   }
 
   /**
-   * <b>Pinned known edge — accepted risk, NOT desired behaviour.</b> A tenant whose only
-   * subscription row is closed but which carries an ACTIVE productive marker (the state R42 can
-   * produce once ETP-5047 closes rows on cancel) is backfilled with a fresh OPEN
-   * {@code legacy-productive} row before the marker is retired. Branch (A) is unchanged by the
-   * widening and keys on "no OPEN row", so it preserves the access the fallback gives the tenant
-   * today. Unreachable while nothing writes {@code END_DATE}; the SQL's header records it as the
-   * residual ETP-5047 must re-check before closing rows. If that fix changes this outcome, this
-   * spec is the one to update.
+   * ETP-5047 — a tenant whose only subscription row is closed (a cancel closes it) but which
+   * carries an ACTIVE productive marker, the state develop's R42 produces for a tenant that paid
+   * and canceled before its data-fix chain ran. The closed row answers for the tenant at runtime
+   * ({@code SubscriptionService#findLatest}), so it reads as canceled and the marker decides
+   * nothing. The backfill must not change that: before ETP-5047 narrowed branch (A) to "no active
+   * row", it inserted a fresh open {@code legacy-productive} row here and the canceled tenant read
+   * as paying again. Now only branch (B) applies — the marker is retired, nothing is inserted.
    */
   @Test
-  public void testKnownEdgeAnActiveMarkerNextToAClosedSubscriptionIsBackfilledAnOpenRow() {
+  public void testAnActiveMarkerNextToAClosedSubscriptionIsRetiredWithoutABackfill() {
     String tenant = createTenant("closed-active", true);
     createSubscription(tenant, true);
 
-    assertEquals(1, selectRows(substitute(checkSection, tenant)).size());
+    assertEquals("@check must select the marker for retirement", 1,
+        selectRows(substitute(checkSection, tenant)).size());
 
-    assertEquals("Known edge: branch (A) inserts a new open legacy-productive row", 1,
+    assertEquals("A closed row answers for the tenant: nothing may be inserted", 0,
         apply(tenant));
-    assertEquals("...and the marker is retired in the same transaction", 1,
-        lastRetiredPreferences);
+    assertEquals("...and the marker is retired", 1, lastRetiredPreferences);
     assertEquals(0L, rawPreferenceCount(tenant));
-    assertEquals("The closed row plus the backfilled open one", 2L, rawTotalCount(tenant));
-    assertEquals(1L, rawOpenCount(tenant));
-    assertEquals("The backfilled row is on the grandfathered plan", LEGACY_PLAN_VALUE,
-        uniqueResult("SELECT p.VALUE FROM ETGO_PLAN p JOIN ETGO_SUBSCRIPTION s "
-            + "ON s.ETGO_PLAN_ID = p.ETGO_PLAN_ID WHERE s.ENVIRONMENT_CLIENT_ID = :tenant "
-            + "AND s.END_DATE IS NULL", "tenant", tenant));
+    assertEquals("Only the closed row the tenant had", 1L, rawTotalCount(tenant));
+    assertEquals("And no open one appeared", 0L, rawOpenCount(tenant));
 
     assertEquals("A re-run inserts nothing", 0, apply(tenant));
     assertEquals("...and retires nothing", 0, lastRetiredPreferences);
-    assertEquals(0, selectRows(substitute(checkSection, tenant)).size());
+    assertEquals("@check converges", 0, selectRows(substitute(checkSection, tenant)).size());
   }
 
   // ---------------------------------------------------------------------------------------------

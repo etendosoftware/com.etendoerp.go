@@ -1012,17 +1012,21 @@ the R37 backfill always writes null.
 whatever its `STATUS` says, `findLatest` keeps a canceled tenant on the row route (never the
 preference fallback), and a later paid checkout opens a fresh row with its own price snapshot.
 
-**Closing on cancel also reopens an R37 edge (accepted risk, re-check before shipping it).** R37's
-backfill branch (A) still keys on "active productive marker AND no **open** row", while its
-retirement branch only needs *any* row (design doc §8). Develop's R42 can re-insert that marker for
-a paid-provisioned tenant regardless of its rows (§3.2). So a tenant whose **only** subscription row
-is closed, and whose chain then runs R42 → R37, gets the marker from R42 and then a **fresh open
-`legacy-productive` row** from R37 branch (A) before the marker is retired — a tenant that
-canceled can read as productive again. R42 skips tenants with a `REFUNDED`/`CANCELED`/`EXPIRED`
-checkout request or an `ETGO_SubscriptionStatus` other than `CURRENT`/`LEGACY_ENTITLEMENT`/`PAST_DUE`, which narrows the
-window but is not a guard on the subscription row. The edge is unreachable while nothing writes
-`END_DATE`; the ETP-5047 change that closes rows on cancel must re-check it (and, if reachable, ship
-a new dated fix — R37 and R42 cannot be edited once applied).
+**Closing on cancel reopened an R37 edge — closed in ETP-5047 by narrowing R37's backfill guard.**
+R37's backfill branch (A) keyed on "active productive marker AND no **open** row", while its
+retirement branch only needs *any* row (design doc §8). Develop's R42 re-inserts that marker for a
+paid-provisioned tenant regardless of its rows (§3.2), and a cancel on the row route changes neither
+the checkout request nor `ETGO_SubscriptionStatus`, so neither of R42's exclusions fires. A tenant
+that paid and canceled before its data-fix chain ran therefore got the marker from R42 and then a
+**fresh open `legacy-productive` row** (seeded `active`) from branch (A) — a canceled customer read
+as paying again. R37 has not reached a shared environment, so it was edited in place: branch (A)
+and the guards of `@apply` statements 1-2 now require **no active row, open or closed**
+(`isactive = 'Y'`, `END_DATE` ignored) — exactly the rows `findLatest` answers from, and the only
+case in which `resolvePlan` still consults the marker. Such a tenant takes branch (B) only: its
+marker is retired and nothing is inserted. The edit is safe in either release order: before this
+module's close-on-cancel deploys no tenant has a closed row, so the old text and the new give every
+tenant the same outcome. Pinned by
+`SubscriptionBackfillIdempotencyIntegrationTest#testAnActiveMarkerNextToAClosedSubscriptionIsRetiredWithoutABackfill`.
 
 **The trap: "open" ignores the dates.** `OPEN_ROW_PREDICATE` in `SubscriptionService` is
 `endDate is null and active = true`; the partial unique index `ETGO_SUB_OPEN_ENVCLIENT_UQ` uses the
