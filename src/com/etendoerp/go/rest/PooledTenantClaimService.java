@@ -16,6 +16,9 @@
  */
 package com.etendoerp.go.rest;
 
+import java.util.List;
+import java.util.UUID;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -37,9 +40,9 @@ import com.etendoerp.go.onboarding.pool.TenantPoolStore;
  * Hands a pre-provisioned tenant to an onboarding request (ETP-5389).
  *
  * <p>{@link #claim} answers {@code null} whenever the classic path must run instead — flag off,
- * a combination the pool does not build, a company name that already resolves to a client (resume
- * and name-collision handling stay where they are), an empty pool, or any failure while taking the
- * tenant. The caller then provisions from scratch exactly as before; the user sees a slower
+ * a combination the pool does not build, an empty pool, or any failure while taking the tenant.
+ * The servlet does not call it at all when the attempt left a half-built client to resume. The
+ * company name plays no part: it may match any other environment (ETP-5548). The caller then provisions from scratch exactly as before; the user sees a slower
  * onboarding, never an error the classic path would not have produced.
  *
  * <p>The claim runs inside the onboarding request's own DAL transaction. The pool row is taken with
@@ -50,14 +53,49 @@ import com.etendoerp.go.onboarding.pool.TenantPoolStore;
  * <p>What the claim applies is deliberately small — only what identifies the tenant as the
  * signup's: client name, organization name/value/SocialName, and the admin user (username,
  * display name, email, password, active). Owner marking, org info (tax id), the warehouse address,
- * the paid upgrade and the data transfer then run through the servlet's existing calls. Names
- * derived from the placeholder at provisioning time (role, trees, ledger, calendar) are NOT
- * renamed — see {@code docs/onboarding-flow.md}, "Tenant pool".
+ * the paid upgrade and the data transfer then run through the servlet's existing calls. The names
+ * the build derived from the placeholder (admin role, trees, ledger, chart of accounts, calendar)
+ * are rewritten to the company name too (ETP-5548) — see {@code docs/onboarding-flow.md},
+ * "Tenant pool".
  */
 public class PooledTenantClaimService {
 
   private static final Logger log = LogManager.getLogger(PooledTenantClaimService.class);
   private static final String PROGRESS_CLIENT = OnboardingProvisioningChain.PROGRESS_CLIENT;
+  private static final String COLUMN_NAME = "name";
+  private static final String COLUMN_DESCRIPTION = "description";
+
+  /**
+   * Every name the pool build derived from the {@code POOL-<id>} placeholder outside the client,
+   * organization and admin user (which {@link #personalize} sets directly), with the column
+   * lengths the rewrite is truncated to. The classic path reuses it for its provisioning name
+   * ({@code EtendoGoJwtServlet.applyRequestedClientName}), since both builds run the same chain.
+   * {@code CLIENT_NAME} is capped at 40 characters, so the longest derived name
+   * ("Arbol de cuentas " + name) fits; the truncation is only a guard.
+   */
+  static final List<String> PLACEHOLDER_DERIVED_NAME_UPDATES = List.of(
+      placeholderRewrite("ad_role", COLUMN_NAME, 60, COLUMN_DESCRIPTION, 255),
+      placeholderRewrite("ad_tree", COLUMN_NAME, 255, COLUMN_DESCRIPTION, 255),
+      placeholderRewrite("c_acctschema", COLUMN_NAME, 60, null, 0),
+      placeholderRewrite("c_element", COLUMN_NAME, 60, COLUMN_DESCRIPTION, 255),
+      placeholderRewrite("c_calendar", COLUMN_NAME, 60, null, 0));
+
+  private static String placeholderRewrite(String table, String nameColumn, int nameLength,
+      String descriptionColumn, int descriptionLength) {
+    StringBuilder sql = new StringBuilder("update ").append(table).append(" set ")
+        .append(rewrite(nameColumn, nameLength));
+    String match = "strpos(" + nameColumn + ", :placeholder) > 0";
+    if (descriptionColumn != null) {
+      sql.append(", ").append(rewrite(descriptionColumn, descriptionLength));
+      match = "(" + match + " or strpos(" + descriptionColumn + ", :placeholder) > 0)";
+    }
+    return sql.append(", updated = now() where ad_client_id = :clientId and ").append(match)
+        .toString();
+  }
+
+  private static String rewrite(String column, int length) {
+    return column + " = left(replace(" + column + ", :placeholder, :clientName), " + length + ")";
+  }
 
   TenantPoolStore store = new TenantPoolStore();
 
@@ -75,30 +113,72 @@ public class PooledTenantClaimService {
    * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
    */
   public String claim(OnboardingProgressSink sink, ClaimRequest request) {
-    if (!isEligible(request)) {
+    return claim(sink, request, UUID.randomUUID().toString());
+  }
+
+  /**
+   * Claims and personalizes a tenant while attaching a caller supplied correlation id to the
+   * performance log entries.
+   *
+   * @param sink progress sink used while personalizing the tenant
+   * @param request account and tenant data supplied by the signup request
+   * @param correlationId identifier shared by the claim and residual onboarding log entries
+   * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
+   */
+  public String claim(OnboardingProgressSink sink, ClaimRequest request, String correlationId) {
+    return claim(sink, request, correlationId, null, null);
+  }
+
+  /**
+   * Claims only the request's reserved tenant when a guarded local fixture is active; otherwise
+   * behaves as {@link #claim(OnboardingProgressSink, ClaimRequest, String)}.
+   *
+   * @param sink progress sink used while personalizing the tenant
+   * @param request account and tenant data supplied by the signup request
+   * @param correlationId identifier shared by the claim and residual onboarding log entries
+   * @param fixtureClientId tenant reserved by the local fixture, or blank for a regular claim
+   * @param fixtureRequestId fixture request that owns that reservation
+   * @return the claimed tenant's {@code AD_Client_ID}, or {@code null} to run the classic path
+   */
+  public String claim(OnboardingProgressSink sink, ClaimRequest request, String correlationId,
+      String fixtureClientId, String fixtureRequestId) {
+    boolean fixture = StringUtils.isNotBlank(fixtureClientId);
+    if (!fixture && !isEligible(request)) {
       return null;
     }
+    long claimStartedAt = System.nanoTime();
     TenantPoolStore.Claim claim;
     try {
-      claim = store.claimReady(OnboardingProvisioningChain.provisioningVersion());
+      long storeStartedAt = System.nanoTime();
+      claim = fixture ? store.lockFixture(fixtureClientId, fixtureRequestId)
+          : store.claimReady(OnboardingProvisioningChain.provisioningVersion());
+      log.info("[ONBOARDING-PERF] phase=pool_claim_store correlationId={} elapsedMs={}",
+          correlationId, elapsedMillis(storeStartedAt));
     } catch (RuntimeException e) {
       log.error("Could not read the tenant pool; onboarding falls back to the classic path", e);
       EtendoGoDalHelper.rollbackDalChanges("tenant pool claim", e, log);
+      if (fixture) throw new OBException("Could not lock the dedicated E2E fixture tenant", e);
       return null;
     }
     if (claim == null) {
-      log.info("Tenant pool is empty; onboarding '{}' takes the classic path",
-          request.clientName());
+      if (fixture) throw new OBException("Dedicated E2E fixture tenant is unavailable");
+      log.info("[ONBOARDING-PERF] phase=pool_claim outcome=empty mode=classic correlationId={} "
+          + "elapsedMs={}", correlationId, elapsedMillis(claimStartedAt));
       return null;
     }
     sink.progress(PROGRESS_CLIENT, OnboardingProvisioningChain.PROGRESS_IN_PROGRESS,
         "Preparing your environment: " + request.clientName() + "...");
     try {
+      long personalizeStartedAt = System.nanoTime();
       personalize(claim.clientId(), request);
+      log.info("[ONBOARDING-PERF] phase=pool_personalization mode=pool correlationId={} "
+          + "clientId={} poolRowId={} elapsedMs={}", correlationId, claim.clientId(),
+          claim.poolRowId(), elapsedMillis(personalizeStartedAt));
     } catch (RuntimeException e) {
       log.error("Claimed pooled tenant {} (pool row {}) could not be personalized; onboarding "
           + "falls back to the classic path", claim.clientId(), claim.poolRowId(), e);
       EtendoGoDalHelper.rollbackDalChanges("pooled tenant personalization", e, log);
+      if (fixture) throw new OBException("Could not personalize the dedicated E2E fixture tenant", e);
       retireBrokenTenantBestEffort(claim, e);
       return null;
     }
@@ -106,7 +186,14 @@ public class PooledTenantClaimService {
         "Client created successfully");
     log.info("Onboarding '{}' claimed pooled tenant {} (pool row {})", request.clientName(),
         claim.clientId(), claim.poolRowId());
+    log.info("[ONBOARDING-PERF] phase=pool_claim outcome=claimed mode=pool correlationId={} "
+        + "clientId={} poolRowId={} elapsedMs={}", correlationId, claim.clientId(),
+        claim.poolRowId(), elapsedMillis(claimStartedAt));
     return claim.clientId();
+  }
+
+  private static long elapsedMillis(long startedAt) {
+    return (System.nanoTime() - startedAt) / 1_000_000L;
   }
 
   /** The cheap checks, all before the pool is touched. */
@@ -114,16 +201,11 @@ public class PooledTenantClaimService {
     return isPoolEnabled(request.accountEmail())
         && TenantPoolConfig.supports(request.currencyIso(), request.countryCode(),
             request.language())
-        && !TenantPoolConfig.isPlaceholderName(request.clientName())
-        && findClientIdByName(request.clientName()) == null;
+        && !TenantPoolConfig.isPlaceholderName(request.clientName());
   }
 
   boolean isPoolEnabled(String accountEmail) {
     return TenantPoolConfig.isEnabled(accountEmail);
-  }
-
-  String findClientIdByName(String clientName) {
-    return EtendoGoJwtSupport.findClientIdByName(clientName);
   }
 
   /**
@@ -134,13 +216,21 @@ public class PooledTenantClaimService {
    * {@code applyClientAdminEmail} (ETP-5019) set.
    */
   void personalize(String clientId, ClaimRequest request) {
+    long personalizeStartedAt = System.nanoTime();
     String clientName = request.clientName();
+    long lookupClientStartedAt = System.nanoTime();
     Client client = OBDal.getInstance().get(Client.class, clientId);
+    long lookupClientElapsed = elapsedMillis(lookupClientStartedAt);
+    long lookupOrgStartedAt = System.nanoTime();
     Organization org = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
+    long lookupOrgElapsed = elapsedMillis(lookupOrgStartedAt);
+    long lookupAdminStartedAt = System.nanoTime();
     UserRoles adminRole = EtendoGoJwtDalHelper.findClientAdminUserRole(clientId);
+    long lookupAdminElapsed = elapsedMillis(lookupAdminStartedAt);
     if (client == null || org == null || adminRole == null) {
       throw new OBException("Pooled tenant " + clientId + " is incomplete");
     }
+    String placeholder = client.getName();
     client.setName(clientName);
     client.setSearchKey(clientName);
     client.setDescription(clientName);
@@ -162,7 +252,36 @@ public class PooledTenantClaimService {
     OBDal.getInstance().save(admin);
 
     applySignupAddress(org, request.address());
+    long beforeFlushElapsed = elapsedMillis(personalizeStartedAt);
+    long flushStartedAt = System.nanoTime();
     OBDal.getInstance().flush();
+    log.info("[ONBOARDING-PERF] phase=pool_personalization_detail clientId={} lookupClientMs={} "
+        + "lookupOrgMs={} lookupAdminMs={} beforeFlushMs={} flushMs={}", clientId,
+        lookupClientElapsed, lookupOrgElapsed, lookupAdminElapsed, beforeFlushElapsed,
+        elapsedMillis(flushStartedAt));
+    if (TenantPoolConfig.isPlaceholderName(placeholder)) {
+      renamePlaceholderDerivedNames(clientId, placeholder, clientName);
+    }
+  }
+
+  /**
+   * Rewrites the placeholder in the names {@link #PLACEHOLDER_DERIVED_NAME_UPDATES} lists, so the
+   * claimed tenant shows no {@code POOL-…} in its role, ledger, chart of accounts, calendar or trees.
+   * Native SQL on purpose: these rows are not loaded, and the 17 trees alone would cost a DAL round
+   * trip each. It runs in the claim's transaction, so a later failure rolls it back with the claim.
+   *
+   * @return rows rewritten
+   */
+  int renamePlaceholderDerivedNames(String clientId, String placeholder, String clientName) {
+    int rewritten = 0;
+    for (String sql : PLACEHOLDER_DERIVED_NAME_UPDATES) {
+      rewritten += OBDal.getInstance().getSession().createNativeQuery(sql)
+          .setParameter("placeholder", placeholder)
+          .setParameter("clientName", clientName)
+          .setParameter("clientId", clientId)
+          .executeUpdate();
+    }
+    return rewritten;
   }
 
   /**

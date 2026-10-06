@@ -42,9 +42,11 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
@@ -68,7 +70,60 @@ public class FinancialAccountCountrySupportTest {
     when(country.getIBANCode()).thenReturn(ibanCode);
     when(country.getIBANLength()).thenReturn(ibanLength);
     when(country.getName()).thenReturn(name);
+    // buildIbanRules serialises getIdentifier() (ETP-5579); an unstubbed mock returns null and
+    // Jettison's put(key, null) drops the key. Tests that need it to differ from the base name
+    // (the translated identifier) re-stub it.
+    when(country.getIdentifier()).thenReturn(name);
     return country;
+  }
+
+  /** A body run against a mocked DAL whose {@code createCriteria(Country.class)} is stubbed. */
+  @FunctionalInterface
+  private interface IbanRulesScenario {
+    void run(OBDal dal, MockedStatic<OBContext> obContext) throws JSONException;
+  }
+
+  /**
+   * Runs {@code scenario} with an empty {@code IBAN_RULES_CACHE}, {@code OBContext} statically
+   * mocked (each scenario picks the session language via {@link #stubLanguage}) and every
+   * {@code createCriteria(Country.class)} call listing {@code country}.
+   */
+  private static void withIbanCatalog(Country country, IbanRulesScenario scenario)
+      throws JSONException {
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(country));
+      scenario.run(dal, obContext);
+    } finally {
+      FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    }
+  }
+
+  /**
+   * Points {@code OBContext.getOBContext()} at a context whose language is {@code language};
+   * {@code null} leaves the context without a language (the {@code getLanguage() == null} case).
+   */
+  private static void stubLanguage(MockedStatic<OBContext> obContext, String language) {
+    OBContext ctx = mock(OBContext.class);
+    if (language != null) {
+      Language lang = mock(Language.class);
+      when(lang.getLanguage()).thenReturn(language);
+      when(ctx.getLanguage()).thenReturn(lang);
+    }
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+  }
+
+  /** The single rule's {@code name}, i.e. what the New Account country chip displays. */
+  private static String onlyRuleName() throws JSONException {
+    JSONArray rules = FinancialAccountCountrySupport.buildIbanRules();
+    assertEquals(1, rules.length());
+    return rules.getJSONObject(0).getString("name");
   }
 
   // ---------------------------------------------------------------------------
@@ -364,6 +419,75 @@ public class FinancialAccountCountrySupportTest {
       assertEquals(1, thirdResult.length());
       verify(dal, times(2)).createCriteria(Country.class);
     }
+  }
+
+  /**
+   * ETP-5579: the rule {@code name} is the country's identifier (resolved through
+   * {@code C_Country_Trl} in the OBContext language), never {@code getName()}, which is always
+   * the untranslated base name — the New Account chip showed "Spain" to an es_ES user.
+   */
+  @Test
+  public void buildIbanRulesEmitsTheTranslatedIdentifierNotTheBaseName() throws JSONException {
+    Country spain = countryWithIbanMeta("ES", "ES", 24, "Spain");
+    when(spain.getIdentifier()).thenReturn("España");
+
+    withIbanCatalog(spain, (dal, obContext) -> {
+      stubLanguage(obContext, "es_ES");
+      assertEquals("España", onlyRuleName());
+    });
+  }
+
+  /**
+   * ETP-5579: the catalog cache is keyed per language. An es_ES entry must not be served to an
+   * en_US user (and vice versa) — each language loads once, then repeats hit its own entry.
+   */
+  @Test
+  public void buildIbanRulesCachesOneEntryPerLanguage() throws JSONException {
+    Country spain = countryWithIbanMeta("ES", "ES", 24, "Spain");
+    // getIdentifier() follows the OBContext language: the first load runs under es_ES, the
+    // second under en_US.
+    when(spain.getIdentifier()).thenReturn("España", "Spain");
+
+    withIbanCatalog(spain, (dal, obContext) -> {
+      stubLanguage(obContext, "es_ES");
+      assertEquals("España", onlyRuleName());
+      stubLanguage(obContext, "en_US");
+      assertEquals("an en_US user never gets the cached es_ES name", "Spain", onlyRuleName());
+      verify(dal, times(2)).createCriteria(Country.class);
+
+      stubLanguage(obContext, "es_ES");
+      assertEquals("España", onlyRuleName());
+      stubLanguage(obContext, "en_US");
+      assertEquals("Spain", onlyRuleName());
+      verify(dal, times(2).description("repeats in a cached language are served from cache"))
+          .createCriteria(Country.class);
+    });
+  }
+
+  /**
+   * ETP-5579: with no OBContext, or one without a language, the key falls back to the
+   * language-less entry instead of throwing — and both cases share that one entry, separate from
+   * any real language's.
+   */
+  @Test
+  public void buildIbanRulesWithoutContextOrLanguageUsesTheLanguageLessEntry()
+      throws JSONException {
+    Country spain = countryWithIbanMeta("ES", "ES", 24, "Spain");
+
+    withIbanCatalog(spain, (dal, obContext) -> {
+      obContext.when(OBContext::getOBContext).thenReturn(null);
+      assertEquals("Spain", onlyRuleName());
+
+      stubLanguage(obContext, null);
+      assertEquals("Spain", onlyRuleName());
+      verify(dal, times(1).description("no context and no language share one cache entry"))
+          .createCriteria(Country.class);
+
+      stubLanguage(obContext, "es_ES");
+      onlyRuleName();
+      verify(dal, times(2).description("a real language does not reuse the language-less entry"))
+          .createCriteria(Country.class);
+    });
   }
 
   // ---------------------------------------------------------------------------

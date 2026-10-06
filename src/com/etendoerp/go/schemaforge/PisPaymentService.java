@@ -139,7 +139,7 @@ public final class PisPaymentService {
     try {
       OBContext.setAdminMode(true);
       try {
-        PisPayment pisPayment = OBDal.getInstance().get(PisPayment.class, pisPaymentId);
+        PisPayment pisPayment = TenantOwnership.loadOwned(PisPayment.class, pisPaymentId);
         if (pisPayment == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
         }
@@ -232,7 +232,7 @@ public final class PisPaymentService {
     try {
       OBContext.setAdminMode(true);
       try {
-        PisPayment pisPayment = OBDal.getInstance().get(PisPayment.class, pisPaymentId);
+        PisPayment pisPayment = TenantOwnership.loadOwned(PisPayment.class, pisPaymentId);
         if (pisPayment == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
         }
@@ -347,7 +347,7 @@ public final class PisPaymentService {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
         if (invoice == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
               PaymentRegistrationService.MSG_INVOICE_NOT_FOUND);

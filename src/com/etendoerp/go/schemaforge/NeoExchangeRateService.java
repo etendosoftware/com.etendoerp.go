@@ -77,38 +77,17 @@ class NeoExchangeRateService {
 
     try {
       java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
-
       Connection conn = OBDal.getInstance().getConnection();
 
       // Resolve ISO codes or DB IDs to canonical DB record IDs
       String fromCurrencyId = resolveToDbId(fromParam, conn);
       String toCurrencyId   = resolveToDbId(toParam, conn);
 
-      if (fromCurrencyId.equals(toCurrencyId)) {
-        JSONObject body = new JSONObject();
-        body.put(FIELD_HAS_RATE, true);
-        body.put("rate", 1.0);
-        return NeoResponse.ok(body);
-      }
-
-      // Try direct rate first; fall back to the inverse direction.
-      // Mirrors standard Etendo behaviour: configuring EUR→USD at X implicitly
-      // covers USD→EUR at 1/X — callers need only register one direction.
-      Double directRate  = queryRate(conn, fromCurrencyId, toCurrencyId, clientId, orgId, localDate);
-      if (directRate != null) {
-        JSONObject body = new JSONObject();
-        body.put(FIELD_HAS_RATE, true);
-        body.put("rate", directRate);
-        return NeoResponse.ok(body);
-      }
-
-      Double inverseRate = queryRate(conn, toCurrencyId, fromCurrencyId, clientId, orgId, localDate);
+      Double rate = rate(fromCurrencyId, toCurrencyId, localDate);
       JSONObject body = new JSONObject();
-      if (inverseRate != null) {
+      if (rate != null) {
         body.put(FIELD_HAS_RATE, true);
-        body.put("rate", inverseRate != 0 ? 1.0 / inverseRate : 0);
+        body.put("rate", rate);
       } else {
         body.put(FIELD_HAS_RATE, false);
       }
@@ -117,6 +96,52 @@ class NeoExchangeRateService {
       log.warn("[ETP-4027] validate-exchange-rate failed: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Internal error checking exchange rate");
     }
+  }
+
+  /**
+   * The rate {@code validate-exchange-rate} answers for {@code from → to} on {@code date}: 1 for
+   * the same currency, else the direct rate, else the inverse of the reverse rate (configuring
+   * EUR→USD at X implicitly covers USD→EUR at 1/X — callers need only register one direction).
+   * Client-or-system scoped, for the session's organization. Shared with the funds-transfer agent
+   * action (ETP-5558), which prefills the rate exactly as the SPA's transfer modal does.
+   *
+   * @param fromCurrencyId source currency record id
+   * @param toCurrencyId   target currency record id
+   * @param date           the rate date
+   * @return the rate, or {@code null} when there is none
+   * @throws java.sql.SQLException if the lookup fails
+   */
+  static Double rate(String fromCurrencyId, String toCurrencyId, java.time.LocalDate date)
+      throws java.sql.SQLException {
+    return rate(fromCurrencyId, toCurrencyId, date,
+        OBContext.getOBContext().getCurrentOrganization().getId());
+  }
+
+  /**
+   * {@link #rate(String, String, java.time.LocalDate)} for a given organization instead of the
+   * session's (ETP-5558): the lookup admits the rates of organization {@code 0} and of {@code
+   * orgId}, so whose organization it is decides which organization-specific rates are eligible.
+   * The funds-transfer agent action asks with the SOURCE account's organization; the endpoint, and
+   * the SPA modal that calls it, keep the session's.
+   *
+   * @param orgId the organization whose rates are admitted next to organization {@code 0}
+   */
+  static Double rate(String fromCurrencyId, String toCurrencyId, java.time.LocalDate date,
+      String orgId) throws java.sql.SQLException {
+    if (fromCurrencyId.equals(toCurrencyId)) {
+      return 1.0;
+    }
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    Connection conn = OBDal.getInstance().getConnection();
+    Double directRate = queryRate(conn, fromCurrencyId, toCurrencyId, clientId, orgId, date);
+    if (directRate != null) {
+      return directRate;
+    }
+    Double inverseRate = queryRate(conn, toCurrencyId, fromCurrencyId, clientId, orgId, date);
+    if (inverseRate == null) {
+      return null;
+    }
+    return inverseRate != 0 ? 1.0 / inverseRate : 0;
   }
 
   /**

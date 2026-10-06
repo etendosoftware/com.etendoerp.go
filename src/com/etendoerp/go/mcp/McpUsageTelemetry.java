@@ -90,7 +90,35 @@ final class McpUsageTelemetry {
    */
   private static final ThreadLocal<String> CURRENT_SESSION = new ThreadLocal<>();
 
+  /**
+   * The tenant the tool call on this thread actually ran under (ETP-5594). An MCP token commonly
+   * carries the wildcard client and org {@code "0"}; {@link McpSessionManager#executeInContext}
+   * resolves them to the role's client and first transactional org before building the
+   * {@code OBContext}, and binds the result here so the usage row records the same tenant instead
+   * of {@code "0"}. Bound by the session manager, cleared by {@link McpServlet#doPost} in a
+   * {@code finally} for the same pooled-thread reason as {@link #CURRENT_SESSION}.
+   */
+  private static final ThreadLocal<Tenant> CURRENT_TENANT = new ThreadLocal<>();
+
   private McpUsageTelemetry() {
+  }
+
+  /** Bind the effective client/org the current call runs under. Never throws. */
+  static void setCurrentTenant(String clientId, String orgId) {
+    CURRENT_TENANT.set(new Tenant(clientId, orgId));
+  }
+
+  /** Unbind the effective tenant. Must run in a {@code finally} — the servlet thread is pooled. */
+  static void clearCurrentTenant() {
+    CURRENT_TENANT.remove();
+  }
+
+  /**
+   * @return the effective tenant bound on this thread, or null when the request never entered
+   *     {@link McpSessionManager#executeInContext}
+   */
+  static Tenant currentTenant() {
+    return CURRENT_TENANT.get();
   }
 
   /** Bind the session key for the duration of this request. */
@@ -281,6 +309,26 @@ final class McpUsageTelemetry {
     } catch (Exception e) {
       log.debug("Could not read the error code off an MCP tool result.", e);
       return null;
+    }
+  }
+
+  /** The client and org a tool call ran under, as resolved by {@link McpSessionManager}. */
+  static final class Tenant {
+
+    private final String clientId;
+    private final String orgId;
+
+    Tenant(String clientId, String orgId) {
+      this.clientId = clientId;
+      this.orgId = orgId;
+    }
+
+    String getClientId() {
+      return clientId;
+    }
+
+    String getOrgId() {
+      return orgId;
     }
   }
 

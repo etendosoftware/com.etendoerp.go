@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -57,6 +58,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -65,6 +68,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
@@ -109,6 +113,9 @@ public class FinancialAccountsPageHandlerTest {
   private static final String TOTAL_ISO = "totalBalanceCurrencyIso";
   private static final String TOTAL_APPROXIMATE = "totalBalanceApproximate";
   private static final String MISSING_RATE = "missingRateCurrencies";
+
+  /** The GO locale loadAccounts() reads off the OBContext to localize the country (ETP-5579). */
+  private static final String GO_LANGUAGE = "es_ES";
 
   private FinancialAccountsPageHandler handler;
 
@@ -887,17 +894,11 @@ public class FinancialAccountsPageHandlerTest {
     // Column 11 (em_psd2_connection_status): first connected ('CO'), second pending ('IN').
     when(rs.getString(11)).thenReturn("CO", "IN");
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(2, rows.size());
-      assertTrue("'CO' maps to bankConnected=true", rows.get(0).bankConnected);
-      assertFalse("non-'CO' maps to bankConnected=false", rows.get(1).bankConnected);
-    }
+    assertEquals(2, rows.size());
+    assertTrue("'CO' maps to bankConnected=true", rows.get(0).bankConnected);
+    assertFalse("non-'CO' maps to bankConnected=false", rows.get(1).bankConnected);
   }
 
   /**
@@ -925,17 +926,11 @@ public class FinancialAccountsPageHandlerTest {
     // Column 17 (prov.logo_url): first has a logo, second's provider row has none (SQL NULL).
     when(rs.getString(17)).thenReturn("https://cdn.saltedge.com/bank_icons/bbva.png", null);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(2, rows.size());
-      assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", rows.get(0).providerLogoUrl);
-      assertEquals("", rows.get(1).providerLogoUrl);
-    }
+    assertEquals(2, rows.size());
+    assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", rows.get(0).providerLogoUrl);
+    assertEquals("", rows.get(1).providerLogoUrl);
   }
 
   /**
@@ -966,19 +961,13 @@ public class FinancialAccountsPageHandlerTest {
     // Column 13: amountTolerance = 2.50 (non-default)
     when(rs.getBigDecimal(13)).thenReturn(new BigDecimal("2.50"));
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(1, rows.size());
-      AccountRow row = rows.get(0);
-      assertEquals("dateTolerance column 12 read correctly", 5, row.dateTolerance);
-      assertEquals("amountTolerance column 13 read correctly",
-          0, new BigDecimal("2.50").compareTo(row.amountTolerance));
-    }
+    assertEquals(1, rows.size());
+    AccountRow row = rows.get(0);
+    assertEquals("dateTolerance column 12 read correctly", 5, row.dateTolerance);
+    assertEquals("amountTolerance column 13 read correctly",
+        0, new BigDecimal("2.50").compareTo(row.amountTolerance));
   }
 
   /**
@@ -1008,19 +997,13 @@ public class FinancialAccountsPageHandlerTest {
     when(rs.getString(14)).thenReturn("gli-diff-1", "");
     when(rs.getString(15)).thenReturn("Diferencias de caja", "");
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(2, rows.size());
-      assertEquals("gli-diff-1", rows.get(0).glItemDifferenceId);
-      assertEquals("Diferencias de caja", rows.get(0).glItemDifferenceName);
-      assertEquals("", rows.get(1).glItemDifferenceId);
-      assertEquals("", rows.get(1).glItemDifferenceName);
-    }
+    assertEquals(2, rows.size());
+    assertEquals("gli-diff-1", rows.get(0).glItemDifferenceId);
+    assertEquals("Diferencias de caja", rows.get(0).glItemDifferenceName);
+    assertEquals("", rows.get(1).glItemDifferenceId);
+    assertEquals("", rows.get(1).glItemDifferenceName);
   }
 
   /**
@@ -1203,7 +1186,8 @@ public class FinancialAccountsPageHandlerTest {
    * Verifies that {@code loadAccounts} maps every column of the result set
    * into an {@link AccountRow} fixture: id, name, type, balance, currency,
    * IBAN and the {@code isDefault} flag are read in the expected positions
-   * and the SQL bind parameters are set with the client id and the org array.
+   * and the SQL bind parameters are set with the GO language (the c_country_trl
+   * join, ETP-5579), the client id and the org array.
    *
    * @throws Exception
    *     if the mocked JDBC chain fails
@@ -1235,7 +1219,9 @@ public class FinancialAccountsPageHandlerTest {
     // (e.g. a Cash account, or a Bank account never given one).
     when(rs.getString(19)).thenReturn("106", null);
     when(rs.getString(20)).thenReturn("ES", null);
-    when(rs.getString(21)).thenReturn("Spain", null);
+    // Column 21 is COALESCE(ctryt.name, ctry.name) (ETP-5579): the c_country_trl name in the GO
+    // language, so an es_ES user gets "España", not c_country's English "Spain".
+    when(rs.getString(21)).thenReturn("España", null);
     // Column 22: EM_ETGO_Pending_Count, the stored computed column, appended after the
     // ETP-4896 country block for the same reason — every column here is read BY POSITION.
     // COALESCEd in the SQL, so getInt never sees a NULL.
@@ -1244,45 +1230,40 @@ public class FinancialAccountsPageHandlerTest {
     // reason. First row has a BIC, second has none (a Cash account, or a Bank account without one).
     when(rs.getString(23)).thenReturn("BBVAESMM", null);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
+    assertEquals(2, rows.size());
+    AccountRow first = rows.get(0);
+    assertEquals("acc-1", first.id);
+    assertEquals("BBVA", first.name);
+    assertEquals("B", first.type);
+    assertEquals(0, new BigDecimal("1500.00").compareTo(first.currentBalance));
+    assertEquals("EUR", first.currency.iso);
+    assertTrue("first row is default", first.isDefault);
 
-      assertEquals(2, rows.size());
-      AccountRow first = rows.get(0);
-      assertEquals("acc-1", first.id);
-      assertEquals("BBVA", first.name);
-      assertEquals("B", first.type);
-      assertEquals(0, new BigDecimal("1500.00").compareTo(first.currentBalance));
-      assertEquals("EUR", first.currency.iso);
-      assertTrue("first row is default", first.isDefault);
+    assertTrue("first row maps column 9 'Y' to active", first.active);
+    assertNotNull("first row maps columns 19-21 into a CountryRef", first.country);
+    assertEquals("106", first.country.id);
+    assertEquals("ES", first.country.iso);
+    assertEquals("España", first.country.name);
+    assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
+    assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
 
-      assertTrue("first row maps column 9 'Y' to active", first.active);
-      assertNotNull("first row maps columns 19-21 into a CountryRef", first.country);
-      assertEquals("106", first.country.id);
-      assertEquals("ES", first.country.iso);
-      assertEquals("Spain", first.country.name);
-      assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
-      assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
+    AccountRow second = rows.get(1);
+    assertEquals("acc-2", second.id);
+    assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
+    assertFalse("second row is not default", second.isDefault);
+    assertFalse("second row maps column 9 'N' to inactive", second.active);
+    assertNull("a null column 19 (no C_Country_ID) leaves row.country null, not a CountryRef "
+        + "full of blanks", second.country);
+    assertEquals("a zero column 22 is a real zero, not a missing value", 0,
+        second.pendingCount);
+    assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
+        "", second.swiftCode);
 
-      AccountRow second = rows.get(1);
-      assertEquals("acc-2", second.id);
-      assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
-      assertFalse("second row is not default", second.isDefault);
-      assertFalse("second row maps column 9 'N' to inactive", second.active);
-      assertNull("a null column 19 (no C_Country_ID) leaves row.country null, not a CountryRef "
-          + "full of blanks", second.country);
-      assertEquals("a zero column 22 is a real zero, not a missing value", 0,
-          second.pendingCount);
-      assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
-          "", second.swiftCode);
-
-      verify(ps).setString(1, CLIENT_ID);
-      verify(ps).setArray(2, orgArray);
-    }
+    verify(ps).setString(1, GO_LANGUAGE);
+    verify(ps).setString(2, CLIENT_ID);
+    verify(ps).setArray(3, orgArray);
   }
 
   /**
@@ -1303,14 +1284,122 @@ public class FinancialAccountsPageHandlerTest {
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(false);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
+
+    assertTrue("expected empty list", rows.isEmpty());
+  }
+
+  /**
+   * Guards the SQL shape of the ETP-5579 fix: the País column is read through a
+   * {@code c_country_trl} LEFT JOIN on the GO language with a fallback to the base
+   * {@code c_country.name}, and that join's {@code ?} is the FIRST placeholder — so the language
+   * must be bound at index 1, before the client id (2) and the org array (3). Binding in the old
+   * order would compare {@code ad_language} against the client id and silently fall back to the
+   * English name for every row, with no error anywhere.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsJoinsCountryTranslationAndBindsLanguageFirst() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    Array orgArray = mock(Array.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+
+    when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    loadAccountsWithGoLanguage(conn);
+
+    String sql = sqlCaptor.getValue();
+    assertTrue("selects the translated name with a fallback to the base name",
+        sql.contains("COALESCE(ctryt.name, ctry.name)"));
+    assertFalse("no longer selects the untranslated c_country.name directly",
+        sql.contains("ctry.countrycode, ctry.name,"));
+    assertTrue("LEFT JOINs c_country_trl on the country",
+        sql.contains("LEFT JOIN c_country_trl ctryt ON ctryt.c_country_id = ctry.c_country_id"));
+    int languagePlaceholder = sql.indexOf("ctryt.ad_language = ?");
+    assertTrue("filters the translation row by a bound ad_language", languagePlaceholder >= 0);
+    assertTrue("the language join sits before the WHERE clause",
+        languagePlaceholder < sql.indexOf(" WHERE "));
+    assertEquals("the ad_language '?' is the first placeholder of the statement",
+        languagePlaceholder + "ctryt.ad_language = ".length(), sql.indexOf('?'));
+
+    InOrder binds = inOrder(ps);
+    binds.verify(ps).setString(1, GO_LANGUAGE);
+    binds.verify(ps).setString(2, CLIENT_ID);
+    binds.verify(ps).setArray(3, orgArray);
+    binds.verify(ps).executeQuery();
+  }
+
+  /**
+   * End-to-end over the loader and the serialiser (ETP-5579): the translated name returned in
+   * column 21 ("España") reaches {@link FinancialAccountsPageHandler.CountryRef#name} and is what
+   * the list's {@code countryName} key carries, while an account without a country in the same
+   * result set still serialises {@code countryName} as {@code ""}.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain or the JSON traversal fails
+   */
+  @Test
+  public void testLoadAccountsTranslatedCountryNameReachesSerialisedCountryName()
+      throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-bank", "acc-cash");
+    when(rs.getString(19)).thenReturn("106", null);
+    when(rs.getString(20)).thenReturn("ES", null);
+    when(rs.getString(21)).thenReturn("España", null);
+
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
+
+    assertEquals("España", rows.get(0).country.name);
+    JSONArray arr = handler.buildAccountsArray(rows, Collections.emptySet());
+    assertEquals(2, arr.length());
+    assertEquals("106", arr.getJSONObject(0).getString("countryId"));
+    assertEquals("ES", arr.getJSONObject(0).getString("countryIso"));
+    assertEquals("the País column receives the GO-language name", "España",
+        arr.getJSONObject(0).getString("countryName"));
+    assertEquals("an account with no country still serialises countryName as \"\"", "",
+        arr.getJSONObject(1).getString("countryName"));
+  }
+
+  /**
+   * Runs the real {@code loadAccounts()} over the given mocked connection, with
+   * {@code OBDal.getInstance().getConnection()} returning it and
+   * {@code OBContext.getOBContext().getLanguage().getLanguage()} returning {@link #GO_LANGUAGE}
+   * — the language the c_country_trl join is bound to (ETP-5579). Without the OBContext stub the
+   * loader NPEs before preparing the statement.
+   *
+   * @param conn
+   *     the mocked JDBC connection the loader prepares {@code ACCOUNTS_SQL} on
+   * @return the rows the loader mapped
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  private List<AccountRow> loadAccountsWithGoLanguage(Connection conn) throws Exception {
+    OBContext obContext = mock(OBContext.class);
+    Language language = mock(Language.class);
+    when(language.getLanguage()).thenReturn(GO_LANGUAGE);
+    when(obContext.getLanguage()).thenReturn(language);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
-
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertTrue("expected empty list", rows.isEmpty());
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      return handler.loadAccounts(CLIENT_ID, ORGS);
     }
   }
 
