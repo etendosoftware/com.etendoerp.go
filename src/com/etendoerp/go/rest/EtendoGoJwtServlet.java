@@ -2239,7 +2239,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       String sessionToken = generateToken();
       // Commits the password together with the rotation above.
-      EtendoGoJwtDalHelper.changePassword(account, hashPassword(newPassword), sessionToken,
+      EtendoGoJwtDalHelper.changePassword(account, PasswordHasher.hash(newPassword), sessionToken,
           new Date());
       if (rotated != null) {
         // Already committed by changePassword; this keeps every session cookie behind a commit.
