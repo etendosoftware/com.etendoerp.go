@@ -556,6 +556,20 @@ public class DocumentPostingService {
    */
   private static final String MSG_OTHER_POSTING_PROCESS_ACTIVE = "OtherPostingProcessActive";
 
+  /**
+   * {@code OBMessageUtils.messageBD(key)} in the {@link OBContext} (GO) language, or {@code null}
+   * when there is no context or no language (ETP-5529): {@code messageBD} dereferences the language
+   * unguarded, so a background caller would otherwise turn a known posting failure into a
+   * {@code NullPointerException} message. Callers treat {@code null} as "keep core's text".
+   */
+  private static String localizedMessage(String messageKey) {
+    OBContext ctx = OBContext.getOBContext();
+    if (ctx == null || ctx.getLanguage() == null) {
+      return null;
+    }
+    return OBMessageUtils.messageBD(messageKey);
+  }
+
   private static String errorMessageOf(AcctServer acct) {
     OBError result = acct.getMessageResult();
     String message = (result != null && result.getMessage() != null && !result.getMessage().isEmpty())
@@ -572,7 +586,7 @@ public class DocumentPostingService {
     // language like the rest of this file's own enrichment messages. Any other status keeps
     // core's text as-is.
     if (AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
-      String localizedBase = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BASE);
+      String localizedBase = localizedMessage(MSG_INVALID_ACCOUNT_BASE);
       if (StringUtils.isNotBlank(localizedBase)) {
         message = localizedBase;
       }
@@ -580,7 +594,7 @@ public class DocumentPostingService {
     // ETP-5529: a document another posting process holds (or whose Processing lock AcctServer
     // could not take) — "This record is being posted by another process".
     if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
-      String localizedLocked = OBMessageUtils.messageBD(MSG_OTHER_POSTING_PROCESS_ACTIVE);
+      String localizedLocked = localizedMessage(MSG_OTHER_POSTING_PROCESS_ACTIVE);
       if (StringUtils.isNotBlank(localizedLocked)) {
         message = localizedLocked;
       }
@@ -590,7 +604,7 @@ public class DocumentPostingService {
     // second hardcoded message.
     if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
         && TABLE_M_MOVEMENT.equals(acct.tableName)) {
-      String localizedNotCalculated = OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST);
+      String localizedNotCalculated = localizedMessage(MSG_NOT_CALCULATED_COST);
       if (StringUtils.isNotBlank(localizedNotCalculated)) {
         message = localizedNotCalculated;
       }
