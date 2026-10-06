@@ -547,24 +547,42 @@ public class DocumentPostingService {
    */
   private static final String MSG_INVALID_ACCOUNT_BASE = "InvalidAccount";
 
+  /**
+   * {@code AD_MESSAGE.VALUE} core resolves for {@code STATUS_DocumentLocked} (ETP-5529) — confirmed
+   * against {@code AD_MESSAGE_ID = E2670BE243274B3CBAF627D17B0696D9} in core Etendo's
+   * {@code AD_MESSAGE.xml} ("This record is being posted by another process"). Re-resolved in the
+   * GO locale by {@link #errorMessageOf} and sent as the failure's {@code messageKeys} so the SPA
+   * renders it in its own locale.
+   */
+  private static final String MSG_OTHER_POSTING_PROCESS_ACTIVE = "OtherPostingProcessActive";
+
   private static String errorMessageOf(AcctServer acct) {
     OBError result = acct.getMessageResult();
     String message = (result != null && result.getMessage() != null && !result.getMessage().isEmpty())
         ? result.getMessage()
         : "Posting failed";
-    // ETP-5175: core's AcctServer.setMessageResult always re-derives the message language from
-    // the classic HttpServletRequest/session (see AcctServer.java — it never reads the GO locale
-    // NeoAuthenticator/NeoLanguage apply to OBContext for a NEO request, because a NEO request
-    // always has an active HttpServletRequest and so always takes that branch), so the base
-    // "InvalidAccount" text is permanently baked in the wrong language before we ever see it here.
-    // Re-resolve it ourselves in the GO locale for this one known status — no core change needed,
-    // OBMessageUtils.messageBD already follows OBContext's language like the rest of this file's
-    // own enrichment messages (MSG_INVALID_ACCOUNT_BP_AND_GROUP, etc.). Every other status already
-    // carries its own correctly-derived message from core and is left untouched.
+    // ETP-5175: core's AcctServer.setMessageResult re-derives the message language from the
+    // classic HttpServletRequest/session, never from the GO locale NeoAuthenticator/NeoLanguage
+    // apply to OBContext (a NEO request always has an HttpServletRequest, so it always takes that
+    // branch). Even the overload that takes our VariablesSecureApp — setMessageResult(conn, vars,
+    // status, type), used for a locked document and for the generic per-status fallback —
+    // discards those vars and delegates to the session one (ETP-5529, confirmed live). So the
+    // text is baked in the wrong language before we see it here; re-resolve it ourselves in the
+    // GO locale for the statuses we know — OBMessageUtils.messageBD already follows OBContext's
+    // language like the rest of this file's own enrichment messages. Any other status keeps
+    // core's text as-is.
     if (AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       String localizedBase = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BASE);
       if (StringUtils.isNotBlank(localizedBase)) {
         message = localizedBase;
+      }
+    }
+    // ETP-5529: a document another posting process holds (or whose Processing lock AcctServer
+    // could not take) — "This record is being posted by another process".
+    if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
+      String localizedLocked = OBMessageUtils.messageBD(MSG_OTHER_POSTING_PROCESS_ACTIVE);
+      if (StringUtils.isNotBlank(localizedLocked)) {
+        message = localizedLocked;
       }
     }
     // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
@@ -582,7 +600,8 @@ public class DocumentPostingService {
 
   /**
    * Failure result for a failed {@code acct.post()}. Every status keeps core's (re-localized, see
-   * {@link #errorMessageOf}) message and no identity, except {@code STATUS_InvalidAccount}: core's
+   * {@link #errorMessageOf}) message and no identity, except {@code STATUS_DocumentLocked}, which
+   * names {@code OtherPostingProcessActive} (ETP-5529), and {@code STATUS_InvalidAccount}: core's
    * accounting engine does not always say which entity caused that failure — {@code
    * DocInOut#createFact} (and other {@code Doc*} subclasses) can leave an account null and fall
    * through to {@code AcctServer#post}'s generic {@code setMessageResult(conn, vars, getStatus(),
@@ -603,6 +622,9 @@ public class DocumentPostingService {
    */
   private static PostResult failureOf(AcctServer acct) {
     String message = errorMessageOf(acct);
+    if (AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())) {
+      return new PostResult(false, message, List.of(MSG_OTHER_POSTING_PROCESS_ACTIVE));
+    }
     if (!AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       return new PostResult(false, message);
     }

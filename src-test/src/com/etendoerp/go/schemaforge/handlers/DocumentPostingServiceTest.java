@@ -86,6 +86,8 @@ import org.openbravo.model.ad.ui.Tab;
  * database. To keep these tests DB-free while genuinely exercising the post/commit/rollback logic,
  * the tests drive the package-private seam {@code post(String, String, ConnectionProvider)} with a
  * mocked {@link ConnectionProvider}. The public API stays exactly as specified.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.DocumentPostingService
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class DocumentPostingServiceTest {
@@ -171,6 +173,123 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
     }
+  }
+
+  /**
+   * ETP-5529: a document another posting process holds ({@code STATUS_DocumentLocked}). Core bakes
+   * {@code @OtherPostingProcessActive@} in the classic-session language — its
+   * {@code setMessageResult(conn, vars, status, type)} overload discards the vars it is handed —
+   * so the text is re-resolved in the GO locale, and the failure names its identity so the SPA
+   * can render it in its own locale.
+   */
+  @Test
+  public void postReLocalizesLockedDocumentMessageAndSendsItsKey() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubLockedAcctServer();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("OtherPostingProcessActive"))
+          .thenReturn("Este registro está siendo contabilizado por otro proceso");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Este registro está siendo contabilizado por otro proceso", r.message());
+      assertEquals(List.of("OtherPostingProcessActive"), r.messageKeys());
+      assertTrue(r.messageParams().isEmpty());
+      verify(conn).releaseRollbackConnection(con);
+    }
+  }
+
+  /**
+   * ETP-5529: when the GO-locale lookup yields nothing, the locked-document failure keeps core's
+   * own text (never an empty message) and still names its identity.
+   */
+  @Test
+  public void postKeepsCoreLockedMessageWhenLocalizedLookupIsBlank() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubLockedAcctServer();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("OtherPostingProcessActive")).thenReturn("");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("This record is being posted by another process", r.message());
+      assertEquals(List.of("OtherPostingProcessActive"), r.messageKeys());
+    }
+  }
+
+  /**
+   * ETP-5529: only the statuses {@code failureOf} knows name an identity — a generic
+   * {@code STATUS_Error} failure keeps core's text and sends no {@code messageKeys}, so the
+   * locked-document key can never leak onto an unrelated failure.
+   */
+  @Test
+  public void postSendsNoMessageKeysForGenericErrorStatus() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_Error);
+    OBError err = new OBError();
+    err.setMessage("Process failed during execution");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Process failed during execution", r.message());
+      assertTrue(r.messageKeys().isEmpty());
+      assertTrue(r.messageParams().isEmpty());
+    }
+  }
+
+  /** An {@code AcctServer} mock whose post fails on the Processing lock, with core's English text. */
+  private static AcctServer stubLockedAcctServer() throws Exception {
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(false);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentLocked);
+    OBError err = new OBError();
+    err.setMessage("This record is being posted by another process");
+    when(acct.getMessageResult()).thenReturn(err);
+    return acct;
   }
 
   /**
