@@ -94,6 +94,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * @covers com.etendoerp.go.mcp.McpToolRouter
  * @covers com.etendoerp.go.mcp.McpRoutingException
  * @covers com.etendoerp.go.mcp.McpNamedFilters
+ * @covers com.etendoerp.go.mcp.McpDiscoverTool
+ * @covers com.etendoerp.go.mcp.McpVectorSearchTool
+ * @covers com.etendoerp.go.mcp.McpIndentResponse
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -612,7 +615,7 @@ class McpToolRouterRouteTest {
       supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
           .thenReturn(true);
 
-      // ETP-4254: handleDiscover now loads the included entities once and feeds both the
+      // ETP-4254: McpDiscoverTool.handle now loads the included entities once and feeds both the
       // summary array and the spec-level readOnly marker from that single list.
       supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
           .thenReturn(Collections.emptyList());

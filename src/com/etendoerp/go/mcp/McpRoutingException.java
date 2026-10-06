@@ -95,6 +95,19 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The single WARN line this refusal leaves in the router's log, built from its error code
+   * (ETP-5639).
+   *
+   * @param toolName the tool that was called
+   * @return e.g. {@code MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only…
+   *         session=<key>}
+   */
+  String logLine(String toolName) {
+    return "MCP tool '" + toolName + "' rejected (" + errorCode + "): " + getMessage()
+        + " session=" + McpUsageTelemetry.sessionForLog();
+  }
+
+  /**
    * Attach extra envelope keys and return {@code this}, so a factory reads as one expression.
    *
    * @param extraKeys the keys to merge into {@link #toEnvelope()}

@@ -332,7 +332,7 @@ class McpRoutingExceptionRefusalTest {
     @DisplayName("is keyed on the refusal's error code and carries its detail")
     void keyedOnErrorCode(McpRoutingException refusal, String code) {
       assertEquals(code, refusal.getErrorCode());
-      String line = McpToolRouter.routingRejectionLogLine("etendo_update", refusal);
+      String line = refusal.logLine("etendo_update");
       assertEquals("MCP tool 'etendo_update' rejected (" + code + "): " + refusal.getMessage()
           + " session=" + McpUsageTelemetry.NO_SESSION, line);
     }
@@ -342,8 +342,8 @@ class McpRoutingExceptionRefusalTest {
     void carriesTheSessionKey() {
       McpUsageTelemetry.setCurrentSessionKey("sess-42");
       try {
-        assertTrue(McpToolRouter.routingRejectionLogLine("etendo_list",
-            McpRoutingException.specNotFound("x")).endsWith(" session=sess-42"));
+        assertTrue(McpRoutingException.specNotFound("x").logLine("etendo_list")
+            .endsWith(" session=sess-42"));
       } finally {
         McpUsageTelemetry.clearCurrentSessionKey();
       }

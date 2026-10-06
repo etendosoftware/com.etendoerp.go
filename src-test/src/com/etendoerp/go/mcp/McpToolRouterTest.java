@@ -49,6 +49,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * @covers com.etendoerp.go.mcp.McpToolRouter
  * @covers com.etendoerp.go.mcp.McpToolResponses
  * @covers com.etendoerp.go.mcp.McpResponseSanitizer
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 public class McpToolRouterTest {
 
@@ -264,120 +265,120 @@ public class McpToolRouterTest {
     assertEquals(recordId, payload.getString("id"));
   }
 
-  // ── mapColumnTypeStatic ───────────────────────────────────────────────
+  // ── mapColumnType ───────────────────────────────────────────────
 
-  /** Tests that mapColumnTypeStatic maps string reference IDs correctly. */
+  /** Tests that mapColumnType maps string reference IDs correctly. */
   @Test
   public void testMapColumnTypeStringRefs() {
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("10"));
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("14"));
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("34"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("10"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("14"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("34"));
   }
 
-  /** Tests that mapColumnTypeStatic maps numeric reference IDs correctly. */
+  /** Tests that mapColumnType maps numeric reference IDs correctly. */
   @Test
   public void testMapColumnTypeNumericRefs() {
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("11"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("22"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("29"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("12"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("800008"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("800019"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("11"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("22"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("29"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("12"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("800008"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("800019"));
   }
 
-  /** Tests that mapColumnTypeStatic maps boolean reference ID correctly. */
+  /** Tests that mapColumnType maps boolean reference ID correctly. */
   @Test
   public void testMapColumnTypeBooleanRef() {
-    assertEquals("boolean", McpToolRouter.mapColumnTypeStatic("20"));
+    assertEquals("boolean", McpSchemaFieldBuilder.mapColumnType("20"));
   }
 
-  /** Tests that mapColumnTypeStatic maps date/time reference IDs correctly. */
+  /** Tests that mapColumnType maps date/time reference IDs correctly. */
   @Test
   public void testMapColumnTypeDateTimeRefs() {
-    assertEquals("date", McpToolRouter.mapColumnTypeStatic("15"));
-    assertEquals("datetime", McpToolRouter.mapColumnTypeStatic("16"));
-    assertEquals("time", McpToolRouter.mapColumnTypeStatic("24"));
+    assertEquals("date", McpSchemaFieldBuilder.mapColumnType("15"));
+    assertEquals("datetime", McpSchemaFieldBuilder.mapColumnType("16"));
+    assertEquals("time", McpSchemaFieldBuilder.mapColumnType("24"));
   }
 
-  /** Tests that mapColumnTypeStatic maps button reference ID correctly. */
+  /** Tests that mapColumnType maps button reference ID correctly. */
   @Test
   public void testMapColumnTypeButtonRef() {
-    assertEquals("button", McpToolRouter.mapColumnTypeStatic("28"));
+    assertEquals("button", McpSchemaFieldBuilder.mapColumnType("28"));
   }
 
-  /** Tests that mapColumnTypeStatic maps list reference ID correctly. */
+  /** Tests that mapColumnType maps list reference ID correctly. */
   @Test
   public void testMapColumnTypeListRef() {
-    assertEquals("list", McpToolRouter.mapColumnTypeStatic("17"));
+    assertEquals("list", McpSchemaFieldBuilder.mapColumnType("17"));
   }
 
-  /** Tests that mapColumnTypeStatic maps ID reference correctly. */
+  /** Tests that mapColumnType maps ID reference correctly. */
   @Test
   public void testMapColumnTypeIdRef() {
-    assertEquals("id", McpToolRouter.mapColumnTypeStatic("13"));
+    assertEquals("id", McpSchemaFieldBuilder.mapColumnType("13"));
   }
 
-  /** Tests that mapColumnTypeStatic maps foreign key reference IDs correctly. */
+  /** Tests that mapColumnType maps foreign key reference IDs correctly. */
   @Test
   public void testMapColumnTypeForeignKeyRefs() {
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("19"));
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("18"));
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("30"));
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("95E2A8B50A254B2AAE6774B8C2F28120"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("19"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("18"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("30"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("95E2A8B50A254B2AAE6774B8C2F28120"));
   }
 
-  /** Tests that mapColumnTypeStatic returns string for null input. */
+  /** Tests that mapColumnType returns string for null input. */
   @Test
   public void testMapColumnTypeNullRef() {
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic(null));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType(null));
   }
 
-  /** Tests that mapColumnTypeStatic returns string for unknown reference ID. */
+  /** Tests that mapColumnType returns string for unknown reference ID. */
   @Test
   public void testMapColumnTypeUnknownRef() {
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("9999"));
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("unknown"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("9999"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("unknown"));
   }
 
-  // ── mapSelectorTypeStatic ─────────────────────────────────────────────
+  // ── mapSelectorType ─────────────────────────────────────────────
 
-  /** Tests that mapSelectorTypeStatic maps TableDir reference correctly. */
+  /** Tests that mapSelectorType maps TableDir reference correctly. */
   @Test
   public void testMapSelectorTypeTableDir() {
-    assertEquals("TableDir", McpToolRouter.mapSelectorTypeStatic("19"));
+    assertEquals("TableDir", McpSchemaFieldBuilder.mapSelectorType("19"));
   }
 
-  /** Tests that mapSelectorTypeStatic maps Table reference correctly. */
+  /** Tests that mapSelectorType maps Table reference correctly. */
   @Test
   public void testMapSelectorTypeTable() {
-    assertEquals("Table", McpToolRouter.mapSelectorTypeStatic("18"));
+    assertEquals("Table", McpSchemaFieldBuilder.mapSelectorType("18"));
   }
 
-  /** Tests that mapSelectorTypeStatic maps Search reference correctly. */
+  /** Tests that mapSelectorType maps Search reference correctly. */
   @Test
   public void testMapSelectorTypeSearch() {
-    assertEquals("Search", McpToolRouter.mapSelectorTypeStatic("30"));
+    assertEquals("Search", McpSchemaFieldBuilder.mapSelectorType("30"));
   }
 
-  /** Tests that mapSelectorTypeStatic maps OBUISEL reference correctly. */
+  /** Tests that mapSelectorType maps OBUISEL reference correctly. */
   @Test
   public void testMapSelectorTypeObuisel() {
-    assertEquals("OBUISEL", McpToolRouter.mapSelectorTypeStatic("95E2A8B50A254B2AAE6774B8C2F28120"));
+    assertEquals("OBUISEL", McpSchemaFieldBuilder.mapSelectorType("95E2A8B50A254B2AAE6774B8C2F28120"));
   }
 
-  /** Tests that mapSelectorTypeStatic returns null for null input. */
+  /** Tests that mapSelectorType returns null for null input. */
   @Test
   public void testMapSelectorTypeNullRef() {
-    assertNull(McpToolRouter.mapSelectorTypeStatic(null));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType(null));
   }
 
-  /** Tests that mapSelectorTypeStatic returns null for non-selector reference IDs. */
+  /** Tests that mapSelectorType returns null for non-selector reference IDs. */
   @Test
   public void testMapSelectorTypeNonSelectorRefs() {
-    assertNull(McpToolRouter.mapSelectorTypeStatic("10"));
-    assertNull(McpToolRouter.mapSelectorTypeStatic("11"));
-    assertNull(McpToolRouter.mapSelectorTypeStatic("20"));
-    assertNull(McpToolRouter.mapSelectorTypeStatic("9999"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("10"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("11"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("20"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("9999"));
   }
 
   // ── ToolRegistry.resolveSpecName ───────────────────────────────────────

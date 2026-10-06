@@ -72,6 +72,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * Pure unit tests with MockedStatic for OBDal and NeoAccessUtils.
  *
  * @covers com.etendoerp.go.mcp.ToolRegistry
+ * @covers com.etendoerp.go.mcp.McpIndentResponse
+ * @covers com.etendoerp.go.mcp.McpNamedFilterCatalog
+ * @covers com.etendoerp.go.mcp.McpImageToolDefinitions
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

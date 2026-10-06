@@ -2420,7 +2420,7 @@ had to infer which included entity was the header by calling `etendo_schema` on 
 surfaces that directly: each window spec that has entities carries a `primaryEntity` field naming the
 root entity.
 
-**Response fragment** (`handleDiscover` → `McpToolRouterSupport.buildDiscoverSpec`):
+**Response fragment** (`McpDiscoverTool.handle` → `McpToolRouterSupport.buildDiscoverSpec`):
 
 ```json
 {
@@ -7706,7 +7706,7 @@ The client name comes from the telemetry session when the client ran `initialize
 failure keeps the `ERROR` with its stack trace.
 
 **A routing refusal is logged under its own code.** Every `McpRoutingException` the router catches
-leaves one `WARN` built from the refusal's error code (`McpToolRouter.routingRejectionLogLine`):
+leaves one `WARN` built from the refusal's error code (`McpRoutingException.logLine`):
 
 ```
 WARN McpToolRouter - MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only on entity 'y' and cannot be written
@@ -7822,10 +7822,10 @@ optional boolean `_indentResponse`. When it is `true`, that call's JSON comes ba
 spaces, as before ETP-5639, and so does its error body. When it is missing or `false`, the output is
 compact. It only changes how the JSON is rendered and is never a business argument:
 
-- `McpToolRouter.route` removes it from the arguments before anything else reads them. The
-  unknown-argument guard (IMP-40), the handlers, NEO (`fields`, `filters`, process and report
-  `parameters`) and the usage telemetry (`target_entity`, `fields_touched`) never see it. It is
-  also not in the `available` list of an `unknown_argument` refusal.
+- `McpToolRouter.route` removes it from the arguments (`McpIndentResponse.take`) before anything
+  else reads them. The unknown-argument guard (IMP-40), the handlers, NEO (`fields`, `filters`,
+  process and report `parameters`) and the usage telemetry (`target_entity`, `fields_touched`)
+  never see it. It is also not in the `available` list of an `unknown_argument` refusal.
 - The mode lasts for the call only. `McpResponseSanitizer` holds it in a thread-local that `route`
   sets and restores, and `McpResponseSanitizer.serialize` is the single place where it is applied.
 - Bodies that are already text (the `docs` passthrough, prose errors) are not affected.
@@ -7833,7 +7833,7 @@ compact. It only changes how the JSON is rendered and is never a business argume
   propagates out of `route` and `McpServlet` answers it as a JSON-RPC error, which is always compact
   and ignores `_indentResponse`. The thread-local is reset in `route`'s `finally`, so the mode does
   not carry over to the next request on that thread.
-- `ToolRegistry.withIndentResponse` adds the argument to every tool in `generateTools`, with one
+- `McpIndentResponse.declare` adds the argument to every tool in `generateTools`, with one
   shared description (`McpConstants.DESC_INDENT_RESPONSE`), so a new tool cannot miss it.
 
 **Catalog cost.** Each tool definition grows by 138 bytes in compact JSON. On the 28-tool catalog
@@ -7895,7 +7895,7 @@ Configured named filters (spec/entity: name (meaning)):
 sales-invoice/header: completed (Fully paid invoices (payment complete).), pending (…), partial (…), outstanding (Every invoice that still owes a balance: unpaid plus partially paid.)
 ```
 
-- `ToolRegistry.namedFilterSummary` builds this text with one query on every `tools/list`. Nothing
+- `McpNamedFilterCatalog.summary` builds this text with one query on every `tools/list`. Nothing
   caches it, so a `NAMED_FILTERS` change appears on the next catalog request and there is nothing
   to invalidate. (`McpConfigCache` holds parsed `MCP_CONFIG` and tab hierarchy, not the catalog.)
   MCP clients that keep their own copy of `tools/list` still need to fetch it again.
