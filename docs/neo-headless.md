@@ -7520,3 +7520,24 @@ unknown tool, unknown argument, invalid filter, refused write, DAL validation �
 answer a JSON-RPC error: `tools/call` with no `params`, and with no `name` (both `-32603`). Those are
 malformed protocol messages, not tool input, so they are outside SEP-1303; mapping them to `-32602`
 (Invalid params) is a possible follow-up, not done here.
+
+#### 4.12.25 Tool annotations (ETP-5639)
+
+`tools/list` gives every tool an `annotations` object with all four hints of MCP 2025-03-26, so
+clients can decide which calls to confirm with the user. All four are explicit on every tool: the
+spec defaults (`readOnlyHint=false`, **`destructiveHint=true`**, `idempotentHint=false`,
+`openWorldHint=true`) would otherwise report `neo_create` as destructive. `openWorldHint` is `false`
+everywhere — every tool stays inside the ERP.
+
+| Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
+|---|---|---|---|
+| `neo_list`, `neo_get`, `neo_schema`, `neo_discover`, `neo_selectors`, `neo_defaults`, `docs`, `neo_widget`, `neo_vector_search`, `neo_get_image_upload`, every `generate_*` report | true | false | true |
+| `neo_create`, `neo_request_image_upload`, `neo_upload_image`, `neo_feedback` | false | false | false |
+| `neo_delete` | false | true | true |
+| `neo_update`, `neo_batch`, `neo_action`, `neo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+
+Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
+and the shared `neo_update` / `neo_batch` / `neo_action` serve every entity, so a per-entity setting
+could not reach them. An unclassified tool falls to the conservative last row.
+`McpToolAnnotationsTest` pins the read-only set and requires every fixed tool to be classified
+explicitly — a new fixed tool must be added to one of the sets.

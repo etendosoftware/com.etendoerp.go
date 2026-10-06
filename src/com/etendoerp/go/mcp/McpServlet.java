@@ -665,12 +665,7 @@ public class McpServlet extends HttpServlet {
             JSONObject result = new JSONObject();
             JSONArray toolsArray = new JSONArray();
             for (McpToolDefinition tool : tools) {
-              JSONObject toolJson = new JSONObject();
-              toolJson.put("name", tool.getName());
-              toolJson.put("title", McpToolTitles.resolve(tool, language));
-              toolJson.put("description", tool.getDescription());
-              toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
-              toolsArray.put(toolJson);
+              toolsArray.put(describeTool(tool, language));
             }
             result.put("tools", toolsArray);
             return result;
@@ -678,6 +673,20 @@ public class McpServlet extends HttpServlet {
             OBContext.restorePreviousMode();
           }
         });
+  }
+
+  /**
+   * One {@code tools/list} entry: name, localized title, description, input schema and the four
+   * behaviour hints ({@link McpToolAnnotations}, ETP-5639).
+   */
+  JSONObject describeTool(McpToolDefinition tool, String language) throws JSONException {
+    JSONObject toolJson = new JSONObject();
+    toolJson.put("name", tool.getName());
+    toolJson.put("title", McpToolTitles.resolve(tool, language));
+    toolJson.put("description", tool.getDescription());
+    toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
+    toolJson.put("annotations", McpToolAnnotations.of(tool.getName()));
+    return toolJson;
   }
 
   // ── Handler: tools/call ─────────────────────────────────────────────────
