@@ -58,7 +58,7 @@ public final class NeoAccessUtils {
    *
    * @param windowId   AD_Window_ID to check
    * @param httpMethod the HTTP-method equivalent of the MCP operation (e.g. {@code "POST"}
-   *                   for {@code neo_create}, {@code "GET"} for read-only tools)
+   *                   for {@code etendo_create}, {@code "GET"} for read-only tools)
    * @return true if the role is allowed to perform {@code httpMethod} on {@code windowId}
    */
   public static boolean hasWindowAccess(String windowId, String httpMethod) {

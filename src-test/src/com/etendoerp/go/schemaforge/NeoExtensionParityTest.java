@@ -52,7 +52,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * channels can return byte-identical bodies while one of them never reached the customization at
  * all — the generic path simply produced the same answer for that row. The defect only becomes
  * visible on the row where the customization would have changed something, which is exactly the row
- * nobody puts in a fixture. {@code neo_batch} was switched off
+ * nobody puts in a fixture. {@code etendo_batch} was switched off
  * because of a divergence of this shape, and was re-enabled once it was closed.</p>
  *
  * <p>So the assertion is on {@code (spec, entity, surface, customization, method, outcome)} as
@@ -74,6 +74,8 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * answer, one of them just quietly runs generic CRUD. {@link ResolverDivergence} drives the two
  * resolvers apart on purpose and asserts the gate catches it; without that case a green run here
  * would prove only that the mocks agree with each other.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoExtensionDispatcher
  */
 @DisplayName("E4 — a customization reaches every channel identically (ETP-5415, D7)")
 class NeoExtensionParityTest {

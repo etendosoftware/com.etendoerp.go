@@ -42,6 +42,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 abstract class AbstractFiscalHandler {
@@ -228,6 +229,15 @@ abstract class AbstractFiscalHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
+    // ETP-5546: single entry point for every /fiscal303 and /fiscal349 sub-route
+    // (declarations, incidents, boxes, submit, modified, ...) — gate here once instead of
+    // per-entity. "Modelos Fiscales" access is the role's grant on the Tax Report window
+    // (ETP-5116 proxy); the method is tiered against IsReadWrite so a read-only grant still
+    // denies POST /fiscal303/submit.
+    if (!NeoAccessHelper.hasWindowAccess(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, method)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "Access denied");
+      return;
+    }
     if (DECLARATIONS.equals(entityName) || INCIDENTS.equals(entityName)) {
       delegateToDeclHandler(entityName, method, request, response);
       return;

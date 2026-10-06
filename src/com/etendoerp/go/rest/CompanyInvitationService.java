@@ -679,7 +679,7 @@ public class CompanyInvitationService {
     }
     if (authenticatedAccount == null) {
       return errorResponse(401, "AUTHENTICATION_REQUIRED",
-          "Sign in with the invited Etendo Go account before accepting");
+          "Sign in with the invited Etendo account before accepting");
     }
 
     return withAdminMode(() -> acceptExistingAccountInAdminMode(rawToken, authenticatedAccount));
