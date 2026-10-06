@@ -437,8 +437,9 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   all (the preference fallback).
 - **Re-subscribing opens a fresh row.** A later purchase for the same tenant finds no open row and
   `openSubscription` inserts one. If the open row is `canceled` but was never closed — its delete
-  event was lost, or R37 backfilled it (R37 leaves canceled rows open on purpose: its idempotency
-  guard is "no open row", so closing would let a re-run insert a duplicate) — `openSubscription`
+  event was lost, or R37 backfilled it (R37 leaves canceled rows open on purpose: it has no
+  provider end instant to close them at; its idempotency guard is "no row at all", so a re-run
+  never inserts a second one either way) — `openSubscription`
   closes it before inserting. The close must be in the database first — Hibernate runs inserts
   before updates at flush, and `etgo_sub_open_envclient_uq` would otherwise reject the new row —
   but it is **not** a session flush: the only caller is the paid onboarding
@@ -575,7 +576,7 @@ exposes) with the token's client, answering the same 402 body — the durable fi
 §3.8 states for any new tenant servlet; or (b) shorten the secure-web-services token lifetime —
 cheaper, but it bounds the leak rather than closing it and affects every client of those tokens.
 
-### 🟡 3.11 Two R37 edge cases found in ETP-5047 QA
+### 🟡 3.11 R37 edge cases found in ETP-5047 QA — one live, one resolved
 
 **Ticket:** accepted as a known risk (Martin, 2026-09-28); no ticket — found in ETP-5047 QA; related ETP-5046 (R37 deployment).
 
@@ -589,15 +590,10 @@ cheaper, but it bounds the leak rather than closing it and affects every client 
   than changing it — the preference route already read the same pair as "past due, no due date",
   i.e. blocked — accepted as is. Before running R37 on an environment, run a report query for
   tenants with `ETGO_SubscriptionStatus = PAST_DUE` and no valid `ETGO_SubscriptionDueAt`.
-- **R37's `@check` keys on "no OPEN row", so it can re-subscribe a canceled tenant.** A tenant
-  that still carries the `ETGO_TenantPlan = productive` preference and whose only rows are closed
-  — a subscription canceled since ETP-5047 closes its row, and a failed
-  `retireProductivePreference` leaves the preference behind — matches `@check`, and R37 inserts a
-  fresh **active** row: a canceled tenant reads as paying again. Accepted as is; if R37 is ever
-  run on an environment where subscriptions were canceled live, revisit the check first — keying
-  `@check` and the statement-2 guard on "no row at all" (`NOT EXISTS` any `ETGO_SUBSCRIPTION` row
-  for the tenant) closes it and stays idempotent (§3.7's reason for leaving backfilled canceled
-  rows open).
+- **Resolved in ETP-5047 — see §5.13.** R37's backfill keyed on "no OPEN row", so a tenant with
+  only closed rows and a leftover or R42-written `productive` marker was re-subscribed with a fresh
+  active row. Branch (A) of `@check` and the guards of `@apply` statements 1-2 now key on "no row
+  at all" (active or not, open or closed), so such a tenant only has its marker retired.
 
 ## 4. Known issues
 
@@ -1020,13 +1016,17 @@ the checkout request nor `ETGO_SubscriptionStatus`, so neither of R42's exclusio
 that paid and canceled before its data-fix chain ran therefore got the marker from R42 and then a
 **fresh open `legacy-productive` row** (seeded `active`) from branch (A) — a canceled customer read
 as paying again. R37 has not reached a shared environment, so it was edited in place: branch (A)
-and the guards of `@apply` statements 1-2 now require **no active row, open or closed**
-(`isactive = 'Y'`, `END_DATE` ignored) — exactly the rows `findLatest` answers from, and the only
-case in which `resolvePlan` still consults the marker. Such a tenant takes branch (B) only: its
-marker is retired and nothing is inserted. The edit is safe in either release order: before this
-module's close-on-cancel deploys no tenant has a closed row, so the old text and the new give every
-tenant the same outcome. Pinned by
-`SubscriptionBackfillIdempotencyIntegrationTest#testAnActiveMarkerNextToAClosedSubscriptionIsRetiredWithoutABackfill`.
+and the guards of `@apply` statements 1-2 now require **no subscription row at all** — `isactive`
+and `END_DATE` both ignored, the same "any row" predicate as branch (B) and the retirement. A
+tenant with any row takes branch (B) only: its marker is retired and nothing is inserted. That
+includes a tenant whose only rows are **inactive**: nothing in the product deactivates a row, so one
+is an operator's deliberate switch-off, and a backfilled active row would undo it — the accepted
+consequence (product decision) is that such a tenant loses its marker and reads as free until the
+operator restores the row. Before this module's close-on-cancel deploys no tenant has a closed row,
+so the only tenants whose outcome changes from the ETP-5046 text are hand-deactivated ones — on
+purpose. Pinned by `SubscriptionBackfillIdempotencyIntegrationTest`
+(`#testAnActiveMarkerNextToAClosedSubscriptionIsRetiredWithoutABackfill`,
+`#testAnActiveMarkerNextToAnInactiveSubscriptionIsRetiredWithoutABackfill`).
 
 **The trap: "open" ignores the dates.** `OPEN_ROW_PREDICATE` in `SubscriptionService` is
 `endDate is null and active = true`; the partial unique index `ETGO_SUB_OPEN_ENVCLIENT_UQ` uses the

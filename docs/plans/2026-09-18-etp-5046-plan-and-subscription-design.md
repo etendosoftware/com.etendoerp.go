@@ -301,10 +301,11 @@ stores no amount), **and retires that tenant's now-stale `ETGO_TenantPlan` prefe
 same transaction** (§8). Delivered as `20261005T180000Z__R37-tenant-subscription-backfill.sql`
 under `schema_forge/cli/src/data-fixes/sql/` — re-dated from `20260918T120000Z` during the develop
 merge, see §7.3. `@check` selects a tenant on either of two grounds: **(A) backfill** — an active
-productive marker and no open subscription; **(B) retirement** — any `ETGO_TenantPlan` row and any
+productive marker and **no subscription row at all**, active or not, open or closed (narrowed from
+"no open subscription" in ETP-5047, §8); **(B) retirement** — any `ETGO_TenantPlan` row and any
 subscription row, open or closed (added for develop's R42, §8). Re-running creates zero rows and
-retires nothing: (A) turns false because the inserted row is open and the marker is gone, (B)
-because every marker of a subscribed tenant is gone.
+retires nothing: (A) turns false because the inserted row is a row and the marker is gone, (B)
+because every marker of a tenant with a row is gone.
 
 The `legacy-productive` plan itself is created by the **module script**
 `EnsureLegacyPlanScript` (`src-util/modulescript/`) on every `update.database` — an idempotent
@@ -331,7 +332,7 @@ would silently turn a past-due or expired tenant back into a paying one. R37 the
 |---|---|---|
 | `CURRENT` | `active` | `CURRENT` |
 | `PAST_DUE` | `past_due` | `PAST_DUE` |
-| `EXPIRED` | `canceled`, left open (`END_DATE` NULL) on purpose — R37's idempotency guard is "no open row", so a closed row would let a re-run insert a duplicate. A cancellation received live closes its row since ETP-5047; open or closed, a canceled row reads back the same, and a later checkout closes an open one (§3.7 of the open-topics register) | `EXPIRED` |
+| `EXPIRED` | `canceled`, left open (`END_DATE` NULL) on purpose — there is no provider end instant to close it at (R37's idempotency guard is "no row at all" since ETP-5047, so a re-run never inserts a second row either way). A cancellation received live closes its row since ETP-5047; open or closed, a canceled row reads back the same, and a later checkout closes an open one (§3.7 of the open-topics register) | `EXPIRED` |
 | `NONE` | `canceled` | `EXPIRED` — same access decision as `NONE` (`SUBSCRIPTION_REQUIRED`) |
 | absent, blank, `LEGACY_ENTITLEMENT` or unknown | `active` | `CURRENT` (the preference reader's own fallback is `LEGACY_ENTITLEMENT`, also entitled) |
 
@@ -426,9 +427,10 @@ flips an existing one to `productive` — for every paid-provisioned owned tenan
 from `etgo_checkout_request` and knowing nothing about `etgo_subscription`. It therefore also
 targets tenants onboarded after ETP-5046, whose paid upgrade opened a row and wrote no marker.
 With the old guard such a tenant matched neither half of `@check` (it has an open row), R37
-recorded `SKIPPED_NOT_NEEDED`, and the marker survived forever: §8.1's count never reaches 0, and
-once a row is closed (ETP-5047's close-on-cancel) `resolvePlan` falls through to the fallback, reads
-the stale marker and a canceled tenant reads productive. A closed row is still proof the tenant is
+recorded `SKIPPED_NOT_NEEDED`, and the marker survived forever: §8.1's count never reaches 0 (and
+before ETP-5047 made `resolvePlan` read the latest closed row through `findLatest`, a closed row
+would have sent it to the fallback, where the stale marker made a canceled tenant read
+productive). A closed row is still proof the tenant is
 on the row model, so the widened guard retires the marker next to a closed row too. The runtime
 path cannot do this cleanup — it runs only when it opens a row — so **the retirement end state now
 depends on R37 running after R42** for every tenant (§8.2).
@@ -438,7 +440,11 @@ accepted consequence: a tenant whose only subscription row is closed and that ca
 productive marker — R42 can produce exactly that — would get a fresh open `legacy-productive` row
 before its marker is retired. ETP-5047, which closes rows on cancel and makes a closed row answer
 for its tenant, made that reachable and closed it: branch (A) and the `@apply` guards now require
-no **active** row, open or closed (`open-and-notable-topics.md` §5.13).
+**no subscription row at all** — active or not, open or closed — the same "any row" predicate as
+the retirement, so a tenant is either backfilled and retired or retired only. An inactive row
+blocks the backfill too: nothing in the product deactivates a row, so one is an operator's
+deliberate switch-off, and the accepted consequence is that such a tenant loses its marker without
+a backfill (`open-and-notable-topics.md` §5.13).
 
 The fleet therefore converges from both ends, and the preference stops being a parallel source of
 truth: **the product writes it only when the subscription write FAILED**, which is precisely the
