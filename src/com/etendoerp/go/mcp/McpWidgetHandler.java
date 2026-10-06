@@ -31,7 +31,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * Handles the {@code neo_widget} MCP tool (gap G4, ETP-4284), extracted from
+ * Handles the {@code etendo_widget} MCP tool (gap G4, ETP-4284), extracted from
  * {@link McpToolRouter} so the router stays within its authorized method budget and
  * the widget-handling logic lives in a single, dedicated collaborator (parity with the
  * generic-service rule for adding MCP tools).

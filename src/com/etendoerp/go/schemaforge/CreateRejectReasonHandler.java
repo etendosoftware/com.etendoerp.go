@@ -63,7 +63,7 @@ public class CreateRejectReasonHandler implements NeoHandler {
   private static final int NAME_MAX_LENGTH = 60;
 
   /**
-   * The action as {@code neo_schema(view:"actions")} publishes it (ETP-5535), declared by
+   * The action as {@code etendo_schema(view:"actions")} publishes it (ETP-5535), declared by
    * {@link SalesQuotationHeaderHandler#actionContracts()}. Only for discovery: the body is still
    * read by {@link #handle}, so the React modal's request is accepted exactly as before.
    */

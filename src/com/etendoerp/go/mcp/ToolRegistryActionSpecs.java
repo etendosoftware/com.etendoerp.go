@@ -31,7 +31,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Enum helpers for the report specs whose handler declares named actions (ETP-5468), used by
- * {@link ToolRegistry} to add them to the {@code neo_schema} and {@code neo_action} spec enums.
+ * {@link ToolRegistry} to add them to the {@code etendo_schema} and {@code etendo_action} spec enums.
  *
  * <p>Extracted from {@link ToolRegistry} so that class stays under the Sonar per-class
  * method-count limit (java:S1448). Behavior is unchanged; it logs under the {@code ToolRegistry}
@@ -46,7 +46,7 @@ final class ToolRegistryActionSpecs {
   }
 
   /**
-   * Whether a report spec serves named actions through {@code neo_action} (ETP-5468): its handler
+   * Whether a report spec serves named actions through {@code etendo_action} (ETP-5468): its handler
    * declares {@code NeoHandler#actionContracts()} and the role passes the same report-spec gate the
    * UI does. Independent of {@link NeoReportCallability}: such a spec is not a report generator
    * (IMP-19 keeps its {@code generate_*} tool retired) but it does have an action surface.

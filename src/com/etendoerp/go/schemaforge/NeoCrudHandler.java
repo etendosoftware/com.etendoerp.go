@@ -711,7 +711,7 @@ class NeoCrudHandler {
           + " meantime. The field is absent or null, so this write was refused rather than allowed"
           + " to silently overwrite a concurrent edit.");
       errorObj.put(KEY_FIELD, FIELD_UPDATED);
-      errorObj.put(KEY_HINT, "Re-read the record (GET the same URL, or neo_get) and send back the"
+      errorObj.put(KEY_HINT, "Re-read the record (GET the same URL, or etendo_get) and send back the"
           + " '" + FIELD_UPDATED + "' value it returns, verbatim and unmodified, alongside the"
           + " fields you are changing.");
       errorObj.put(KEY_SEE_ALSO, "docs(topic:\"updating records\")");
@@ -784,7 +784,7 @@ class NeoCrudHandler {
       // here rather than the catch-all below because DefaultJsonDataService swallows the constraint
       // violation and returns it as an ordinary RPC failure body. Reusing ETP-3894's
       // MISSING_REQUIRED_FIELDS shape rather than inventing a second one keeps the React UI's
-      // field-highlighting working on this path too, and gives neo_batch a 4xx it can map onto
+      // field-highlighting working on this path too, and gives etendo_batch a 4xx it can map onto
       // IMP-24's `missingFields` envelope (IMP-23 §9.4).
       if (NeoErrorSanitizer.isNotNullViolationMessage(translated)) {
         return buildNotNullViolationResponse(translated, adTab);
@@ -861,7 +861,7 @@ class NeoCrudHandler {
       // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
       // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
       // that contract ("only handleWithHooks touches the owning servlet"). Going through
-      // servlet.lookupHandler here broke it: every neo_batch create on an entity with a
+      // servlet.lookupHandler here broke it: every etendo_batch create on an entity with a
       // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
       // one-line delegation to this same static, so the behaviour is identical on both paths
       // (same precedent as NeoActionSurface's CDI_RESOLVER).

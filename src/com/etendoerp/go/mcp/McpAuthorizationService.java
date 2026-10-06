@@ -23,6 +23,8 @@ import java.util.Set;
 
 import org.openbravo.base.exception.OBSecurityException;
 
+import com.etendoerp.go.oauth2.ApiScopes;
+
 /**
  * Enforces MCP tool authorization at execution time. Legacy browser JWT sessions
  * receive the broad MCP scope set only after JWT validation; role/window access
@@ -30,11 +32,10 @@ import org.openbravo.base.exception.OBSecurityException;
  */
 final class McpAuthorizationService {
 
-  private static final String SCOPE_ALL = "neo:*";
-  private static final String SCOPE_READ = "neo:read";
-  private static final String SCOPE_WRITE = "neo:write";
-  private static final String SCOPE_PROCESS = "neo:process";
-  private static final String SCOPE_REPORT = "neo:report";
+  private static final String SCOPE_READ = ApiScopes.READ;
+  private static final String SCOPE_WRITE = ApiScopes.WRITE;
+  private static final String SCOPE_PROCESS = ApiScopes.PROCESS;
+  private static final String SCOPE_REPORT = ApiScopes.REPORT;
 
   private McpAuthorizationService() {
   }
@@ -69,23 +70,23 @@ final class McpAuthorizationService {
       throw new OBSecurityException("MCP tool name is required");
     }
     switch (toolName) {
-      case "neo_discover":
-      case "neo_list":
-      case "neo_get":
-      case "neo_selectors":
-      case "neo_defaults":
-      case "neo_schema":
+      case "etendo_discover":
+      case "etendo_list":
+      case "etendo_get":
+      case "etendo_selectors":
+      case "etendo_defaults":
+      case "etendo_schema":
       case "docs":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_NEO_VECTOR_SEARCH:
       // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
-      // neo:write would silence exactly the read-only sessions most likely to get lost.
+      // etendo:write would silence exactly the read-only sessions most likely to get lost.
       case McpConstants.TOOL_NEO_FEEDBACK:
         return SCOPE_READ;
-      case "neo_create":
-      case "neo_update":
-      case "neo_delete":
-      case "neo_action":
+      case "etendo_create":
+      case "etendo_update":
+      case "etendo_delete":
+      case "etendo_action":
       // ETP-5184: all three image-upload tools are write-tier. The two upload tools create an
       // AD_Image row; the status lookup is bundled with them deliberately — it is a step of the
       // write flow and has nothing to offer a read-only session.
@@ -101,7 +102,6 @@ final class McpAuthorizationService {
   }
 
   private static boolean hasScope(Set<String> scopes, String requiredScope) {
-    return scopes != null
-        && (scopes.contains(SCOPE_ALL) || scopes.contains(requiredScope));
+    return ApiScopes.grants(scopes, requiredScope);
   }
 }

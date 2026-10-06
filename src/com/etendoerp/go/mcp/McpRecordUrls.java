@@ -48,20 +48,20 @@ import com.etendoerp.go.common.PublicUrlResolver;
  *       gets no {@code url}; the agent is meant to link to its header instead.</li>
  * </ol>
  *
- * <p>The template is advertised once per session by {@code neo_discover} rather than repeated on
+ * <p>The template is advertised once per session by {@code etendo_discover} rather than repeated on
  * every row: it costs a couple of dozen tokens once and lets the agent build a link for any record
- * it ever sees, including the rows of a 100-record {@code neo_list} that deliberately carries
+ * it ever sees, including the rows of a 100-record {@code etendo_list} that deliberately carries
  * none.</p>
  */
 public final class McpRecordUrls {
 
-  /** Key holding the app metadata block inside the {@code neo_discover} result. */
+  /** Key holding the app metadata block inside the {@code etendo_discover} result. */
   static final String KEY_APP = "app";
   /** Key holding the resolved public base URL of the Etendo Go app. */
   static final String KEY_BASE_URL = "baseUrl";
   /** Key holding the record URL template. */
   static final String KEY_RECORD_URL_TEMPLATE = "recordUrlTemplate";
-  /** Key holding a single record's link in a {@code neo_get} / {@code neo_create} result. */
+  /** Key holding a single record's link in a {@code etendo_get} / {@code etendo_create} result. */
   static final String KEY_URL = "url";
 
   private static final String KEY_DATA = "data";
@@ -78,7 +78,7 @@ public final class McpRecordUrls {
   }
 
   /**
-   * Describes how record links are built, for {@code neo_discover} to advertise once per session.
+   * Describes how record links are built, for {@code etendo_discover} to advertise once per session.
    *
    * @return the app metadata object, or {@code null} when no public app base URL is configured —
    *     in which case the caller must omit the key entirely rather than guess a base
@@ -122,7 +122,7 @@ public final class McpRecordUrls {
    * configured, or when no record id could be determined — all three are ordinary states, not
    * errors, and none of them should cost the agent a failed call.</p>
    *
-   * @param flatResult      the flattened {@code neo_get} / {@code neo_create} result, mutated in
+   * @param flatResult      the flattened {@code etendo_get} / {@code etendo_create} result, mutated in
    *                        place; {@code null} is tolerated
    * @param specName        the spec name
    * @param recordId        the record id, or {@code null} to read it back from {@code flatResult}
@@ -144,7 +144,7 @@ public final class McpRecordUrls {
   /**
    * Reads the record id back out of a flattened single-record result.
    *
-   * <p>Needed by {@code neo_create}, where the id is assigned by the database and therefore only
+   * <p>Needed by {@code etendo_create}, where the id is assigned by the database and therefore only
    * exists in the response.</p>
    *
    * @param flatResult the flattened result

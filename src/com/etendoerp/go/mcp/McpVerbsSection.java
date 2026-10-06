@@ -40,7 +40,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  *     "update":  false,
  *     "delete":  false,
  *     "reason":  "payments are created from the invoice, never by hand",
- *     "instead": "neo_action(spec:'sales-invoice', entity:'header', action:'registerPayment')"
+ *     "instead": "etendo_action(spec:'sales-invoice', entity:'header', action:'registerPayment')"
  *   }
  * }
  * </pre>

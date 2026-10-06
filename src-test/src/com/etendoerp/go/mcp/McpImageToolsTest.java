@@ -59,6 +59,8 @@ import com.etendoerp.go.schemaforge.util.NeoImageUploadTickets;
  * <p>Includes the documentation assertions the plan calls for: both tool descriptions must name the
  * cheap path and the 256 KB cap, so the guidance an agent reads cannot drift away from the
  * validation the server actually enforces.
+ *
+ * @covers com.etendoerp.go.mcp.McpImageTools
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -123,19 +125,19 @@ class McpImageToolsTest {
   class ToolDescriptions {
 
     @Test
-    @DisplayName("neo_request_image_upload advertises itself as the cheap path")
+    @DisplayName("etendo_request_image_upload advertises itself as the cheap path")
     void requestToolNamesTheCheapPath() {
       String description = ToolRegistry.REQUEST_IMAGE_UPLOAD_DESCRIPTION;
       assertTrue(description.contains("curl"), description);
       assertTrue(description.contains(McpConstants.TOOL_NEO_UPLOAD_IMAGE),
           "it must tell the agent what it is cheaper than: " + description);
       assertTrue(description.contains("never pass through the conversation"), description);
-      assertTrue(description.contains("neo_update"),
+      assertTrue(description.contains("etendo_update"),
           "the agent still has to write the id somewhere: " + description);
     }
 
     @Test
-    @DisplayName("neo_upload_image states the cap and routes over-cap callers to the cheap path")
+    @DisplayName("etendo_upload_image states the cap and routes over-cap callers to the cheap path")
     void uploadToolStatesTheCapAndTheAlternative() {
       String description = ToolRegistry.UPLOAD_IMAGE_DESCRIPTION;
       assertTrue(description.contains("256 KB"),
@@ -153,7 +155,7 @@ class McpImageToolsTest {
     }
 
     @Test
-    @DisplayName("neo_get_image_upload explains it is only for a lost PUT response")
+    @DisplayName("etendo_get_image_upload explains it is only for a lost PUT response")
     void statusToolExplainsItself() {
       String description = ToolRegistry.GET_IMAGE_UPLOAD_DESCRIPTION;
       assertTrue(description.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD), description);
@@ -161,10 +163,10 @@ class McpImageToolsTest {
     }
   }
 
-  // ── neo_request_image_upload ──────────────────────────────────────────
+  // ── etendo_request_image_upload ──────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_request_image_upload")
+  @DisplayName("etendo_request_image_upload")
   class RequestUpload {
 
     @Test
@@ -305,10 +307,10 @@ class McpImageToolsTest {
     }
   }
 
-  // ── neo_upload_image ──────────────────────────────────────────────────
+  // ── etendo_upload_image ──────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_upload_image")
+  @DisplayName("etendo_upload_image")
   class UploadImage {
 
     private JSONObject upload(JSONObject args) throws Exception {
@@ -337,7 +339,7 @@ class McpImageToolsTest {
       assertTrue(result.getInt("bytes") > 0);
       assertEquals(2, result.getInt("width"));
       assertEquals(3, result.getInt("height"));
-      assertTrue(result.getString(McpConstants.KEY_HINT).contains("neo_update"),
+      assertTrue(result.getString(McpConstants.KEY_HINT).contains("etendo_update"),
           "the response must say the image is not attached to anything yet");
       assertFalse(result.has(McpConstants.KEY_ERROR));
     }
@@ -354,7 +356,7 @@ class McpImageToolsTest {
     }
 
     @Test
-    @DisplayName("over the 256 KB cap the error names neo_request_image_upload")
+    @DisplayName("over the 256 KB cap the error names etendo_request_image_upload")
     void overCapNamesTheCheapPath() throws Exception {
       String oversized = "A".repeat(
           (McpConstants.IMAGE_BASE64_MAX_BYTES + 4096) / 3 * 4);
@@ -413,10 +415,10 @@ class McpImageToolsTest {
     }
   }
 
-  // ── neo_get_image_upload ──────────────────────────────────────────────
+  // ── etendo_get_image_upload ──────────────────────────────────────────────
 
   @Nested
-  @DisplayName("neo_get_image_upload")
+  @DisplayName("etendo_get_image_upload")
   class GetUpload {
 
     @Test
@@ -447,7 +449,7 @@ class McpImageToolsTest {
       });
       assertEquals("completed", result.getString(McpConstants.KEY_STATUS));
       assertEquals(IMAGE_ID, result.getString("imageId"));
-      assertTrue(result.getString(McpConstants.KEY_HINT).contains("neo_update"));
+      assertTrue(result.getString(McpConstants.KEY_HINT).contains("etendo_update"));
     }
 
     @Test

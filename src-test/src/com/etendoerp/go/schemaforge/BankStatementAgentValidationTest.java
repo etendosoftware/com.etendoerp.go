@@ -64,6 +64,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * runs after the contract); the few rules the declared contract enforces first (an empty
  * {@code lines} array, a month-13 header date) are exercised through
  * {@link BankStatementAgentActions#dispatch} so the agent-visible outcome is what is pinned.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementAgentValidation
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("BankStatementAgentValidation (ETP-5469)")
@@ -422,7 +424,7 @@ class BankStatementAgentValidationTest {
       assertRefused(BankStatementAgentValidation.check(handler, IMPORT, importOf(1_398_105)),
           "contentBase64 is 1398105 characters; importStatement accepts at most 1398104 (a "
               + "1024 KB file). Split the statement into smaller files, or import it from the "
-              + "Etendo GO UI.");
+              + "Etendo UI.");
     }
 
     private JSONObject importOf(int length) throws Exception {

@@ -83,7 +83,7 @@ import com.etendoerp.go.schemaforge.BatchService;
  * <p><b>Two call sites, both live.</b> {@code McpToolRouter#handleCreate}, and the per-operation
  * transform {@code McpToolRouter#preprocessBatchOperation}. The second one ran only while
  * {@link McpConstants#batchToolEnabled()} was {@code true}, which it is again as of ETP-5415: the
- * divergences that had {@code neo_batch} switched off were closed, so both write verbs now reach
+ * divergences that had {@code etendo_batch} switched off were closed, so both write verbs now reach
  * this derivation. It was written for exactly that — the call site was added and kept while the
  * flag was off, so batched documents could not start being persisted with a null bill-to the
  * moment the verb came back.

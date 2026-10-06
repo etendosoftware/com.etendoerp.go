@@ -51,7 +51,7 @@ import org.codehaus.jettison.json.JSONObject;
  * <h2>What this does <em>not</em> do</h2>
  * <p><b>This reclassifies SchemaForge's curation, never Etendo's permissions.</b> Curation answers
  * "is this field part of the agent surface, and may the agent send it" — the question that decides
- * whether {@code neo_schema} advertises the field and whether {@code McpToolRouter} publishes
+ * whether {@code etendo_schema} advertises the field and whether {@code McpToolRouter} publishes
  * {@code POST}/{@code PUT} for the entity at all. Permissions answer "may this role write this
  * column on this record", and that question is settled downstream, by the DAL and by
  * {@code NeoCrudHandler}, exactly as before. Declaring {@code visibility:"editable"} on a column AD
@@ -83,8 +83,8 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <h2>One resolver, every reader</h2>
  * <p>An override that only the first reader honoured would be worse than no override. Four places
- * derive these properties from {@code SFField} independently — {@code neo_schema}'s field metadata,
- * {@code neo_selectors}' editable-property set, the resource provider's field list and the
+ * derive these properties from {@code SFField} independently — {@code etendo_schema}'s field metadata,
+ * {@code etendo_selectors}' editable-property set, the resource provider's field list and the
  * {@code view:"summary"} projection — and they do not agree by construction. {@link McpFieldView}
  * is the single resolver all of them go through, so "editable" means the same thing in every
  * response. {@code McpFieldViewSingleResolverCallSiteTest} fails the build if one stops.</p>
@@ -240,8 +240,8 @@ final class McpFieldsSection {
    *
    * <p><b>This is the escape hatch for IMP-39's exclusion gate</b> (see §4.12.10 of
    * {@code neo-headless.md}). Since that change a field whose {@code ETGO_SF_FIELD} row says
-   * {@code ISINCLUDED = 'N'} is absent from {@code neo_schema} and refused by {@code neo_list} as a
-   * filter and by {@code neo_create}/{@code neo_update} as a value. That is the right default —
+   * {@code ISINCLUDED = 'N'} is absent from {@code etendo_schema} and refused by {@code etendo_list} as a
+   * filter and by {@code etendo_create}/{@code etendo_update} as a value. That is the right default —
    * {@code discarded} is a decision about the product surface, and the agent surface should not
    * quietly contradict it — but the two surfaces are not the same surface, and there are real
    * cases where a field a person never needs to see is one an agent legitimately needs to carry.

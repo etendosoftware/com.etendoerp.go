@@ -40,7 +40,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * {@code McpToolRouterSupport#isCatalogExcludedSpec} hides a spec whose entities are all
  * handler-backed <em>and</em> actionless (the dashboard's widgets), while keeping one that
  * still has a real action surface ({@code not-posted-documents}' {@code post} /
- * {@code bulk-post}) reachable through {@code neo_discover} and {@code neo_action}.</p>
+ * {@code bulk-post}) reachable through {@code etendo_discover} and {@code etendo_action}.</p>
  *
  * <p><b>Fail-open.</b> A missing qualifier, an unregistered handler or a CDI failure all
  * answer {@code true} — "assume there is a surface". The catalog predicates are advisory

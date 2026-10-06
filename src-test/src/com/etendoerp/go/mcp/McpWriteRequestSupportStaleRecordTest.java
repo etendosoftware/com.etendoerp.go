@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * that keys off the status alone — or off a shared {@code conflict} code — retries the wrong thing
  * forever. Hence the explicit assertion that the code is {@code stale_record} and NOT
  * {@code conflict}.
+ *
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 class McpWriteRequestSupportStaleRecordTest {
 
@@ -66,7 +68,7 @@ class McpWriteRequestSupportStaleRecordTest {
     assertFalse(hint.trim().isEmpty());
     // The remedy is re-reading, and the tool that does it has to be named — an agent told only
     // "conflict" has no next move.
-    assertTrue(hint.contains("neo_get"));
+    assertTrue(hint.contains("etendo_get"));
     assertTrue(hint.contains(McpConstants.PARAM_UPDATED));
     // Nothing was written: an agent must not go looking for a partially updated record.
     assertTrue(detail.contains("nothing was written"));

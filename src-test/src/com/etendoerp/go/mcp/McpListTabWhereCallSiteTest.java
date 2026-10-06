@@ -26,7 +26,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Architecture regression test for ETP-5542 — {@code neo_list} must resolve the parent placeholders
+ * Architecture regression test for ETP-5542 — {@code etendo_list} must resolve the parent placeholders
  * of a child tab's where clause, the way the REST read does.
  *
  * <p>The Bin Contents tab stores {@code e.storageBin.id=@Locator.id@}. REST fills the placeholder
@@ -66,7 +66,7 @@ class McpListTabWhereCallSiteTest {
     assertTrue(SHARED_RULE.matcher(body).find(),
         "handleList no longer calls NeoParentTabFilterResolver.resolveTabWhere(adTab, parentId)."
             + " Without it a child tab's placeholder (Bin Contents: @Locator.id@) reaches the query"
-            + " unresolved and neo_list answers 200 with an empty list (ETP-5542). If the method was"
+            + " unresolved and etendo_list answers 200 with an empty list (ETP-5542). If the method was"
             + " refactored, update this guard; do not delete it without moving the call.");
   }
 
