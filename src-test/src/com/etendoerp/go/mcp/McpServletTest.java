@@ -504,6 +504,49 @@ public class McpServletTest {
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
   }
 
+  /** Runs a wildcard-token {@code ping} whose role lookup answers {@code roleLookup}. */
+  private void doPostWildcardPing(Object roleLookup) throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "0", "0", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 3).put("method", "ping")
+        .toString());
+    OBDal obDal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    if (roleLookup instanceof RuntimeException) {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
+          .thenThrow((RuntimeException) roleLookup);
+    } else {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any())).thenReturn(roleLookup);
+    }
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(request, response);
+    }
+  }
+
+  /**
+   * ETP-5047 review W2 — fail closed: a role lookup that FAILED must not fall back to
+   * {@code "0"}, which the guard allows; a later successful lookup in
+   * {@code McpSessionManager.executeInContext} would then run under the tenant unjudged.
+   */
+  @Test
+  public void doPostWithAWildcardTokenWhoseRoleLookupFailsIsRefusedUnjudged() throws Exception {
+    doPostWildcardPing(new IllegalStateException("db down"));
+
+    verify(response).setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+    verifyNoInteractions(environmentAccessGuard);
+    assertFalse(getResponseBody().contains("\"jsonrpc\""));
+  }
+
+  /** A System role legitimately has no tenant: it keeps {@code "0"} and proceeds, as before. */
+  @Test
+  public void doPostWithAWildcardTokenOfASystemRoleKeepsTheSystemClient() throws Exception {
+    doPostWildcardPing(null);
+
+    verify(environmentAccessGuard).checkAsSystem("0", "mcp");
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+  }
+
   // ── doPost: the 402 under every credential scheme (ETP-5047) ────────────
 
   /**

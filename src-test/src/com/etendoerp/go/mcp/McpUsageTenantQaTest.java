@@ -169,13 +169,15 @@ public class McpUsageTenantQaTest {
   }
 
   @Test
-  public void resolutionFailureIsSwallowedAndTheRowKeepsZero() throws Exception {
-    // resolveDefaultOrg/resolveClientFromRole catch and log: the call proceeds on "0".
-    McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "0", "0",
+  public void orgResolutionFailureIsSwallowedAndTheRowKeepsOrgZero() throws Exception {
+    // resolveDefaultOrg catches and logs: the call proceeds on org "0". (A failed CLIENT lookup
+    // is no longer swallowed — since ETP-5047 it refuses the request before the access guard,
+    // see McpServletTest#doPostWithAWildcardTokenWhoseRoleLookupFailsIsRefusedUnjudged.)
+    McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "client1", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
     assertEquals(McpUsageRow.OUTCOME_OK, row.outcome());
-    assertEquals("0", row.clientId());
+    assertEquals("client1", row.clientId());
     assertEquals("0", row.orgId());
   }
 
@@ -186,11 +188,12 @@ public class McpUsageTenantQaTest {
     assertEquals("clientA", first.clientId());
     assertNull(McpUsageTelemetry.currentTenant());
 
-    // Same thread, next request never reaches setCurrentTenant (resolution blows up).
-    McpUsageRow second = doPostToolsCall("neo_list", neoListArgs(), "0", "0",
+    // Same thread, next request for another tenant whose org resolution blows up: it must record
+    // its own tenant, never the one the previous request bound.
+    McpUsageRow second = doPostToolsCall("neo_list", neoListArgs(), "clientB", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
-    assertEquals("0", second.clientId());
+    assertEquals("clientB", second.clientId());
     assertEquals("0", second.orgId());
   }
 

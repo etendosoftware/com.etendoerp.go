@@ -26,6 +26,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.auth.EffectiveClientResolver;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -91,7 +92,9 @@ public class McpSessionManager {
 
       // Resolve client: if "0" (System), get the client from the role
       // Tables with access level "Organization" reject clientId=0
-      String effectiveClient = effectiveClientId(clientId, roleId);
+      // (ETP-5047: the shared resolver, the same one McpServlet judges the call with; a failed
+      // lookup throws instead of falling back to "0")
+      String effectiveClient = EffectiveClientResolver.effectiveClientId(clientId, roleId);
 
       // Telemetry only (ETP-5594): the usage row must carry the tenant the call runs under, not
       // the token's "0" wildcard. Bound before createContext so a call that fails there is still
@@ -121,30 +124,6 @@ public class McpSessionManager {
       // Always restore previous context (even if null) to prevent cross-call leakage
       OBContext.setOBContext(previousContext);
     }
-  }
-
-  /**
-   * The tenant an MCP call acts on: the token's client, except the wildcard System client
-   * {@code "0"}, which an MCP token commonly carries and which is resolved to the client of the
-   * token's role. The one resolution {@link #executeInContext} builds its {@code OBContext} with
-   * and the one {@code McpServlet} hands the commercial access guard (ETP-5047), so the guard
-   * judges the tenant the call then runs under — never the System client a wildcard token names.
-   *
-   * @param clientId the client the token carries; may be {@code "0"}
-   * @param roleId the token's role
-   * @return the role's client for a wildcard token whose role belongs to a tenant; otherwise
-   *     {@code clientId} unchanged ({@code "0"} for a System role or a failed lookup)
-   */
-  public static String effectiveClientId(String clientId, String roleId) {
-    if (!"0".equals(clientId)) {
-      return clientId;
-    }
-    String resolvedClient = resolveClientFromRole(roleId);
-    if (resolvedClient == null) {
-      return clientId;
-    }
-    log.debug("Resolved client from role {}: {}", roleId, resolvedClient);
-    return resolvedClient;
   }
 
   /**
@@ -195,32 +174,6 @@ public class McpSessionManager {
   public static void runInContext(String userId, String roleId,
       String clientId, Runnable action) throws Exception {
     runInContext(userId, roleId, clientId, DEFAULT_ORG, null, action);
-  }
-
-  /**
-   * Resolve the AD_Client_ID from the role record.
-   * When the OAuth2 token stores clientId="0" (System), we need the role's actual client
-   * because tables with access level "Organization" reject client 0.
-   */
-  private static String resolveClientFromRole(String roleId) {
-    try {
-      return OBDal.getInstance().getSession().doReturningWork(connection -> {
-        String sql = "SELECT ad_client_id FROM ad_role WHERE ad_role_id = ?";
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-          ps.setString(1, roleId);
-          try (ResultSet rs = ps.executeQuery()) {
-            if (rs.next()) {
-              String cid = rs.getString(1);
-              return "0".equals(cid) ? null : cid;
-            }
-          }
-        }
-        return null;
-      });
-    } catch (Exception e) {
-      log.warn("Failed to resolve client from role {}: {}", roleId, e.getMessage());
-      return null;
-    }
   }
 
   /**

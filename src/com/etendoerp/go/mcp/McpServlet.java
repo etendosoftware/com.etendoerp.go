@@ -37,6 +37,7 @@ import org.codehaus.jettison.json.JSONObject;
 
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.auth.EffectiveClientResolver;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
@@ -139,9 +140,18 @@ public class McpServlet extends HttpServlet {
       return; // Response already sent by authenticate()
     }
     // ETP-5047 — the tenant the call acts on, resolved once: the guard below judges it, and
-    // McpSessionManager.executeInContext builds the call's context with the same value.
-    AuthIdentity identity = authenticated.withClientId(
-        McpSessionManager.effectiveClientId(authenticated.clientId, authenticated.roleId));
+    // McpSessionManager.executeInContext builds the call's context with the same value. A failed
+    // role lookup refuses the call: falling back to "0" would be allowed unjudged.
+    AuthIdentity identity;
+    try {
+      identity = authenticated.withClientId(EffectiveClientResolver.effectiveClientId(
+          authenticated.clientId, authenticated.roleId));
+    } catch (EffectiveClientResolver.ResolutionException e) {
+      log.warn("Refusing MCP request of user {}: {}", authenticated.userId, e.getMessage(), e);
+      sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          "The environment of this credential could not be verified; retry later");
+      return;
+    }
     if (!isEnvironmentAccessAllowed(response, identity)) {
       return; // 402 already sent
     }
@@ -509,9 +519,9 @@ public class McpServlet extends HttpServlet {
    * error object, so an MCP client sees the same status NEO answers. Before this, MCP was the one
    * tenant entry point that never asked, so an agent kept reading and writing a blocked tenant's
    * data. Every credential scheme (OAuth2, legacy JWT, cookie session) reaches it with the
-   * EFFECTIVE tenant ({@link McpSessionManager#effectiveClientId}): a wildcard token's {@code "0"}
-   * is already resolved to its role's client, since asking about System would allow. The guard
-   * owns the decision and the kill switch; it runs as system because MCP has no
+   * EFFECTIVE tenant ({@link EffectiveClientResolver#effectiveClientId}): a wildcard token's
+   * {@code "0"} is already resolved to its role's client, since asking about System would allow.
+   * The guard owns the decision and the kill switch; it runs as system because MCP has no
    * {@code OBContext} of its own at this point.
    *
    * @return true when the request may proceed
