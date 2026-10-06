@@ -185,7 +185,7 @@ public class McpServletTest {
     assertEquals("role1", identity.roleId);
     assertEquals("client1", identity.clientId);
     assertEquals("org1", identity.orgId);
-    assertEquals("neo:read neo:write neo:process neo:report", identity.scopes);
+    assertEquals("etendo:read etendo:write etendo:process etendo:report", identity.scopes);
   }
 
   /**
@@ -260,7 +260,10 @@ public class McpServletTest {
     assertEquals("https://example.com/mcp", meta.getString("resource"));
     assertEquals("https://example.com/oauth2",
         meta.getJSONArray("authorization_servers").getString(0));
-    assertTrue(meta.has("scopes_supported"));
+    // Only the current etendo: scopes are advertised; the deprecated neo: aliases are accepted
+    // but never listed (ETP-5602). Each scope is its own array entry.
+    assertEquals("[\"etendo:read\",\"etendo:write\",\"etendo:process\",\"etendo:report\","
+        + "\"etendo:*\"]", meta.getJSONArray("scopes_supported").toString());
     assertTrue(meta.has("bearer_methods_supported"));
   }
 
@@ -888,7 +891,7 @@ public class McpServletTest {
   private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,
       String resolvedOrg, String resolvedClient, boolean routerThrows) throws Exception {
     return recordedRowForToolsCall(tokenClient, tokenOrg, resolvedOrg, resolvedClient,
-        routerThrows, "neo_list", new JSONObject().put("spec", "sales-order"));
+        routerThrows, "etendo_list", new JSONObject().put("spec", "sales-order"));
   }
 
   private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,

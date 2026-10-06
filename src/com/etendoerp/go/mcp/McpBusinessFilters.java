@@ -22,7 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Pure (DAL-free) building blocks for the business-query semantics that {@code neo_list} exposes
+ * Pure (DAL-free) building blocks for the business-query semantics that {@code etendo_list} exposes
  * on top of the plain {@code key=value} equality filters (IMP-3).
  *
  * <p>The range-operator building blocks live here, emitted as HQL fragments that

@@ -34,6 +34,8 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link BankStatementEntityHandler} (ETP-5447): generic CRUD writes on
  * {@code importedBankStatements} and {@code bankStatementLines} are refused with a 405 that points
  * to the {@code bank-statements} actions; reads, defaults and selectors pass through.
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementEntityHandler
  */
 class BankStatementEntityHandlerTest {
 
@@ -49,7 +51,7 @@ class BankStatementEntityHandlerTest {
   private static final List<String> WRITE_METHODS = List.of(POST, PUT, PATCH, DELETE);
   private static final String ACTIONS_SPEC = "bank-statements";
   private static final int METHOD_NOT_ALLOWED = 405;
-  private static final String NEO_ACTION = "neo_action";
+  private static final String NEO_ACTION = "etendo_action";
   private static final String STATEMENT_ID_HINT = "bank statement id";
 
   private BankStatementEntityHandler handler;
@@ -156,7 +158,7 @@ class BankStatementEntityHandlerTest {
   }
 
   /**
-   * The message names a concrete neo_action action, and that action really is declared by
+   * The message names a concrete etendo_action action, and that action really is declared by
    * {@link BankStatementAgentActions}: a renamed action would otherwise leave the refusal pointing
    * the agent at an action that no longer exists.
    */

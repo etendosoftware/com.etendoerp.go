@@ -118,7 +118,7 @@ final class McpSupportInternals {
   }
 
   /**
-   * Builds the entity metadata returned by {@code neo_discover}.
+   * Builds the entity metadata returned by {@code etendo_discover}.
    *
    * <p>The {@code readOnly} flag is derived from the entity's configured mutation methods rather
    * than its name, so it applies consistently to handler-backed GET-only entities and any future
@@ -136,7 +136,7 @@ final class McpSupportInternals {
     // expected to address it. Going through the scope instead of reading MCP_CONFIG here keeps the
     // column to a single consumer; asking twice would also have meant two answers to reconcile.
     // The descriptor is what stops the parent requirement from being pure friction: an agent that
-    // can read parentField and parentRequiredFor gets the call right the first time. neo_schema
+    // can read parentField and parentRequiredFor gets the call right the first time. etendo_schema
     // emits the same block from the same helper, so the two tools cannot drift apart.
     McpParentScope.publishInto(item, McpParentScope.forEntity(entity));
     // ETP-5558: and for a header too — its scope never reads the configuration, and a broken one
@@ -149,11 +149,11 @@ final class McpSupportInternals {
       Map<String, NeoActionContract> declared = McpDeclaredActions.of(entity);
       if (!declared.isEmpty()) {
         item.put("actions", new JSONArray(declared.keySet()));
-        item.put("actionsHint", "Run these with neo_action (id = the record each acts on); "
-            + "neo_schema with view:\"actions\" returns their parameters next to the AD buttons.");
+        item.put("actionsHint", "Run these with etendo_action (id = the record each acts on); "
+            + "etendo_schema with view:\"actions\" returns their parameters next to the AD buttons.");
         McpActionsSection.View config = McpActionsSection.forEntity(entity);
         if (config.isUnusable()) {
-          // neo_action refuses every action of the entity, so discovery must say so.
+          // etendo_action refuses every action of the entity, so discovery must say so.
           item.put("actionsInvokable", false);
           item.put("actionsNotInvokableReason", "Not run through MCP: " + config.getReason());
         }
@@ -169,7 +169,7 @@ final class McpSupportInternals {
   }
 
   /**
-   * Build the methods advertised by {@code neo_discover} for the current role.
+   * Build the methods advertised by {@code etendo_discover} for the current role.
    * Window-backed entities derive mutation visibility from {@code AD_Window_Access}; the
    * configured entity methods alone are not enough because they describe the server surface,
    * not the caller's role. Handler-backed entities have no AD window to consult and retain their
@@ -403,9 +403,9 @@ final class McpSupportInternals {
    * Lift {@code NeoCrudHandler}'s {@code MISSING_REQUIRED_FIELDS} body into the {@code missingFields}
    * list an MCP agent already knows (ETP-4793 / IMP-17, from IMP-23 §9.4).
    *
-   * <p>The condition was reported three different ways for the same mistake: {@code neo_create}
+   * <p>The condition was reported three different ways for the same mistake: {@code etendo_create}
    * answered IMP-5's {@code missingFields} 422, the REST CRUD path answered ETP-3894's
-   * {@code MISSING_REQUIRED_FIELDS} 400, and {@code neo_batch} — which reaches that REST path —
+   * {@code MISSING_REQUIRED_FIELDS} 400, and {@code etendo_batch} — which reaches that REST path —
    * forwarded whatever came back. Omitting {@code partnerAddress} inside a batch used to surface a
    * <b>500</b> carrying a raw Postgres not-null violation with the whole failing row in it. The REST
    * shape stays as it is, because the React UI highlights fields from it; the translation to the
@@ -437,7 +437,7 @@ final class McpSupportInternals {
     clean.put(McpConstants.KEY_DETAIL, "Missing required fields on the operation named in 'failedAt'");
     clean.put(McpConstants.KEY_MISSING_FIELDS, missingFields);
     clean.put(McpConstants.KEY_HINT, "Add these fields to that operation's body, or use "
-        + "neo_selectors to find valid values for foreignKey fields, then retry the whole batch.");
+        + "etendo_selectors to find valid values for foreignKey fields, then retry the whole batch.");
     clean.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return clean;
   }

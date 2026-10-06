@@ -202,29 +202,29 @@ final class McpUsageTelemetry {
       return null;
     }
     switch (toolName) {
-      case "neo_list":
+      case "etendo_list":
         return "list";
-      case "neo_get":
+      case "etendo_get":
         return "get";
-      case "neo_create":
+      case "etendo_create":
         return "create";
-      case "neo_update":
+      case "etendo_update":
         return "update";
-      case "neo_delete":
+      case "etendo_delete":
         return "delete";
-      case "neo_batch":
+      case "etendo_batch":
         return "batch";
-      case "neo_action":
+      case "etendo_action":
         return "action";
-      case "neo_schema":
+      case "etendo_schema":
         return "schema";
-      case "neo_defaults":
+      case "etendo_defaults":
         return "defaults";
-      case "neo_selectors":
+      case "etendo_selectors":
         return "selectors";
-      case "neo_discover":
+      case "etendo_discover":
         return "discover";
-      case "neo_vector_search":
+      case "etendo_vector_search":
         return "search";
       case "docs":
         return "docs";

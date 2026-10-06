@@ -61,7 +61,7 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * </ul>
  *
  * <p>ETP-5535: {@code rejectQuotation} and {@code createRejectReason} are declared through
- * {@link #actionContracts()}, so {@code neo_schema(view:"actions")} lists them next to the AD
+ * {@link #actionContracts()}, so {@code etendo_schema(view:"actions")} lists them next to the AD
  * buttons. Before that they were reachable over MCP but undiscoverable.
  *
  * <p>Total discount is synced on two paths:
@@ -141,7 +141,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   }
 
   /**
-   * The quotation's handler-served actions (ETP-5535). Published by {@code neo_schema} next to the
+   * The quotation's handler-served actions (ETP-5535). Published by {@code etendo_schema} next to the
    * AD buttons; each request is still judged by its own handler, so what the React modals send is
    * accepted exactly as before.
    */
@@ -169,7 +169,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * MCP and the REST action reach this handler, so both channels get it.</p>
    *
    * <p>The value is read where the action requests carry it: {@code docAction} at the root (the
-   * {@code actionParameter} {@code neo_schema} advertises for the button), {@code documentAction}
+   * {@code actionParameter} {@code etendo_schema} advertises for the button), {@code documentAction}
    * at the root, or {@code fieldValues.documentAction}. The button is named by its column
    * ({@code DocAction}) or its field ({@code documentAction}), as {@code findButtonColumn} accepts
    * both. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
@@ -219,7 +219,7 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * <p><b>ETP-5528 — the order is left in Draft.</b> Core always completes the order it creates
    * ({@code c_order_post1}). Until ETP-5528 the SPA then reactivated it from the browser with a
    * second request ({@code QuotationConfirmModal}, ETP-3570), which is why an order created through
-   * the MCP ({@code neo_action Convertquotation}) stayed Completed while the same action in the UI
+   * the MCP ({@code etendo_action Convertquotation}) stayed Completed while the same action in the UI
    * ended in Draft. The reactivation now runs here, through the same {@code C_Order_Post 'RE'} the
    * UI request reaches ({@link OrderDocActionSupport}), so both channels share one flow. The UI's own
    * call is guarded by {@code documentStatus === 'CO'}, so against an order that is already Draft

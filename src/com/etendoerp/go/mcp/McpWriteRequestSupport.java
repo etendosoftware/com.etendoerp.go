@@ -114,7 +114,7 @@ final class McpWriteRequestSupport {
    * agents, not just SF-configured ones. filterWriteRequest strips fields not in ETGO_SF_FIELD
    * writableFields, which is too restrictive for MCP where AI agents need to set any valid
    * column."</em> The cost of that openness was measured: {@code orderReference}, curated out of
-   * the sales-order window, could be written and filtered while {@code neo_get} refused to project
+   * the sales-order window, could be written and filtered while {@code etendo_get} refused to project
    * it — so an agent could set a value, be told 200, and never read it back. The three tools now
    * answer the same question the same way.</p>
    *
@@ -124,7 +124,7 @@ final class McpWriteRequestSupport {
    * {@code NeoFieldFilter} solely to project GET responses, so nothing stopped the write and AD's
    * {@code isUpdatable} alone decided whether the value was dropped or persisted. The exemptions
    * are copied from that predicate rather than reinvented — see {@link McpQuerySupport#writeGate}.
-   * It applies to {@code neo_create} and {@code neo_update} alike: a field is read-only or it is
+   * It applies to {@code etendo_create} and {@code etendo_update} alike: a field is read-only or it is
    * not, and which verb is asking does not change the answer.</p>
    *
    * <p><b>What it does not do.</b> A key that resolves to no property at all still passes through
@@ -153,8 +153,8 @@ final class McpWriteRequestSupport {
    * As {@link #mapFieldsToDalProperties(JSONObject, Tab, SFEntity)}, also collecting the keys that
    * matched no field of the entity.
    *
-   * <p><b>IMP-18 — the write verbs report, they do not refuse.</b> {@code neo_schema},
-   * {@code neo_list} and {@code neo_get} have answered an unrecognised name with
+   * <p><b>IMP-18 — the write verbs report, they do not refuse.</b> {@code etendo_schema},
+   * {@code etendo_list} and {@code etendo_get} have answered an unrecognised name with
    * {@code unknownFields} since 2026-08-10; the write verbs dropped it in silence, so a create
    * carrying a misspelt field returned 201 and no later read could contradict it. The obvious
    * symmetry with the two gates above — refuse it — was measured and rejected: of the 73 handler
@@ -215,7 +215,7 @@ final class McpWriteRequestSupport {
         // parentId is a declared argument of the write tools, not a stray key - see
         // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
-        // not properties of this one - but neo_schema now publishes them and the handler writes
+        // not properties of this one - but etendo_schema now publishes them and the handler writes
         // them, and a key the schema advertises must not come back labelled unrecognised.
         if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
           unknown.add(key);
@@ -232,7 +232,7 @@ final class McpWriteRequestSupport {
    * The caller-facing names of the virtual fields the entity's wrapper policy publishes.
    *
    * <p>ETP-5368. Compared against the backing table's own DAL property names, resolved the same
-   * way {@code neo_schema} resolves them, so the two answers come from one source rather than from
+   * way {@code etendo_schema} resolves them, so the two answers come from one source rather than from
    * two hand-kept lists.
    */
   private static Set<String> virtualFieldNames(SFEntity sfEntity) {
@@ -289,17 +289,17 @@ final class McpWriteRequestSupport {
    *
    * <p><b>Why a second entry point, and why it does not map.</b> {@link #mapFieldsToDalProperties}
    * does two jobs — it translates the caller's spelling into DAL property names, and it applies
-   * these gates on the way. {@code neo_batch} needs only the second: its operation bodies reach
+   * these gates on the way. {@code etendo_batch} needs only the second: its operation bodies reach
    * {@code BatchService} in whatever spelling the agent sent and are resolved downstream, so
    * running the mapping here as well would rewrite keys a path that works today does not expect.
    * This method therefore refuses, and changes nothing.
    *
    * <p><b>The gap it closes.</b> The read-only gate lived only where the mapping lived, so
-   * {@code neo_create} refused a value sent for a field the spec publishes as read-only while
-   * {@code neo_batch} accepted and persisted it — measured live on {@code sales-order/lines}:
+   * {@code etendo_create} refused a value sent for a field the spec publishes as read-only while
+   * {@code etendo_batch} accepted and persisted it — measured live on {@code sales-order/lines}:
    * {@code salesOrder} was refused by one verb with {@code 422 read_only_field} and written by the
    * other. A batch being more permissive than a single create is the divergence class ETP-5415
-   * exists to remove, and it only became reachable when {@code neo_batch} was re-enabled.
+   * exists to remove, and it only became reachable when {@code etendo_batch} was re-enabled.
    *
    * <p>Keys that resolve to no property are left alone, exactly as the mapping leaves them: that
    * is IMP-18 and it is not decided here. The server's own injectors run after this, on the body
@@ -362,8 +362,8 @@ final class McpWriteRequestSupport {
   /**
    * Attach the keys a write did not recognise to the body handed back to the agent (IMP-18).
    *
-   * <p>Mirrors the {@code unknownFields} array {@code neo_list}, {@code neo_get} and
-   * {@code neo_schema} already return, so the same word means the same thing on every tool. The
+   * <p>Mirrors the {@code unknownFields} array {@code etendo_list}, {@code etendo_get} and
+   * {@code etendo_schema} already return, so the same word means the same thing on every tool. The
    * accompanying hint is worded to be <b>true even when a {@code NeoHandler} consumed the key</b>:
    * it says the name was not mapped to a field of this entity and no field of the record holds the
    * value, which is exactly what happened in both cases. Claiming the key was ignored would be a
@@ -379,7 +379,7 @@ final class McpWriteRequestSupport {
     try {
       body.put(McpFieldProjection.KEY_UNKNOWN_FIELDS, new JSONArray(unknown));
       body.put("unknownFieldsHint", "These names were not mapped to a field of this entity, and "
-          + "no field of the record holds their value. Call neo_schema with view:\"create\" for "
+          + "no field of the record holds their value. Call etendo_schema with view:\"create\" for "
           + "the names this entity accepts.");
     } catch (JSONException ignored) {
       // Reporting is an aid, never the answer. The write already succeeded; a body that cannot
@@ -391,11 +391,11 @@ final class McpWriteRequestSupport {
   /**
    * Attach the callout-vs-caller divergences a create left behind (IMP-45).
    *
-   * <p>{@code neo_defaults} tells an agent to use its result as the starting point for
-   * {@code neo_create}, and {@code neo_create} repeats the advice. Follow it literally and every
+   * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
+   * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
    * value handed over becomes a value the caller sent, which ETP-4784 protects from being
    * recomputed by a callout that knows the record's real context. The measured case:
-   * {@code neo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
+   * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
    * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
    * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
    *
@@ -417,7 +417,7 @@ final class McpWriteRequestSupport {
       body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
           + "callout had resolved a different one from this record's own context (the business "
           + "partner's configuration, for one). That is correct if the value was chosen "
-          + "deliberately. If you copied it from neo_defaults, it was a generic default resolved "
+          + "deliberately. If you copied it from etendo_defaults, it was a generic default resolved "
           + "before this record had a business partner: omit that field and let the server resolve "
           + "it, or send the value under \"callout\" instead.");
     } catch (JSONException ignored) {
@@ -455,7 +455,7 @@ final class McpWriteRequestSupport {
 
   /**
    * Validate that all mandatory columns have a value in the body before insert.
-   * Returns a JSONArray of missing fields using the same structure as neo_schema
+   * Returns a JSONArray of missing fields using the same structure as etendo_schema
    * (name, column, type, hasSelector) so the model knows exactly what to provide.
    *
    * <p><b>ETP-5368 — a field the server resolves is not a field the caller omitted.</b> This walk
@@ -465,12 +465,12 @@ final class McpWriteRequestSupport {
    * country, a street and a province was refused with "Missing required fields" naming
    * {@code locationAddress} — the very record {@code ContactsLocationAddressHandler} was about to
    * create from those fields. Skipping the names the wrapper policy declares server-resolved is
-   * the same declaration {@code neo_schema} uses to demote them to {@code optional}, so the
+   * the same declaration {@code etendo_schema} uses to demote them to {@code optional}, so the
    * catalogue and the write agree instead of contradicting each other.
    *
    * <p>ETP-5535: the fields a customization declares through
    * {@code NeoHandler#serverResolvedCreateFields} are deliberately NOT skipped here, although
-   * {@code neo_schema} demotes them. This check runs after {@code injectMandatoryDefaults} — the
+   * {@code etendo_schema} demotes them. This check runs after {@code injectMandatoryDefaults} — the
    * create callout cascade that derives them — and before the customization's pre-hook. So a
    * declared field the cascade filled is simply not missing, and one it could not fill is a real
    * gap: reporting it here gives the agent a precise 422 instead of the DAL's NOT NULL failure. The
@@ -733,7 +733,7 @@ final class McpWriteRequestSupport {
   /**
    * Refuse a child create that cannot be attached to the parent the caller means (ETP-5558).
    *
-   * <p>Shared by {@code neo_create} and {@code neo_batch}'s per-operation preprocessor, which never
+   * <p>Shared by {@code etendo_create} and {@code etendo_batch}'s per-operation preprocessor, which never
    * reaches {@link #resolveParentFK} because {@code BatchService} maps the parent itself. One
    * predicate for both, so a batch cannot write what a single create refuses.</p>
    *
@@ -783,7 +783,7 @@ final class McpWriteRequestSupport {
    *
    * <p>Equivalent to calling the 3-arg overload with {@code callerProvidedFields = null}: every
    * {@code fieldErrors} key is then described the old, caller-agnostic way. Kept for the read path
-   * and for {@code neo_delete}, neither of which tracks a pre-defaults snapshot of caller fields.
+   * and for {@code etendo_delete}, neither of which tracks a pre-defaults snapshot of caller fields.
    *
    * @param responseJson the raw DAL response
    * @param seeAlso      the {@code docs} recipe for the calling verb; also tells the failure builder
@@ -878,7 +878,7 @@ final class McpWriteRequestSupport {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_CONFLICT);
       envelope.put(McpConstants.KEY_HINT, "A record with this business key already exists. Find it "
-          + "with neo_list and update it, or send a different key.");
+          + "with etendo_list and update it, or send a different key.");
     } else if (write) {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
@@ -928,7 +928,7 @@ final class McpWriteRequestSupport {
     } else {
       envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
           + "field");
-      envelope.put(McpConstants.KEY_HINT, "Call neo_schema with view:\"create\" for this entity "
+      envelope.put(McpConstants.KEY_HINT, "Call etendo_schema with view:\"create\" for this entity "
           + "to check the type and allowed values of every field sent.");
     }
     envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
@@ -1011,7 +1011,7 @@ final class McpWriteRequestSupport {
     envelope.put(McpConstants.KEY_DETAIL, "This record was modified by someone else after the '"
         + McpConstants.PARAM_UPDATED + "' value you sent was read. The write was refused so their "
         + "change is not lost; nothing was written.");
-    envelope.put(McpConstants.KEY_HINT, "Re-read the record with neo_get, reapply your changes on "
+    envelope.put(McpConstants.KEY_HINT, "Re-read the record with etendo_get, reapply your changes on "
         + "top of the values it returns, and retry with the fresh '"
         + McpConstants.PARAM_UPDATED + "'. Retrying the same payload unchanged will fail "
         + "identically.");

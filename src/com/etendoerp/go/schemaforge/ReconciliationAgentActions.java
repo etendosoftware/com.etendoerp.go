@@ -39,12 +39,12 @@ import org.codehaus.jettison.json.JSONObject;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * The bank-reconciliation actions an agent can run through {@code neo_action} (ETP-5468, front A).
+ * The bank-reconciliation actions an agent can run through {@code etendo_action} (ETP-5468, front A).
  *
  * <p><b>Purely additive.</b> The SPA keeps calling {@code /sws/neo/bank-reconciliation?action=…}
  * — a report-spec request whose context carries no endpoint type — and {@link
  * ReconciliationHandler#handle} only enters {@link #dispatch} for {@code NeoEndpointType.ACTION},
- * which only {@code neo_action} produces for this spec. Every action here re-enters the SAME
+ * which only {@code etendo_action} produces for this spec. Every action here re-enters the SAME
  * wrapper the SPA route uses ({@code ReconciliationHandlerSupport.handle*}), so the business
  * validations, the {@code runPostAction} rollback and the error mapping are identical to the UI's —
  * this class only translates the MCP call shape (record {@code id} = financial account,
@@ -78,7 +78,7 @@ final class ReconciliationAgentActions {
           + "pending sub-line (remainderLineId) automatically; reconcileDifference needs the "
           + "pending sub-line itself and its refusal names it as remainderLineId.";
 
-  /** What the {@code neo_action} {@code id} argument identifies for every action here. */
+  /** What the {@code etendo_action} {@code id} argument identifies for every action here. */
   private static final String ID_DESC =
       "The financial account id (FIN_Financial_Account) whose bank statement lines are "
           + "reconciled.";

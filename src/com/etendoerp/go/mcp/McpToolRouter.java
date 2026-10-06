@@ -95,14 +95,14 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * <p>
  * Tool routing:
  * <ul>
- *   <li>{@code neo_discover} — list all accessible specs</li>
- *   <li>{@code neo_list} — list records (GET)</li>
- *   <li>{@code neo_get} — get single record by ID</li>
- *   <li>{@code neo_create} — create a record (POST)</li>
- *   <li>{@code neo_update} — update a record (PUT)</li>
- *   <li>{@code neo_delete} — delete a record (DELETE)</li>
- *   <li>{@code neo_selectors} — query FK selector values</li>
- *   <li>{@code neo_defaults} — get default field values for new records</li>
+ *   <li>{@code etendo_discover} — list all accessible specs</li>
+ *   <li>{@code etendo_list} — list records (GET)</li>
+ *   <li>{@code etendo_get} — get single record by ID</li>
+ *   <li>{@code etendo_create} — create a record (POST)</li>
+ *   <li>{@code etendo_update} — update a record (PUT)</li>
+ *   <li>{@code etendo_delete} — delete a record (DELETE)</li>
+ *   <li>{@code etendo_selectors} — query FK selector values</li>
+ *   <li>{@code etendo_defaults} — get default field values for new records</li>
  *   <li>{@code generate_*} — report generation tools</li>
  *   <li>All other names — process execution tools</li>
  * </ul>
@@ -121,7 +121,7 @@ public class McpToolRouter {
   private static final String HTTP_METHOD_DELETE = "DELETE";
   /** DAL property names the line-policy injection keys off (IMP-15). */
   /** The batch tool's own name, used by the router switch and in its refusal envelopes. */
-  private static final String TOOL_NEO_BATCH = "neo_batch";
+  private static final String TOOL_NEO_BATCH = "etendo_batch";
   private static final String FIELD_PRODUCT = "product";
   private static final String FIELD_UOM = "uOM";
 
@@ -129,16 +129,23 @@ public class McpToolRouter {
   /**
    * Route a tool call to its handler.
    * <p>
-   * For CRUD tools (neo_list, neo_get, etc.), the spec name is extracted from the
+   * For CRUD tools (etendo_list, etendo_get, etc.), the spec name is extracted from the
    * "spec" argument. For process and report tools, the spec name is derived from
    * the tool name itself via {@link ToolRegistry#resolveSpecName}.
    *
-   * @param toolName  MCP tool name (e.g. "neo_list", "complete_order")
+   * @param toolName  MCP tool name (e.g. "etendo_list", "complete_order")
    * @param arguments tool arguments (may be null)
    * @param scopes    OAuth2 scopes granted to this call
    * @return MCP result object with "content" array
    */
   public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
+    String renamedTo = McpRoutingException.renamedToolName(toolName);
+    if (renamedTo != null) {
+      // ETP-5602: answer a removed neo_<x> name with its new name before anything else — the
+      // default branch would read it as a process tool and refuse it for an unrelated reason.
+      return wrapAsErrorContent(
+          buildRoutingErrorBody(McpRoutingException.toolRenamed(toolName, renamedTo), toolName));
+    }
     McpAuthorizationService.authorizeToolCall(toolName, scopes);
     // Vector target authorization must run in the caller's role context. The regular MCP
     // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
@@ -159,23 +166,23 @@ public class McpToolRouter {
         authorizeSpecAccess(specName, resolveAccessMethod(toolName));
 
         switch (toolName) {
-          case "neo_discover":
+          case "etendo_discover":
             return handleDiscover();
-          case "neo_list":
+          case "etendo_list":
             return handleList(specName, arguments);
-          case "neo_get":
+          case "etendo_get":
             return handleGet(specName, arguments);
-          case "neo_create":
+          case "etendo_create":
             return handleCreate(specName, arguments);
-          case "neo_update":
+          case "etendo_update":
             return handleUpdate(specName, arguments);
-          case "neo_delete":
+          case "etendo_delete":
             return handleDelete(specName, arguments);
-          case "neo_selectors":
+          case "etendo_selectors":
             return handleSelectors(specName, arguments);
-          case "neo_defaults":
+          case "etendo_defaults":
             return handleDefaults(specName, arguments);
-          case "neo_schema":
+          case "etendo_schema":
             return handleSchema(specName, arguments);
           case TOOL_NEO_BATCH:
             // Withdrawing it from tools/list is not enough: an agent that learned the name
@@ -185,7 +192,7 @@ public class McpToolRouter {
               return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
-          case "neo_action":
+          case "etendo_action":
             return handleAction(specName, arguments);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
@@ -299,7 +306,7 @@ public class McpToolRouter {
           + "your role cannot read any of its indexes.");
       envelope.put(McpConstants.KEY_TOOL, McpConstants.TOOL_NEO_VECTOR_SEARCH);
       envelope.put(McpConstants.KEY_HINT, "Do not retry with other target names — none would work. "
-          + "Use neo_list or neo_selectors to find the record instead.");
+          + "Use etendo_list or etendo_selectors to find the record instead.");
       return envelope;
     } catch (JSONException e) {
       throw new McpToolException(ERROR_BUILDING_CONTENT, e);
@@ -352,7 +359,7 @@ public class McpToolRouter {
         return wrapAsTextContent("No documentation found for topic '" + topic + "'.");
       }
       // ETP-5306: the recipe surface states the record-reference format too, for an agent that
-      // came here without reading neo_schema. One constant, declared once per response, instead
+      // came here without reading etendo_schema. One constant, declared once per response, instead
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
     } catch (Exception e) {
@@ -389,7 +396,7 @@ public class McpToolRouter {
     }
   }
 
-  // ── neo_discover ──────────────────────────────────────────────────────
+  // ── etendo_discover ──────────────────────────────────────────────────────
 
   /**
    * List all active specs the current user can access.
@@ -436,7 +443,7 @@ public class McpToolRouter {
     return wrapAsTextContent(result);
   }
 
-  // ── neo_list ──────────────────────────────────────────────────────────
+  // ── etendo_list ──────────────────────────────────────────────────────────
 
   /**
    * List records from a spec entity. Replicates NeoServlet.handleDefault() GET logic.
@@ -455,9 +462,9 @@ public class McpToolRouter {
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
 
     // IMP-40: a child entity is readable only through its parent. The gate itself is not new —
-    // McpParentScope has carried VERB_LIST since it was written, and neo_discover advertises
+    // McpParentScope has carried VERB_LIST since it was written, and etendo_discover advertises
     // "parentRequiredFor":["list","get",...] on 89 entities — but nothing ever enforced it here,
-    // and neo_list had no parentId argument to satisfy it with. So an agent that asked for one
+    // and etendo_list had no parentId argument to satisfy it with. So an agent that asked for one
     // order's lines got EVERY order's lines, with nothing in the response to say the scope had
     // been dropped: a confident, wrong answer that reads exactly like a correct one. Worse than a
     // refusal, because the caller then acts on rows belonging to records it never asked about.
@@ -563,7 +570,7 @@ public class McpToolRouter {
         McpToolRouterSupport.flattenCoreResponse(responseJson));
   }
 
-  // ── neo_get ───────────────────────────────────────────────────────────
+  // ── etendo_get ───────────────────────────────────────────────────────────
 
   /**
    * Get a single record by ID.
@@ -635,7 +642,7 @@ public class McpToolRouter {
     return wrapAsTextContent(flat);
   }
 
-  // ── neo_create ────────────────────────────────────────────────────────
+  // ── etendo_create ────────────────────────────────────────────────────────
 
   /**
    * Refuses any top-level argument the tool does not declare (IMP-40).
@@ -676,8 +683,9 @@ public class McpToolRouter {
    * <p>Three outcomes. For an entity that is not a gated child, the filters pass through
    * untouched. (A child gated by its tab where clause — {@code McpParentScope.Kind#TAB_WHERE} —
    * has no parent field: it is refused without {@code parentId} and otherwise passes through, the
-   * clause doing the scoping.) For a gated child with no {@code parentId}, the call is refused with the same
-   * {@code parent_required} envelope {@code neo_defaults} already uses — one wording, one copy.
+   * clause doing the scoping.) For a gated child with no {@code parentId}, the call is refused with
+   * the same {@code parent_required} envelope {@code etendo_defaults} already uses — one wording,
+   * one copy.
    * For a gated child with a {@code parentId}, the parent field is added to the filters, so the
    * scope is enforced by the query rather than trusted.</p>
    *
@@ -729,7 +737,7 @@ public class McpToolRouter {
 
     // IMP-40: accept parentId as a top-level argument, the way every other parent-aware tool
     // takes it. It used to be read only out of `fields`, so an agent that followed the shape
-    // neo_defaults/neo_list/neo_get taught it had its parent link silently dropped — and then
+    // etendo_defaults/etendo_list/etendo_get taught it had its parent link silently dropped — and then
     // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
     // rather than handled separately so there stays exactly ONE downstream reader of it (the
     // resolveParentFK block below); the top-level argument wins, because it is the declared one.
@@ -744,7 +752,7 @@ public class McpToolRouter {
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     // ETP-4254: entity-level method gate, the same ETGO_SF_ENTITY flags the REST CRUD path
     // enforces. hasSpecAccess above is role-level only, so without this an agent could write
-    // to an entity configured read-only (which neo_discover already reports as readOnly).
+    // to an entity configured read-only (which etendo_discover already reports as readOnly).
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
     // ETP-5558: a child whose parent cannot be identified is refused here, before any body
@@ -761,7 +769,7 @@ public class McpToolRouter {
 
     // IMP-39: the spec's exclusions are honoured here. This used to accept every valid table
     // column "not just SF-configured ones", which is what let a curated-out field be written and
-    // filtered while neo_get denied it existed. A column with no ETGO_SF_FIELD row is still
+    // filtered while etendo_get denied it existed. A column with no ETGO_SF_FIELD row is still
     // accepted — only an explicit exclusion is refused.
     // IMP-18: the keys this write did not recognise, reported on the way out rather than dropped.
     java.util.Set<String> unknownWriteFields = new java.util.TreeSet<>();
@@ -788,7 +796,7 @@ public class McpToolRouter {
     // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
     // record ids before anything downstream touches them. A value that already looks like an id
     // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
-    // ETP-5535: a child's selectors also see its parent record, as neo_selectors' parentContext
+    // ETP-5535: a child's selectors also see its parent record, as etendo_selectors' parentContext
     // would carry it — a line's tax rule reads the header's order date.
     JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
         McpSelectorContextHelper.buildSelectorContextParams(
@@ -878,7 +886,7 @@ public class McpToolRouter {
       return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
     }
 
-    // Validate mandatory fields before insert — return structured error matching neo_schema contract
+    // Validate mandatory fields before insert — return structured error matching etendo_schema contract
     JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, log);
     if (missingFields.length() > 0) {
       // IMP-5: stable machine-detectable code + status so the agent can distinguish an
@@ -889,7 +897,7 @@ public class McpToolRouter {
       errorObj.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
       errorObj.put(McpConstants.KEY_DETAIL, "Missing required fields that could not be auto-resolved");
       errorObj.put("missingFields", missingFields);
-      errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
+      errorObj.put("hint", "Provide these fields in the request, or use etendo_selectors to find valid values for foreignKey fields");
       errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
       return wrapAsErrorContent(errorObj);
     }
@@ -954,7 +962,7 @@ public class McpToolRouter {
     return wrapAsTextContent(flat);
   }
 
-  // ── neo_update ────────────────────────────────────────────────────────
+  // ── etendo_update ────────────────────────────────────────────────────────
 
   /**
    * Update an existing record.
@@ -975,7 +983,7 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
-    // ETP-4254: neo_update maps to PUT, exactly as resolveAccessMethod does for the
+    // ETP-4254: etendo_update maps to PUT, exactly as resolveAccessMethod does for the
     // role-level check — so the entity-level flag consulted here is ISPUT.
     McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_PUT);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
@@ -1018,7 +1026,7 @@ public class McpToolRouter {
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
-    // this call site existed the date branch was unreachable from neo_update, so the agent's raw
+    // this call site existed the date branch was unreachable from etendo_update, so the agent's raw
     // string went straight to the DAL's lenient parser: orderDate "09-08-2026" was accepted under
     // status 0 and stored as 0015-02-16. The defect was never in the coercer — it was in the caller,
     // which is why IMP-16 read as fixed on emit and still corrupted on write. Unlike handleCreate
@@ -1096,7 +1104,7 @@ public class McpToolRouter {
     return wrapAsTextContent(flat);
   }
 
-  // ── neo_delete ────────────────────────────────────────────────────────
+  // ── etendo_delete ────────────────────────────────────────────────────────
 
   /**
    * Delete a record by ID.
@@ -1150,7 +1158,7 @@ public class McpToolRouter {
     return deleteConfirmation(recordId);
   }
 
-  // ── neo_selectors ─────────────────────────────────────────────────────
+  // ── etendo_selectors ─────────────────────────────────────────────────────
 
   /**
    * Query FK selector values for a column.
@@ -1250,7 +1258,7 @@ public class McpToolRouter {
     return McpHookExecutor.neoResponseToMcpResult(response);
   }
 
-  // ── neo_defaults ──────────────────────────────────────────────────────
+  // ── etendo_defaults ──────────────────────────────────────────────────────
 
   /**
    * Get default field values for creating a new record.
@@ -1278,11 +1286,11 @@ public class McpToolRouter {
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     // ETP-5558: defaults only exist to prepare a create; where MCP_CONFIG.verbs hides the create,
-    // answer the same 405 neo_create and view:"create" give instead of a starting point for a
+    // answer the same 405 etendo_create and view:"create" give instead of a starting point for a
     // record the agent cannot write.
     McpToolRouterSupport.requireVerbNotHidden(spec, sfEntity, HTTP_METHOD_POST);
 
-    // ETP-5184: neo_defaults on a child entity without parentId does not fail — it silently omits
+    // ETP-5184: etendo_defaults on a child entity without parentId does not fail — it silently omits
     // every field whose default expression reads from the parent (the parent's warehouse, its
     // price-list version, its next line number). The agent then sends a create built on defaults
     // that were never resolved, and the create is the thing that fails, one call too late and with
@@ -1346,7 +1354,7 @@ public class McpToolRouter {
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
-  // ── neo_schema ─────────────────────────────────────────────────────────
+  // ── etendo_schema ─────────────────────────────────────────────────────────
 
   // AD_Reference ID for OBUISEL selectors (extends the base FK refs from NeoSelectorService)
   private static final java.util.Set<String> SELECTOR_REFS = new java.util.HashSet<>(
@@ -1403,8 +1411,8 @@ public class McpToolRouter {
     // needs the same answer the full response publishes.
     McpParentScope.Scope parentScope = McpParentScope.forEntity(sfEntity);
     // ETP-5184: the entity-level agentPrompt (ETGO_SF_ENTITY.AGENT_PROMPT) used to reach
-    // neo_discover only, and discover is the catalogue an agent reads once at the start of a
-    // session. neo_schema is what it reads immediately before writing, so guidance that only lives
+    // etendo_discover only, and discover is the catalogue an agent reads once at the start of a
+    // session. etendo_schema is what it reads immediately before writing, so guidance that only lives
     // in discover is guidance the agent has already paged out. Resolved here, ahead of the view
     // dispatch, because view:"create" returns early and needs the same value. Trimmed and
     // blank-checked exactly as McpSupportInternals does, so an empty column emits no key.
@@ -1464,12 +1472,12 @@ public class McpToolRouter {
       // telling the agent to pass a parentId would send it looking for an argument that does not
       // apply. requiresParentFor("create") is the precise question the hint answers.
       boolean isChildEntity = parentScope.requiresParentFor(McpParentSection.VERB_CREATE);
-      // ETP-5368: union the AD/neo_defaults answer with the fields a wrapper handler resolves
+      // ETP-5368: union the AD/etendo_defaults answer with the fields a wrapper handler resolves
       // itself. Both mean the same thing to the caller — "the server has this, do not ask the
       // user" — and only the second one knows that an address wrapper builds its own C_Location.
       // ETP-5535: the second set also carries what the entity's customization declares the create
       // callout cascade derives from another field of the body
-      // (NeoHandler#serverResolvedCreateFields). The neo_create pre-check deliberately does not skip
+      // (NeoHandler#serverResolvedCreateFields). The etendo_create pre-check deliberately does not skip
       // those: it runs after the cascade, so they are present there unless the cascade failed.
       Set<String> serverResolved = new HashSet<>(
           McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
@@ -1484,7 +1492,7 @@ public class McpToolRouter {
     // bottom of the response the caller had already paid for. That advice has also been in this
     // tool's description since 2026-08-06 and three independent blind agents still took the full
     // route first, which is why the fix is the argument rather than more wording. The same check
-    // catches an unrecognised value: view:"summary" is real on neo_list/neo_get and used to fall
+    // catches an unrecognised value: view:"summary" is real on etendo_list/etendo_get and used to fall
     // through to here, answering a request for less with the largest response in the tool.
     if (!McpSchemaCreateView.isFullView(view)) {
       throw McpRoutingException.schemaViewRequired(view);
@@ -1535,8 +1543,8 @@ public class McpToolRouter {
     }
     entitySchema.put("methods", methods);
 
-    // ETP-5184: how this entity is addressed, in the same keys neo_discover uses — isChild,
-    // parentEntity, parentField, parentRequiredFor. neo_schema is where an agent goes to learn how
+    // ETP-5184: how this entity is addressed, in the same keys etendo_discover uses — isChild,
+    // parentEntity, parentField, parentRequiredFor. etendo_schema is where an agent goes to learn how
     // to call something, so it is the one place the parent requirement must not be a surprise
     // discovered by getting a 422. Emitted only for child entities; a header tab adds nothing.
     McpParentScope.publishInto(entitySchema, parentScope);
@@ -1563,9 +1571,9 @@ public class McpToolRouter {
     // agent could call. Say "the parent record" rather than the literal "null".
     String parentHint = McpSchemaResponseHints.parentHint(parentScope);
     entitySchema.put("hint", parentHint
-        + "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
+        + "Call etendo_schema with view:\"create\" to get only the fields you may send, already split "
         + "into required/optional — this full response is far larger than you need. "
-        + "Fields with userRequired=true: MUST be provided in neo_create. "
+        + "Fields with userRequired=true: MUST be provided in etendo_create. "
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
         + "Fields with visibility=discarded are excluded — do not send them. "
         + "visibility=readOnly means you cannot set this field here — trust visibility over "
@@ -1573,13 +1581,13 @@ public class McpToolRouter {
         + "Fields with readOnly=true cannot be set by you: this covers auto-generated "
         + "identifiers (DocumentNo, IDs) as well as values derived/maintained elsewhere. "
         + "When such a field carries a writableVia pointer, it names the spec/entity where "
-        + "the value is actually writable — call neo_schema with view:\"create\" there instead "
+        + "the value is actually writable — call etendo_schema with view:\"create\" there instead "
         + "of giving up. "
-        + "Use neo_selectors for FK fields with hasSelector=true. "
+        + "Use etendo_selectors for FK fields with hasSelector=true. "
         + "Fields with businessCritical=true carry core business data (amounts, categories, "
         + "key dates) — you MUST confirm these values with the user before creating or "
         + "modifying records. "
-        // ETP-5306: stated here because neo_schema is where an agent learns what a row looks
+        // ETP-5306: stated here because etendo_schema is where an agent learns what a row looks
         // like, and the prebuilt reference field it used to read no longer exists.
         + McpConstants.RECORD_REF_NOTE);
 
@@ -1594,7 +1602,7 @@ public class McpToolRouter {
     return McpSchemaFieldBuilder.mapSelectorType(refId);
   }
 
-  // ── neo_batch ─────────────────────────────────────────────────────────
+  // ── etendo_batch ─────────────────────────────────────────────────────────
 
   /**
    * Execute a transactional batch of create operations across specs.
@@ -1621,13 +1629,13 @@ public class McpToolRouter {
     }
     try {
       // Per-spec access check: a single batch can mix specs from different
-      // windows, and the top-level authorizeSpecAccess(null) on neo_batch is a
+      // windows, and the top-level authorizeSpecAccess(null) on etendo_batch is a
       // no-op. Authorise each distinct spec before any DAL work happens so an
       // LLM agent cannot smuggle writes into a spec it lacks CRUD access to.
       // Every batch operation is a create (BatchService#processOperation only
       // ever calls createRecord — there is no update/delete op type), so this
       // is a write-tier ("POST") check: a read-only AD_Window_Access role must
-      // be denied here exactly as it would be for a direct neo_create call.
+      // be denied here exactly as it would be for a direct etendo_create call.
       java.util.Set<String> seen = new java.util.HashSet<>();
       for (int i = 0; i < operations.length(); i++) {
         JSONObject op = operations.optJSONObject(i);
@@ -1639,7 +1647,7 @@ public class McpToolRouter {
           authorizeSpecAccess(specName, HTTP_METHOD_POST);
         }
       }
-      // IMP-15 / ETP-5415: the body transforms that make neo_batch accept exactly what neo_create
+      // IMP-15 / ETP-5415: the body transforms that make etendo_batch accept exactly what etendo_create
       // accepts — FK-by-name and legacy-numeric ids, the UoM derivation, the bill-to and
       // line-price injections. They run per operation, from inside the batch loop, because that is
       // the first point where a $ref is resolved and a parentRef's parent exists; running them
@@ -1654,11 +1662,11 @@ public class McpToolRouter {
       }
       return wrapAsTextContent(result);
     } catch (SecurityException e) {
-      log.warn("neo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
+      log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
     } catch (Exception e) {
-      log.error("Error executing neo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
-      return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
+      log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
+      return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
     }
   }
 
@@ -1667,7 +1675,7 @@ public class McpToolRouter {
    * <p>
    * The MCP write verbs are the second and third create path in this module, and neither reaches
    * {@code NeoCrudHandler#executePostCreate} — where the REST path runs this same injection. Without
-   * it, a line body that {@code neo_schema} reports as complete is rejected by the {@code C_OrderLine}
+   * it, a line body that {@code etendo_schema} reports as complete is rejected by the {@code C_OrderLine}
    * trigger with AD message 20111, {@code "Unit of Measure mismatch (product/transaction)"}: the
    * trigger compares {@code M_PRODUCT.C_UOM_ID} against the row's {@code C_UOM_ID}, and {@code uOM}
    * is a {@code system}-visibility field, so no agent-visible contract ever mentions it.
@@ -1740,14 +1748,14 @@ public class McpToolRouter {
       adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, op.entityName());
       dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
     } catch (Exception e) {
-      log.debug("neo_batch transforms skipped op {} ({}/{}): {}", op.index(), op.specName(),
+      log.debug("etendo_batch transforms skipped op {} ({}/{}): {}", op.index(), op.specName(),
           op.entityName(), e.getMessage());
       return null;
     }
     // ETP-5415: the curation gates, FIRST — before any injection, so they judge only what the
-    // agent sent. neo_create applies them inside mapFieldsToDalProperties; neo_batch never calls
+    // agent sent. etendo_create applies them inside mapFieldsToDalProperties; etendo_batch never calls
     // that method, so until now a batch could write a field the spec publishes as read-only that
-    // neo_create refuses with 422 (measured live on sales-order/lines: salesOrder). A batch more
+    // etendo_create refuses with 422 (measured live on sales-order/lines: salesOrder). A batch more
     // permissive than a single create is the divergence class this ticket removes, and it only
     // became reachable when the tool was re-enabled. Refusals surface through the same batch
     // envelope as every other pre-write rejection.
@@ -1758,7 +1766,7 @@ public class McpToolRouter {
     // payment-out/lines corruption, through the other door.
     //
     // ETP-5558: and the method gate before it — a create MCP_CONFIG.verbs hides is refused here
-    // with the same 405 neo_create returns (BatchService's own check reads only the raw flag).
+    // with the same 405 etendo_create returns (BatchService's own check reads only the raw flag).
     try {
       McpToolRouterSupport.requireMethodEnabled(spec, sfEntity, HTTP_METHOD_POST);
       McpWriteRequestSupport.requireApplicableParent(sfEntity, op.parentId());
@@ -1788,7 +1796,7 @@ public class McpToolRouter {
     if (fkError != null) {
       return McpBatchEnvelope.toMcpBatchPreflightFailure(fkError, op.index(), op.opId());
     }
-    // ETP-5335: same derivation neo_create runs, and it must run here too — neo_batch never
+    // ETP-5335: same derivation etendo_create runs, and it must run here too — etendo_batch never
     // reaches handleCreate, so without this a batched document is persisted with a null bill-to
     // instead of being refused, and the failure only surfaces later when C_INVOICE_CREATE copies
     // that null into C_Invoice.C_BPartner_Location_ID (NOT NULL). Placed after the FK pre-pass so
@@ -1798,17 +1806,17 @@ public class McpToolRouter {
     // ETP-5415 (T6a): without it a batched commercial line is persisted at price 0 — the shared
     // create path derives a line's price from the product selector's aux values, which carry no
     // price-list context, so nothing downstream fills it and nothing complains. That silent-zero
-    // shape is the divergence class that had neo_batch switched off (ETP-5335); leaving it while
+    // shape is the divergence class that had etendo_batch switched off (ETP-5335); leaving it while
     // re-enabling the tool would have shipped the same defect back. Placed last, matching
     // handleCreate's order. See McpLinePriceInjector.
     McpLinePriceInjector.injectIfMissing(body, dalEntity, sfEntity, op.parentId(), agentProvided,
         log);
 
-    // ETP-5415 (T6a): the remaining two steps neo_create ran and neo_batch did not, both named in
+    // ETP-5415 (T6a): the remaining two steps etendo_create ran and etendo_batch did not, both named in
     // McpConstants#batchToolEnabled() as reasons the tool was switched off.
     //
     // FK sentinels first: "0" is a UI-level "not yet set" that the DAL cannot take as a reference,
-    // so it must be resolved or dropped before the write, exactly as neo_create does.
+    // so it must be resolved or dropped before the write, exactly as etendo_create does.
     McpWriteRequestSupport.resolveFkSentinels(body, dalEntity, log);
 
     // Then image fields. This one REFUSES rather than repairs, so it runs last among the body
@@ -1821,7 +1829,7 @@ public class McpToolRouter {
     return null;
   }
 
-  // ── neo_action ────────────────────────────────────────────────────────
+  // ── etendo_action ────────────────────────────────────────────────────────
 
   /**
    * Fire a button action on a record and return the structured process result.
@@ -1921,7 +1929,7 @@ public class McpToolRouter {
   }
 
   /**
-   * The request body a {@code neo_action} call reaches the customization and the button with: the
+   * The request body a {@code etendo_action} call reaches the customization and the button with: the
    * call's parameters, wrapped under {@code fieldValues} when the declared contract says its
    * customization reads them there — the body the SPA's process dialog posts (ETP-5587).
    *
@@ -1941,10 +1949,10 @@ public class McpToolRouter {
     return body;
   }
 
-  // ── neo_generate_amortization_plan ────────────────────────────────────
+  // ── etendo_generate_amortization_plan ────────────────────────────────────
 
   /**
-   * Handles the {@code neo_generate_amortization_plan} MCP tool call.
+   * Handles the {@code etendo_generate_amortization_plan} MCP tool call.
    * Delegates to {@link AmortizationPlanService#generatePlan(String)}.
    *
    * @param arguments tool arguments containing {@code assetId}
@@ -2015,7 +2023,7 @@ public class McpToolRouter {
     // ETP-5415: this site RESOLVES but never dispatches — the handler is consulted for its report
     // contract, no hook is invoked. So it uses resolveOnly and emits no trace: a "dispatched" line
     // here would claim something that did not happen. It still needs the annotation-first order,
-    // or an annotated report generator would be invisible to neo_report while working elsewhere.
+    // or an annotated report generator would be invisible to etendo_report while working elsewhere.
     NeoHandler handler = reportEntity != null
         ? NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
             .qualifier(reportEntity.getJavaQualifier())
@@ -2026,7 +2034,7 @@ public class McpToolRouter {
             .build())
         : null;
     if (handler == null) {
-      // Non-callable report: identical message to neo_discover. Not an error path.
+      // Non-callable report: identical message to etendo_discover. Not an error path.
       return wrapAsTextContent(
           NeoReportCallability.buildNotConfiguredResponse(specName));
     }
@@ -2096,7 +2104,7 @@ public class McpToolRouter {
           "Output format '" + format + "' is not served by this report");
       error.put(McpConstants.PARAM_FIELD, McpConstants.PARAM_FORMAT);
       error.put("supportedFormats", new JSONArray(contract.getFormats()));
-      error.put(McpConstants.KEY_HINT, "Etendo Go returns report data as JSON; it does not render documents. "
+      error.put(McpConstants.KEY_HINT, "Etendo returns report data as JSON; it does not render documents. "
           + "Omit 'format' or pass '" + contract.getDefaultFormat() + "'.");
       return error;
     }
@@ -2139,9 +2147,9 @@ public class McpToolRouter {
    * tiering (ETP-4510) via {@link McpToolRouterSupport#hasSpecAccess(SFSpec, String, String)}.
    *
    * @param specName   the spec name resolved from the tool call (blank/{@code null} is a no-op —
-   *                   some tools, e.g. {@code neo_discover}, have no single spec to authorize)
+   *                   some tools, e.g. {@code etendo_discover}, have no single spec to authorize)
    * @param httpMethod the HTTP-method equivalent of the MCP operation being authorized
-   *                   (e.g. {@code "POST"} for {@code neo_create})
+   *                   (e.g. {@code "POST"} for {@code etendo_create})
    */
   private void authorizeSpecAccess(String specName, String httpMethod) throws Exception {
     if (StringUtils.isBlank(specName)) {
@@ -2161,17 +2169,17 @@ public class McpToolRouter {
    * execution, discovery) is treated as a read for window-access purposes — process and
    * report access are authorized separately and are unaffected by this method string.
    *
-   * @param toolName the MCP tool name (e.g. {@code "neo_create"})
+   * @param toolName the MCP tool name (e.g. {@code "etendo_create"})
    * @return {@code "POST"}, {@code "PUT"}, or {@code "DELETE"} for the corresponding
    *         mutating tool; {@code "GET"} for everything else
    */
   private static String resolveAccessMethod(String toolName) {
     switch (toolName) {
-      case "neo_create":
+      case "etendo_create":
         return HTTP_METHOD_POST;
-      case "neo_update":
+      case "etendo_update":
         return HTTP_METHOD_PUT;
-      case "neo_delete":
+      case "etendo_delete":
         return HTTP_METHOD_DELETE;
       default:
         return HTTP_METHOD_GET;

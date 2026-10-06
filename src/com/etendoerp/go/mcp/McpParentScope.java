@@ -72,7 +72,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * <p>{@code McpWriteRequestSupport#resolveParentFK} walks the columns, takes the first with
  * {@code isLinkToParentColumn()} and assigns {@code parentId} to it <b>without checking it points
  * at the real parent</b>. In the 17 mismatched entities that first column is the wrong one: a
- * {@code neo_create} on {@code product/stock} passing a product id writes it into the
+ * {@code etendo_create} on {@code product/stock} passing a product id writes it into the
  * "referenced inventory" foreign key. It does not fail — it stores wrong data, which is why nobody
  * noticed. Both names exist on the same entity ({@code product} and {@code referencedInventory}),
  * so the write lands in the neighbouring field. Routing that resolution through this class corrects
@@ -100,12 +100,12 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * <p>Step 5 is what keeps the gate from having a permissive default. What "not publishable" means
  * in practice, verb by verb:</p>
  * <ul>
- *   <li><b>create</b> ({@code neo_create}, {@code neo_batch}) — refused with
+ *   <li><b>create</b> ({@code etendo_create}, {@code etendo_batch}) — refused with
  *       {@code parent_unresolvable}, with or without {@code parentId}, by
  *       {@code McpWriteRequestSupport#requireApplicableParent} (ETP-5558). Letting it through is
  *       what attached a {@code payment-out} line to an unrelated collection: the mandatory-defaults
  *       pass fills the unmappable link on its own.</li>
- *   <li><b>discovery</b> — {@code neo_discover} and {@code neo_schema} still list the entity, with
+ *   <li><b>discovery</b> — {@code etendo_discover} and {@code etendo_schema} still list the entity, with
  *       {@code configError} and {@code parentProblem} saying why.</li>
  *   <li><b>read, update, delete</b> — served, without a parent gate (there is no field to gate
  *       on). None of them runs the defaults pass, so none can choose a parent for the caller.</li>
@@ -250,7 +250,7 @@ final class McpParentScope {
     }
 
     /**
-     * The verbs the parent key is required on, for {@code neo_discover} and {@code neo_schema}.
+     * The verbs the parent key is required on, for {@code etendo_discover} and {@code etendo_schema}.
      *
      * @return the required verbs in declaration order, empty when the gate does not apply
      */
@@ -265,7 +265,7 @@ final class McpParentScope {
     }
 
     /**
-     * This scope as the block {@code neo_discover} and {@code neo_schema} publish.
+     * This scope as the block {@code etendo_discover} and {@code etendo_schema} publish.
      *
      * <p>Emitting it is what keeps the gate from being pure friction: an agent that can read
      * {@code parentField} and {@code parentRequiredFor} makes the correct call on the first try
@@ -761,7 +761,7 @@ final class McpParentScope {
    * Copy a scope's descriptor onto a response object, so every tool that describes an entity
    * describes it identically.
    *
-   * <p>{@code neo_discover} and {@code neo_schema} both need this block, and an agent that reads
+   * <p>{@code etendo_discover} and {@code etendo_schema} both need this block, and an agent that reads
    * {@code parentField} from one and then calls the other must find the same key spelled the same
    * way. Duplicating the merge loop in each caller is how those two drift apart, so the loop lives
    * here and the callers pass their own target.</p>

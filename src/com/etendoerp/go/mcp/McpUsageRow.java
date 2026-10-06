@@ -45,7 +45,7 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
  * @param orgId         {@code AD_Org_ID} the call ran under
  * @param userId        {@code AD_User_ID} the call ran under, used for the audit columns
  * @param sessionKey    MCP session the call belongs to, so a sequence reads as one task
- * @param toolName      the MCP tool invoked ({@code neo_create}, {@code neo_list}, …)
+ * @param toolName      the MCP tool invoked ({@code etendo_create}, {@code etendo_list}, …)
  * @param verb          the CRUD/action verb the call resolved to
  * @param targetEntity  the spec, or {@code spec/entity}, the call addressed. Named
  *                      {@code targetEntity} and not {@code entity}/{@code entityName} because BOTH

@@ -50,7 +50,12 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
-/** QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows). */
+/**
+ * QA edge cases for ETP-5594 (effective tenant on ETGO_MCP_USAGE rows).
+ *
+ * @covers com.etendoerp.go.mcp.McpUsageRow
+ * @covers com.etendoerp.go.mcp.McpUsageTelemetry
+ */
 public class McpUsageTenantQaTest {
 
   private McpServlet servlet;
@@ -124,7 +129,7 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void wildcardTokenWhoseResolutionFindsNothingKeepsZero() throws Exception {
-    McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "0", "0", resolves(null, null),
+    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "0", "0", resolves(null, null),
         new JSONObject());
     assertEquals("0", row.clientId());
     assertEquals("0", row.orgId());
@@ -132,7 +137,7 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void wildcardTokenWithOnlyClientResolvedKeepsOrgZero() throws Exception {
-    McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "0", "0",
+    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
         resolves(null, "realClient"), new JSONObject());
     assertEquals("realClient", row.clientId());
     assertEquals("0", row.orgId());
@@ -140,7 +145,7 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void nullTokenOrgIsRecordedAsTheResolvedOrg() throws Exception {
-    McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "client1", null,
+    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "client1", null,
         resolves("realOrg", null), new JSONObject());
     assertEquals("client1", row.clientId());
     assertEquals("realOrg", row.orgId());
@@ -149,7 +154,7 @@ public class McpUsageTenantQaTest {
   @Test
   public void resolutionFailureIsSwallowedAndTheRowKeepsZero() throws Exception {
     // resolveDefaultOrg/resolveClientFromRole catch and log: the call proceeds on "0".
-    McpUsageRow row = doPostToolsCall("neo_list", neoListArgs(), "0", "0",
+    McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
     assertEquals(McpUsageRow.OUTCOME_OK, row.outcome());
@@ -159,13 +164,13 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void pooledThreadDoesNotCarryThePreviousRequestTenant() throws Exception {
-    McpUsageRow first = doPostToolsCall("neo_list", neoListArgs(), "0", "0",
+    McpUsageRow first = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
         resolves("orgA", "clientA"), new JSONObject());
     assertEquals("clientA", first.clientId());
     assertNull(McpUsageTelemetry.currentTenant());
 
     // Same thread, next request never reaches setCurrentTenant (resolution blows up).
-    McpUsageRow second = doPostToolsCall("neo_list", neoListArgs(), "0", "0",
+    McpUsageRow second = doPostToolsCall("etendo_list", neoListArgs(), "0", "0",
         s -> when(s.doReturningWork(any())).thenThrow(new RuntimeException("db down")),
         new JSONObject());
     assertEquals("0", second.clientId());
@@ -184,7 +189,7 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void neoDiscoverRowIsAttributedToTheEffectiveTenant() throws Exception {
-    McpUsageRow row = doPostToolsCall("neo_discover", new JSONObject(), "0", "0",
+    McpUsageRow row = doPostToolsCall("etendo_discover", new JSONObject(), "0", "0",
         resolves("realOrg", "realClient"), new JSONObject());
     assertNotNull(row);
     assertEquals("realClient", row.clientId());
