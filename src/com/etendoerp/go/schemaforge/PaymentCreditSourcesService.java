@@ -88,7 +88,7 @@ final class PaymentCreditSourcesService {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
         if (invoice == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
         }
@@ -102,8 +102,10 @@ final class PaymentCreditSourcesService {
         // Editing a draft: add its own consumption back in, so sources it is already using
         // show their "as if this draft didn't exist" availability and stay in the list even
         // if fully consumed by it — letting the modal re-check them.
-        String editPaymentId = context.getRequestBody() != null
-            ? context.getRequestBody().optString(FIELD_EDIT_PAYMENT_ID, null) : null;
+        // ETP-5558: honoured only for a draft of THIS invoice the caller may read; another id is
+        // ignored, so it can neither reveal another payment's credit nor inflate the availability.
+        String editPaymentId = PaymentOwnership.ownDraftIdOrNull(context.getRequestBody() != null
+            ? context.getRequestBody().optString(FIELD_EDIT_PAYMENT_ID, null) : null, invoiceId);
         List<DatedSource> sources = new ArrayList<>();
         collectAbonoSources(sources, invoice, isReceipt, editPaymentId);
         if (isReceipt) {

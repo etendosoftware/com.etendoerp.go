@@ -378,6 +378,85 @@ public class NeoAttachmentsHelperTest {
     }
   }
 
+  /**
+   * ETP-5526 — the count endpoint validates its inputs exactly like the list, before any DB access.
+   */
+  @Test
+  public void handleCountRejectsBlankInputs() throws Exception {
+    String[][] cases = { { " ", "REC1" }, { "C_Order", null }, { null, "" } };
+    for (String[] c : cases) {
+      NeoResponse response = NeoAttachmentsHelper.handleCount(c[0], c[1]);
+      assertEquals(c[0] + "/" + c[1], 400, response.getHttpStatus());
+      assertEquals("tableName and recordId are required", errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5526 — an unknown table maps to 404, like the list.
+   */
+  @Test
+  public void handleCountReturnsNotFoundWhenTableCannotBeResolved() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubUnknownTableLookup(dal);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleCount("C_Order", "REC1");
+
+      assertEquals(404, response.getHttpStatus());
+      assertEquals("Unknown table: C_Order", errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5526 — any other failure while counting maps to a generic 500.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleCountReturnsInternalErrorOnUnexpectedFailure() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableLookup(dal, "TABLE1");
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    when(criteria.count()).thenThrow(new RuntimeException("db down"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleCount("C_Order", "REC1");
+
+      assertEquals(500, response.getHttpStatus());
+      assertEquals("Internal error counting attachments", errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5526 — success returns {count: N} from a COUNT query (the attachments are never
+   * loaded) with the organization filter off, as the list does, so N equals the list length.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleCountReturnsCountWithoutLoadingAttachments() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableLookup(dal, "TABLE1");
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    when(criteria.count()).thenReturn(3);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleCount("C_Order", "REC1");
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(3, response.getBody().getInt("count"));
+      verify(criteria).setFilterOnReadableOrganization(false);
+      verify(criteria).count();
+      verify(criteria, never()).list();
+    }
+  }
+
   private static Attachment stubAttachment(String id, String name) {
     Attachment attachment = mock(Attachment.class);
     when(attachment.getId()).thenReturn(id);

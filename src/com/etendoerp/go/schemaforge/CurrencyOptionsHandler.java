@@ -37,6 +37,8 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Returns the set of currencies that have a defined conversion to/from the order's org currency,
  * scoped to the order's own client and org, for the order's date period.
@@ -71,6 +73,19 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CurrencyOptionsHandler.class);
   private static final String ACTION_NAME = "currencyOptions";
+
+  /**
+   * The contract a document header that routes {@code currencyOptions} here publishes for agents
+   * (ETP-5558). Served over {@code GET} only — {@link #handle} refuses any other method — so the
+   * contract says so, and the MCP calls it that way.
+   */
+  static final NeoActionContract CONTRACT = NeoActionContract.read(ACTION_NAME,
+      "Lists the currencies that have a conversion rate to or from the organization currency for "
+          + "this document's date: [{id, isoCode, rate}]. The organization currency is always "
+          + "included with rate 1. Use it to find registerPayment's conversionRate when the "
+          + "account currency differs from the invoice currency.")
+      .withIdDescription("the id of the document whose date and organization scope the rates")
+      .withHttpMethod("GET");
 
   @Override
   public NeoResponse handle(NeoContext context) {

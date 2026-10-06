@@ -4,8 +4,13 @@ package com.etendoerp.go.payment;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -48,6 +53,7 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * browser can re-enter the flow on reload, so both are ordinary occurrences rather than errors.
  */
 abstract class CheckoutRequestStoreQuerySupport {
+  private static final Logger log = LogManager.getLogger(CheckoutRequestStore.class);
   protected static final String ZERO_ID = "0";
 
   /** Immutable product/contact selection stored with a purchase. */
@@ -251,7 +257,91 @@ abstract class CheckoutRequestStoreQuerySupport {
   }
 
   protected abstract CheckoutRequest find(String requestId, String accountId, String accountEmail);
-  protected abstract <T> T runAsSystem(Supplier<T> body);
+  /**
+   * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
+   * the caller back exactly the execution context it arrived with.
+   *
+   * <p>Restoring is the part that is easy to get wrong, and this class got it wrong until
+   * ETP-5045: {@link OBContext#restorePreviousMode()} pops the <em>admin-mode stack</em>, it does
+   * not undo {@link OBContext#setOBContext(String, String, String, String)}. So every method used
+   * to leave the system context installed on the calling thread. That was invisible while the only
+   * callers were the webhook (which has no context to lose) and the status endpoint (which is done
+   * when the store returns, near the end of a request). It stopped being invisible as soon as a
+   * caller in the middle of a unit of work started using the store: everything it ran afterwards
+   * silently continued as system instead of as the identity it had established.
+   *
+   * <p><b>{@code null} is a legitimate previous context, not a missing one.</b> The webhook handler
+   * is matched before the authentication chain and genuinely has none, so "no context" must be
+   * restored as no context. {@link OBContext#setOBContext(OBContext)} clears the thread-local when
+   * handed {@code null}, which is precisely the wanted behaviour — substituting a system context
+   * for it would leave the thread more privileged than it was found.
+   *
+   * @param body the work to run as system
+   * @param <T> the body's result type
+   * @return whatever the body returned
+   */
+  protected <T> T runAsSystem(Supplier<T> body) {
+    OBContext previousContext = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return body.get();
+    } finally {
+      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
+      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
+      // and then looks at whichever context is current at that moment, clearing it outright when
+      // the stack empties on the shared admin context. Putting the caller's context back first
+      // would expose that context to the check and could null it out — reintroducing, from the
+      // other end, the very leak this method exists to close.
+      exitAdminModeQuietly();
+      restoreContextQuietly(previousContext);
+    }
+  }
+
+  /**
+   * Void form of {@link #runAsSystem(Supplier)}, for the methods that only write.
+   *
+   * @param body the work to run as system
+   */
+  protected void runAsSystem(Runnable body) {
+    runAsSystem(() -> {
+      body.run();
+      return null;
+    });
+  }
+
+  /**
+   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
+   * would replace the real failure from the body with a misleading one.
+   */
+  private void exitAdminModeQuietly() {
+    try {
+      OBContext.restorePreviousMode();
+    } catch (RuntimeException e) {
+      log.error("Could not leave admin mode after a checkout-request store operation", e);
+    }
+  }
+
+  /**
+   * Reinstates the caller's context without ever throwing, for the same reason as
+   * {@link #exitAdminModeQuietly()}.
+   *
+   * @param previousContext the context captured on entry; {@code null} is a real value and is
+   *     restored as "no context"
+   */
+  private void restoreContextQuietly(OBContext previousContext) {
+    try {
+      OBContext.setOBContext(previousContext);
+    } catch (RuntimeException e) {
+      log.error("Could not restore the caller's OBContext after a checkout-request store operation",
+          e);
+    }
+  }
+
+  protected void flushAndCommit() {
+    OBDal.getInstance().flush();
+    OBDal.getInstance().commitAndClose();
+  }
 }
 
 /**
@@ -277,11 +367,133 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   static final String STATUS_PROVISIONING = "PROVISIONING";
   static final String STATUS_PROVISIONED = "PROVISIONED";
 
+  /** Wire status returned by the checkout status endpoint when a failed attempt can be retried. */
+  public static final String DERIVED_STATUS_PROVISIONING_FAILED = "provisioning_failed";
+  /** Wire status returned once the environment of the request has been set up. */
+  public static final String DERIVED_STATUS_PROVISIONED = "provisioned";
+  /** Wire status returned when a provisioning lease expired without a diagnostic reason. */
+  public static final String DERIVED_STATUS_STALLED = "stalled";
+
   private static final String PROVISIONING_LEASE_MINUTES_PROPERTY =
       "etendo.go.billing.provisioning.lease.minutes";
   private static final String PROVISIONING_LEASE_MINUTES_ENV =
       "ETGO_BILLING_PROVISIONING_LEASE_MINUTES";
   private static final long DEFAULT_PROVISIONING_LEASE_MINUTES = 30L;
+
+  /**
+   * Derives the customer-facing provisioning state from the durable checkout row.
+   *
+   * <p>The persisted lifecycle remains deliberately small ({@code PAID}, {@code PROVISIONING},
+   * {@code PROVISIONED}). A failed attempt is represented by its diagnostic reason and a stale
+   * lease by its timestamp; exposing those as derived states keeps retries fenced without adding a
+   * second mutable status that could drift from the attempt token.
+   *
+   * @param request checkout row, possibly {@code null}
+   * @return stable lowercase status for the API
+   */
+  public String deriveProvisioningStatus(CheckoutRequest request) {
+    if (request == null) return "pending";
+    String status = StringUtils.defaultString(request.getCheckoutRequestStatus());
+    if (STATUS_PROVISIONED.equals(status)) return DERIVED_STATUS_PROVISIONED;
+    if (STATUS_PROVISIONING.equals(status)) {
+      if (StringUtils.isNotBlank(request.getFailureReason())) {
+        return DERIVED_STATUS_PROVISIONING_FAILED;
+      }
+      Date provisioningAt = request.getProvisioningAt();
+      if (provisioningAt != null
+          && provisioningAt.before(new Date(System.currentTimeMillis() - provisioningLeaseMillis()))) {
+        return DERIVED_STATUS_STALLED;
+      }
+      return HQL_PROVISIONING;
+    }
+    return STATUS_PAID.equals(status) ? "paid" : "pending";
+  }
+
+  /**
+   * Tells whether a new fenced provisioning attempt may be claimed for the row. A failure whose
+   * code is deterministic (see {@link #NON_RETRYABLE_FAILURE_CODES}) is never retryable: the same
+   * request would fail the same way on every attempt.
+   *
+   * @param request durable checkout row, or {@code null}
+   * @return whether the row may be retried
+   */
+  public boolean isProvisioningRetryAllowed(CheckoutRequest request) {
+    String derived = deriveProvisioningStatus(request);
+    if (DERIVED_STATUS_PROVISIONING_FAILED.equals(derived)) {
+      return !NON_RETRYABLE_FAILURE_CODES.contains(failureCode(request.getFailureReason()));
+    }
+    return "paid".equals(derived) || DERIVED_STATUS_STALLED.equals(derived);
+  }
+
+  /** Failure code of a provisioning attempt whose cause is not known more precisely. */
+  public static final String FAILURE_CODE_PROVISIONING_FAILED = "PROVISIONING_FAILED";
+  /**
+   * The account already has a productive environment with the requested company name (ETP-5548;
+   * before it, the name belonged to another account's environment).
+   */
+  public static final String FAILURE_CODE_CLIENT_NAME_IN_USE = "CLIENT_NAME_IN_USE";
+
+  /**
+   * Failure codes a retry cannot fix. The checkout request fixes the company name, so a name
+   * collision fails again on every attempt; offering a retry would only loop the customer.
+   */
+  static final Set<String> NON_RETRYABLE_FAILURE_CODES = Set.of(FAILURE_CODE_CLIENT_NAME_IN_USE);
+
+  /**
+   * Customer-safe description of each failure code. The persisted reason keeps the raw cause for
+   * operations; it can carry exception text, internal ids or SQL, so it never leaves the backend.
+   */
+  private static final Map<String, String> SAFE_FAILURE_DESCRIPTIONS = Map.of(
+      FAILURE_CODE_CLIENT_NAME_IN_USE,
+      "The account already has a productive environment with this company name",
+      FAILURE_CODE_PROVISIONING_FAILED, "The environment setup did not complete");
+
+  private static final Pattern FAILURE_CODE_PREFIX = Pattern.compile("^([A-Z][A-Z0-9_]*): ");
+
+  /**
+   * Encodes a failure as {@code CODE: message}, the format {@link #failureCode} reads back.
+   *
+   * <p>The code travels as a prefix of the existing {@code FAILURE_REASON} column rather than in a
+   * column of its own: the reason is an operational annotation of a row whose lifecycle stays
+   * {@code PROVISIONING}, and rows written before codes existed simply read back as
+   * {@link #FAILURE_CODE_PROVISIONING_FAILED}.
+   *
+   * @param code stable failure code, {@code null} for {@link #FAILURE_CODE_PROVISIONING_FAILED}
+   * @param message raw operational cause, kept for diagnostics only
+   * @return the value to persist
+   */
+  public static String encodeFailureReason(String code, String message) {
+    String safeCode = StringUtils.defaultIfBlank(code, FAILURE_CODE_PROVISIONING_FAILED);
+    return safeCode + ": " + StringUtils.defaultIfBlank(StringUtils.normalizeSpace(message),
+        "Provisioning did not complete");
+  }
+
+  /**
+   * Reads the failure code back from a persisted reason written by {@link #encodeFailureReason}.
+   *
+   * @param failureReason persisted {@code FAILURE_REASON}
+   * @return its failure code; {@code null} when there is no failure, and
+   *     {@link #FAILURE_CODE_PROVISIONING_FAILED} for a reason written without one
+   */
+  public static String failureCode(String failureReason) {
+    if (StringUtils.isBlank(failureReason)) {
+      return null;
+    }
+    Matcher matcher = FAILURE_CODE_PREFIX.matcher(failureReason);
+    return matcher.find() ? matcher.group(1) : FAILURE_CODE_PROVISIONING_FAILED;
+  }
+
+  /**
+   * Maps a failure code to its fixed customer-facing description; unknown codes get the generic
+   * one.
+   *
+   * @param failureCode a code from {@link #failureCode}
+   * @return a fixed description of it that is safe to return to the customer
+   */
+  public static String safeFailureDescription(String failureCode) {
+    return SAFE_FAILURE_DESCRIPTIONS.getOrDefault(failureCode,
+        SAFE_FAILURE_DESCRIPTIONS.get(FAILURE_CODE_PROVISIONING_FAILED));
+  }
 
   /** Lifecycle order. A request may only move to a strictly later element. */
   private static final List<String> LIFECYCLE = Arrays.asList(STATUS_CREATING, STATUS_CREATED,
@@ -565,6 +777,48 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   }
 
   /**
+   * Company names of the account's paid purchases whose environment has not finished
+   * provisioning, each with the moment it was paid.
+   *
+   * <p>The classic path commits the client while it builds it, so a failed or still running paid
+   * attempt can leave an incomplete client behind. Callers hide a client of that name only when it
+   * was created at or after the payment: an environment that existed before the purchase (a demo
+   * being converted) must stay reachable.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return lower-cased company name to the earliest payment instant among its unfinished rows
+   */
+  public Map<String, Date> findUnfinishedPaidClientNames(String accountId, String accountEmail) {
+    return runAsSystem(() -> {
+      if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) return Map.of();
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.checkoutRequestStatus in ('PAID', 'PROVISIONING')");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      return earliestPaymentByClientName(query.list());
+    });
+  }
+
+  /** Lower-cased company name to the earliest payment (or creation) instant among {@code rows}. */
+  private static Map<String, Date> earliestPaymentByClientName(List<CheckoutRequest> rows) {
+    Map<String, Date> unfinished = new java.util.HashMap<>();
+    for (CheckoutRequest request : rows) {
+      String name = StringUtils.lowerCase(StringUtils.trimToNull(request.getClientName()),
+          Locale.ROOT);
+      Date paidAt = request.getPaidAt() != null ? request.getPaidAt() : request.getCreatingAt();
+      if (name != null && paidAt != null) {
+        unfinished.merge(name, paidAt, (left, right) -> left.before(right) ? left : right);
+      }
+    }
+    return unfinished;
+  }
+
+  /**
    * Finds the one purchase that backs the authenticated account's subscription.
    *
    * <p>It is the account's newest purchase carrying both a Stripe subscription and a Stripe
@@ -769,10 +1023,15 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
                 + " where cr.request = :requestId"
                 + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
                 + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
-                + "   and (cr.failureReason is not null or cr.provisioningAt <= :staleBefore)")
+                + "   and (cr.failureReason is not null or cr.provisioningAt <= :staleBefore)"
+                // A deterministic failure is never reclaimed, whoever asks: see
+                // NON_RETRYABLE_FAILURE_CODES.
+                + "   and (cr.failureReason is null"
+                + "        or cr.failureReason not like :nameInUsePrefix)")
             .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
             .setParameter("now", now)
             .setParameter("staleBefore", staleBefore)
+            .setParameter("nameInUsePrefix", FAILURE_CODE_CLIENT_NAME_IN_USE + ": %")
             .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
             .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
             .executeUpdate();
@@ -934,6 +1193,29 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
   }
 
   /**
+   * Removes one local E2E fixture purchase when its immutable account tuple matches.
+   *
+   * @param requestId fixture request id
+   * @param accountId immutable platform account id
+   * @param accountEmail account email of the request
+   * @return whether a matching fixture purchase was removed
+   */
+  public boolean deleteFixture(String requestId, String accountId, String accountEmail) {
+    return runAsSystem(() -> {
+      List<CheckoutRequest> matches = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.request = :requestId and cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)")
+          .setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
+          .setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId))
+          .setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
+          .list();
+      matches.forEach(OBDal.getInstance()::remove);
+      flushAndCommit();
+      return !matches.isEmpty();
+    });
+  }
+
+  /**
    * Applies a status transition only when it moves the request strictly forward.
    *
    * <p>A target the request has already reached means the same step arrived twice — Stripe
@@ -988,92 +1270,5 @@ public class CheckoutRequestStore extends CheckoutRequestStoreQuerySupport {
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
     return query.uniqueResult();
-  }
-
-  /**
-   * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
-   * the caller back exactly the execution context it arrived with.
-   *
-   * <p>Restoring is the part that is easy to get wrong, and this class got it wrong until
-   * ETP-5045: {@link OBContext#restorePreviousMode()} pops the <em>admin-mode stack</em>, it does
-   * not undo {@link OBContext#setOBContext(String, String, String, String)}. So every method used
-   * to leave the system context installed on the calling thread. That was invisible while the only
-   * callers were the webhook (which has no context to lose) and the status endpoint (which is done
-   * when the store returns, near the end of a request). It stopped being invisible as soon as a
-   * caller in the middle of a unit of work started using the store: everything it ran afterwards
-   * silently continued as system instead of as the identity it had established.
-   *
-   * <p><b>{@code null} is a legitimate previous context, not a missing one.</b> The webhook handler
-   * is matched before the authentication chain and genuinely has none, so "no context" must be
-   * restored as no context. {@link OBContext#setOBContext(OBContext)} clears the thread-local when
-   * handed {@code null}, which is precisely the wanted behaviour — substituting a system context
-   * for it would leave the thread more privileged than it was found.
-   *
-   * @param body the work to run as system
-   * @param <T> the body's result type
-   * @return whatever the body returned
-   */
-  @Override
-  protected <T> T runAsSystem(Supplier<T> body) {
-    OBContext previousContext = OBContext.getOBContext();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      return body.get();
-    } finally {
-      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
-      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
-      // and then looks at whichever context is current at that moment, clearing it outright when
-      // the stack empties on the shared admin context. Putting the caller's context back first
-      // would expose that context to the check and could null it out — reintroducing, from the
-      // other end, the very leak this method exists to close.
-      exitAdminModeQuietly();
-      restoreContextQuietly(previousContext);
-    }
-  }
-
-  /**
-   * Void form of {@link #runAsSystem(Supplier)}, for the methods that only write.
-   *
-   * @param body the work to run as system
-   */
-  private void runAsSystem(Runnable body) {
-    runAsSystem(() -> {
-      body.run();
-      return null;
-    });
-  }
-
-  /**
-   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
-   * would replace the real failure from the body with a misleading one.
-   */
-  private void exitAdminModeQuietly() {
-    try {
-      OBContext.restorePreviousMode();
-    } catch (RuntimeException e) {
-      log.error("Could not leave admin mode after a checkout-request store operation", e);
-    }
-  }
-
-  /**
-   * Reinstates the caller's context without ever throwing, for the same reason as
-   * {@link #exitAdminModeQuietly()}.
-   *
-   * @param previousContext the context captured on entry; {@code null} is a real value and is
-   *     restored as "no context"
-   */
-  private void restoreContextQuietly(OBContext previousContext) {
-    try {
-      OBContext.setOBContext(previousContext);
-    } catch (RuntimeException e) {
-      log.error("Could not restore the caller's OBContext after a checkout-request store operation",
-          e);
-    }
-  }
-
-  private void flushAndCommit() {
-    OBDal.getInstance().flush();
-    OBDal.getInstance().commitAndClose();
   }
 }
