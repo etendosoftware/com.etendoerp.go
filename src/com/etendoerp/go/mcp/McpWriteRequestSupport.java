@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -38,6 +39,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
@@ -276,6 +278,53 @@ final class McpWriteRequestSupport {
   }
 
   /**
+   * Apply the curation gates to a body that is ALREADY keyed by DAL property name (ETP-5415).
+   *
+   * <p><b>Why a second entry point, and why it does not map.</b> {@link #mapFieldsToDalProperties}
+   * does two jobs — it translates the caller's spelling into DAL property names, and it applies
+   * these gates on the way. {@code neo_batch} needs only the second: its operation bodies reach
+   * {@code BatchService} in whatever spelling the agent sent and are resolved downstream, so
+   * running the mapping here as well would rewrite keys a path that works today does not expect.
+   * This method therefore refuses, and changes nothing.
+   *
+   * <p><b>The gap it closes.</b> The read-only gate lived only where the mapping lived, so
+   * {@code neo_create} refused a value sent for a field the spec publishes as read-only while
+   * {@code neo_batch} accepted and persisted it — measured live on {@code sales-order/lines}:
+   * {@code salesOrder} was refused by one verb with {@code 422 read_only_field} and written by the
+   * other. A batch being more permissive than a single create is the divergence class ETP-5415
+   * exists to remove, and it only became reachable when {@code neo_batch} was re-enabled.
+   *
+   * <p>Keys that resolve to no property are left alone, exactly as the mapping leaves them: that
+   * is IMP-18 and it is not decided here. The server's own injectors run after this, on the body
+   * it inspected, so a derived read-only value is unaffected.
+   *
+   * @param body      the operation body, keyed by DAL property name; never modified
+   * @param adTab     the tab whose table the fields belong to
+   * @param sfEntity  the SchemaForge entity; {@code null} skips the check, since with no spec in
+   *                  hand there is no curation to enforce
+   * @param dalEntity the DAL entity being written to
+   * @throws McpRoutingException 422 {@code field_not_allowed} or {@code read_only_field}
+   */
+  static void applyWriteGatesToDalBody(JSONObject body, Tab adTab, SFEntity sfEntity,
+      Entity dalEntity) {
+    if (body == null || sfEntity == null || dalEntity == null || adTab == null) {
+      return;
+    }
+    McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      // parentId is the batch's own linking key, not a field of the entity, so it has no gate.
+      Property prop = McpConstants.PARAM_PARENT_ID.equals(key) ? null
+          : resolveProperty(dalEntity, key);
+      if (prop != null) {
+        applyWriteGates(gate, key, mappedKeyFor(dalEntity, key, prop), body.opt(key), sfEntity,
+            dalEntity);
+      }
+    }
+  }
+
+  /**
    * Apply the two curation gates to one key that resolved to a property.
    *
    * <p>IMP-39 / IMP-48: two gates, two answers. The unresolved case is not handled here - it is
@@ -411,6 +460,15 @@ final class McpWriteRequestSupport {
    * create from those fields. Skipping the names the wrapper policy declares server-resolved is
    * the same declaration {@code neo_schema} uses to demote them to {@code optional}, so the
    * catalogue and the write agree instead of contradicting each other.
+   *
+   * <p>ETP-5535: the fields a customization declares through
+   * {@code NeoHandler#serverResolvedCreateFields} are deliberately NOT skipped here, although
+   * {@code neo_schema} demotes them. This check runs after {@code injectMandatoryDefaults} — the
+   * create callout cascade that derives them — and before the customization's pre-hook. So a
+   * declared field the cascade filled is simply not missing, and one it could not fill is a real
+   * gap: reporting it here gives the agent a precise 422 instead of the DAL's NOT NULL failure. The
+   * wrapper-policy names keep being skipped, because their value is built only later, by the
+   * handler.
    *
    * @param systemColumns system/audit columns excluded from schema (auto-managed by Etendo)
    * @param selectorRefs  AD_Reference IDs for OBUISEL selectors (extends the base FK refs from
@@ -602,9 +660,14 @@ final class McpWriteRequestSupport {
    * ({@code product} and {@code referencedInventory}), so the write landed in the neighbouring
    * field.</p>
    *
-   * <p>A scope that cannot identify the parent writes nothing, exactly as before: the caller's
-   * gate is what refuses such an entity, and silently guessing a column here is what caused the
-   * defect in the first place.</p>
+   * <p><b>ETP-5558:</b> a scope that cannot identify the parent now <b>refuses</b> the write
+   * through {@link #requireApplicableParent}. It used to log a WARN and return, on the promise that
+   * "the caller's gate is what refuses such an entity" — there was no such gate, so the create went
+   * on without its parent and the mandatory-defaults pass filled the link by itself:
+   * {@code payment-out/lines} ({@code FIN_Payment_ScheduleDetail}, whose parent-link columns point
+   * at {@code FIN_Payment_Detail} and {@code FIN_Payment_Schedule}, never at {@code FIN_Payment})
+   * was attached to an unrelated, processed customer collection. Only a same-record tab still
+   * ignores the id, because there the parent is the record itself.</p>
    *
    * @param adTab         the child tab
    * @param body          the write payload, mutated in place
@@ -612,19 +675,61 @@ final class McpWriteRequestSupport {
    * @param log           caller's logger
    * @param sfEntity      the SchemaForge entity, needed to read its {@code MCP_CONFIG}
    * @throws JSONException if the payload cannot be written to
+   * @throws McpRoutingException {@code parent_unresolvable} when the id cannot be mapped
    */
   static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log,
       SFEntity sfEntity) throws JSONException {
     if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
       return;
     }
-    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    McpParentScope.Scope scope = requireApplicableParent(sfEntity, parentIdValue);
     if (scope.getParentField() == null) {
-      log.warn("No parent field resolved for tab '{}' — parentId not applied ({})",
-          adTab.getName(), scope.getProblem());
+      // Only a same-record tab gets here: the parent is the record itself, so there is no link
+      // to write. Every other scope without a parent field was refused above.
+      log.debug("Tab '{}' is the parent's own record — parentId not applied", adTab.getName());
       return;
     }
     body.put(scope.getParentField(), parentIdValue);
+  }
+
+  /**
+   * Refuse a child create that cannot be attached to the parent the caller means (ETP-5558).
+   *
+   * <p>Shared by {@code neo_create} and {@code neo_batch}'s per-operation preprocessor, which never
+   * reaches {@link #resolveParentFK} because {@code BatchService} maps the parent itself. One
+   * predicate for both, so a batch cannot write what a single create refuses.</p>
+   *
+   * <p>Refused:</p>
+   * <ul>
+   *   <li>{@link McpParentScope.Kind#UNRESOLVABLE} — <b>always</b>, with or without
+   *       {@code parentId}. Without one the create still reaches the mandatory-defaults pass, which
+   *       fills the unmappable link on its own; omitting the id must not be a way around the
+   *       refusal. This is what makes the scope's "not publishable" true on the write path.</li>
+   *   <li>{@link McpParentScope.Kind#UNPARENTED} — only when a {@code parentId} is sent, since the
+   *       entity declares it has no field to put it in. (Such an entity advertises no write
+   *       method, so {@code requireMethodEnabled} normally refuses first.)</li>
+   * </ul>
+   * <p>Not refused: a header, a same-record tab — its parent is the record itself — and a resolved
+   * child. The update and delete verbs do not call this: neither runs the defaults pass, so neither
+   * can pick a parent on the caller's behalf.</p>
+   *
+   * @param sfEntity the SchemaForge entity being created
+   * @param parentId the parent id the caller supplied, may be blank
+   * @return the entity's parent scope, so the caller does not resolve it twice
+   * @throws McpRoutingException {@code parent_unresolvable} (422) when the create must not proceed
+   */
+  static McpParentScope.Scope requireApplicableParent(SFEntity sfEntity, String parentId) {
+    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    McpParentScope.Kind kind = scope.getKind();
+    boolean refuse = kind == McpParentScope.Kind.UNRESOLVABLE
+        || (kind == McpParentScope.Kind.UNPARENTED && StringUtils.isNotBlank(parentId));
+    if (refuse) {
+      SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();
+      throw McpRoutingException.parentUnresolvable(spec == null ? null : spec.getName(),
+          sfEntity == null ? null : sfEntity.getName(), scope.getParentEntity(),
+          scope.getAgentProblem());
+    }
+    return scope;
   }
 
   /**

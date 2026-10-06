@@ -2,7 +2,9 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -53,6 +55,20 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
     runAsNonAdmin(stored, () -> assertEquals(
         EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED,
         service.evaluateAccess(CLIENT_ID, true, NOW)));
+  }
+
+  /** ETP-5548: the purchase checks read the association marker as the caller, too. */
+  @Test
+  public void aDemoWithAnAssociationMarkerIsNoLongerAPurchaseSource() {
+    Map<String, String> stored = new HashMap<>();
+    stored.put(TenantEnvironmentLifecycleService.ASSOCIATED_PRODUCTIVE_ATTRIBUTE, "productive-1");
+    runAsNonAdmin(stored, () -> assertTrue(service.isAssociatedWithProductive(CLIENT_ID)));
+  }
+
+  @Test
+  public void aDemoWithoutAssociationMarkerIsStillAPurchaseSource() {
+    runAsNonAdmin(new HashMap<>(), () -> assertFalse(service.isAssociatedWithProductive(CLIENT_ID)));
+    assertFalse(service.isAssociatedWithProductive(" "));
   }
 
   /**

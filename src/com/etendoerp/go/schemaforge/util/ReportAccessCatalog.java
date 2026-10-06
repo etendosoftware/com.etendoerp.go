@@ -65,10 +65,15 @@ import org.openbravo.model.ad.ui.Window;
  * per-row granularity (there being nothing finer-grained to resolve against).
  *
  * <p>{@code aging-receivable} is represented as TWO rows ({@code aging-receivable} / {@code
- * aging-payable}) even though both are served by the single {@code aging-receivable} spec and
- * {@code AgingReportHandler} — matching how {@code TemplateRoleWindowAccess} and the frontend's
- * {@code REPORT_PREVIEW_IMAGES} already treat Cobros/Pagos as two distinct identities gated by two
- * different OBUIAPP process grants (receivable vs. payable).
+ * aging-payable}) — matching how {@code TemplateRoleWindowAccess} and the frontend's {@code
+ * REPORT_PREVIEW_IMAGES} already treat Cobros/Pagos as two distinct identities gated by two
+ * different OBUIAPP process grants (receivable vs. payable). <b>ETP-5483</b> gave {@code
+ * aging-payable} its own {@code ETGO_SF_SPEC} row and its own handler ({@code
+ * AgingPayableReportHandler}, {@code @Named("agingPayableReportHandler")}), mirroring Classic's
+ * two separate "Aging Balance Process Definition" reports — before that change both rows were
+ * served by the single {@code aging-receivable} spec and {@code AgingReportHandler}'s {@code
+ * recOrPay} switch. This catalog's rows and anchor ids did not need to change either way: it
+ * resolves access by OBUIAPP process id, not by which spec/handler ultimately serves the report.
  */
 public final class ReportAccessCatalog {
 
@@ -93,7 +98,7 @@ public final class ReportAccessCatalog {
    * artifacts/} directory name / {@code REPORT_PREVIEW_IMAGES} key, except for the {@code
    * aging-receivable}/{@code aging-payable} split above), a fallback display name (the
    * frontend's {@code menu.json} is expected to override it, same convention as {@code
-   * SFRolesOverview}'s {@code PROXY_MATRIX_ROWS}), which access mechanism to resolve it
+   * RoleAccessMatrix}'s {@code PROXY_MATRIX_ROWS}), which access mechanism to resolve it
    * through, the anchor id in that mechanism's own id-space, and the hardcoded category it
    * belongs to (a report row's category cannot be derived from the classic {@code AD_Menu}
    * tree the way a real window's can, so it is a human-assigned constant here).

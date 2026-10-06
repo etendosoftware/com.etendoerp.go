@@ -132,6 +132,18 @@ class OAuth2ServletManagementAuthTest {
   }
 
   @Test
+  void clientCreationUnderTheCookieFromAForeignOriginIs403ForItsOrigin() throws Exception {
+    when(sessionService.resolve(SESSION_TOKEN)).thenReturn(session("0"));
+    HttpServletRequest req = cookie("POST", "/clients", CSRF, "{}");
+    when(req.getHeader("Origin")).thenReturn("https://evil.example.test");
+
+    Response resp = run(req);
+
+    assertEquals(403, resp.status);
+    assertEquals("Origin not allowed", resp.description());
+  }
+
+  @Test
   void clientsRefuseAJwtWhenTheLegacySwitchIsOff() throws Exception {
     System.setProperty(LEGACY_BEARER_PROPERTY, "false");
     stubJwt("0");

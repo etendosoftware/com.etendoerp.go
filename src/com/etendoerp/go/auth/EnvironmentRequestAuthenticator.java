@@ -86,7 +86,6 @@ public class EnvironmentRequestAuthenticator {
 
   private static final Logger log = LogManager.getLogger(EnvironmentRequestAuthenticator.class);
 
-  static final String MSG_CSRF_FAILED = "CSRF validation failed";
   static final String MSG_SESSION_INVALID = "Invalid or expired session";
   static final String MSG_NO_CREDENTIALS = "Missing or invalid Authorization header";
   static final String MSG_NO_ENVIRONMENT = "Session has no environment selected";
@@ -228,7 +227,8 @@ public class EnvironmentRequestAuthenticator {
       case AUTHENTICATED:
         return fromSession(sessionAuth.getRecord());
       case CSRF_FAILED:
-        return Resolution.refused(Status.CSRF_REJECTED, MSG_CSRF_FAILED, AuthScheme.COOKIE);
+        return Resolution.refused(Status.CSRF_REJECTED, sessionAuth.getRefusalMessage(),
+            AuthScheme.COOKIE);
       case UNAUTHENTICATED:
         // A dead cookie is final: falling back to a Bearer sent alongside it would let a
         // revoked session keep working through whatever token the page still holds.

@@ -217,6 +217,18 @@ row instead — `findLatest`, §3.7.) What
 is open is the cleanup that ends the transition: nothing owns it, so without a ticket the
 transitional code stays indefinitely.
 
+**R42 is a second marker writer, and only R37 cleans up after it.** Develop's
+`20260929T190000Z__R42-paid-provisioning-commercial-metadata.sql` (ETP-5548, applied, immutable)
+inserts an active `ETGO_TenantPlan='productive'` marker — or flips an existing one to `productive` —
+for every paid-provisioned owned tenant, deciding "paid" from `etgo_checkout_request` and knowing
+nothing about `etgo_subscription`. With the onboarding baseline at 2026-09-02 that includes tenants
+whose paid upgrade opened a subscription row and deliberately wrote no marker. The runtime path
+cannot remove such a marker (it retires only at the moment it opens a row), so R37's retirement
+branch does: it deletes the marker of **every tenant that has any subscription row**, open or
+closed (design doc §8). The end condition below is therefore reached only once R37 has run *after*
+R42 for every tenant — the normal chain order (§3.6); a marker that reappears after R37 means
+someone forced R42 by hand.
+
 **Trigger** — both, checked on every environment (design doc §8.1):
 
 ```sql
@@ -340,13 +352,26 @@ ledger row, no error, nothing in any report.
 
 R37 was authored as `20260918T120000Z`. At merge time develop carried fixes up to
 `20260922T130000Z`, and `R38-org-legalentity-pointer` had the **identical** `20260918T120000Z`
-(equal is skipped too). It was renamed to `20260924T150000Z__R37-tenant-subscription-backfill.sql`
-before reaching any shared environment; `sql/README.md` rule 3 forbids renaming an *applied* fix,
+(equal is skipped too). It was renamed to `20260924T150000Z__R37-tenant-subscription-backfill.sql`,
+and again to `20261005T180000Z__R37-tenant-subscription-backfill.sql` once develop carried fixes up
+to `20261005T120000Z`, before reaching any shared environment; `sql/README.md` rule 3 forbids renaming an *applied* fix,
 not an unapplied one. The consequence had it shipped: every paying tenant left on the retired
 preference, with §3.2's end condition never reached.
 
 **Before merging any branch that carries a data-fix, re-check its timestamp against the newest fix
 in the target branch** — and re-date it if it is not strictly newer.
+
+**The date also fixes R37's place after R42, and that order is load-bearing.** R37 now sits at
+2026-10-05T18:00:00Z; develop's R42 (`20260929T190000Z`, which re-inserts the `ETGO_TenantPlan`
+marker, §3.2) sorts before it. Per tenant, the chain visits R42 and then R37 in the same run, and
+R37's retirement branch removes whatever marker R42 just wrote. A failed R42 halts that tenant's
+chain before R37 and the next run resumes at R42, so R42 still comes first. Once R37 is
+`PROCESSED` the tenant's watermark is ≥ 2026-10-05T18:00:00Z and R42 never runs for it again. A
+tenant onboarded after ETP-5046 carries the onboarding baseline (2026-09-02) as its watermark, so
+its first chain runs R42 and then R37 in one pass. **The one way to run R42 after R37 is an
+operator forcing it** — `run.js --fix <R42>` ignores chain order and the watermark. Whoever does
+that must follow it with `run.js --fix <R37> --client <same tenant>`, or the re-inserted marker
+survives and §3.2's end condition never reaches 0.
 
 **Guard since ETP-5046:** `schema_forge/cli/test/data-fixes-catalog-ordering.test.js` fails the
 build when two fixes share a timestamp prefix (the seven already-applied pairs are frozen by exact
@@ -660,7 +685,7 @@ line below is the result of reading the code, not of counting matches.
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
 | `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |
-| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 28 raw system installs (counted 2026-09-28); the lifecycle webhook is the one site routed through `payment/SystemContext` |
+| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 28 raw system installs (recounted 2026-10-05); routed through `payment/SystemContext`: the lifecycle webhook, and the two ETP-5548 checks develop brought in (`isProductiveNameTakenByAccount`, `isAssociatedDemo`). Note the checkout paths still run in system context after the name check: `requireBillingOwner` → `hasOwnedEnvironment` installs it first, raw |
 
 **`CompanyInvitationService` — the real one.** Two sites, both `restorePreviousMode()`-only:
 
@@ -676,9 +701,10 @@ to one context site and fix both at once. The case to care about is
 on that thread afterwards runs as system. That is the shape of the hazard; no exploit has been
 traced.
 
-**`EtendoGoJwtServlet` — deliberately left as a question.** 28 installs and one capture/restore is
-not evidence of 27 leaks, and it is not evidence of none either. A heuristic marked it "OK" on the
-strength of that single site; nobody has read the other 27. Whoever picks this up should treat the
+**`EtendoGoJwtServlet` — deliberately left as a question.** 28 raw installs next to three sites
+routed through `SystemContext` is not evidence of 28 leaks, and it is not evidence of none either.
+A heuristic once marked it "OK" on the strength of a single capture/restore site; nobody has read
+the raw ones. Whoever picks this up should treat the
 verdict as unknown rather than inherit an unearned pass.
 
 **Left unfixed on purpose.** Neither belongs to ETP-5046, and widening an already large merge to
@@ -985,6 +1011,18 @@ the R37 backfill always writes null.
 **Cancellation closes the row — settled in ETP-5047 (§3.7).** A closed row reads as `canceled`
 whatever its `STATUS` says, `findLatest` keeps a canceled tenant on the row route (never the
 preference fallback), and a later paid checkout opens a fresh row with its own price snapshot.
+
+**Closing on cancel also reopens an R37 edge (accepted risk, re-check before shipping it).** R37's
+backfill branch (A) still keys on "active productive marker AND no **open** row", while its
+retirement branch only needs *any* row (design doc §8). Develop's R42 can re-insert that marker for
+a paid-provisioned tenant regardless of its rows (§3.2). So a tenant whose **only** subscription row
+is closed, and whose chain then runs R42 → R37, gets the marker from R42 and then a **fresh open
+`legacy-productive` row** from R37 branch (A) before the marker is retired — a tenant that
+canceled can read as productive again. R42 skips tenants with a `REFUNDED`/`CANCELED`/`EXPIRED`
+checkout request or an `ETGO_SubscriptionStatus` other than `CURRENT`/`LEGACY_ENTITLEMENT`/`PAST_DUE`, which narrows the
+window but is not a guard on the subscription row. The edge is unreachable while nothing writes
+`END_DATE`; the ETP-5047 change that closes rows on cancel must re-check it (and, if reachable, ship
+a new dated fix — R37 and R42 cannot be edited once applied).
 
 **The trap: "open" ignores the dates.** `OPEN_ROW_PREDICATE` in `SubscriptionService` is
 `endDate is null and active = true`; the partial unique index `ETGO_SUB_OPEN_ENVCLIENT_UQ` uses the

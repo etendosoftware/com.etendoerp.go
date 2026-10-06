@@ -20,77 +20,48 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doReturn;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.util.Collections;
-
 import org.codehaus.jettison.json.JSONObject;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
-import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.currency.Currency;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
 /**
- * Mockito-driven unit tests for {@link FinancialAccountHandler#validateAndEnrichCreate} focused on
- * the {@code enrichProvider} step added by the bank connection bridge (offline "with bank selected" flow).
+ * Mockito-driven unit tests for {@link FinancialAccountHandler#validateAndEnrichCreate} /
+ * {@link FinancialAccountHandler#validateAndEnrichUpdate} focused on the {@code enrichProvider}
+ * step of the offline "with bank selected" flow, for <b>bank and card</b> accounts.
  *
  * <p>Split out of {@link FinancialAccountHandlerTest} so that file (already at the Sonar
- * 35-method-per-class ceiling) is not pushed over it. Strategy mirrors the sibling file: spy the
- * handler, stub the DAL-bound seams ({@code loadCurrency}, {@code nameExists},
- * {@code listMatchingAlgorithms}) and statically mock {@link ProviderCatalogUtils} /
- * {@link OBDal} so no database or live OBContext is needed.
+ * 35-method-per-class ceiling) is not pushed over it; the logo URL sanitizer cases live in
+ * {@link FinancialAccountHandlerProviderLogoTest} for the same reason, and the shared fixtures in
+ * {@link FinancialAccountProviderTestSupport}.
  *
  * <p>Scenarios:
  * <ul>
- *   <li>Bank create + providerCode → upsertProvider(code, name, null), the FK id injected under
- *       {@code psd2Provider}, transient keys stripped.</li>
+ *   <li>Bank or card create + providerCode → upsertProvider(code, name, null, logoUrl), the FK
+ *       id injected under {@code psd2Provider}, transient keys stripped.</li>
  *   <li>Bank create + providerCode without providerName → name defaults to the code.</li>
- *   <li>Non-bank (cash) create + providerCode → no upsert / no FK; keys still stripped.</li>
- *   <li>Bank create without providerCode → no upsert / no FK.</li>
+ *   <li>Fill-only logo (ETP-5521): the sanitized logo reaches the upsert only when the provider
+ *       is new or has no stored logo; the lookup is skipped when there is no usable logo.</li>
+ *   <li>Cash create + providerCode/logo → no upsert / no FK; keys still stripped.</li>
+ *   <li>Bank or card create without providerCode → no upsert / no FK; keys still stripped.</li>
+ *   <li>Update → the three provider keys are always stripped (create-only).</li>
+ *   <li>Bank create + providerCode but no country → 400 before any upsert (ETP-5473).</li>
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class FinancialAccountHandlerProviderTest {
-
-  private static final String EUR_ID = "102";
-  private static final String PROVIDER_CODE = "providerCode";
-  private static final String PROVIDER_NAME = "providerName";
-  private static final String PSD2_PROVIDER = "psd2Provider";
-  private static final String FIELD_TYPE = "type";
-  private static final String SANTANDER_CODE = "santander";
-  private static final String SANTANDER_NAME = "Banco Santander";
-  private static final String PROVIDER_FK_ID = "prov-1";
-
-  private FinancialAccountHandler handler;
-
-  /** Spies the handler and neutralizes the OBContext/rollback seams (no live session in CI). */
-  @Before
-  public void setUp() {
-    handler = spy(new FinancialAccountHandler());
-    doNothing().when(handler).enterAdminMode();
-    doNothing().when(handler).exitAdminMode();
-    doNothing().when(handler).doRollbackAndClose();
-  }
-
-  /** Clears the inline mock cache after each test to keep the single-JVM suite heap flat. */
-  @After
-  public void clearMocks() {
-    Mockito.framework().clearInlineMocks();
-  }
+public class FinancialAccountHandlerProviderTest extends FinancialAccountProviderTestSupport {
 
   /**
    * A bank account created with a {@code providerCode} (and {@code providerName}) upserts the Salt
@@ -110,15 +81,16 @@ public class FinancialAccountHandlerProviderTest {
         MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      utils.when(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null))
-          .thenReturn(provider);
+      utils.when(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null,
+          null)).thenReturn(provider);
 
       assertNull(handler.validateAndEnrichCreate(body));
 
       assertEquals(PROVIDER_FK_ID, body.getString(PSD2_PROVIDER));
       assertFalse("transient providerCode stripped", body.has(PROVIDER_CODE));
       assertFalse("transient providerName stripped", body.has(PROVIDER_NAME));
-      utils.verify(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null));
+      utils.verify(
+          () -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_NAME, null, null));
       verify(dal).flush();
     }
   }
@@ -138,29 +110,30 @@ public class FinancialAccountHandlerProviderTest {
         MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      utils.when(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null))
-          .thenReturn(provider);
+      utils.when(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null,
+          null)).thenReturn(provider);
 
       assertNull(handler.validateAndEnrichCreate(body));
 
       assertEquals(PROVIDER_FK_ID, body.getString(PSD2_PROVIDER));
-      utils.verify(() -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null));
+      utils.verify(
+          () -> ProviderCatalogUtils.upsertProvider(SANTANDER_CODE, SANTANDER_CODE, null, null));
     }
   }
 
   /**
-   * A non-bank account (Cash) carrying a {@code providerCode} injects no provider FK and performs
+   * A cash account carrying a {@code providerCode} injects no provider FK and performs
    * no upsert; the transient keys are still stripped.
    */
   @Test
-  public void testCreateNonBankWithProviderCodeInjectsNothing() throws Exception {
+  public void testCreateCashWithProviderCodeInjectsNothing() throws Exception {
     JSONObject body = validCreateBody().put(FIELD_TYPE, "C").put(PROVIDER_CODE, SANTANDER_CODE);
     stubValidCreate();
 
     try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
       assertNull(handler.validateAndEnrichCreate(body));
 
-      assertFalse("no provider FK injected for a non-bank account", body.has(PSD2_PROVIDER));
+      assertFalse("no provider FK injected for a cash account", body.has(PSD2_PROVIDER));
       assertFalse("transient providerCode stripped", body.has(PROVIDER_CODE));
       utils.verifyNoInteractions();
     }
@@ -180,15 +153,174 @@ public class FinancialAccountHandlerProviderTest {
     }
   }
 
-  // ── fixtures ──────────────────────────────────────────────────────────────
-
-  private JSONObject validCreateBody() throws Exception {
-    return new JSONObject().put("name", "BBVA").put("currency", EUR_ID);
+  /**
+   * ETP-5521: a bank create with no {@code providerLogoUrl} never looks the provider up — the
+   * fill-only lookup is skipped when there is no usable logo.
+   */
+  @Test
+  public void testCreateBankWithoutLogoSkipsProviderLookup() throws Exception {
+    JSONObject body = validCreateBody().put(PROVIDER_CODE, SANTANDER_CODE).put(PROVIDER_NAME,
+        SANTANDER_NAME);
+    assertUpsertedWithLogo(body, null);
+    verify(enricher, never()).findExistingProvider(anyString());
   }
 
-  private void stubValidCreate() {
-    doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
-    doReturn(false).when(handler).nameExists("BBVA", null);
-    doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
+  /**
+   * ETP-5521 fill-only: an already-registered provider that has a logo keeps it — the upsert
+   * receives a null logo, so the client value never overwrites the shared catalog row.
+   */
+  @Test
+  public void testCreateBankWithExistingProviderLogoKeepsStoredLogo() throws Exception {
+    Provider existing = mock(Provider.class);
+    when(existing.getLogoURL()).thenReturn("https://" + TRUSTED_LOGO_HOST + "/stored.svg");
+
+    assertUpsertedWithLogo(bankBodyWithLogo(SANTANDER_LOGO), existing, null);
+    verify(enricher).findExistingProvider(SANTANDER_CODE);
+  }
+
+  /** ETP-5521 fill-only: an existing provider with a blank logo gets the client logo filled in. */
+  @Test
+  public void testCreateBankWithExistingProviderBlankLogoFillsLogo() throws Exception {
+    Provider existing = mock(Provider.class);
+    when(existing.getLogoURL()).thenReturn("  ");
+
+    assertUpsertedWithLogo(bankBodyWithLogo(SANTANDER_LOGO), existing, SANTANDER_LOGO);
+  }
+
+  /** ETP-5521 fill-only: an existing provider with a null logo gets the client logo filled in. */
+  @Test
+  public void testCreateBankWithExistingProviderNullLogoFillsLogo() throws Exception {
+    Provider existing = mock(Provider.class);
+    when(existing.getLogoURL()).thenReturn(null);
+
+    assertUpsertedWithLogo(bankBodyWithLogo(SANTANDER_LOGO), existing, SANTANDER_LOGO);
+  }
+
+  /**
+   * ETP-5521: a cash account ignores {@code providerLogoUrl} entirely — no upsert — but
+   * the transient key is still stripped so it is not treated as an entity property.
+   */
+  @Test
+  public void testCreateCashWithLogoIgnoresLogoAndStripsKey() throws Exception {
+    JSONObject body = validCreateBody().put(FIELD_TYPE, "C")
+        .put(PROVIDER_CODE, SANTANDER_CODE)
+        .put(PROVIDER_LOGO_URL, SANTANDER_LOGO);
+    stubValidCreate();
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      assertNull(handler.validateAndEnrichCreate(body));
+
+      assertFalse("no provider FK injected for a cash account", body.has(PSD2_PROVIDER));
+      assertFalse("transient providerLogoUrl stripped", body.has(PROVIDER_LOGO_URL));
+      utils.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5521: a bank account without a {@code providerCode} but with a stray
+   * {@code providerLogoUrl} does not upsert and still strips the logo key.
+   */
+  @Test
+  public void testCreateBankWithoutProviderCodeStripsLogoKey() throws Exception {
+    JSONObject body = validCreateBody().put(PROVIDER_LOGO_URL, SANTANDER_LOGO);
+    stubValidCreate();
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      assertNull(handler.validateAndEnrichCreate(body));
+
+      assertFalse("transient providerLogoUrl stripped", body.has(PROVIDER_LOGO_URL));
+      utils.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5521: the provider keys are create-only — an update strips {@code providerCode},
+   * {@code providerName} and {@code providerLogoUrl} so the generic CRUD never sees them, and
+   * never touches the provider catalog.
+   */
+  @Test
+  public void testUpdateStripsTransientProviderKeys() throws Exception {
+    JSONObject body = new JSONObject().put(PROVIDER_CODE, SANTANDER_CODE)
+        .put(PROVIDER_NAME, SANTANDER_NAME)
+        .put(PROVIDER_LOGO_URL, SANTANDER_LOGO);
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      assertNull(handler.validateAndEnrichUpdate("acc-1", body));
+
+      assertFalse("providerCode stripped on update", body.has(PROVIDER_CODE));
+      assertFalse("providerName stripped on update", body.has(PROVIDER_NAME));
+      assertFalse("providerLogoUrl stripped on update", body.has(PROVIDER_LOGO_URL));
+      utils.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5521: a card account also goes through the wizard's bank picker, so a card create with a
+   * {@code providerCode} upserts the provider, injects the {@code psd2Provider} FK and strips the
+   * transient keys — exactly like a bank account. No logo → the fill-only lookup is skipped.
+   */
+  @Test
+  public void testCreateCardWithProviderCodeUpsertsAndInjectsFk() throws Exception {
+    JSONObject body = validCreateBody().put(FIELD_TYPE, TYPE_CARD)
+        .put(PROVIDER_CODE, SANTANDER_CODE)
+        .put(PROVIDER_NAME, SANTANDER_NAME);
+    assertUpsertedWithLogo(body, null);
+    assertEquals(TYPE_CARD, body.getString(FIELD_TYPE));
+    verify(enricher, never()).findExistingProvider(anyString());
+  }
+
+  /**
+   * ETP-5521: a card create with a valid Salt Edge CDN logo for a provider not in the catalog yet
+   * takes the fill-only path and passes the logo to the upsert.
+   */
+  @Test
+  public void testCreateCardWithCdnLogoFillsLogo() throws Exception {
+    JSONObject body = bankBodyWithLogo(SANTANDER_LOGO).put(FIELD_TYPE, TYPE_CARD);
+    assertUpsertedWithLogo(body, null, SANTANDER_LOGO);
+    verify(enricher).findExistingProvider(SANTANDER_CODE);
+  }
+
+  /**
+   * ETP-5521: a card create without a {@code providerCode} links no provider and never upserts,
+   * but a stray {@code providerName}/{@code providerLogoUrl} is still stripped.
+   */
+  @Test
+  public void testCreateCardWithoutProviderCodeInjectsNothing() throws Exception {
+    JSONObject body = validCreateBody().put(FIELD_TYPE, TYPE_CARD)
+        .put(PROVIDER_NAME, SANTANDER_NAME)
+        .put(PROVIDER_LOGO_URL, SANTANDER_LOGO);
+    stubValidCreate();
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      assertNull(handler.validateAndEnrichCreate(body));
+
+      assertFalse("no provider FK injected without a provider code", body.has(PSD2_PROVIDER));
+      assertFalse("transient providerName stripped", body.has(PROVIDER_NAME));
+      assertFalse("transient providerLogoUrl stripped", body.has(PROVIDER_LOGO_URL));
+      utils.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5473: validation runs before the provider upsert. A bank create carrying a
+   * {@code providerCode} but no {@code country} is rejected with "Country is required" and never
+   * reaches {@code upsertProvider} — which flushes, so reaching it would leave an orphan provider
+   * row behind a rejected create.
+   */
+  @Test
+  public void testCreateBankWithProviderCodeWithoutCountryRejectsBeforeUpsert() throws Exception {
+    JSONObject body = validCreateBody().put(PROVIDER_CODE, SANTANDER_CODE);
+    body.remove("country");
+    stubValidCreate();
+
+    try (MockedStatic<ProviderCatalogUtils> utils = mockStatic(ProviderCatalogUtils.class)) {
+      NeoResponse response = handler.validateAndEnrichCreate(body);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("Country is required",
+          response.getBody().getJSONObject("error").getString("message"));
+      assertFalse("no provider FK injected for a rejected create", body.has(PSD2_PROVIDER));
+      utils.verifyNoInteractions();
+    }
   }
 }

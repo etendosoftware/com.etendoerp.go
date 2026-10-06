@@ -271,6 +271,19 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals("CSRF validation failed", outcome.getMessage());
   }
 
+  /** ETP-5550 — the origin refusal keeps its 403 but not the stale-token message. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(SurfacePolicy.class)
+  void aForeignOriginIs403WithItsOwnMessageOnEverySurface(SurfacePolicy policy) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.originRejected());
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(mock(HttpServletRequest.class), policy);
+
+    assertEquals(Status.CSRF_REJECTED, outcome.getStatus());
+    assertEquals(403, outcome.getHttpStatus());
+    assertEquals("Origin not allowed", outcome.getMessage());
+  }
+
   @ParameterizedTest(name = "{0}")
   @EnumSource(SurfacePolicy.class)
   void anInvalidCookieIs401AndNeverFallsBackToTheBearer(SurfacePolicy policy) {

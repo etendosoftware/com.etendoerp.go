@@ -49,7 +49,7 @@ import org.openbravo.test.base.OBBaseTest;
  * ETP-5046 — runs the REAL backfill SQL, twice, against the real database.
  *
  * <p>The fix under test is
- * {@code schema_forge/cli/src/data-fixes/sql/20260924T150000Z__R37-tenant-subscription-backfill.sql}:
+ * {@code schema_forge/cli/src/data-fixes/sql/20261005T180000Z__R37-tenant-subscription-backfill.sql}:
  * it gives every tenant that carries the legacy {@code AD_Preference ETGO_TenantPlan='productive'}
  * marker, but no open subscription, one open {@code ETGO_SUBSCRIPTION} row on the grandfathered
  * {@code legacy-productive} plan.
@@ -85,6 +85,15 @@ import org.openbravo.test.base.OBBaseTest;
  * rather than a fleet-wide flag day. That raises the stakes of the fixture discipline above — this
  * database holds six real {@code ETGO_TenantPlan} rows — so {@link #cleanUp()} now also asserts
  * that the fleet-wide count of that preference is exactly what it was before the test.
+ *
+ * <p><b>The retirement is WIDENED to every subscribed tenant</b> (ETP-5046, develop's R42): a
+ * tenant is a candidate either because it needs the backfill (A), or because it carries any
+ * {@code ETGO_TenantPlan} row next to any subscription row, open or closed (B). Group 5 runs (B).
+ *
+ * <p>The SQL file is what this class guards; {@code @covers} names the Java reader whose mapping of
+ * the seeded rows it asserts.
+ *
+ * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
  */
 public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
 
@@ -95,7 +104,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
 
   /** Path of the fix, relative to whichever ancestor directory holds the sibling repository. */
   private static final String SQL_RELATIVE_PATH = "schema_forge/cli/src/data-fixes/sql/"
-      + "20260924T150000Z__R37-tenant-subscription-backfill.sql";
+      + "20261005T180000Z__R37-tenant-subscription-backfill.sql";
 
   /** The grandfathered plan the fix insists on, seeded by EnsureLegacyPlanScript with this id. */
   private static final String LEGACY_PLAN_VALUE = "legacy-productive";
@@ -636,8 +645,8 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
    * code can be deleted because a query says so, not because someone judged it safe.
    *
    * <p>The second apply is asserted too: it must retire nothing and insert nothing, which is what
-   * makes a re-run harmless. And {@code @check} stays converged — now for two independent reasons,
-   * since it requires BOTH a productive preference (gone) and no open subscription (present).
+   * makes a re-run harmless. And {@code @check} stays converged: both of its branches need an
+   * {@code ETGO_TenantPlan} row visible at the tenant, and there is none left.
    */
   @Test
   public void testTheBackfillRetiresTheTenantPlanPreferenceInTheSameTransaction() {
@@ -660,13 +669,14 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
   }
 
   /**
-   * The retirement is guarded on an open subscription EXISTING, not on "the insert above ran".
+   * The retirement is guarded on a subscription row EXISTING — any row, open or closed — not on
+   * "the insert above ran".
    *
    * <p>That is what makes it self-healing: a tenant that obtained its subscription by any other
    * route — the runtime paid-upgrade path, a manual correction, an earlier partial run — is retired
-   * the next time the fix is invoked for it. The negative half is asserted here because it is the
-   * dangerous one: a tenant with a marker and NO subscription must keep its marker, since the
-   * marker is then the only record that it paid.
+   * the next time the fix is invoked for it (Group 5 runs that positive half). The negative half is
+   * asserted here because it is the dangerous one: a tenant with a marker and NO subscription row
+   * must keep its marker, since the marker is then the only record that it paid.
    */
   @Test
   public void testTheRetirementOnlyFiresForATenantThatActuallyHasAnOpenSubscription() {
@@ -707,10 +717,106 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
     assertTrue("@report must record the retirement: " + reportText(retired),
         reportText(retired).contains("preference retired for this tenant"));
 
+    // R42 shape: the subscription was already there, so only the marker went. @report must still
+    // record the retirement — it is the only trace of the row it removed.
+    String r42 = createTenant("report-r42", true);
+    createSubscription(r42, false);
+    assertEquals(0, apply(r42));
+    assertEquals("Sanity: this apply retired the R42 marker", 1, lastRetiredPreferences);
+    assertTrue("@report must record the retirement of an R42 marker: " + reportText(r42),
+        reportText(r42).contains("preference retired for this tenant"));
+
     // A tenant with a marker and no subscription: @report must flag that it was NOT retired.
     String untouched = createTenant("report-untouched", true);
     assertTrue("@report must flag a tenant whose marker survived: " + reportText(untouched),
         reportText(untouched).contains("STILL PRESENT"));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 5 — the widened retirement: a marker next to ANY subscription row (branch B)
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The R42 shape: a tenant onboarded after ETP-5046 has its open subscription, and develop's R42
+   * then re-inserted an active productive marker next to it.
+   *
+   * <p>Branch (A) is false — there IS an open row — so before the widening the fix recorded
+   * SKIPPED_NOT_NEEDED and the marker survived forever. Branch (B) selects the tenant, the insert
+   * and the abort guard stay idle (no second open row, no failure), and the retirement removes the
+   * marker. Afterwards {@code @check} converges.
+   */
+  @Test
+  public void testAnR42MarkerNextToAnOpenSubscriptionIsRetiredWithoutASecondRow() {
+    String tenant = createTenant("r42-open", true);
+    createSubscription(tenant, false);
+
+    assertEquals("@check must select a marker next to an open subscription", 1,
+        selectRows(substitute(checkSection, tenant)).size());
+
+    assertEquals("The tenant already has its open row: nothing may be inserted", 0, apply(tenant));
+    assertEquals("The R42 marker must be retired", 1, lastRetiredPreferences);
+    assertEquals(0L, rawPreferenceCount(tenant));
+    assertEquals("Still exactly the one subscription row it had", 1L, rawTotalCount(tenant));
+    assertEquals(1L, rawOpenCount(tenant));
+    assertEquals("@check must converge once the marker is gone", 0,
+        selectRows(substitute(checkSection, tenant)).size());
+  }
+
+  /**
+   * A closed row is still proof the tenant is on the row model, and an INACTIVE marker is still a
+   * row that keeps the cutover's end-condition count above zero. Both are retired, and since the
+   * marker is not an active productive one, branch (A) does not backfill anything.
+   */
+  @Test
+  public void testAnInactiveMarkerNextToAClosedSubscriptionIsRetiredWithoutAnInsert() {
+    String tenant = createTenant("closed-inactive", true);
+    deactivateMarker(tenant);
+    createSubscription(tenant, true);
+
+    assertEquals("@check must select any marker next to any subscription row", 1,
+        selectRows(substitute(checkSection, tenant)).size());
+
+    assertEquals("An inactive marker is not a productive claim: nothing may be inserted", 0,
+        apply(tenant));
+    assertEquals("The inactive marker must be retired", 1, lastRetiredPreferences);
+    assertEquals(0L, rawPreferenceCount(tenant));
+    assertEquals("Only the closed row the tenant had", 1L, rawTotalCount(tenant));
+    assertEquals("And no open one appeared", 0L, rawOpenCount(tenant));
+    assertEquals("@check converges", 0, selectRows(substitute(checkSection, tenant)).size());
+  }
+
+  /**
+   * <b>Pinned known edge — accepted risk, NOT desired behaviour.</b> A tenant whose only
+   * subscription row is closed but which carries an ACTIVE productive marker (the state R42 can
+   * produce once ETP-5047 closes rows on cancel) is backfilled with a fresh OPEN
+   * {@code legacy-productive} row before the marker is retired. Branch (A) is unchanged by the
+   * widening and keys on "no OPEN row", so it preserves the access the fallback gives the tenant
+   * today. Unreachable while nothing writes {@code END_DATE}; the SQL's header records it as the
+   * residual ETP-5047 must re-check before closing rows. If that fix changes this outcome, this
+   * spec is the one to update.
+   */
+  @Test
+  public void testKnownEdgeAnActiveMarkerNextToAClosedSubscriptionIsBackfilledAnOpenRow() {
+    String tenant = createTenant("closed-active", true);
+    createSubscription(tenant, true);
+
+    assertEquals(1, selectRows(substitute(checkSection, tenant)).size());
+
+    assertEquals("Known edge: branch (A) inserts a new open legacy-productive row", 1,
+        apply(tenant));
+    assertEquals("...and the marker is retired in the same transaction", 1,
+        lastRetiredPreferences);
+    assertEquals(0L, rawPreferenceCount(tenant));
+    assertEquals("The closed row plus the backfilled open one", 2L, rawTotalCount(tenant));
+    assertEquals(1L, rawOpenCount(tenant));
+    assertEquals("The backfilled row is on the grandfathered plan", LEGACY_PLAN_VALUE,
+        uniqueResult("SELECT p.VALUE FROM ETGO_PLAN p JOIN ETGO_SUBSCRIPTION s "
+            + "ON s.ETGO_PLAN_ID = p.ETGO_PLAN_ID WHERE s.ENVIRONMENT_CLIENT_ID = :tenant "
+            + "AND s.END_DATE IS NULL", "tenant", tenant));
+
+    assertEquals("A re-run inserts nothing", 0, apply(tenant));
+    assertEquals("...and retires nothing", 0, lastRetiredPreferences);
+    assertEquals(0, selectRows(substitute(checkSection, tenant)).size());
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -1017,6 +1123,32 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
         "clientName", MARKER + "tenant", "customer", stripeCustomerId,
         "subscription", stripeSubscriptionId, "tenant", tenantId);
     return requestId;
+  }
+
+  /**
+   * Gives a fixture tenant a subscription row the way the runtime path does — owned by the System
+   * pseudo-client, ABOUT the tenant — on the grandfathered plan.
+   *
+   * @param tenantId the tenant the row is about
+   * @param closed true for a closed row ({@code END_DATE} set, status {@code canceled}), false for
+   *     an open {@code active} one
+   */
+  private void createSubscription(String tenantId, boolean closed) {
+    nativeUpdateCommitted("INSERT INTO ETGO_SUBSCRIPTION (ETGO_SUBSCRIPTION_ID, AD_CLIENT_ID, "
+            + "AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, ENVIRONMENT_CLIENT_ID, "
+            + "ETGO_PLAN_ID, STATUS, START_DATE, END_DATE) "
+            + "VALUES (:id, '0', '0', 'Y', now(), '0', now(), '0', :tenant, "
+            + "(SELECT ETGO_PLAN_ID FROM ETGO_PLAN WHERE VALUE = :plan LIMIT 1), "
+            + (closed ? "'canceled', now() - interval '30 days', now() - interval '1 day')"
+                : "'active', now() - interval '30 days', NULL)"),
+        "id", newId(), "tenant", tenantId, "plan", LEGACY_PLAN_VALUE);
+  }
+
+  /** Turns the tenant's productive marker into an inactive leftover. */
+  private void deactivateMarker(String tenantId) {
+    nativeUpdateCommitted("UPDATE AD_PREFERENCE SET ISACTIVE = 'N' "
+            + "WHERE ATTRIBUTE = 'ETGO_TenantPlan' AND VISIBLEAT_CLIENT_ID = :tenant",
+        "tenant", tenantId);
   }
 
   /**

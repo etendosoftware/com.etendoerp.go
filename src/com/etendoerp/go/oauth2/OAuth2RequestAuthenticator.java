@@ -77,7 +77,7 @@ final class OAuth2RequestAuthenticator {
     GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
       throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN,
-          "CSRF validation failed");
+          sessionAuth.getRefusalMessage());
     }
     if (sessionAuth.getStatus() == GoSessionAuthResult.Status.UNAUTHENTICATED) {
       throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_UNAUTHORIZED,

@@ -80,9 +80,9 @@ import java.util.Map;
  * exactly this: Financiero gets all three processes (the "Documentos no contabilizados" proxy,
  * {@code D6AB95CE52D34E1599590526115E26C6}, plus BOTH aging schedules per the v2 target matrix),
  * Ventas gets only the Receivables schedule ({@code 0D37A9F6109549DEB058373EF2DAEB6A}), and Compras
- * gets only the Payables one ({@code EB4C4053F3B94A17A08D1DD7E89CEB7E}) — reconciled by {@code
- * EnsureSystemRoleTemplatesScript#reconcileStandaloneProcessAccess}, a mechanism deliberately
- * separate from (not layered on top of) {@code #reconcileProcessAccess}.</p>
+ * gets only the Payables one ({@code EB4C4053F3B94A17A08D1DD7E89CEB7E}). {@code
+ * EnsureSystemRoleTemplatesScript#reconcileProcessAccess} adds these ids to its button-derived
+ * desired set (ETP-5565), so both kinds of grant are reconciled by one stale removal.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * but are deliberately absent from every role's grant list below</b> — the ticket's matrix shows
@@ -354,10 +354,9 @@ public final class TemplateRoleWindowAccess {
    * contabilizados"/aging reports paragraph) for the full investigation. Financiero gets all three
    * — the "Documentos no contabilizados" proxy plus BOTH aging schedules, per the v2 target
    * matrix; Ventas gets only the Receivables schedule; Compras gets only the Payables one;
-   * Almacén gets none. Reconciled by {@code
-   * EnsureSystemRoleTemplatesScript#reconcileStandaloneProcessAccess} — a mechanism deliberately
-   * separate from (not layered on top of) {@code #reconcileProcessAccess}: it grants each process
-   * id directly, independent of any window grant.
+   * Almacén gets none. Each process id is granted directly, independent of any window grant:
+   * {@code EnsureSystemRoleTemplatesScript#reconcileProcessAccess} adds these ids to its
+   * button-derived desired set (ETP-5565).
    */
   private static List<String> financeStandaloneProcessGrants() {
     return List.of(
@@ -413,10 +412,10 @@ public final class TemplateRoleWindowAccess {
    *
    * <p>Granted to Finance ONLY — Sales/Purchasing/Inventory get nothing (same product scope as
    * every other Finance-only Informes row: "Informes financieros", the 6 financial-account report
-   * rows). Reconciled by {@code EnsureSystemRoleTemplatesScript#reconcileStandaloneClassicProcessAccess}
-   * — a mechanism deliberately separate from {@link #standaloneProcessGrantsByRoleId()}'s OBUIAPP
-   * one (different table: {@code ad_process_access}, not {@code obuiapp_process_access}), following
-   * the same "grant the process id directly, independent of any window grant" shape.</p>
+   * rows). Same shape as {@link #standaloneProcessGrantsByRoleId()}'s OBUIAPP grants, on {@code
+   * ad_process_access} instead of {@code obuiapp_process_access}: {@code
+   * EnsureSystemRoleTemplatesScript#reconcileProcessAccess} adds the id to its button-derived
+   * desired set (ETP-5565).</p>
    *
    * @return a fresh, mutable {@link LinkedHashMap} from template role id to its (immutable) list
    *     of classic {@code AD_Process_Access} ids — every one of the four template roles is a key,

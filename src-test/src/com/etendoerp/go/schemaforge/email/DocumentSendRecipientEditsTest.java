@@ -20,15 +20,21 @@ package com.etendoerp.go.schemaforge.email;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mockStatic;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Tests for editable To/CC recipients in the document-send contract family (ETP-4226).
@@ -37,6 +43,24 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 public class DocumentSendRecipientEditsTest {
 
   private static final String CONTRACT = "doc-send-test";
+
+  /**
+   * ETP-5205 — {@code DefaultDocumentSendEmailContract.authorize} now requires the window write
+   * tier, read from the DAL. These tests drive real contracts end to end past authorization, so
+   * the tier is granted here; {@code DocumentSendAuthorizeTierTest} pins the check itself.
+   */
+  private MockedStatic<NeoAccessHelper> writeTierGranted;
+
+  @Before
+  public void grantWriteTier() {
+    writeTierGranted = mockStatic(NeoAccessHelper.class);
+    writeTierGranted.when(() -> NeoAccessHelper.canWriteSpec(any())).thenReturn(true);
+  }
+
+  @After
+  public void releaseWriteTier() {
+    writeTierGranted.close();
+  }
 
   @Test
   public void noEditsResolvesTrustedBaseRecipient() throws Exception {

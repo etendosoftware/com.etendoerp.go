@@ -15,12 +15,41 @@ transactional email best-effort. Email delivery failure is audited by the
 transactional email safety store and does not roll back the already committed
 environment.
 
-Client resolution keeps the first name lookup for same-account resume and
-cross-account collision checks. When no client exists and `InitialClientSetup`
-creates one, onboarding uses the exact `AD_Client_ID` that setup stores in the
-request session for all later provisioning and paid-upgrade side effects. It
-does not look up the new client by name a second time; a successful setup that
-does not return that ID fails closed before provisioning continues.
+Client resolution never uses the company name (ETP-5548). The classic path
+creates the client under a **provisioning name** (`ProvisioningClientName`,
+`PEND-<32 hex>`: the checkout `requestId` without hyphens for a paid attempt,
+the account id for the free first environment; 37 characters like the pool's
+`POOL-<id>`, so every name the chain derives still fits its 60-character
+column) and looks it up by that name, so a retry of the
+same attempt resumes its own half-built client (ETP-4428 reconcile model) and
+nothing else. The company name may match any other environment — another
+account's, or this account's demo, which is never converted. Only after every
+step that names something after the client, and in the final transaction,
+`applyRequestedClientName` renames the client and every name derived from it
+(admin role, trees, ledger, chart of accounts, calendar — the same rewrite a
+pooled claim does) to the company name; a failure rolls the rename back, so the
+client keeps the provisioning name for the retry. A client under a provisioning
+name is never listed by `/environments`, and a requested company name of that
+exact shape is refused (400). The organization is created with the company name
+directly; a free retry that resumes the attempt under a different company name
+renames it too (its legal name only while it still equals the old name).
+The admin username is the account email, then `<email>+<company slug>`, then
+`<email>+<company slug>2`, `…3` while the previous one is taken by any user,
+active or not — two environments of one account whose names reduce to the same
+slug ("Acme", "Acme!") would otherwise fail `@DuplicateClientUser@` after
+payment, and on the pool path burn a pooled tenant per attempt.
+
+One rule is enforced on the name itself: an account cannot have two
+**productive** environments with the same company name (case and blanks
+ignored) — refused before checkout (409 `CLIENT_NAME_IN_USE`) and again at
+onboarding with the same non-retryable code. A later onboarding call for that
+purchase is refused with 409 `PROVISIONING_RETRY_NOT_ALLOWED` (not
+`PROVISIONING_ALREADY_IN_PROGRESS`, which is reserved for a run still in flight).
+
+When no client exists and `InitialClientSetup` creates one, onboarding uses the
+exact `AD_Client_ID` that setup stores in the request session for all later
+provisioning and paid-upgrade side effects; a successful setup that does not
+return that ID fails closed before provisioning continues.
 
 **Do not hardcode the step count in prose** — the list below is the source of
 truth; keep it (and this list ONLY) in sync with
@@ -183,7 +212,34 @@ for the original ticket analysis.
 
 ### `OnboardingPeriodControlService`
 Step 3. Opens the initial fiscal calendar / period control for the new
-client/org so documents can be posted from day one.
+client/org so documents can be posted from day one. The chain opens every period
+through the month the tenant is **built** and leaves later periods never-opened.
+
+**Demo trial window (ETP-5575).** A demo needs more: its trial lasts
+`etendo.go.demo.trial.days` / `ETGO_DEMO_TRIAL_DAYS` (default 15), so a signup at
+the end of a month could not post the next month, and a pooled tenant kept the
+window of its build month. `openDemoTrialWindow` widens it to the whole trial:
+every never-opened period whose start is on or before `ETGO_DemoTrialStartedAt` +
+trial days is opened.
+
+- **Where.** `EtendoGoJwtServlet.openDemoTrialPeriodsBestEffort`, right after the
+  onboarding commit and before `completeCommittedOnboarding`, for every non-paid
+  onboarding — pooled and classic alike. Paid (productive) onboardings are not
+  affected.
+- **Best effort.** It runs in its own transaction with the commit inside the try:
+  any failure rolls back only this step, the tenant keeps the chain's window, and
+  the onboarding still succeeds. Log markers: `ETP-5575 demo period window
+  started|done|failed for client <id>` — a `started` without `done`/`failed`
+  means the step never finished.
+- **Open-only.** Only `N` (never opened) control rows are flipped to open; rows a
+  user closed (`C`) or closed permanently (`P`) are never touched. Every control
+  row of the period is considered, including the duplicated copy `AD_ORG_READY`
+  inserts, because posting needs any open row but costing reads any non-open row
+  as closed. `C_Period.OpenClose` is then recomputed from the controls.
+- **No year creation.** If the trial end falls beyond the calendar's last period,
+  what exists is opened and a WARN is logged (follow-up: ETP-5586).
+- **Existing demos** were widened through October 2026 by the corrective data-fix
+  `R44-demo-periods-open-through-oct-2026` (etendo_schema_forge).
 
 ### `OnboardingSequenceGeneratorService`
 Generates `AD_SEQUENCE` records for all document types that require a number
@@ -396,6 +452,66 @@ On error:
 
 The final event always carries `"success": true|false`.
 
+The optional `sampleData` step (see below) reports its failure as `"status":"warning"`, never
+`"error"`: the tenant is already committed by then, so the final event is still a success.
+
+## Optional sample data (ETP-5426)
+
+The signup's Company step offers an **"Include sample data to explore the system"** checkbox,
+**unticked by default**. When ticked, the new tenant is born with GOClient's demo content — the same
+data the GOAdmin user sees: 5 business partners, the 4 sample products with prices and the
+"Beverages" category, the 3 template financial accounts, the secondary warehouse, and the full
+completed document chain (9 orders, 9 invoices, 9 shipments/receipts, 8 payments), physical
+inventory, goods movements, stock, costing, matching and 3 fixed assets with their amortization.
+
+**Request.** `POST /sws/go/onboarding` accepts `"includeSampleData": true` (absent means `false`). It
+is honoured only when `OnboardingSampleDataService.isEligible` accepts the request: the user opted
+in, it is a **demo** environment (never a paid one), and the tenant is **Spain / EUR** — the data's
+taxes and tax ids are Spanish. Any other request is provisioned without sample data, whatever it
+sent. The frontend only shows the checkbox for ES/EUR (`isSampleDataOffered` in
+`etendo-go-core`). The choice is persisted in the onboarding draft (see below).
+
+**When it runs.** In `EtendoGoJwtServlet#importSampleDataBestEffort`, **after** the onboarding
+commit (`commitDalChanges("onboarding")` and `completeCommittedOnboarding`) and **before**
+`OnboardingCostingScheduleService.activateSchedule`. Two consequences, both deliberate:
+
+- It is independent of how the tenant was built. A tenant claimed from the pool and a classic one
+  both reach this point with the base dataset committed, so the pool chain is untouched and
+  `CHAIN_REVISION` does not move.
+- It is **best effort**. It runs in its own transaction: on any failure it is rolled back —
+  discarding only the sample data — and reported as a `sampleData` `warning`. The success card
+  then says the environment is ready without sample data, and stays up a few seconds longer so the
+  notice can be read. `DataImportService` rolls the whole session back on error, which is exactly
+  why this import can never share the onboarding transaction.
+
+**What is imported.** A second pass of `OnboardingDatasetNormalizer` over the **same**
+`referencedata/sampledata/GOClient` files, with `OnboardingDatasetProfile.SAMPLE_DATA`
+(`OnboardingSampleDataDefinition` holds the table lists). The source files are not modified and
+nothing is copied: it takes the transactional tables whole and, from the tables shared with the
+base pass, only the `OnboardingDemoMasterData` rows — exactly the rows the base pass drops.
+References from sample rows to base rows carry GOClient ids and resolve through the
+`AD_REF_DATA_LOADED` mapping the base import wrote for the tenant.
+
+**How it differs from GOClient.**
+
+| Aspect | GOClient | Tenant with sample data |
+|---|---|---|
+| Accounting | 128 `FACT_ACCT` entries, documents `POSTED='Y'` | Imported with no `FACT_ACCT` and `POSTED` rewritten to `'N'` (`'D'` kept). The system-wide `AcctServerProcess` (scheduled at client `0`, it posts pending documents of every client) then posts them on its next cycle — about 90 s after the signup on the local instance — so the tenant ends up with entries generated by the real posting engine from its own accounts, not copied from GOClient. Accepted as the intended outcome (ETP-5426); where that process is not scheduled, the documents simply stay pending |
+| Contact user on orders/invoices/shipments/assets | GOAdmin / GOuser | Empty (`AD_USER_ID` stripped; those users do not exist in a tenant) |
+| Partner identifier (`EM_Etgo_Identifier`) | Empty on 4 of 5 partners | The next numbers of the tenant's own identifier sequence, in `VALUE` order, as if a user had created them (the partner that has one keeps it). The import gives them a stand-in first: the column's transactional sequence generator, run per insert inside the import's single flush, handed the same number to all four |
+| Organization | 4 partners, 3 products, the warehouse and its locator at org `0` | Every row at the tenant's business org. A partner at `0` fails the import: `EM_Etgo_Identifier` is generated from a transactional sequence onboarding only creates for the business org |
+| Per-entity posting accounts | GOClient's `*_ACCT` rows | Provisioned by `OnboardingAccountingWiringService#provisionSampleDataPostingAccounts` from the tenant's defaults (`A_ASSET_ACCT` is imported: the wiring has no asset statement) |
+| Document sequences | Still at 1000000 / 10000000 despite documents up to 1000010 | Moved past the highest imported number, so the first real document never repeats a sample number |
+
+**Idempotent.** A tenant whose `AD_REF_DATA_LOADED` already maps any GOClient business partner is
+left untouched (`Outcome.ALREADY_PRESENT`).
+
+**"First steps" is unaffected.** Its progress is a persisted list of ids the user ticks by hand, not
+derived from the tenant's data, so every step still shows as pending.
+
+**Verifying by hand needs a Tomcat restart**: the table lists are Java, loaded once per JVM, while the
+XML files are re-read on every provisioning.
+
 ## Tenant pool (ETP-5389)
 
 Near-instant onboarding: a background process keeps a small pool of tenants already built by the
@@ -469,8 +585,9 @@ it up, running `CostingBackground` for an empty tenant.
 
 `PooledTenantClaimService.claim`, first thing in `executeOnboardingProvisioning`. It answers
 `null` — classic path, transparently — when the flag is off, the request is not EUR/ES/es_ES, the
-company name already resolves to a client (resume and collision handling, ETP-4428, stay
-classic), the name starts with `POOL-`, the pool is empty, or taking/personalizing the tenant fails.
+name starts with `POOL-`, the pool is empty, or taking/personalizing the tenant fails. The servlet
+does not attempt a claim when the attempt left a half-built classic client to resume (found by its
+provisioning name, see Overview). The company name plays no part: it may match another client.
 A personalization failure rolls back, marks the row `FAILED` and falls back.
 
 The row is taken with `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`, **inside
@@ -479,6 +596,11 @@ skipped, not waited for), and a failure anywhere later rolls the claim back and 
 `READY` again. The claim then applies only:
 
 - `AD_Client` name / value / description, `AD_Org` name / value / `SocialName` ← company name;
+- the names the build derived from the placeholder — `AD_Role` "POOL-… Admin" (name and
+  description), the client's 17 `AD_Tree` names/descriptions, the ledger (`C_AcctSchema`), the
+  chart of accounts (`C_Element` name/description) and the fiscal calendar — with `POOL-<id>`
+  replaced by the company name (`PooledTenantClaimService.renamePlaceholderDerivedNames`, ETP-5548;
+  native SQL scoped by `AD_Client_ID`, inside the claim transaction);
 - admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
   description, email, password hash, **active**;
 - the signup address onto the pooled fiscal location's street line.
@@ -487,21 +609,33 @@ After it, the servlet runs its existing calls: owner marking (`resolveAdminConte
 upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
 `warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
 data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
-commit, the `environment-ready` email and costing activation. The stream skips the `organization`
+commit, the demo trial window (ETP-5575: re-evaluates the periods of a pooled demo built in an
+earlier month, see `OnboardingPeriodControlService`), the `environment-ready` email and costing
+activation. The stream skips the `organization`
 and `dataset`…`baseline` steps.
 
-### Where `POOL-…` stays visible after a claim (known gap, not renamed yet)
+### Performance observability (ETP-5500)
 
-Everything derived from the client name at provisioning time keeps the placeholder:
+The server writes structured performance entries at `INFO` level with the `[ONBOARDING-PERF]`
+marker. Each entry includes a request-scoped `correlationId`, a phase, the `pool` or `classic`
+mode, elapsed milliseconds, and only non-secret tenant identifiers. The pool claim emits separate
+timings for the row claim, tenant personalization, and the complete claim. The servlet emits
+tenant selection and residual onboarding time through commit. These entries make pool and classic
+runs directly comparable without changing the NDJSON response or the provisioning transaction.
 
-- `AD_Role` "POOL-… Admin" (`InitialClientSetup.insertRoles`: client name + " Admin") — shown by
-  the roles screens;
-- the client's `AD_Tree` names ("POOL-… <tree>", `InitialClientSetup.insertTrees`);
-- the ledger (`C_AcctSchema`) name and the chart of accounts `C_Element` name/description,
-  rebranded to the client name by `OnboardingAccountingWiringService.rebrandImportedChartNames`;
-- the fiscal calendar name, rebranded by `OnboardingPeriodControlService`;
-- anything else `OnboardingSourceMoniker.replace` rewrote with the client name during the build;
-- the `ETGO_TENANT_POOL` row itself and the server log lines of the build.
+### Where `POOL-…` stays visible after a claim
+
+Until ETP-5548 the claim renamed only the client, organization and admin user, so a claimed tenant
+showed "POOL-… Admin" as its role (account menu, roles screens) and kept the placeholder in its
+ledger, chart of accounts, calendar and trees. The claim now rewrites all of them (see the list
+above). A scan of every text column of a `READY` pooled tenant finds the placeholder only in those
+tables plus `AD_Client`, `AD_Org` and the admin `AD_User`, which the claim sets directly.
+
+What still carries it: the `ETGO_TENANT_POOL` row itself and the server log lines of the build.
+Tenants claimed before ETP-5548 keep the placeholder in those derived names until the schema_forge
+data-fix `R45-pool-claim-placeholder-names` (`cli/src/data-fixes/sql/`) rewrites them: same tables
+and lengths as the claim, matched on the exact `POOL-<pool row id>` of a `CLAIMED` row whose client
+is already renamed, so `READY` tenants keep their placeholder.
 
 A pooled tenant is also a real client before it is claimed: instance-wide sweeps
 (`CostingCadenceStartup`, usage aggregation, the corrective data-fix runner) see it like any other
@@ -568,8 +702,11 @@ Endpoints (session-token auth, same Bearer model as `/me`):
 - `POST /sws/go/onboarding/draft` — body `{ "draft": { "step", "form" } }` saves;
   `{ "draft": null }` clears. Only whitelisted wizard form fields are persisted
   (`fullName`, `businessType`, `clientName`, `currency`, `language`,
-  `countryCode`, `fiscalIdType`, `fiscalIdValue`, `address`, `sector`) and the
-  serialized draft is capped at 4000 chars (400 otherwise).
+  `countryCode`, `fiscalIdType`, `fiscalIdValue`, `address`, `sector`,
+  `includeSampleData`) and the serialized draft is capped at 4000 chars (400
+  otherwise). Every field is kept only as a string, except `includeSampleData`
+  (ETP-5426), which is kept only as a boolean — a checkbox value dropped here
+  would silently lose the choice across a logout.
 
 The draft is cleared automatically (best-effort, non-blocking) by
 `POST /sws/go/onboarding` right after the environment commit succeeds, so a

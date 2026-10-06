@@ -82,6 +82,41 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares HQL predicates that every list read of this handler's entity must satisfy
+   * (ETP-5009).
+   *
+   * <p><b>Why this exists.</b> A handler that hides rows by post-filtering {@code afterHandle}'s
+   * {@code response.data} only hides them from the page it was handed: core already applied
+   * {@code LIMIT}/{@code OFFSET} and counted {@code totalRows}, so pages come back short, the count
+   * is wrong, and the {@code ?_distinct=} value fetch — which never reaches {@code afterHandle} at
+   * all — keeps offering values only the hidden rows carry (the Product window's filter offered
+   * the internal "Discounts" category). A predicate declared here goes into the query itself, so
+   * list, count, paging and distinct values agree by construction.</p>
+   *
+   * <p><b>Where it is applied.</b> ANDed into the generic list query of every channel: the REST
+   * list {@code GET} (and therefore its count and any CSV/XLSX export of it), the REST
+   * {@code ?_distinct=<field>} value fetch, and MCP {@code neo_list}. It is <b>not</b> applied to
+   * a single-record read by id: core resolves that with its own {@code id = :id} query and ignores
+   * the where clause, so a handler that must also hide a record from a direct read keeps doing so
+   * in {@code afterHandle}. Nor is it applied to a read a handler serves itself from
+   * {@link #handle}.</p>
+   *
+   * <p><b>Contract.</b> Each predicate is a complete HQL boolean expression over the alias
+   * {@code e} (the entity being read). It is spliced into the HQL text verbatim — there is no
+   * bind-parameter mechanism — so it must be a server-side constant or built only from values the
+   * server validated; never from request input. It is resolved on its own instance, separately
+   * from the one that runs {@link #handle}/{@link #afterHandle}, so it must not rely on
+   * per-request state set by those. A predicate that throws fails the read rather than silently
+   * returning the rows it was meant to hide.</p>
+   *
+   * @param context the read context: spec, entity, {@code GET}, no record id, the query params
+   * @return the predicates to AND into the read; the default is empty (no restriction)
+   */
+  default List<String> readPredicates(NeoContext context) {
+    return Collections.emptyList();
+  }
+
+  /**
    * Whether the current role may reach the surface this handler serves.
    *
    * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
@@ -114,6 +149,37 @@ public interface NeoHandler {
    * @return protected DAL property names
    */
   default Set<String> protectedCreateCalloutFields(NeoContext context) {
+    return Collections.emptySet();
+  }
+
+  /**
+   * Declares the DAL property names this customization resolves server-side on create, so a
+   * caller does not have to send them even though AD marks the column mandatory (ETP-5535).
+   *
+   * <p><b>Why the customization declares it.</b> {@code neo_schema(view:"create")} learns what the
+   * server fills from two generic sources: the values {@code neo_defaults} resolves without any
+   * input, and the selector policies' own wrapper fields. Neither can see a value the server derives
+   * <em>from another field of the same body</em> — the create callout cascade, or the
+   * customization's own pre-hook — because that derivation only runs once the caller has sent its
+   * source. Without this declaration the schema lists the field as {@code required}, the agent goes
+   * looking for a value the server would have chosen for it, and the server's choice and the
+   * agent's can then disagree. The customization is the only place that knows the derivation
+   * exists, so it is the one that says so.</p>
+   *
+   * <p>Reader: {@code neo_schema(view:"create")} moves the names to {@code optional} with
+   * {@code serverDefaulted:true}. The {@code neo_create} mandatory pre-check does not skip them: it
+   * runs after the create callout cascade and before this customization's pre-hook, so a field the
+   * cascade derived is not missing there, and one it could not derive is reported with a precise
+   * 422 rather than left to the DAL's NOT NULL check. A caller may still send a value; it is
+   * honoured as on any other field.</p>
+   *
+   * <p>Consequently, declare only fields the <b>create callout cascade</b> derives. A field filled
+   * only by this customization's own {@code handle()} would still be refused by the pre-check on
+   * {@code neo_create}, which runs first.</p>
+   *
+   * @return the property names resolved server-side on create; empty by default
+   */
+  default Set<String> serverResolvedCreateFields() {
     return Collections.emptySet();
   }
 
@@ -164,6 +230,23 @@ public interface NeoHandler {
    */
   default Map<String, NeoActionContract> actionContracts() {
     return Collections.emptyMap();
+  }
+
+  /**
+   * Names the actions this handler serves to the SPA but that an agent must never run
+   * (ETP-5558), e.g. a bank-initiated payment that ends in an authorization only a person can give.
+   *
+   * <p>Read by the MCP only: {@code neo_action} refuses them (405) before the handler runs, and
+   * they are never advertised. REST and the SPA ignore it. The handler is the authority because it
+   * is the one that serves them; a configuration row may add a second guard but must not be the
+   * only one.</p>
+   *
+   * <p>Returns an empty set by default: nothing is excluded.</p>
+   *
+   * @return the excluded action names
+   */
+  default Set<String> agentExcludedActions() {
+    return Collections.emptySet();
   }
 
   /**

@@ -29,6 +29,9 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.PeriodControl;
 import org.openbravo.model.financialmgmt.calendar.Year;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Date;
 import java.util.List;
 
@@ -57,6 +60,9 @@ import java.util.List;
  * date) and leaves later periods never-opened, so the onboarded tenant starts with the correct
  * year-to-date open regardless of when onboarding runs. This is the preventive counterpart of the
  * frozen R3-periodcontrol corrective data-fix.
+ *
+ * <p>For demo signups, {@link #openDemoTrialWindow} later widens that window to the whole trial
+ * (ETP-5575). It runs after the onboarding commit, open-only, for pooled and classic demos alike.
  *
  * <p>Accounting-schema (general-ledger) wiring is out of scope here — that belongs to Gap A1 and
  * lives in {@link OnboardingAccountingWiringService}.
@@ -88,30 +94,137 @@ public class OnboardingPeriodControlService extends OnboardingContextSupport {
    * @param adminRoleId administrator role for DAL context
    */
   public void wire(String clientId, String orgId, String adminUserId, String adminRoleId) {
+    runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
+      Organization org = resolveOrganization(orgId);
+      if (org == null) {
+        throw new OBException("Organization not found for period-control wiring: " + orgId);
+      }
+      Calendar calendar = resolveImportedCalendar(org);
+      if (calendar == null) {
+        throw new OBException("No calendar was imported for client " + clientId
+            + "; cannot enable period control on the organization");
+      }
+      enablePeriodControl(org, calendar);
+      rebrandImportedCalendarName(org, calendar);
+      openPeriodsThroughCurrentMonth(calendar);
+      flushChanges();
+    });
+  }
+
+  /**
+   * Opens the fiscal periods a demo tenant needs for its whole trial (ETP-5575).
+   *
+   * <p>{@link #wire} opens periods through the month the tenant is <em>built</em>. That is too short
+   * for a demo: a trial lasts {@code trialDays}, so a signup at the end of a month cannot post the
+   * next month, and a pooled tenant built in one month and claimed in the next keeps the build
+   * month's window. This method runs after the onboarding commit, for demo signups only, and opens
+   * every never-opened period whose start is on or before the trial end.
+   *
+   * <p>It only opens: a control row is flipped from never-opened ({@code 'N'}) to open, and rows a
+   * user closed ({@code 'C'}) or closed permanently ({@code 'P'}) are never touched. Every control row
+   * of a period is considered, so the duplicated rows a tenant carries today (the dataset copy plus
+   * the copy {@code AD_ORG_READY} inserts) all end up open. Posting needs any open row and costing
+   * reads any non-open row as closed, so both must be open. Years are not created: when the trial end
+   * falls beyond the calendar's last period, what exists is opened and a warning is logged.
+   *
+   * @param clientId    demo client identifier
+   * @param orgId       demo organization identifier
+   * @param adminUserId administrator user for DAL context
+   * @param adminRoleId administrator role for DAL context
+   * @param trialStart  first instant of the trial ({@code ETGO_DemoTrialStartedAt})
+   * @param trialDays   configured trial length in days
+   */
+  public void openDemoTrialWindow(String clientId, String orgId, String adminUserId,
+      String adminRoleId, Instant trialStart, int trialDays) {
+    if (trialStart == null) {
+      throw new OBException("Missing trial start for demo period window of client " + clientId);
+    }
+    runInTenantContext(clientId, orgId, adminUserId, adminRoleId, () -> {
+      Organization org = resolveOrganization(orgId);
+      if (org == null) {
+        throw new OBException("Organization not found for demo period window: " + orgId);
+      }
+      Calendar calendar = org.getCalendar() != null ? org.getCalendar()
+          : resolveImportedCalendar(org);
+      if (calendar == null) {
+        throw new OBException("No calendar found for demo period window of client " + clientId);
+      }
+      Date trialEnd = Date.from(trialStart.plus(Duration.ofDays(Math.max(trialDays, 0))));
+      List<Period> periods = resolveCalendarPeriods(calendar);
+      if (!coversDate(periods, trialEnd)) {
+        log.warn("ETP-5575 trial end {} beyond calendar for client {}; opening what exists",
+            trialEnd, clientId);
+      }
+      openNeverOpenedPeriodsThrough(periods, trialEnd);
+      flushChanges();
+    });
+  }
+
+  /**
+   * Validates the context, switches to the tenant's admin context in admin mode, runs the action and
+   * always restores the previous context.
+   */
+  private void runInTenantContext(String clientId, String orgId, String adminUserId,
+      String adminRoleId, Runnable action) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
     OBContext previousContext = captureCurrentContext();
     applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
     try {
       enterAdminMode();
       try {
-        Organization org = resolveOrganization(orgId);
-        if (org == null) {
-          throw new OBException("Organization not found for period-control wiring: " + orgId);
-        }
-        Calendar calendar = resolveImportedCalendar(org);
-        if (calendar == null) {
-          throw new OBException("No calendar was imported for client " + clientId
-              + "; cannot enable period control on the organization");
-        }
-        enablePeriodControl(org, calendar);
-        rebrandImportedCalendarName(org, calendar);
-        openPeriodsThroughCurrentMonth(calendar);
-        flushChanges();
+        action.run();
       } finally {
         exitAdminMode();
       }
     } finally {
       restoreExecutionContext(previousContext);
+    }
+  }
+
+  /** True when some period of the calendar ends on or after the given date. */
+  private static boolean coversDate(List<Period> periods, Date date) {
+    for (Period period : periods) {
+      Date end = period.getEndingDate();
+      if (end != null && !end.before(truncateToDay(date))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static Date truncateToDay(Date date) {
+    return Date.from(date.toInstant().atZone(ZoneId.systemDefault()).toLocalDate()
+        .atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /**
+   * Open-only variant of {@link #openPeriodsThroughCurrentMonth}: for every period starting on or
+   * before {@code cutoff}, flips its never-opened control rows to open and leaves every other row
+   * alone. Later periods are not touched. The period's own {@code openclose} flag is then
+   * recomputed from its controls: open ({@code 'C'}) only when every control row is open, as the core
+   * open/close process does.
+   */
+  protected void openNeverOpenedPeriodsThrough(List<Period> periods, Date cutoff) {
+    for (Period period : periods) {
+      if (period.getStartingDate() == null || period.getStartingDate().after(cutoff)) {
+        continue;
+      }
+      List<PeriodControl> controls = resolvePeriodControls(period);
+      boolean allOpen = !controls.isEmpty();
+      for (PeriodControl control : controls) {
+        if (PERIOD_STATUS_NEVER_OPENED.equals(control.getPeriodStatus())) {
+          control.setPeriodStatus(PERIOD_STATUS_OPEN);
+          control.setPeriodAction(PERIOD_ACTION_NONE);
+          control.setOpenClose(OPENCLOSE_OPEN);
+          OBDal.getInstance().save(control);
+        }
+        allOpen &= PERIOD_STATUS_OPEN.equals(control.getPeriodStatus());
+      }
+      String openClose = allOpen ? OPENCLOSE_OPEN : OPENCLOSE_CLOSED;
+      if (!openClose.equals(period.getOpenClose())) {
+        period.setOpenClose(openClose);
+        OBDal.getInstance().save(period);
+      }
     }
   }
 

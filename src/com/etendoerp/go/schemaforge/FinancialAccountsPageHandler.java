@@ -110,7 +110,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // Appended at the END on purpose (ETP-4896): loadAccounts() below reads every column by
           // POSITION, and so does FinancialAccountsPageHandlerTest's ResultSet stubbing — inserting
           // these in the middle would silently shift every existing column index.
-          + "       fa.c_country_id, ctry.countrycode, ctry.name, "
+          // Country name localized via c_country_trl (ETP-5579): c_country.name is English only.
+          // COALESCE falls back to the base name when the country has no translation row.
+          + "       fa.c_country_id, ctry.countrycode, COALESCE(ctryt.name, ctry.name), "
           // Stored computed column (EPL-1807 engine). Replaces the per-request
           // PENDING_BY_ACCOUNT_SQL aggregate this class used to run: the value is now a real,
           // sortable column the engine recomputes whenever a statement, statement line,
@@ -140,6 +142,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           + "  LEFT JOIN psd2_provider prov ON prov.psd2_provider_id = fa.em_psd2_provider_id "
           // LEFT JOIN: c_country_id is nullable and Cash accounts never carry one.
           + "  LEFT JOIN c_country ctry ON ctry.c_country_id = fa.c_country_id "
+          // Same c_country_trl join as TaxReportHandler (ETP-5013). Its '?' precedes the WHERE
+          // placeholders, so loadAccounts() binds the language FIRST (index 1).
+          + "  LEFT JOIN c_country_trl ctryt ON ctryt.c_country_id = ctry.c_country_id "
+          + "    AND ctryt.ad_language = ? "
           + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
@@ -304,8 +310,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     List<AccountRow> rows = new ArrayList<>();
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(ACCOUNTS_SQL)) {
-      ps.setString(1, clientId);
-      ps.setArray(2, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
+      // c_country_trl's language (ETP-5579): the GO locale NeoAuthenticator applied to the
+      // OBContext from the request's Accept-Language header. Bound first to match its join '?'.
+      ps.setString(1, OBContext.getOBContext().getLanguage().getLanguage());
+      ps.setString(2, clientId);
+      ps.setArray(3, conn.createArrayOf(SQL_TYPE_VARCHAR, orgs.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           AccountRow row = new AccountRow(

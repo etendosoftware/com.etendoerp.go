@@ -27,8 +27,10 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -44,6 +46,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
@@ -59,10 +62,13 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
+import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingProgressSink;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.email.InternalAlertService;
 
 /**
  * ETP-5389 — the servlet chooses between a claimed pooled tenant and the classic path, and the
@@ -76,6 +82,7 @@ public class EtendoGoJwtServletTenantPoolTest {
   @Test
   public void aClaimedPooledTenantSkipsClientCreationAndTheDatasetChain() throws Exception {
     EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(mock(TransactionalAuthEmailSender.class));
+    servlet.internalAlertService = mock(InternalAlertService.class);
     StubClaimService claim = new StubClaimService("POOLED-CLIENT");
     servlet.pooledTenantClaimService = claim;
     OnboardingDatasetImportService dataset = mock(OnboardingDatasetImportService.class);
@@ -84,6 +91,9 @@ public class EtendoGoJwtServletTenantPoolTest {
     OnboardingCostingScheduleService costing = mock(OnboardingCostingScheduleService.class);
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     when(lifecycle.markDemoReady(eq("POOLED-CLIENT"), any(Instant.class))).thenReturn(true);
+    when(lifecycle.configuration()).thenReturn(new EnvironmentAccessPolicy.Configuration(15, 7));
+    OnboardingPeriodControlService periods = mock(OnboardingPeriodControlService.class);
+    servlet.onboardingPeriodControlService = periods;
     servlet.onboardingDatasetImportService = dataset;
     servlet.onboardingOrgInfoService = orgInfo;
     servlet.onboardingWarehouseAddressService = warehouse;
@@ -92,12 +102,20 @@ public class EtendoGoJwtServletTenantPoolTest {
     StringWriter body = new StringWriter();
     HttpServletResponse response = response(body);
 
+    OBDal dalInstance = mock(OBDal.class);
+    boolean[] commitBeforeWindow = new boolean[1];
+    doAnswer(inv -> {
+      commitBeforeWindow[0] = mockingDetails(dalInstance).getInvocations().stream()
+          .anyMatch(i -> "commitAndClose".equals(i.getMethod().getName()));
+      return null;
+    }).when(periods).openDemoTrialWindow(anyString(), anyString(), anyString(), anyString(),
+        any(Instant.class), anyInt());
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
          MockedStatic<OBDal> dal = mockStatic(OBDal.class);
          MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
          MockedStatic<EtendoGoJwtDalHelper> dalHelper = mockStatic(EtendoGoJwtDalHelper.class);
          var setup = mockConstruction(InitialClientSetup.class)) {
-      dal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      dal.when(OBDal::getInstance).thenReturn(dalInstance);
       stubAuthenticationAndCurrency(dalHelper);
       UserRoles adminRole = adminRole();
       dalHelper.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("POOLED-CLIENT"))
@@ -129,11 +147,19 @@ public class EtendoGoJwtServletTenantPoolTest {
         "ADMIN-ROLE");
     verify(lifecycle).markDemoReady(eq("POOLED-CLIENT"), any(Instant.class));
     verify(costing).activateSchedule("POOLED-CLIENT");
+    // ETP-5575: a pooled demo gets its trial window re-evaluated after the onboarding commit, so a
+    // tenant built in an earlier month still opens through its trial end.
+    assertTrue(commitBeforeWindow[0], "the window runs after the onboarding commit");
+    InOrder order = inOrder(periods, costing);
+    order.verify(periods).openDemoTrialWindow(eq("POOLED-CLIENT"), eq("ORG-1"), eq("ADMIN-USER"),
+        eq("ADMIN-ROLE"), any(Instant.class), eq(15));
+    order.verify(costing).activateSchedule("POOLED-CLIENT");
   }
 
   @Test
   public void noClaimMeansTheClassicPathRunsUnchanged() throws Exception {
     EtendoGoJwtServlet servlet = new EtendoGoJwtServlet(mock(TransactionalAuthEmailSender.class));
+    servlet.internalAlertService = mock(InternalAlertService.class);
     StubClaimService claim = new StubClaimService(null);
     servlet.pooledTenantClaimService = claim;
     StringWriter body = new StringWriter();
@@ -142,6 +168,7 @@ public class EtendoGoJwtServletTenantPoolTest {
     failure.setMessage("@CreateClientFailed@");
 
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+         MockedStatic<OBDal> dal = mockStatic(OBDal.class);
          MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
          MockedStatic<EtendoGoJwtDalHelper> dalHelper = mockStatic(EtendoGoJwtDalHelper.class);
          var setup = mockConstruction(InitialClientSetup.class, (mocked, context) ->
@@ -149,6 +176,7 @@ public class EtendoGoJwtServletTenantPoolTest {
                  anyString(), anyString(), anyString(), anyString(), anyString(), anyBoolean(),
                  isNull(), anyBoolean(), anyBoolean(), anyBoolean(), anyBoolean(), anyBoolean()))
                  .thenReturn(failure))) {
+      dal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
       stubAuthenticationAndCurrency(dalHelper);
       support.when(() -> EtendoGoJwtSupport.buildClientUsername("user@test.com", "Acme"))
           .thenReturn("user@test.com");
@@ -210,7 +238,7 @@ public class EtendoGoJwtServletTenantPoolTest {
     }
 
     @Override
-    public String claim(OnboardingProgressSink sink, ClaimRequest request) {
+    public String claim(OnboardingProgressSink sink, ClaimRequest request, String correlationId) {
       this.request = request;
       return clientId;
     }

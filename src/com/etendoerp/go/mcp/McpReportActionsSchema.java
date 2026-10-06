@@ -22,14 +22,18 @@ import java.util.Collections;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 
-import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
-import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
  * {@code neo_schema} answers for entities whose handler declares named actions (ETP-5468): the
@@ -39,8 +43,16 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  * <p>Extracted from {@link McpToolRouter} so that class stays under the Sonar per-class
  * method-count limit (java:S1448). Behavior is unchanged: {@code McpToolRouter#handleSchema} calls
  * {@link #reportSpecActionsSchema} and {@link #declaredActionsOf} at the same points as before.</p>
+ *
+ * <p><b>ETP-5535 — an entity with fields keeps them.</b> Replacing the schema with the catalog is
+ * right for an entity whose AD tab exists only for role gating, and wrong for a window entity whose
+ * customization serves a few named actions next to its AD buttons (the sales quotation's
+ * {@code rejectQuotation}). {@link #isActionOnlyEntity} tells the two apart structurally: the first
+ * has no {@code ETGO_SF_FIELD} row at all.</p>
  */
 final class McpReportActionsSchema {
+
+  private static final Logger log = LogManager.getLogger(McpReportActionsSchema.class);
 
   private McpReportActionsSchema() {
     // utility class — no instances
@@ -71,7 +83,8 @@ final class McpReportActionsSchema {
       return null;
     }
     return McpToolRouter.wrapAsTextContent(
-        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts));
+        McpActionsView.buildDeclaredResponse(specName, target.getName(), contracts,
+            McpActionsSection.forEntity(target)));
   }
 
   /**
@@ -116,12 +129,45 @@ final class McpReportActionsSchema {
   }
 
   /**
+   * Whether the entity's {@code neo_schema} IS its declared action catalog (ETP-5468), whatever view
+   * was asked for: it declares named actions and has no field payload of its own — no
+   * {@code ETGO_SF_FIELD} row, which is the shape of every report-spec entity (bank-statements,
+   * bank-reconciliation). An entity that declares actions AND has fields keeps its normal schema;
+   * its declared actions are added to {@code view:"actions"} instead (ETP-5535).
+   *
+   * @param sfEntity the entity
+   * @param declared its declared actions, from {@link #declaredActionsOf}
+   * @return {@code true} when the catalog replaces the field schema
+   */
+  static boolean isActionOnlyEntity(SFEntity sfEntity, Map<String, NeoActionContract> declared) {
+    return declared != null && !declared.isEmpty() && !hasFieldPayload(sfEntity);
+  }
+
+  /**
+   * Whether any {@code ETGO_SF_FIELD} row belongs to the entity. Only asked of entities that declare
+   * actions, so an ordinary entity never pays for the query. A lookup failure answers {@code true}:
+   * the generic field schema is the path that works for any entity, the catalog-only answer is not.
+   */
+  private static boolean hasFieldPayload(SFEntity sfEntity) {
+    try {
+      OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
+      criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+      criteria.setMaxResults(1);
+      return !criteria.list().isEmpty();
+    } catch (Exception e) {
+      log.warn("Could not check the fields of entity '{}'; keeping its field schema: {}",
+          sfEntity.getName(), e.getMessage());
+      return true;
+    }
+  }
+
+  /**
    * The named actions the entity's handler declares (ETP-5468), or an empty map. Looked up quietly:
-   * a CDI failure must not break {@code neo_schema} for an ordinary entity.
+   * a CDI failure must not break {@code neo_schema} for an ordinary entity. ETP-5558: resolved by
+   * {@link McpDeclaredActions}, so the {@code @NeoExtension} binding counts as the dispatcher's
+   * does and {@code MCP_CONFIG.actions} can hide one.
    */
   static Map<String, NeoActionContract> declaredActionsOf(SFEntity sfEntity) {
-    NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(sfEntity.getJavaQualifier());
-    Map<String, NeoActionContract> contracts = handler != null ? handler.actionContracts() : null;
-    return contracts != null ? contracts : Collections.emptyMap();
+    return McpDeclaredActions.of(sfEntity);
   }
 }

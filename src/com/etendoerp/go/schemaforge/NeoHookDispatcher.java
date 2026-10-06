@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
@@ -77,18 +76,41 @@ class NeoHookDispatcher {
     SFEntity entity = servlet.findEntity(spec.getId(), entityName);
     String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
 
-    if (StringUtils.isBlank(qualifier)) {
-      return defaultAction.get();
-    }
-
-    NeoHandler handler = servlet.lookupHandler(qualifier);
-    if (handler == null) {
-      return defaultAction.get();
+    // ETP-5558: before the customization or the AD button sees the record, whatever the entity.
+    if (endpointType == NeoEndpointType.ACTION && actionParams != null) {
+      NeoResponse refusal = NeoActionRecordGuard.refusalFor(entity, actionParams.recordId);
+      if (refusal != null) {
+        return refusal;
+      }
     }
 
     NeoContext hookCtx = buildHookContext(spec, entityName, endpointType, fieldName,
         httpMethod, entity, actionParams);
-    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
+
+    // ETP-5415: routed through NeoExtensionDispatcher, which is what brings the SELECTOR,
+    // CALLOUT and EVALUATE_DISPLAY surfaces into the trace — they reach an entity's
+    // customization only through this method. Two deliberate consequences:
+    //
+    //  - The blank-qualifier early return is gone. It was correct while Java_Qualifier was the
+    //    only way to declare a customization; with @NeoExtension an entity that has no qualifier
+    //    can still have one, and returning early here would make the annotation work on CRUD and
+    //    silently not on any sub-endpoint. The dispatcher answers a blank qualifier itself.
+    //  - "No customization is configured" is now logged as such (NO_CUSTOMIZATION) instead of
+    //    being indistinguishable from a handler that declined.
+    //
+    // Everything else is preserved byte for byte: the same resolver (REST_SINGLE →
+    // NeoServletSupport.lookupHandler), the same hook order, the same 500 on a throwing hook,
+    // and the same audit-token refresh in runPostHook.
+    NeoExtensionRequest request = NeoExtensionRequest.builder()
+        .qualifier(qualifier)
+        .specName(spec.getName())
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.of(hookCtx))
+        .channel(NeoExtensionChannel.REST_SINGLE)
+        .context(hookCtx)
+        .build();
+
+    return executeHookChain(request, defaultAction, endpointType, entityName);
   }
 
   private NeoContext buildHookContext(SFSpec spec, String entityName,
@@ -112,17 +134,21 @@ class NeoHookDispatcher {
   }
 
   private NeoResponse executeHookChain(
-      NeoHandler handler, NeoContext hookCtx,
+      NeoExtensionRequest request,
       java.util.function.Supplier<NeoResponse> defaultAction,
       NeoEndpointType endpointType, String entityName) {
     try {
-      NeoResponse preResult = handler.handle(hookCtx);
-      if (preResult != null) {
-        return runPostHook(handler, hookCtx, preResult);
+      NeoExtensionResult pre = NeoExtensionDispatcher.dispatch(request);
+      if (pre.customization() == null) {
+        return defaultAction.get();
       }
 
-      NeoResponse defaultResult = defaultAction.get();
-      return runPostHook(handler, hookCtx, defaultResult);
+      // A non-null pre-result short-circuits the default action but NOT the post hook: a
+      // customization that produces the whole payload (a selector taking over its own field's
+      // candidate list) is still offered the chance to refine it. This is the REST shape and it
+      // is deliberately not the MCP write shape — see divergence D4.
+      NeoResponse previousResult = pre.response() != null ? pre.response() : defaultAction.get();
+      return runPostHook(request, pre.customization(), previousResult);
 
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
@@ -136,12 +162,12 @@ class NeoHookDispatcher {
    * Sub-endpoint handlers can persist changes during {@code afterHandle()}, so
    * the response must carry the version produced by those writes.
    */
-  private NeoResponse runPostHook(NeoHandler handler, NeoContext hookCtx,
+  private NeoResponse runPostHook(NeoExtensionRequest request, NeoHandler customization,
       NeoResponse previousResult) {
-    hookCtx.setPreviousResult(previousResult);
-    NeoResponse afterResult = handler.afterHandle(hookCtx);
-    NeoResponse effectiveResult = afterResult != null ? afterResult : previousResult;
-    NeoAuditTokenRefresh.refreshInResponse(hookCtx, effectiveResult);
+    NeoExtensionResult post = NeoExtensionDispatcher.dispatch(
+        request.post(customization).withPreviousResult(previousResult));
+    NeoResponse effectiveResult = post.response() != null ? post.response() : previousResult;
+    NeoAuditTokenRefresh.refreshInResponse(request.context(), effectiveResult);
     return effectiveResult;
   }
 }

@@ -276,10 +276,12 @@ public class ToolRegistry {
       if (!deletableWindowSpecs.isEmpty()) {
         tools.add(buildDeleteTool(deletableWindowSpecs));
       }
-      // ETP-5335: published only while the flag is on. See McpConstants#BATCH_TOOL_ENABLED for
-      // why it is off — neo_batch is a second create implementation that had drifted from
-      // neo_create in both directions, and one correct write path beats two out of step.
-      if (McpConstants.BATCH_TOOL_ENABLED) {
+      // Published only while the flag is on. ETP-5335 switched it off because neo_batch was a
+      // second create implementation that had drifted from neo_create in both directions, and
+      // ETP-5415 closed those divergences and turned it back on. The accessor is a method, not
+      // the constant, so a partial rebuild cannot leave this class publishing a tool the router
+      // still refuses. See McpConstants#batchToolEnabled.
+      if (McpConstants.batchToolEnabled()) {
         tools.add(buildBatchTool());
       }
       tools.add(buildActionTool(ToolRegistryActionSpecs.withActionSpecs(accessibleWindowSpecs, actionReportSpecs)));
@@ -553,7 +555,7 @@ public class ToolRegistry {
   /**
    * Build the {@code neo_widget} tool: a single enum tool wrapping the 9 handler-backed
    * business widgets (gap G4, ETP-4284). The enum value selects the widget; {@code params}
-   * is a free-form object forwarded to the handler (e.g. {@code {"range": "30d"}}).
+   * is a free-form object forwarded to the handler (e.g. {@code {"range": "last30d"}}).
    */
   private McpToolDefinition buildWidgetTool() {
     StringBuilder enumDesc = new StringBuilder(
@@ -567,8 +569,11 @@ public class ToolRegistry {
         enumProp(enumDesc.toString(), new ArrayList<>(WIDGET_ENTITY_BY_NAME.keySet())));
     props.put(McpConstants.PARAM_PARAMS, objectProp(
         "Optional parameters forwarded to the widget. Most widgets accept "
-            + "'range' (e.g. '7d', '30d', '90d', '12m') to scope the period; "
-            + "omit for the widget's default window."));
+            + "'range' to scope the period. Valid values: 'ytd', 'mtd', 'last30d', "
+            + "'last90d', 'lastYear'. Omit for the widget's default window "
+            + "(for 'kpis', an omitted range means 'ytd'; for 'revenue-trend' it means "
+            + "the rolling last 12 months, bucketed by month); any other value falls back "
+            + "to the rolling last 12 months."));
 
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_WIDGET,
@@ -896,7 +901,7 @@ public class ToolRegistry {
             + "\"grouped\" splits the result into `confirm` (writable fields you should review or "
             + "override before neo_create) and `systemManaged` (compliance/audit flags the server "
             + "owns — leave them alone). \"minimal\" returns only the `confirm` block. Use "
-            + "grouped/minimal on compliance-heavy specs (invoices, payments) to avoid wading "
+            + "grouped/minimal on compliance-heavy specs (invoices, orders) to avoid wading "
             + "through ~65 fields when only ~5 matter. In both grouped views a field the server "
             + "knows but could not resolve a value for is listed in `metadata.unresolvedFields` "
             + "instead of appearing in `confirm` with an empty value — those are the fields you "
