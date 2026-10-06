@@ -23,6 +23,8 @@ import com.etendoerp.go.schemaforge.data.Invitation;
 final class CompanyInvitationDalHelper {
 
   private static final String EMAIL_PARAMETER = "email";
+  private static final String CLIENT_ID_PARAMETER = "clientId";
+  private static final String USER_ID_PARAMETER = "userId";
 
   private CompanyInvitationDalHelper() {
   }
@@ -47,7 +49,7 @@ final class CompanyInvitationDalHelper {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and lower(i.email) = :email "
             + "and i.active = true and i.status in ('PENDING', 'SENT')");
-    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
@@ -66,7 +68,7 @@ final class CompanyInvitationDalHelper {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and lower(i.email) = :email "
             + "and i.active = true order by i.creationDate desc");
-    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
@@ -84,8 +86,8 @@ final class CompanyInvitationDalHelper {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and (lower(i.email) = :email or i.user.id = :userId) "
             + "and i.active = true and i.status = 'ACCEPTED'");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("userId", userId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
+    query.setNamedParameter(USER_ID_PARAMETER, userId);
     query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
@@ -101,8 +103,8 @@ final class CompanyInvitationDalHelper {
   static boolean existsInvitationForUser(String clientId, String userId) {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and i.user.id = :userId and i.active = true");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("userId", userId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
+    query.setNamedParameter(USER_ID_PARAMETER, userId);
     disableTenantFilters(query);
     query.setMaxResult(1);
     return !query.list().isEmpty();
@@ -115,8 +117,8 @@ final class CompanyInvitationDalHelper {
   static List<Invitation> findInvitationsForUser(String clientId, String userId) {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and i.user.id = :userId and i.active = true");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("userId", userId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
+    query.setNamedParameter(USER_ID_PARAMETER, userId);
     disableTenantFilters(query);
     return query.list();
   }

@@ -22,7 +22,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -35,7 +34,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
@@ -47,6 +45,7 @@ import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.rest.CompanyInvitationEmailCorrection;
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.roles.UserRoleCompositionService;
@@ -56,7 +55,6 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.Invitation;
-import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
@@ -138,9 +136,9 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   to fail on the DB's {@code username} unique-constraint violation instead — the derived
  *   username collides too, but the resulting error names the technical {@code username} column,
  *   which the user never typed and the frontend ({@code backendErrors.js}) has no mapping for, so
- *   it surfaced raw and misleadingly. {@link #rejectDuplicateEmail} runs BEFORE the {@code
- *   username} derivation above and returns a clear 400 instead, so the confusing DB message is
- *   never reached.</li>
+ *   it surfaced raw and misleadingly. {@link UserEmailCorrection#rejectDuplicateEmail} runs BEFORE
+ *   the {@code username} derivation above and returns a clear 400 instead, so the confusing DB
+ *   message is never reached.</li>
  *
  *   <li><b>Write-path guards on {@code PUT}/{@code PATCH} (ETP-4830 QA rejection cycle 1):</b>
  *   {@link #handle(NeoContext)} rejects two dangerous updates with a 400 BEFORE the default CRUD
@@ -159,17 +157,16 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *     transactionDocument}, and is tracked separately).
  *     <p><i>Email correction window (ETP-5194).</i> The lock above covered more than the link it
  *     protects: a Go account only gets linked to an admin-created user when the invitation is
- *     accepted. So the email stays editable while the latest invitation to it is {@code
- *     EXPIRED} or {@code DELIVERY_FAILED} (or there is none, after a re-invite that could not be
- *     issued) and none of this user, nor to this address, was ever accepted — never for the
- *     client's owner, and never for a business-partner contact (an {@code AD_User} with no
- *     invitation of its own), which must not be invited by any flow (see {@link
- *     #isEmailEditable(User, String)}). Every GET row
- *     carries that verdict as {@code emailEditable}, which the SPA's {@code readOnlyLogicJs}
+ *     accepted. So the email stays editable while the latest invitation to it is {@code EXPIRED} or
+ *     {@code DELIVERY_FAILED} (or there is none, after a re-invite that could not be issued) and
+ *     none of this user, nor to this address, was ever accepted — never for the client's owner, and
+ *     never for a business-partner contact (an {@code AD_User} with no invitation of its own),
+ *     which must not be invited by any flow (see {@link UserEmailCorrection}). Every GET
+ *     row carries that verdict as {@code emailEditable}, which the SPA's {@code readOnlyLogicJs}
  *     reads. After an allowed correction, {@link #reinviteAfterEmailChange} re-derives {@code
  *     username}, invites the new address and, only once that new invitation is confirmed as this
- *     user's, revokes the old invitations. Correcting an address
- *     that matches an existing Go account also cuts that account's access to this tenant, since
+ *     user's, revokes the old invitations. Correcting an address that matches an existing Go
+ *     account also cuts that account's access to this tenant, since
  *     environments are resolved by email/username value — the intended effect when the wrong
  *     person was invited.</p></li>
  *     <li><i>Self/last-admin lockout.</i> {@code NeoFieldFilter#forEntity} always adds {@code
@@ -266,32 +263,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
   private static final String FIELD_IS_OWNER = "isOwner";
-  /**
-   * ETP-5194: whether the row's {@code email} may still be corrected, see {@link #isEmailEditable}.
-   */
-  private static final String FIELD_EMAIL_EDITABLE = "emailEditable";
-  /**
-   * ETP-5194: {@link NeoContext} attribute set by {@link #rejectEmailChange} when it lets an email
-   * change through, read back by {@link #reinviteAfterEmailChange} on the same request.
-   */
-  private static final String ATTR_EMAIL_CHANGE =
-      UserRoleAssignmentHandler.class.getName() + ".emailChange";
-  /**
-   * ETP-5194: the refusal for an email change outside the correction window. Says when the change
-   * IS allowed, so an MCP agent can tell the user what to do. Kept verbatim — {@code
-   * backendErrors.js} in the SPA translates it by exact match.
-   */
-  static final String MSG_EMAIL_LOCKED = "Field 'email' can only be changed while the user's "
-      + "invitation has expired or could not be delivered";
-  /**
-   * ETP-5194: the refusal when the target was never invited — typically a business-partner
-   * contact person, which lives on the same {@code AD_User} table. Points an MCP agent that picked
-   * this spec by mistake to the one where that email is freely editable (and never invites).
-   * Kept verbatim — {@code backendErrors.js} translates it by exact match.
-   */
-  static final String MSG_EMAIL_NOT_A_GO_USER = "This user was never invited to Etendo "
-      + "(for example, a business partner contact person): edit its email through spec "
-      + "'contacts', entity 'contact'";
   /** ETP-5277: fields patched onto the create response by {@link #patchUserDefaultsOntoRow}. */
   private static final String FIELD_DEFAULT_ROLE = "defaultRole";
   private static final String FIELD_DEFAULT_CLIENT = "defaultClient";
@@ -666,7 +637,8 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   /**
    * Derives a unique {@code username} from {@code email} and the current client, and rejects a
    * blank/missing email with 400. Before that derivation runs, also rejects a duplicate {@code
-   * email} within the same client with a clear 400 (see {@link #rejectDuplicateEmail}, ETP-5264)
+   * email} within the same client with a clear 400 (see {@link
+   * UserEmailCorrection#rejectDuplicateEmail}, ETP-5264)
    * — otherwise the derived {@code username} would collide too, and the resulting DB
    * unique-constraint error would confusingly name a field this create form never shows.
    *
@@ -682,85 +654,25 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (requestBody == null) {
       return null;
     }
-    String email = emailOf(requestBody);
+    String email = UserEmailCorrection.emailOf(requestBody);
     if (email == null) {
       return NeoResponse.error(400, "Field 'email' is required to create a user");
     }
     String normalizedEmail = email.toLowerCase();
     OBContext obContext = OBContext.getOBContext();
     Client client = obContext != null ? obContext.getCurrentClient() : null;
-    NeoResponse duplicateEmailGuard = rejectDuplicateEmail(normalizedEmail, client);
+    NeoResponse duplicateEmailGuard =
+        UserEmailCorrection.rejectDuplicateEmail(normalizedEmail, client, null);
     if (duplicateEmailGuard != null) {
       return duplicateEmailGuard;
     }
     try {
-      requestBody.put(FIELD_USERNAME, deriveUsername(normalizedEmail, client));
+      requestBody.put(FIELD_USERNAME, UserEmailCorrection.deriveUsername(normalizedEmail, client));
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.handle: failed to derive username from email: {}",
           e.getMessage(), e);
     }
     return null;
-  }
-
-  /**
-   * Rejects a {@code user} create whose {@code email} (already lowercased by the caller) is
-   * already used by another {@code AD_User} of the same {@code client} — see the class javadoc's
-   * ETP-5264 duplicate-email-guard concern for why this proactive check exists (it stands in for
-   * the DB's own {@code username} unique-constraint, whose violation would otherwise surface a
-   * raw message naming a field this form never shows). Deliberately does NOT filter by {@code
-   * active} — the DB constraint this check stands in for doesn't care about the {@code active}
-   * flag either, so filtering here would create a gap where this pre-check passes but the DB
-   * insert still fails with the confusing raw message. A no-op ({@code null}) when {@code client}
-   * is {@code null} — {@link #handleCreate} still falls through to its own best-effort username
-   * derivation in that case, unchanged from before ETP-5264.
-   */
-  private NeoResponse rejectDuplicateEmail(String normalizedEmail, Client client) {
-    return rejectDuplicateEmail(normalizedEmail, client, null);
-  }
-
-  /**
-   * Same check as {@link #rejectDuplicateEmail(String, Client)}, ignoring {@code excludeUserId}'s
-   * own row — used when an existing user's email is corrected (ETP-5194).
-   */
-  private NeoResponse rejectDuplicateEmail(String normalizedEmail, Client client,
-      String excludeUserId) {
-    if (client == null) {
-      return null;
-    }
-    OBCriteria<User> criteria = OBDal.getInstance().createCriteria(User.class);
-    criteria.add(Restrictions.eq(User.PROPERTY_CLIENT, client));
-    criteria.add(Restrictions.ilike(User.PROPERTY_EMAIL, normalizedEmail, MatchMode.EXACT));
-    if (excludeUserId != null) {
-      criteria.add(Restrictions.ne(User.PROPERTY_ID, excludeUserId));
-    }
-    criteria.setMaxResults(1);
-    if (!criteria.list().isEmpty()) {
-      return NeoResponse.error(400, "A user with this email address already exists");
-    }
-    return null;
-  }
-
-  /**
-   * The trimmed {@code email} of a request body or response row, {@code null} when absent, blank
-   * or JSON {@code null}. Jettison's {@code optString} turns a JSON {@code null} into the string
-   * {@code "null"}, which would otherwise read as a non-blank address (ETP-5194 QA BUG-1/BUG-2).
-   */
-  private static String emailOf(JSONObject json) {
-    return json == null || json.isNull(FIELD_EMAIL) ? null
-        : StringUtils.trimToNull(json.optString(FIELD_EMAIL, null));
-  }
-
-  /**
-   * The {@code username} a user with {@code normalizedEmail} gets in {@code client}: the email
-   * itself, or the client-suffixed form when it is already taken (see {@link
-   * EtendoGoJwtSupport#buildClientUsername}). Shared by create and by an email correction
-   * (ETP-5194) so both follow the convention {@code EtendoGoJwtDalHelper} matches on.
-   */
-  private static String deriveUsername(String normalizedEmail, Client client) {
-    String clientName = client != null ? client.getName() : null;
-    return clientName == null
-        ? normalizedEmail
-        : EtendoGoJwtSupport.buildClientUsername(normalizedEmail, clientName);
   }
 
   /**
@@ -787,7 +699,8 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (ownerGuard != null) {
       return ownerGuard;
     }
-    NeoResponse emailGuard = rejectEmailChange(requestBody, userId, context);
+    NeoResponse emailGuard =
+        UserEmailCorrection.rejectEmailChange(requestBody, userId, context);
     if (emailGuard != null) {
       return emailGuard;
     }
@@ -826,145 +739,6 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     }
     return NeoResponse.error(400,
         "This user is the tenant owner — only the owner can modify this account");
-  }
-
-  /**
-   * Guards an {@code email} change on an existing {@code user} record (ETP-4830, relaxed by
-   * ETP-5194). A no-op when the request doesn't touch {@code email} at all, or when the incoming
-   * value is identical (after trimming) to the persisted one — a naive client re-submitting its
-   * own unchanged form value must not 400.
-   *
-   * <p>A real change is only allowed while {@link #isEmailEditable} holds — the invitation to it
-   * expired or failed to deliver, so no Go account can have been linked through it. Anything else
-   * gets a {@link #MSG_EMAIL_LOCKED} 400. An allowed change must be a non-blank, well-formed
-   * address not used by another user of the client; it is lowercased in the request body (the same
-   * normalization create applies) and recorded on the
-   * context under {@link #ATTR_EMAIL_CHANGE} so {@link #reinviteAfterEmailChange} re-derives the
-   * {@code username} and re-invites once the update has been saved.
-   */
-  private NeoResponse rejectEmailChange(JSONObject requestBody, String userId,
-      NeoContext context) {
-    if (!requestBody.has(FIELD_EMAIL)) {
-      return null;
-    }
-    String incomingEmail = emailOf(requestBody);
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        User user = OBDal.getInstance().get(User.class, userId);
-        if (user == null) {
-          // Record doesn't exist (yet) — let the default CRUD update produce its own error.
-          return null;
-        }
-        String currentEmail = StringUtils.trimToNull(user.getEmail());
-        if (Objects.equals(incomingEmail, currentEmail)) {
-          return null;
-        }
-        if (!isEmailEditable(user, currentEmail)) {
-          return NeoResponse.error(400, isNeverInvitedNonOwner(user)
-              ? MSG_EMAIL_NOT_A_GO_USER : MSG_EMAIL_LOCKED);
-        }
-        return acceptEmailChange(requestBody, user, incomingEmail, currentEmail, context);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("UserRoleAssignmentHandler.rejectEmailChange error for user {}: {}", userId,
-          e.getMessage(), e);
-      // Fail CLOSED: an error here must not silently let an email change through unverified.
-      return NeoResponse.error(500, "Error validating email immutability: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Whether {@code user} is not the owner and has no invitation of its own — a business-partner
-   * contact person or a user never invited to Go. Only picks the refusal message; evaluated on
-   * the rejection path only, so it costs nothing on an allowed change.
-   */
-  private static boolean isNeverInvitedNonOwner(User user) {
-    String clientId = user.getClient() != null ? user.getClient().getId() : null;
-    return !OwnerSupport.isOwner(user.getId())
-        && !CompanyInvitationService.hasInvitationForUser(clientId, user.getId());
-  }
-
-  /**
-   * Validates an email change {@link #isEmailEditable} already allowed, normalizes it in the
-   * request body and marks the context for {@link #reinviteAfterEmailChange} (ETP-5194).
-   *
-   * @return a 400 for a blank, malformed or duplicate address, otherwise {@code null}
-   */
-  private NeoResponse acceptEmailChange(JSONObject requestBody, User user, String incomingEmail,
-      String currentEmail, NeoContext context) throws JSONException {
-    if (incomingEmail == null) {
-      return NeoResponse.error(400, "Field 'email' is required");
-    }
-    String normalizedEmail = incomingEmail.toLowerCase(Locale.ROOT);
-    requestBody.put(FIELD_EMAIL, normalizedEmail);
-    if (normalizedEmail.equalsIgnoreCase(currentEmail)) {
-      // Only the case differed from what is already stored: nothing actually changes.
-      return null;
-    }
-    if (!EmailContractCommandSupport.isValidEmail(normalizedEmail)) {
-      return NeoResponse.error(400, "Invalid email format");
-    }
-    NeoResponse duplicateEmailGuard =
-        rejectDuplicateEmail(normalizedEmail, user.getClient(), user.getId());
-    if (duplicateEmailGuard != null) {
-      return duplicateEmailGuard;
-    }
-    context.setAttribute(ATTR_EMAIL_CHANGE, new EmailChange(currentEmail));
-    return null;
-  }
-
-  /**
-   * ETP-5194 — whether {@code user}'s email may still be corrected. Only while ALL hold:
-   * <ul>
-   *   <li>it is not the client's owner;</li>
-   *   <li>it is a Go user, not a business-partner contact: at least one invitation was issued to
-   *   this very {@code AD_User} ({@link CompanyInvitationService#hasInvitationForUser}). A contact
-   *   must never be sent an invitation by any flow, and a correction always re-invites. A blank
-   *   email therefore stays locked too — such a row is a contact or a user that was never
-   *   invited;</li>
-   *   <li>the latest invitation to the current email is {@code EXPIRED} or {@code
-   *   DELIVERY_FAILED} — or there is none at all, the state an earlier correction is left in when
-   *   its re-invite could not be issued, which must stay recoverable;</li>
-   *   <li>no invitation of this user, nor to this email, was ever accepted.</li>
-   * </ul>
-   * Those are the only states in which no Go account can be linked to this {@code AD_User}
-   * through an accepted invitation, which is the link the original ETP-4830 lock protected.
-   * Lookups throw rather than default, so callers fail closed. Must run in admin mode.
-   */
-  private boolean isEmailEditable(User user, String currentEmail) {
-    boolean isOwner = OwnerSupport.isOwner(user.getId());
-    String clientId = user.getClient() != null ? user.getClient().getId() : null;
-    String latestStatus = currentEmail == null ? null
-        : CompanyInvitationService.findLatestInvitationStatus(clientId, currentEmail);
-    return isEmailEditable(isOwner, user.getId(), currentEmail, latestStatus, clientId);
-  }
-
-  /**
-   * The {@link #isEmailEditable(User, String)} rule over values a GET row already carries, so the
-   * list does not repeat the owner and status lookups. Only a correctable status costs a query.
-   */
-  private static boolean isEmailEditable(boolean isOwner, String userId, String email,
-      String latestStatus, String clientId) {
-    if (isOwner || email == null || userId == null) {
-      return false;
-    }
-    if (latestStatus != null && !CompanyInvitationService.isEmailCorrectableStatus(latestStatus)) {
-      return false;
-    }
-    return CompanyInvitationService.hasInvitationForUser(clientId, userId)
-        && !CompanyInvitationService.hasAcceptedInvitation(clientId, userId, email);
-  }
-
-  /** ETP-5194: the email a user had before an allowed correction, kept for the log line. */
-  private static final class EmailChange {
-    private final String previousEmail;
-
-    private EmailChange(String previousEmail) {
-      this.previousEmail = previousEmail;
-    }
   }
 
   /**
@@ -1133,7 +907,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       }
       attachInvitationStatus(context);
       attachOwnerFlag(context);
-      attachEmailEditable(context);
+      UserEmailCorrection.attachEmailEditable(context);
       return null;
     }
     syncRoleAfterUpdate(context);
@@ -1243,7 +1017,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
             + "create response — cannot determine the created user's email, invitation not sent");
         return;
       }
-      email = emailOf(data);
+      email = UserEmailCorrection.emailOf(data);
       if (email == null) {
         log.warn("UserRoleAssignmentHandler.inviteNewlyCreatedUser: created user has no email "
             + "in the create response, invitation not sent");
@@ -1522,7 +1296,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (row == null) {
       return;
     }
-    String email = emailOf(row);
+    String email = UserEmailCorrection.emailOf(row);
     String status = email == null ? null
         : CompanyInvitationService.findLatestInvitationStatus(clientId, email);
     try {
@@ -1580,90 +1354,27 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5194 — on a {@code user} GET (list or single-record), attaches a boolean {@code
-   * emailEditable} to every row: whether the email can still be corrected (see {@link
-   * #isEmailEditable(boolean, String, String, String, String)}). The SPA's {@code
-   * readOnlyLogicJs} on {@code email} reads this flag rather than re-deriving the rule, so the
-   * client cannot drift from the server-side guard in {@link #rejectEmailChange}, and typing in the
-   * form cannot flip it. Must run after {@link #attachInvitationStatus} and {@link
-   * #attachOwnerFlag}, whose fields
-   * it reads. A row whose evaluation fails gets {@code false} (fail closed).
-   */
-  private void attachEmailEditable(NeoContext context) {
-    try {
-      NeoResponse previousResult = context.getPreviousResult();
-      JSONObject body = previousResult != null ? previousResult.getBody() : null;
-      JSONObject inner = body != null ? body.optJSONObject(JsonConstants.RESPONSE_RESPONSE) : null;
-      if (inner == null) {
-        return;
-      }
-      String clientId = context.getObContext() != null
-          && context.getObContext().getCurrentClient() != null
-          ? context.getObContext().getCurrentClient().getId() : null;
-      OBContext.setAdminMode(true);
-      try {
-        JSONArray data = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
-        if (data != null) {
-          for (int i = 0; i < data.length(); i++) {
-            attachEmailEditableToRow(data.optJSONObject(i), clientId);
-          }
-        } else {
-          attachEmailEditableToRow(inner.optJSONObject(JsonConstants.RESPONSE_DATA), clientId);
-        }
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.warn("UserRoleAssignmentHandler.attachEmailEditable error: {}", e.getMessage(), e);
-    }
-  }
-
-  private void attachEmailEditableToRow(JSONObject row, String clientId) {
-    if (row == null) {
-      return;
-    }
-    boolean editable;
-    try {
-      String email = emailOf(row);
-      String status = row.isNull(FIELD_INVITATION_STATUS) ? null
-          : row.optString(FIELD_INVITATION_STATUS, null);
-      // No isOwner / invitationStatus on the row means that lookup failed: unknown, not "none".
-      editable = row.has(FIELD_IS_OWNER) && row.has(FIELD_INVITATION_STATUS)
-          && isEmailEditable(row.optBoolean(FIELD_IS_OWNER, true),
-              StringUtils.trimToNull(row.optString(FIELD_ID, null)), email, status, clientId);
-    } catch (Exception e) {
-      log.warn("UserRoleAssignmentHandler.attachEmailEditableToRow error for user {}: {}",
-          row.optString(FIELD_ID, null), e.getMessage(), e);
-      editable = false;
-    }
-    try {
-      row.put(FIELD_EMAIL_EDITABLE, editable);
-    } catch (JSONException e) {
-      log.warn("UserRoleAssignmentHandler.attachEmailEditableToRow error: {}", e.getMessage(), e);
-    }
-  }
-
-  /**
-   * ETP-5194 — after a successful {@code PUT}/{@code PATCH} that {@link #rejectEmailChange} let
-   * correct the email (marked with {@link #ATTR_EMAIL_CHANGE}), brings everything keyed by the
-   * email in line with the new address:
+   * ETP-5194 — after a successful {@code PUT}/{@code PATCH} that {@link
+   * UserEmailCorrection#rejectEmailChange} let correct the email (marked with {@link
+   * UserEmailCorrection#ATTR_EMAIL_CHANGE}), brings everything keyed by the email in line with the
+   * new address:
    *
    * <ol>
-   *   <li>re-derives {@code username} with {@link #deriveUsername}, written through DAL — a
-   *   {@code username} put into the request body would be dropped, since the update path's {@code
-   *   NeoFieldFilter#filterWriteRequest} keeps only writable fields and {@code username} is a
-   *   system field;</li>
+   *   <li>re-derives {@code username} with {@link UserEmailCorrection#deriveUsername}, written
+   *   through DAL — a {@code username} put into the request body would be dropped, since the update
+   *   path's {@code NeoFieldFilter#filterWriteRequest} keeps only writable fields and {@code
+   *   username} is a system field;</li>
    *   <li>invites the new address via {@link
    *   CompanyInvitationService#createInvitationForNewlyCreatedUser}, which persists a row even
    *   when delivery fails, so the status pill keeps meaning something;</li>
    *   <li>only then — and only when the latest invitation to the new address now provably belongs
-   *   to this user ({@link CompanyInvitationService#latestInvitationBelongsTo}) — revokes the
-   *   invitations addressed to the old email ({@link
-   *   CompanyInvitationService#revokeSupersededInvitations}). The invite reports most failures
-   *   as an error result rather than an exception, and may just report another user's open
+   *   to this user ({@link CompanyInvitationEmailCorrection#latestInvitationBelongsTo}) — revokes
+   *   the invitations addressed to the old email ({@link
+   *   CompanyInvitationEmailCorrection#revokeSupersededInvitations}). The invite reports most
+   *   failures as an error result rather than an exception, and may just report another user's open
    *   invitation back; revoking then would strand the user. Left unrevoked, the user has its own
-   *   invitations but none to its current address, which {@link #isEmailEditable} keeps
-   *   correctable;</li>
+   *   invitations but none to its current address, which {@link
+   *   UserEmailCorrection#rejectEmailChange} keeps correctable;</li>
    *   <li>attaches {@code invitationStatus} and {@code emailEditable} to the update response row,
    *   so the form shows the new status on its first paint.</li>
    * </ol>
@@ -1672,12 +1383,12 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * so a failure here is logged at WARN and never fails the request.
    */
   private void reinviteAfterEmailChange(NeoContext context) {
-    Object marker = context.getAttribute(ATTR_EMAIL_CHANGE);
+    Object marker = context.getAttribute(UserEmailCorrection.ATTR_EMAIL_CHANGE);
     String userId = context.getRecordId();
-    if (!(marker instanceof EmailChange) || userId == null) {
+    if (!(marker instanceof UserEmailCorrection.EmailChange) || userId == null) {
       return;
     }
-    EmailChange change = (EmailChange) marker;
+    UserEmailCorrection.EmailChange change = (UserEmailCorrection.EmailChange) marker;
     String newEmail = null;
     String clientId = null;
     try {
@@ -1692,7 +1403,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         }
         newEmail = newEmail.toLowerCase(Locale.ROOT);
         clientId = user.getClient().getId();
-        user.setUsername(deriveUsername(newEmail, user.getClient()));
+        user.setUsername(UserEmailCorrection.deriveUsername(newEmail, user.getClient()));
         OBDal.getInstance().save(user);
         OBDal.getInstance().flush();
         JSONObject invitationResult = new CompanyInvitationService()
@@ -1700,7 +1411,8 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         logInvitationResult(invitationResult, newEmail, clientId);
         boolean issued = invitationResult != null
             && !invitationResult.optBoolean(FIELD_ERROR, false)
-            && CompanyInvitationService.latestInvitationBelongsTo(clientId, newEmail, userId);
+            && CompanyInvitationEmailCorrection.latestInvitationBelongsTo(clientId, newEmail,
+                userId);
         if (!issued) {
           log.warn("UserRoleAssignmentHandler.reinviteAfterEmailChange: no invitation of user {} "
               + "for {} after the email change — old invitations kept, email stays correctable",
@@ -1708,11 +1420,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
           attachEmailChangeOntoUpdateRow(context, clientId, user.getUsername());
           return;
         }
-        int revoked = CompanyInvitationService.revokeSupersededInvitations(clientId, userId,
-            newEmail);
+        int revoked = CompanyInvitationEmailCorrection.revokeSupersededInvitations(clientId,
+            userId, newEmail);
         log.info("UserRoleAssignmentHandler.reinviteAfterEmailChange: user {} email changed "
             + "from {} to {}, {} superseded invitation(s) revoked", userId,
-            change.previousEmail, newEmail, revoked);
+            change.previousEmail(), newEmail, revoked);
         attachEmailChangeOntoUpdateRow(context, clientId, user.getUsername());
       } finally {
         OBContext.restorePreviousMode();
@@ -1746,7 +1458,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       }
       attachInvitationStatusToRow(row, clientId);
       attachOwnerFlagToRow(row);
-      attachEmailEditableToRow(row, clientId);
+      UserEmailCorrection.attachEmailEditableToRow(row, clientId);
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.attachEmailChangeOntoUpdateRow error: {}",
           e.getMessage(), e);

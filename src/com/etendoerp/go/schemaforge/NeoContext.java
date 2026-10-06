@@ -184,6 +184,10 @@ public class NeoContext {
   }
 
   /**
+   * Returns per-request state an earlier phase of this same request stored with {@link
+   * #setAttribute}, typically a customization's {@code handle()} pre-hook handing a marker to its
+   * own {@code afterHandle()}. See {@link #attributes}.
+   *
    * @param key the attribute key, namespaced by the owning class
    * @return the value stored by an earlier phase of this same request, or {@code null}
    */

@@ -56,6 +56,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 
+import com.etendoerp.go.rest.CompanyInvitationEmailCorrection;
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.roles.UserRoleCompositionService;
@@ -117,6 +118,7 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * mocks no {@code OBContext} at all).
  *
  * @covers com.etendoerp.go.schemaforge.handlers.UserRoleAssignmentHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.UserEmailCorrection
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -838,7 +840,9 @@ public class UserRoleAssignmentHandlerTest {
         MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
         MockedStatic<CompanyInvitationService> invitationMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
       ownerMock.when(() -> OwnerSupport.isOwner(USER_ID)).thenReturn(isOwner);
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
@@ -851,11 +855,11 @@ public class UserRoleAssignmentHandlerTest {
           ? Collections.singletonList(mock(User.class)) : Collections.emptyList());
       invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
           currentEmail)).thenReturn(latestStatus);
-      invitationMock.when(() -> CompanyInvitationService.isEmailCorrectableStatus(any()))
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
           .thenCallRealMethod();
-      invitationMock.when(() -> CompanyInvitationService.hasAcceptedInvitation(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasAcceptedInvitation(CLIENT_ID,
           USER_ID, currentEmail)).thenReturn(acceptedBefore);
-      invitationMock.when(() -> CompanyInvitationService.hasInvitationForUser(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
           USER_ID)).thenReturn(invitedUser);
 
       return new EmailChangeRun(handler.handle(ctx), requestBody, ctx);
@@ -864,7 +868,7 @@ public class UserRoleAssignmentHandlerTest {
 
   private static void assertEmailLocked(NeoResponse response) throws Exception {
     assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().toString().contains(UserRoleAssignmentHandler.MSG_EMAIL_LOCKED));
+    assertTrue(response.getBody().toString().contains(UserEmailCorrection.MSG_EMAIL_LOCKED));
   }
 
   @Test
@@ -893,7 +897,7 @@ public class UserRoleAssignmentHandlerTest {
   private static void assertPointsToContactsSpec(NeoResponse response) throws Exception {
     assertEquals(400, response.getHttpStatus());
     assertTrue(response.getBody().toString()
-        .contains(UserRoleAssignmentHandler.MSG_EMAIL_NOT_A_GO_USER));
+        .contains(UserEmailCorrection.MSG_EMAIL_NOT_A_GO_USER));
   }
 
   @Test
@@ -1080,7 +1084,9 @@ public class UserRoleAssignmentHandlerTest {
                       return successResult;
                     }));
         MockedStatic<CompanyInvitationService> invitationMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       OBDal obDal = mock(OBDal.class);
@@ -1089,16 +1095,16 @@ public class UserRoleAssignmentHandlerTest {
       ownerMock.when(() -> OwnerSupport.isOwner(USER_ID)).thenReturn(false);
       usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(NEW_EMAIL, "Acme"))
           .thenReturn(NEW_EMAIL);
-      invitationMock.when(() -> CompanyInvitationService.revokeSupersededInvitations(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.revokeSupersededInvitations(CLIENT_ID,
           USER_ID, NEW_EMAIL)).thenAnswer(inv -> {
             calls.add("revoke");
             return 1;
           });
       invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
           NEW_EMAIL)).thenReturn("SENT");
-      invitationMock.when(() -> CompanyInvitationService.isEmailCorrectableStatus(any()))
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
           .thenCallRealMethod();
-      invitationMock.when(() -> CompanyInvitationService.latestInvitationBelongsTo(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.latestInvitationBelongsTo(CLIENT_ID,
           NEW_EMAIL, USER_ID)).thenReturn(true);
 
       assertNull(new UserRoleAssignmentHandler().afterHandle(run.context));
@@ -1160,7 +1166,9 @@ public class UserRoleAssignmentHandlerTest {
                 when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
                     .thenReturn(invitationResult));
         MockedStatic<CompanyInvitationService> invitationMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       OBDal obDal = mock(OBDal.class);
@@ -1168,16 +1176,16 @@ public class UserRoleAssignmentHandlerTest {
       when(obDal.get(User.class, USER_ID)).thenReturn(user);
       usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(any(), any()))
           .thenReturn(NEW_EMAIL);
-      invitationMock.when(() -> CompanyInvitationService.latestInvitationBelongsTo(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.latestInvitationBelongsTo(CLIENT_ID,
           NEW_EMAIL, USER_ID)).thenReturn(belongsToUser);
-      invitationMock.when(() -> CompanyInvitationService.isEmailCorrectableStatus(any()))
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
           .thenCallRealMethod();
-      invitationMock.when(() -> CompanyInvitationService.hasInvitationForUser(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
           USER_ID)).thenReturn(true);
 
       assertNull(new UserRoleAssignmentHandler().afterHandle(run.context));
 
-      invitationMock.verify(() -> CompanyInvitationService.revokeSupersededInvitations(any(),
+      correctionMock.verify(() -> CompanyInvitationEmailCorrection.revokeSupersededInvitations(any(),
           any(), any()), never());
       // No invitation to the new address yet: the email stays correctable on the response.
       JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
@@ -1233,7 +1241,9 @@ public class UserRoleAssignmentHandlerTest {
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
         MockedStatic<CompanyInvitationService> invitationMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
@@ -1242,9 +1252,9 @@ public class UserRoleAssignmentHandlerTest {
           "expired@example.com")).thenReturn("EXPIRED");
       invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
           "sent@example.com")).thenReturn("SENT");
-      invitationMock.when(() -> CompanyInvitationService.isEmailCorrectableStatus(any()))
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
           .thenCallRealMethod();
-      invitationMock.when(() -> CompanyInvitationService.hasInvitationForUser(CLIENT_ID,
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
           "expired-user")).thenReturn(true);
 
       assertNull(handler.afterHandle(ctx));
@@ -1276,13 +1286,15 @@ public class UserRoleAssignmentHandlerTest {
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
         MockedStatic<CompanyInvitationService> invitationMock =
-            mockStatic(CompanyInvitationService.class)) {
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
       obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
       obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
       ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
-      invitationMock.when(() -> CompanyInvitationService.isEmailCorrectableStatus(any()))
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
           .thenCallRealMethod();
-      invitationMock.when(() -> CompanyInvitationService.hasInvitationForUser(any(), any()))
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(any(), any()))
           .thenReturn(true);
 
       assertNull(handler.afterHandle(ctx));
