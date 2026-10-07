@@ -20,12 +20,14 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -93,7 +95,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
  *   <li>a blank/null {@code paymentMethodId} skips resolution — legacy zero-line behavior unchanged
  *       </li>
  *   <li>same-currency zero line → legacy path, returns {@code null}</li>
+ *   <li>{@code loadInstallment} (ETP-5657): a schedule of ANOTHER invoice → 404 (also on the
+ *       default path, before any payment); a schedule with no invoice, or of the same invoice,
+ *       resolves</li>
+ *   <li>{@code collectTransaction}: a payment without a transaction → 500 on the default path</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationFlowSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -144,6 +152,7 @@ class ReconciliationFlowSupportForeignInvoiceTest {
   private Invoice invoice(String id, String currencyId) {
     Invoice inv = mock(Invoice.class);
     Currency cur = currency(currencyId);
+    when(inv.getId()).thenReturn(id);
     when(inv.getCurrency()).thenReturn(cur);
     when(inv.getDocumentNo()).thenReturn(id);
     when(obDal.get(eq(Invoice.class), eq(id))).thenReturn(inv);
@@ -450,5 +459,113 @@ class ReconciliationFlowSupportForeignInvoiceTest {
     assertNull(resp, "an invoice settling less than the line should now succeed, not 400");
     assertEquals(1, operationIds.size());
     assertEquals("txn-1", operationIds.get(0));
+  }
+
+  // ── loadInstallment: the schedule must belong to the named invoice (ETP-5657) ──
+
+  /** A schedule of {@code owner} (or of no invoice when {@code owner} is null). */
+  private FIN_PaymentSchedule scheduleOf(String id, String outstanding, Invoice owner) {
+    FIN_PaymentSchedule sch = schedule(id, outstanding);
+    when(sch.getInvoice()).thenReturn(owner);
+    return sch;
+  }
+
+  @Test
+  void loadInstallment_scheduleOfAnotherInvoice_returns404NamingTheRequestedInvoice()
+      throws Exception {
+    invoice("inv-1", FOREIGN_CURRENCY);
+    Invoice other = invoice("inv-2", FOREIGN_CURRENCY);
+    scheduleOf("sch-2", "987.65", other);
+
+    ReconciliationFlowSupport.InvoiceInstallment installment =
+        ReconciliationFlowSupport.loadInstallment(spec("inv-1", "sch-2"));
+
+    assertEquals(404, installment.error().getHttpStatus());
+    assertEquals("Invoice or payment schedule not found: inv-1", message(installment.error()));
+    assertFalse(String.valueOf(installment.error().getBody()).contains("987.65"));
+    assertNull(installment.invoice());
+    assertNull(installment.schedule());
+  }
+
+  @Test
+  void loadInstallment_scheduleWithoutInvoice_stillResolves() throws Exception {
+    Invoice inv = invoice("inv-1", FOREIGN_CURRENCY);
+    FIN_PaymentSchedule sch = scheduleOf("sch-1", "40.91", null);
+
+    ReconciliationFlowSupport.InvoiceInstallment installment =
+        ReconciliationFlowSupport.loadInstallment(spec("inv-1", "sch-1"));
+
+    assertNull(installment.error());
+    assertSame(inv, installment.invoice());
+    assertSame(sch, installment.schedule());
+  }
+
+  @Test
+  void loadInstallment_scheduleOfTheSameInvoice_resolves() throws Exception {
+    Invoice inv = invoice("inv-1", FOREIGN_CURRENCY);
+    FIN_PaymentSchedule sch = scheduleOf("sch-1", "40.91", inv);
+
+    ReconciliationFlowSupport.InvoiceInstallment installment =
+        ReconciliationFlowSupport.loadInstallment(spec("inv-1", "sch-1"));
+
+    assertNull(installment.error());
+    assertSame(inv, installment.invoice());
+    assertSame(sch, installment.schedule());
+  }
+
+  @Test
+  void loadInstallment_blankInvoiceId_returns400() throws Exception {
+    ReconciliationFlowSupport.InvoiceInstallment installment =
+        ReconciliationFlowSupport.loadInstallment(spec(null, "sch-1"));
+
+    assertEquals(400, installment.error().getHttpStatus());
+    assertEquals("invoiceId and scheduleId are required for each invoice",
+        message(installment.error()));
+  }
+
+  /**
+   * The schedule-to-invoice check also guards the default (greedy) path: a schedule of another
+   * invoice is refused before any payment is registered, instead of paying one invoice while
+   * settling the instalment of a different one.
+   */
+  @Test
+  void defaultPath_scheduleOfAnotherInvoice_returns404AndPaysNothing() throws Exception {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    invoice("inv-1", ACCOUNT_CURRENCY);
+    Invoice other = invoice("inv-2", ACCOUNT_CURRENCY);
+    scheduleOf("sch-2", "60", other);
+    FIN_BankStatementLine bsl = line("100", "0");
+    List<String> operationIds = new ArrayList<>();
+
+    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, specs(spec("inv-1", "sch-2")), operationIds, TOLERANCE, null, false);
+
+    assertEquals(404, resp.getHttpStatus());
+    assertEquals("Invoice or payment schedule not found: inv-1", message(resp));
+    assertTrue(operationIds.isEmpty());
+    reconciliationPaymentServiceMock.verify(
+        () -> ReconciliationPaymentService.registerReconciliationPayment(any()), never());
+  }
+
+  @Test
+  void defaultPath_paymentWithoutTransaction_returns500() throws Exception {
+    FIN_FinancialAccount acc = account(ACCOUNT_CURRENCY);
+    Invoice inv = invoice("inv-1", ACCOUNT_CURRENCY);
+    scheduleOf("sch-1", "60", inv);
+    FIN_BankStatementLine bsl = line("100", "0");
+    List<String> operationIds = new ArrayList<>();
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn("pay-1");
+    when(payment.getFINFinaccTransactionList()).thenReturn(List.of());
+    reconciliationPaymentServiceMock
+        .when(() -> ReconciliationPaymentService.registerReconciliationPayment(any()))
+        .thenReturn(payment);
+
+    NeoResponse resp = ReconciliationFlowSupport.createInvoicePayments(
+        acc, bsl, specs(spec("inv-1", "sch-1")), operationIds, TOLERANCE, null, false);
+
+    assertEquals(500, resp.getHttpStatus());
+    assertEquals("Payment did not produce a transaction: pay-1", message(resp));
+    assertTrue(operationIds.isEmpty());
   }
 }
