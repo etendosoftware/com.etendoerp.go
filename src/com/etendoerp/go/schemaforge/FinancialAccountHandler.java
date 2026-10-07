@@ -495,7 +495,9 @@ public class FinancialAccountHandler implements NeoHandler {
 
     JSONObject envelope = context.getPreviousResult().getBody().optJSONObject("response");
     if (envelope != null) {
-      envelope.put(FIELD_SUMMARY, loaders.buildSummary(visible));
+      // Converted into the login org's functional currency (ETP-5580). Never call buildSummary
+      // without the org currency: the null fallback is the raw cross-currency sum the bug was.
+      envelope.put(FIELD_SUMMARY, loaders.buildSummary(visible, loaders.resolveOrgCurrency()));
     }
   }
 

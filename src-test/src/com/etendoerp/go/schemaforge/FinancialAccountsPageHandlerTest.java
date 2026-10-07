@@ -66,13 +66,16 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.AccountRow;
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
+import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.OrgCurrency;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountsPageHandler}.
@@ -103,6 +106,13 @@ public class FinancialAccountsPageHandlerTest {
   private static final String CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
   private static final Set<String> ORGS = new HashSet<>(Arrays.asList(
       "0", "E443A31992CB4635AFCAEABE7183CE85"));
+  private static final String EUR_ID = "102";
+  private static final String USD_ID = "100";
+  private static final String GBP_ID = "114";
+  private static final OrgCurrency ORG_EUR = new OrgCurrency(EUR_ID, "EUR", 2);
+  private static final String TOTAL_ISO = "totalBalanceCurrencyIso";
+  private static final String TOTAL_APPROXIMATE = "totalBalanceApproximate";
+  private static final String MISSING_RATE = "missingRateCurrencies";
 
   /** The GO locale loadAccounts() reads off the OBContext to localize the country (ETP-5579). */
   private static final String GO_LANGUAGE = "es_ES";
@@ -175,6 +185,7 @@ public class FinancialAccountsPageHandlerTest {
 
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(handler).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
+    doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
 
     // ETP-4896: buildPayload also attaches the countryIbanRules catalog, built by
     // FinancialAccountCountrySupport straight from OBDal (not a spied seam on this handler).
@@ -198,6 +209,8 @@ public class FinancialAccountsPageHandlerTest {
       assertTrue("account with a registered transaction serialises hasTransactions=true",
           data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
       assertNotNull("summary present", data.optJSONObject("summary"));
+      assertEquals("summary total is labelled with the resolved org currency", "EUR",
+          data.getJSONObject("summary").getString(TOTAL_ISO));
       assertTrue("countryIbanRules is a sibling of accounts/summary, not per-account",
           data.has("countryIbanRules"));
 
@@ -223,6 +236,7 @@ public class FinancialAccountsPageHandlerTest {
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(Collections.emptySet()).when(handler)
         .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
+    doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
 
     FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -254,7 +268,7 @@ public class FinancialAccountsPageHandlerTest {
    */
   @Test
   public void testEmptyInputProducesZeroedSummary() throws Exception {
-    JSONObject summary = handler.buildSummary(Collections.emptyList());
+    JSONObject summary = handler.buildSummary(Collections.emptyList(), null);
 
     assertEquals(0, new BigDecimal(summary.getString("totalBalance")).compareTo(BigDecimal.ZERO));
     assertEquals(0, summary.getJSONArray("byCurrency").length());
@@ -269,6 +283,8 @@ public class FinancialAccountsPageHandlerTest {
    * Verifies that accounts denominated in different ISO codes are aggregated
    * separately in the {@code byCurrency} array — EUR balances combine into one
    * entry, USD balances into another — without leaking across currencies.
+   * Runs with a {@code null} org currency, i.e. the no-org-currency fallback, whose
+   * {@code totalBalance} is still the legacy raw sum (ETP-5580).
    *
    * @throws Exception
    *     if the JSON traversal fails
@@ -280,7 +296,7 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-2", "Caja Madrid", "C", new BigDecimal("250.50"), "EUR"),
         account("acc-3", "Citibank USD", "B", new BigDecimal("4000.00"), "USD"));
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
 
     assertEquals(0,
         new BigDecimal("5250.50").compareTo(new BigDecimal(summary.getString("totalBalance"))));
@@ -315,7 +331,7 @@ public class FinancialAccountsPageHandlerTest {
     accounts.get(1).pendingCount = 0;
     accounts.get(2).pendingCount = 1;
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
     assertEquals(2, summary.getJSONObject("pending").getInt("accountsWithPending"));
   }
 
@@ -333,10 +349,368 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
         account("acc-2", "Overdraft", "B", new BigDecimal("-250.00"), "EUR"));
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
     assertEquals(0,
         new BigDecimal("-150.00").compareTo(new BigDecimal(summary.getString("totalBalance"))));
     assertTrue(summary.getJSONArray("byCurrency").length() == 1);
+  }
+
+  // ── buildSummary() currency conversion (ETP-5580) ────────────────────────
+
+  /**
+   * Verifies that when every active account is already in the org currency the
+   * total is the exact sum, labelled with the org ISO, not flagged as approximate,
+   * and the rate seam is never consulted.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryAllOrgCurrencyIsExact() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("1000.00"), "EUR"),
+        account("acc-2", "Overdraft", "B", new BigDecimal("-357.99"), "EUR"));
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("642.01")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+  }
+
+  /**
+   * Verifies the reported bug (EUR -357.99 + USD -20.00 shown as EUR -377.99):
+   * the USD subtotal is converted once with the stubbed rate and rounded to the
+   * org currency precision, the total is flagged approximate, and
+   * {@code byCurrency} keeps the exact unconverted subtotals.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryConvertsForeignCurrencyWithRate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("-357.99"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("-15.00"), "USD"),
+        account("acc-3", "Card USD", "T", new BigDecimal("-5.00"), "USD"));
+    doReturn(new BigDecimal("0.856789")).when(handler).lookupRate(USD_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    // -20.00 * 0.856789 = -17.13578 -> -17.14 (HALF_UP, scale 2); -357.99 + -17.14 = -375.13
+    assertEquals(0, new BigDecimal("-375.13")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertTrue(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    // One lookup per currency, not per account.
+    verify(handler, times(1)).lookupRate(USD_ID, EUR_ID);
+
+    Map<String, BigDecimal> totals = byCurrencyTotals(summary);
+    assertEquals(2, totals.size());
+    assertEquals(0, new BigDecimal("-357.99").compareTo(totals.get("EUR")));
+    assertEquals(0, new BigDecimal("-20.00").compareTo(totals.get("USD")));
+  }
+
+  /**
+   * Verifies that a currency with no configured rate is excluded from the total
+   * (never summed unconverted) and listed in {@code missingRateCurrencies}, while
+   * a converted currency still flags the total approximate and {@code byCurrency}
+   * keeps the excluded subtotal.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryExcludesCurrencyWithoutRate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("10.00"), "USD"),
+        account("acc-3", "Barclays", "B", new BigDecimal("500.00"), "GBP"));
+    doReturn(new BigDecimal("0.9")).when(handler).lookupRate(USD_ID, EUR_ID);
+    doReturn(null).when(handler).lookupRate(GBP_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("109.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertTrue(summary.getBoolean(TOTAL_APPROXIMATE));
+    JSONArray missing = summary.getJSONArray(MISSING_RATE);
+    assertEquals(1, missing.length());
+    assertEquals("GBP", missing.getString(0));
+    assertEquals(0, new BigDecimal("500.00").compareTo(byCurrencyTotals(summary).get("GBP")));
+  }
+
+  /**
+   * Verifies that when the only foreign currency lacks a rate, nothing was
+   * converted, so the total is exact ({@code approximate=false}) over the org
+   * currency alone.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryMissingRateOnlyIsNotApproximate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("10.00"), "USD"));
+    doReturn(null).when(handler).lookupRate(USD_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("100.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals("USD", summary.getJSONArray(MISSING_RATE).getString(0));
+  }
+
+  /**
+   * QA BUG-1 (ETP-5580): a foreign currency whose subtotal is 0.00 adds nothing at any rate, so
+   * an EUR + USD 0.00 summary is exact — {@code approximate=false} even though a USD rate exists,
+   * and the rate is not even looked up. {@code byCurrency} still lists USD.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryZeroForeignSubtotalWithRateIsNotApproximate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("-225110.15"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("0.00"), "USD"));
+    doReturn(new BigDecimal("0.9")).when(handler).lookupRate(USD_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("-225110.15")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    assertEquals(2, summary.getJSONArray("byCurrency").length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+  }
+
+  /**
+   * QA BUG-1 (ETP-5580): a 0.00 foreign currency with NO rate is not listed in
+   * {@code missingRateCurrencies} — it cannot change the total, so the warning would be noise —
+   * while a non-zero one without a rate still is.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryZeroForeignSubtotalWithoutRateIsNotMissing() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("0.00"), "USD"),
+        account("acc-3", "Barclays", "B", new BigDecimal("50.00"), "GBP"));
+    doReturn(null).when(handler).lookupRate(anyString(), anyString());
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("100.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    JSONArray missing = summary.getJSONArray(MISSING_RATE);
+    assertEquals(1, missing.length());
+    assertEquals("GBP", missing.getString(0));
+    verify(handler, never()).lookupRate(USD_ID, EUR_ID);
+  }
+
+  /**
+   * Verifies that archived accounts in a foreign currency are ignored by the
+   * conversion too: no rate lookup, no byCurrency entry, no missing-rate entry.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryConversionIgnoresInactiveAccounts() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("1000.00"), "EUR"),
+        inactiveAccount("acc-2", "Citi Cerrada", "B", new BigDecimal("4000.00"), "USD"));
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("1000.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    assertEquals(1, summary.getJSONArray("byCurrency").length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+  }
+
+  /**
+   * Verifies the null-org-currency fallback: legacy raw sum, never approximate,
+   * no rate lookup, empty {@code missingRateCurrencies}, labelled with the first
+   * {@code byCurrency} ISO — and a JSON {@code null} label when there are no accounts.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryWithoutOrgCurrencyFallsBackToRawSum() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("-357.99"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("-20.00"), "USD"));
+
+    JSONObject summary = handler.buildSummary(accounts, null);
+
+    assertEquals(0, new BigDecimal("-377.99")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+
+    JSONObject empty = handler.buildSummary(Collections.emptyList(), null);
+    assertTrue("no ISO to label an empty fallback total with", empty.isNull(TOTAL_ISO));
+  }
+
+  /**
+   * Verifies that an empty account list with a resolved org currency still labels
+   * the zero total with the org ISO.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryEmptyInputUsesOrgCurrencyIso() throws Exception {
+    JSONObject summary = handler.buildSummary(Collections.emptyList(), ORG_EUR);
+
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertEquals(0, new BigDecimal(summary.getString("totalBalance")).compareTo(BigDecimal.ZERO));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+  }
+
+  /**
+   * Verifies that the converted subtotal is rounded to the org currency's own
+   * standard precision (here 0 decimals), HALF_UP.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryRoundsToOrgCurrencyPrecision() throws Exception {
+    OrgCurrency orgJpy = new OrgCurrency("JPY-ID", "JPY", 0);
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "Citi USD", "B", new BigDecimal("10.00"), "USD"));
+    doReturn(new BigDecimal("149.55")).when(handler).lookupRate(USD_ID, "JPY-ID");
+
+    JSONObject summary = handler.buildSummary(accounts, orgJpy);
+
+    // 10.00 * 149.55 = 1495.5 -> 1496 (HALF_UP, scale 0)
+    assertEquals(new BigDecimal("1496"), new BigDecimal(summary.getString("totalBalance")));
+    assertEquals("JPY", summary.getString(TOTAL_ISO));
+  }
+
+  /**
+   * Verifies {@code OrgCurrency.matches}: by id, by ISO as a fallback, and false
+   * for a different currency.
+   */
+  @Test
+  public void testOrgCurrencyMatchesByIdOrIso() {
+    assertTrue(ORG_EUR.matches(new Currency(EUR_ID, "EUR")));
+    assertTrue(ORG_EUR.matches(new Currency("other-id", "EUR")));
+    assertFalse(ORG_EUR.matches(new Currency(USD_ID, "USD")));
+    assertFalse(new OrgCurrency("x", "", 2).matches(new Currency("y", "")));
+  }
+
+  // ── resolveOrgCurrency() / lookupRate() seams (ETP-5580) ─────────────────
+
+  /**
+   * Verifies that {@code resolveOrgCurrency()} returns {@code null} when no
+   * currency is configured anywhere in the org hierarchy.
+   */
+  @Test
+  public void testResolveOrgCurrencyReturnsNullWhenUnconfigured() {
+    try (MockedStatic<NeoConversionHelper> helper = mockStatic(NeoConversionHelper.class)) {
+      helper.when(NeoConversionHelper::resolveOrgCurrencyId).thenReturn(null);
+      assertNull(handler.resolveOrgCurrency());
+    }
+  }
+
+  /**
+   * Verifies that {@code resolveOrgCurrency()} reads the ISO code and standard
+   * precision of the resolved currency, defaulting the precision to 2 when unset,
+   * and returns {@code null} when the id does not resolve to a record.
+   */
+  @Test
+  public void testResolveOrgCurrencyReadsIsoAndPrecision() {
+    try (MockedStatic<NeoConversionHelper> helper = mockStatic(NeoConversionHelper.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      helper.when(NeoConversionHelper::resolveOrgCurrencyId).thenReturn(EUR_ID);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.currency.Currency eur =
+          mock(org.openbravo.model.common.currency.Currency.class);
+      when(eur.getISOCode()).thenReturn("EUR");
+      when(eur.getStandardPrecision()).thenReturn(3L);
+      when(dal.get(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(eur);
+
+      OrgCurrency resolved = handler.resolveOrgCurrency();
+      assertEquals(EUR_ID, resolved.id);
+      assertEquals("EUR", resolved.iso);
+      assertEquals(3, resolved.precision);
+
+      when(eur.getStandardPrecision()).thenReturn(null);
+      assertEquals(2, handler.resolveOrgCurrency().precision);
+
+      when(dal.get(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(null);
+      assertNull(handler.resolveOrgCurrency());
+    }
+  }
+
+  /**
+   * Verifies that {@code lookupRate()} delegates to core
+   * {@code FinancialUtils.getConversionRate} with the current org/client and
+   * returns the multiply rate, or {@code null} for a missing or zero rate.
+   */
+  @Test
+  public void testLookupRateDelegatesToFinancialUtils() {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<FinancialUtils> finUtils = mockStatic(FinancialUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.currency.Currency usd =
+          mock(org.openbravo.model.common.currency.Currency.class);
+      org.openbravo.model.common.currency.Currency eur =
+          mock(org.openbravo.model.common.currency.Currency.class);
+      when(dal.getProxy(org.openbravo.model.common.currency.Currency.class, USD_ID)).thenReturn(usd);
+      when(dal.getProxy(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(eur);
+      OBContext ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      when(ctx.getCurrentClient()).thenReturn(client);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      ConversionRate rate = mock(ConversionRate.class);
+      when(rate.getMultipleRateBy()).thenReturn(new BigDecimal("0.92"));
+      finUtils.when(() -> FinancialUtils.getConversionRate(any(), eq(usd), eq(eur), eq(org),
+          eq(client))).thenReturn(rate);
+      assertEquals(new BigDecimal("0.92"), handler.lookupRate(USD_ID, EUR_ID));
+
+      when(rate.getMultipleRateBy()).thenReturn(BigDecimal.ZERO);
+      assertNull("a zero rate is unusable", handler.lookupRate(USD_ID, EUR_ID));
+
+      when(rate.getMultipleRateBy()).thenReturn(null);
+      assertNull("a rate with no multiply value is unusable", handler.lookupRate(USD_ID, EUR_ID));
+
+      finUtils.when(() -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()))
+          .thenReturn(null);
+      assertNull("no rate configured", handler.lookupRate(USD_ID, EUR_ID));
+    }
+  }
+
+  /**
+   * Collects {@code summary.byCurrency} into an ISO → total map.
+   *
+   * @param summary the summary JSON built by {@code buildSummary}
+   * @return the per-currency totals keyed by ISO code
+   * @throws Exception if the JSON traversal fails
+   */
+  private static Map<String, BigDecimal> byCurrencyTotals(JSONObject summary) throws Exception {
+    JSONArray byCurrency = summary.getJSONArray("byCurrency");
+    Map<String, BigDecimal> totals = new HashMap<>();
+    for (int i = 0; i < byCurrency.length(); i++) {
+      JSONObject entry = byCurrency.getJSONObject(i);
+      totals.put(entry.getString("currencyIso"), new BigDecimal(entry.getString("total")));
+    }
+    return totals;
   }
 
   // ── buildAccountsArray() ─────────────────────────────────────────────────
@@ -699,7 +1073,7 @@ public class FinancialAccountsPageHandlerTest {
     accounts.get(1).pendingCount = 9;
     accounts.get(2).pendingCount = 5;
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
 
     // Only the active EUR account contributes to the total.
     assertEquals(0,
@@ -1454,6 +1828,8 @@ public class FinancialAccountsPageHandlerTest {
         return "102";
       case "USD":
         return "100";
+      case "GBP":
+        return "114";
       default:
         return "0";
     }
