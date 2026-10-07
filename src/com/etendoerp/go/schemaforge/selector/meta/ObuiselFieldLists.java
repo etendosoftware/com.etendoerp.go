@@ -24,8 +24,8 @@ import java.util.List;
 public class ObuiselFieldLists {
   /** Fields rendered as visible grid columns in the selector popup. */
   public final List<RichFieldMeta> gridFields;
-  /** Property paths that participate in suggestion-box search. */
-  public final List<String> searchableProps;
+  /** Fragments, with their origin, that participate in suggestion-box search. */
+  public final List<SearchableFragment> searchableProps;
   /** Auxiliary output fields appended under {@code _aux}. */
   public final List<AuxFieldMeta> auxFields;
 
@@ -33,10 +33,10 @@ public class ObuiselFieldLists {
    * Create the grouped field lists for one selector.
    *
    * @param gridFields visible grid column metadata
-   * @param searchableProps searchable property paths
+   * @param searchableProps searchable fragments
    * @param auxFields auxiliary output metadata
    */
-  public ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
+  public ObuiselFieldLists(List<RichFieldMeta> gridFields, List<SearchableFragment> searchableProps,
       List<AuxFieldMeta> auxFields) {
     this.gridFields = gridFields;
     this.searchableProps = searchableProps;
