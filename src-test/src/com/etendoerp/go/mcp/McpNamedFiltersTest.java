@@ -29,8 +29,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link McpNamedFilters} — the pure, DAL-free parser for the per-entity
- * {@code NAMED_FILTERS} JSON that {@code neo_list} exposes as {@code {status:"<name>"}} filters
+ * {@code NAMED_FILTERS} JSON that {@code etendo_list} exposes as {@code {status:"<name>"}} filters
  * (ETP-4601).
+ *
+ * @covers com.etendoerp.go.mcp.McpNamedFilters
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -106,6 +108,29 @@ class McpNamedFiltersTest {
       assertEquals(0, McpNamedFilters.describe(null).length());
       assertEquals(0, McpNamedFilters.describe("").length());
       assertEquals(0, McpNamedFilters.describe("garbage").length());
+    }
+  }
+
+  @Nested
+  @DisplayName("publishInto")
+  class PublishInto {
+
+    @Test
+    @DisplayName("adds namedFilters with what describe exposes")
+    void addsTheDescriptors() throws Exception {
+      org.codehaus.jettison.json.JSONObject schema = new org.codehaus.jettison.json.JSONObject();
+      McpNamedFilters.publishInto(schema, JSON);
+      assertEquals(McpNamedFilters.describe(JSON).toString(),
+          schema.getJSONArray("namedFilters").toString());
+    }
+
+    @Test
+    @DisplayName("adds no key when the entity declares no filter")
+    void addsNothingWithoutFilters() throws Exception {
+      org.codehaus.jettison.json.JSONObject schema = new org.codehaus.jettison.json.JSONObject();
+      McpNamedFilters.publishInto(schema, null);
+      McpNamedFilters.publishInto(schema, "garbage");
+      assertEquals(0, schema.length());
     }
   }
 

@@ -55,11 +55,14 @@ import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.MODIFIED;
 import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.PERIOD_KEY;
 import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.SINCE_KEY;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -105,6 +108,58 @@ public class AbstractFiscalHandlerTest {
     protected String getModelKey() {
       return "stub";
     }
+
+    /** Declaration model code this stub answers for; settable per test. */
+    String declModel = "stub";
+    /** Payload returned by computeLivePayload; {@code null} makes it throw. */
+    org.codehaus.jettison.json.JSONObject livePayload;
+    /** Every (orgId, year, period) computeLivePayload was called with. */
+    final java.util.List<String> computeCalls = new java.util.ArrayList<>();
+
+    @Override
+    protected String getDeclModel() {
+      return declModel;
+    }
+
+    /** Per-invoice arrays the snapshot drops; settable per test. */
+    java.util.Map<String, String> excludedLists = java.util.Collections.emptyMap();
+
+    {
+      // What a real subclass does in its constructor: install its snapshot definition. The live
+      // payload comes from this stub's computeLivePayload override, never from the support.
+      snapshotSupport = new FiscalSnapshotSupport() {
+        @Override
+        public String declModel() {
+          return declModel;
+        }
+
+        @Override
+        public org.codehaus.jettison.json.JSONObject computeLivePayload(AbstractFiscalHandler handler,
+            String orgId, int year, String period) {
+          throw new UnsupportedOperationException("StubHandler overrides computeLivePayload");
+        }
+
+        @Override
+        public java.util.Map<String, String> excludedLists() {
+          return excludedLists;
+        }
+      };
+    }
+
+    @Override
+    org.codehaus.jettison.json.JSONObject computeLivePayload(String orgId, int year,
+        String period) {
+      computeCalls.add(orgId + "|" + year + "|" + period);
+      if (livePayload == null) {
+        throw new IllegalStateException("compute failed");
+      }
+      return livePayload;
+    }
+
+    @Override
+    protected String resolveEffectiveOrg() {
+      return "leaf-org";
+    }
   }
 
   private static final String AD_MESSAGE_KEY = "@AEAT349_Phone_Contact_Mandatory@";
@@ -113,9 +168,25 @@ public class AbstractFiscalHandlerTest {
 
   private NeoServlet servlet;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal303 and /fiscal349
+   * sub-route on the Tax Report window grant before any of the routing below runs. Default every
+   * test to "granted" here so the pre-existing routing tests keep exercising what they were
+   * written for; the denial itself gets its own tests below with this stub overridden to deny.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @Before
   public void setUp() {
     servlet = mock(NeoServlet.class);
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── declarations entity ───────────────────────────────────────────
@@ -189,6 +260,49 @@ public class AbstractFiscalHandlerTest {
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         anyString());
+  }
+
+  // ── window-access gate (ETP-5546) ─────────────────────────────────
+
+  /**
+   * ETP-5546 — a role without the Tax Report window grant (the "Modelos Fiscales" access proxy,
+   * ETP-5116) gets 403 from {@code handle()} before any routing — declarations, incidents, boxes
+   * or a known entity alike, since this gate runs first. Covers the "declarations" sub-route
+   * explicitly, which otherwise bypasses {@code isKnownEntity}/the year-period gate entirely.
+   */
+  @Test
+  public void testWindowAccessDeniedReturnsForbiddenForDeclarations() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+
+    StubHandler handler = new StubHandler(servlet, false);
+    handler.handle("declarations", "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+  }
+
+  /**
+   * ETP-5546 — same gate, tiered against the HTTP method: a role whose grant is read-only
+   * ({@code IsReadWrite = 'N'}) is denied a write (e.g. {@code POST /fiscal303/submit}), proven
+   * here via the generic "known" entity POST path, even though {@link #testAllowsPostDefaultReturnsFalse}
+   * shows the stub's own {@code allowsPost} would otherwise 405 it — the access gate runs first and
+   * must short-circuit before that routing is ever reached.
+   */
+  @Test
+  public void testWindowAccessDeniedReturnsForbiddenForWriteMethod() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+
+    StubHandler handler = new StubHandler(servlet, false);
+    handler.handle("known", "POST", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
   }
 
   /**
@@ -711,5 +825,86 @@ public class AbstractFiscalHandlerTest {
         assertTrue(e.getMessage().contains("client1"));
       }
     }
+  }
+
+  // ── submission snapshot wiring (ETP-5438) ───────────────────────────
+
+  private static org.openbravo.base.structure.BaseOBObject declFor(String model) {
+    org.openbravo.base.structure.BaseOBObject decl =
+        mock(org.openbravo.base.structure.BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn(model);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T2");
+    return decl;
+  }
+
+  /**
+   * Every declaration PUT arrives through /fiscal303/declarations, so EACH handler's CRUD delegate
+   * must route the snapshot to the handler owning the declaration's model, with the org resolved
+   * exactly like the read endpoint resolves it.
+   */
+  @Test
+  public void testLinkSubmittedSnapshotProvidersRoutesByDeclarationModel() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    h303.livePayload = new org.codehaus.jettison.json.JSONObject("{\"boxes\":{}}");
+    StubHandler h349 = new StubHandler(servlet, false);
+    h349.declModel = "349";
+    h349.livePayload = new org.codehaus.jettison.json.JSONObject("{\"operators\":[]}");
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303, h349);
+
+    org.openbravo.base.structure.BaseOBObject decl349 = declFor("349");
+    h303.declHandler().snapshots.takeSubmittedSnapshot(decl349);
+
+    assertEquals(java.util.Collections.singletonList("leaf-org|2026|T2"), h349.computeCalls);
+    assertTrue(h303.computeCalls.isEmpty());
+    org.mockito.Mockito.verify(decl349).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
+        "{\"operators\":[]}");
+  }
+
+  /** A model no handler serves gets no snapshot, and nothing is computed. */
+  @Test
+  public void testLinkSubmittedSnapshotProvidersUnknownModelTakesNoSnapshot() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
+
+    org.openbravo.base.structure.BaseOBObject decl = declFor("390");
+    h303.declHandler().snapshots.takeSubmittedSnapshot(decl);
+
+    assertTrue(h303.computeCalls.isEmpty());
+    org.mockito.Mockito.verify(decl, org.mockito.Mockito.never())
+        .set(org.mockito.ArgumentMatchers.eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+            org.mockito.ArgumentMatchers.any());
+  }
+
+  /** A failing compute propagates, so the caller can reject the submission. */
+  @Test(expected = IllegalStateException.class)
+  public void testLinkSubmittedSnapshotProvidersPropagatesComputeFailure() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
+
+    h303.declHandler().snapshots.takeSubmittedSnapshot(declFor("303"));
+  }
+
+  /**
+   * ETP-5438 scope decision — the snapshot the manual PUT path takes through the provider drops
+   * the model's per-invoice arrays and keeps their row counts, so it never grows with invoices.
+   */
+  @Test
+  public void testLinkedProviderSnapshotDropsPerInvoiceArrays() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    h303.excludedLists = java.util.Collections.singletonMap("sources", "sourceCount");
+    h303.livePayload = new org.codehaus.jettison.json.JSONObject(
+        "{\"boxes\":{\"46\":\"1.00\"},\"sources\":[{\"ref\":\"A\"},{\"ref\":\"B\"}]}");
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
+
+    org.openbravo.base.structure.BaseOBObject decl = declFor("303");
+    h303.declHandler().snapshots.takeSubmittedSnapshot(decl);
+
+    org.mockito.Mockito.verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
+        "{\"boxes\":{\"46\":\"1.00\"},\"sourceCount\":2}");
   }
 }

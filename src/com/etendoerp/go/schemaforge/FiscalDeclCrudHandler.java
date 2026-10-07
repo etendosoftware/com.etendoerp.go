@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -104,6 +105,46 @@ class FiscalDeclCrudHandler {
    * {@link #PROPERTY_DECLARATION_STATUS} column.
    */
   static final String PROPERTY_SUBMISSION_METHOD = "submissionMethod";
+  /**
+   * Java property for the {@code Submitted_Snapshot} TEXT column added to
+   * {@code ETGO_Fiscal_Decl} (ETP-5438) — the FIGURES {@code GET /fiscal303/boxes} (Modelo 303)
+   * or {@code GET /fiscal349/operators} (Modelo 349) returned for the declaration's
+   * {@code (org, year, period)} at the moment it entered {@link #SUBMITTED_STATUSES}, computed
+   * server-side with the same code path in the same request (see {@link FiscalSubmittedSnapshotSupport#takeSubmittedSnapshot}).
+   * Per-invoice arrays are not kept, only their row counts
+   * ({@link AbstractFiscalHandler#computeSubmittedSnapshot}), so its size never grows with the
+   * number of invoices.
+   * Once presented, a declaration is served from this snapshot and never recomputed from the
+   * current invoices; "Reactivar declaración" (back to draft) clears it. {@code null} on every
+   * declaration that was never submitted AND on legacy declarations presented before this column
+   * existed — those deliberately keep the live-compute read path (no data-fix, product decision).
+   */
+  static final String PROPERTY_SUBMITTED_SNAPSHOT = "submittedSnapshot";
+  /**
+   * {@code submissionMethod} value set only by {@code Fiscal303SubmissionSupport
+   * #persistSuccessfulSubmission} on a real, non-test-mode AEAT telematic success (ETP-4755).
+   * Duplicated here (rather than referencing {@code Fiscal303SubmissionSupport}'s private
+   * constant of the same value) because this class needs it purely as a guard value for the
+   * "Reactivar declaración" reverse transition below (ETP-5338) — reactivating a declaration
+   * that was actually filed with the AEAT would desync this table from what Hacienda has on
+   * record, so it is blocked here regardless of what the frontend sends.
+   */
+  static final String SUBMISSION_METHOD_AEAT_TELEMATIC = "aeat_telematic";
+
+  /**
+   * The 3 {@link #PROPERTY_DECLARATION_STATUS} values that mean "already presented" — {@code
+   * submitted}, {@code submitted_ext} (legacy/historical only, no longer selectable from
+   * {@code PresentModal}, but still a real value on existing rows) and {@code submitted_ack}.
+   * Mirrors the frontend's own local {@code isSubmitted}/{@code SUBMITTED_STATUSES} literals
+   * (deliberately duplicated per language, not shared — see {@code fiscal-models.md}'s
+   * "Duplicated, deliberately, in 4 places" for the frontend side of this same tradeoff). Used
+   * by {@link #rejectRepresentation} (re-presentation guard, ETP-5438) and by
+   * {@link Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to block a raw
+   * {@code generate} call against an already-presented declaration (the boxes/operators reads
+   * stay open so the frontend can render a submitted declaration).
+   */
+  static final java.util.Set<String> SUBMITTED_STATUSES =
+      java.util.Set.of("submitted", "submitted_ext", "submitted_ack");
 
   /**
    * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
@@ -177,8 +218,11 @@ class FiscalDeclCrudHandler {
   private static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
+  private static final String PARAM_CLIENT_ID   = "clientId";
+  private static final String PARAM_ORG_ID      = "orgId";
   private static final String MANUAL_DATA_KEY   = "manualData";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
+  private static final String SUBMITTED_SNAPSHOT_KEY = "submittedSnapshot";
   private static final String CODE_KEY          = "code";
   private static final String MESSAGE_KEY       = "message";
   private static final String SEVERITY_KEY      = "severity";
@@ -186,9 +230,16 @@ class FiscalDeclCrudHandler {
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
   private final NeoServlet servlet;
+  /**
+   * ETP-5438 submission snapshot handling for this table (transition, lookup, parsing) —
+   * extracted to {@link FiscalSubmittedSnapshotSupport} to keep this class under the SonarQube
+   * {@code java:S1448} method-count threshold.
+   */
+  final FiscalSubmittedSnapshotSupport snapshots;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
+    this.snapshots = new FiscalSubmittedSnapshotSupport(this, servlet);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -215,8 +266,8 @@ class FiscalDeclCrudHandler {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
         "client.id = :clientId and organization.id = :orgId "
             + "order by fiscalYear desc, period desc, fiscalModel asc");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ORG_ID, orgId);
     JSONArray arr = new JSONArray();
     for (BaseOBObject decl : query.list()) arr.put(declToJson(decl));
     JSONObject out = new JSONObject();
@@ -235,6 +286,23 @@ class FiscalDeclCrudHandler {
 
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
     String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+
+    // ETP-5272 — block creating a new declaration for a period that already has one sitting in
+    // draft: a draft is an unfinished, in-progress declaration, and letting the user spawn a 2nd
+    // one for the exact same period just fragments their work across two half-finished rows
+    // instead of them completing (or deleting) the existing draft first. Mirrors the exact
+    // draft-status guard already enforced by handleDeclDelete, but on the OPPOSITE direction:
+    // delete allows ONLY a draft to be removed, creation blocks ONLY when a draft already
+    // exists — a non-draft (ready/submitted/...) existing declaration is the intended
+    // corrective/rectificativa case (ETP-5187) and must keep working exactly as before, via
+    // resolveNextDeclSeq below, untouched by this check.
+    if (hasDraftDeclaration(clientId, orgId, model, year, period)) {
+      servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+          "A draft declaration already exists for this period — complete or delete it before "
+              + "creating a new one.");
+      return;
+    }
+
     // ETP-5187 — a 2nd (or later) declaration for the same model/year/period used to 500 on
     // ETGO_FISCAL_DECL_UQ (unique on client/org/model/year/period/DECL_TYPE) because the frontend
     // never sent a differentiator and every declaration defaulted to DECL_TYPE='O'. A follow-up
@@ -255,12 +323,64 @@ class FiscalDeclCrudHandler {
     decl.set(PROPERTY_DECLARATION_TYPE, requestedDeclType);
     decl.set(PROPERTY_DECL_SEQ, declSeq);
     decl.set(PROPERTY_DECLARATION_STATUS, status);
+    if (!snapshots.applyTransition(decl, null, status, "(new)", response)) {
+      return;
+    }
     OBDal.getInstance().save(decl);
     JSONObject created = declToJson(decl);
     OBDal.getInstance().commitAndClose();
 
     response.setStatus(HttpServletResponse.SC_CREATED);
     response.getWriter().write(created.toString());
+  }
+
+  /**
+   * Returns {@code true} if ANY existing declaration for the given natural key
+   * ({@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD}) currently has
+   * {@link #DEFAULT_STATUS} ({@code "draft"}) — ETP-5272, the creation-time gate that mirrors
+   * {@link #handleDeclDelete}'s existing draft-only guard.
+   *
+   * <p>Deliberately a separate, self-contained query rather than folded into
+   * {@link #resolveNextDeclSeq}: that method has its own long-established, verified contract
+   * ({@code MAX(DECL_SEQ) + 1}, no cap, no status awareness) and is explicitly NOT to be touched
+   * by this feature — this is a distinct pre-condition, checked BEFORE it, not part of computing
+   * the next ordinal. The extra query is one cheap indexed lookup on the same natural key
+   * {@code ETGO_FISCAL_DECL_UQ} already covers; not worth entangling with resolveNextDeclSeq's
+   * own iteration for that.
+   */
+  private boolean hasDraftDeclaration(String clientId, String orgId, String model, long year,
+      String period) {
+    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
+    for (BaseOBObject existing : query.list()) {
+      if (DEFAULT_STATUS.equals(asString(existing.get(PROPERTY_DECLARATION_STATUS)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Builds the shared HQL query on the natural key
+   * ({@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD}) used by
+   * {@link #hasDraftDeclaration}, {@link #resolveNextDeclSeq} and
+   * {@link #findLatestDeclarationStatus} — hoisted into a single helper (SonarQube S1192,
+   * duplicated-literal WHERE-clause pieces) so each fragment
+   * ({@code "client.id = :clientId and organization.id = :orgId and "}, {@code " = :model and "},
+   * {@code " = :year and "}, {@code " = :period"}) is defined exactly once instead of copy-pasted
+   * across the 3 call sites.
+   */
+  private static OBQuery<BaseOBObject> naturalKeyQuery(String clientId, String orgId,
+      String model, long year, String period) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
+        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
+            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
+            + " = :period");
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ORG_ID, orgId);
+    query.setNamedParameter(MODEL_KEY, model);
+    query.setNamedParameter("year", Long.valueOf(year));
+    query.setNamedParameter(PERIOD_KEY, period);
+    return query;
   }
 
   /**
@@ -288,15 +408,7 @@ class FiscalDeclCrudHandler {
   // in this class rather than introducing a new one.
   long resolveNextDeclSeq(String clientId, String orgId, String model, long year,
       String period) {
-    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
-        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
-            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
-            + " = :period");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
-    query.setNamedParameter(MODEL_KEY, model);
-    query.setNamedParameter("year", Long.valueOf(year));
-    query.setNamedParameter(PERIOD_KEY, period);
+    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
     long maxSeq = -1L;
     for (BaseOBObject existing : query.list()) {
       Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
@@ -308,6 +420,48 @@ class FiscalDeclCrudHandler {
     return maxSeq + 1L;
   }
 
+  /**
+   * Resolves {@link #PROPERTY_DECLARATION_STATUS} of the MOST RECENT declaration (highest
+   * {@link #PROPERTY_DECL_SEQ} — same "latest wins" ordinal {@link #resolveNextDeclSeq} computes
+   * off) for the given natural key, or {@code null} when no declaration exists for it yet.
+   *
+   * <p>ETP-5438 — {@code /fiscal349/generate} and {@code /fiscal303/generate} take no
+   * declaration id, only {@code (org, year, period)}: the natural key can legitimately have MORE
+   * THAN ONE declaration (the rectificativa flow, {@link #resolveNextDeclSeq}'s own javadoc), so
+   * "the declaration this call is about" is inherently the latest one for that period — an
+   * older, already-submitted declaration for the SAME period must not block a fresh
+   * rectificativa draft's own generate. Used by {@link Fiscal349BoxesHandler}/{@code
+   * Fiscal303BoxesHandler} to reject a generate call once that latest declaration is already in
+   * {@link #SUBMITTED_STATUSES} — the same "must not silently regenerate an already-presented
+   * declaration" guarantee {@link #rejectRepresentation} enforces for the PUT path, extended to
+   * the generate endpoints a direct API call could otherwise reach without ever going through
+   * this handler's PUT at all. The boxes/operators reads are intentionally NOT gated: they serve
+   * a submitted declaration from its persisted snapshot ({@link FiscalSubmittedSnapshotSupport#findLatestSubmittedSnapshot}),
+   * or compute it live for a legacy declaration presented before snapshots existed.
+   */
+  String findLatestDeclarationStatus(String clientId, String orgId, String model, long year,
+      String period) {
+    BaseOBObject latest = findLatestDeclaration(clientId, orgId, model, year, period);
+    return latest != null ? asString(latest.get(PROPERTY_DECLARATION_STATUS)) : null;
+  }
+
+  /** Highest-{@code DECL_SEQ} declaration for the natural key, or {@code null} when none. */
+  BaseOBObject findLatestDeclaration(String clientId, String orgId, String model,
+      long year, String period) {
+    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
+    long maxSeq = -1L;
+    BaseOBObject latest = null;
+    for (BaseOBObject existing : query.list()) {
+      Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
+      long seq = rawSeq instanceof Number ? ((Number) rawSeq).longValue() : 0L;
+      if (seq > maxSeq) {
+        maxSeq = seq;
+        latest = existing;
+      }
+    }
+    return latest;
+  }
+
   private void handleDeclPut(HttpServletRequest request, HttpServletResponse response)
       throws Exception {
     String id = request.getParameter("id");
@@ -315,45 +469,291 @@ class FiscalDeclCrudHandler {
     if (decl == null) {
       return;
     }
-    JSONObject body      = readJsonBody(request);
-    boolean hasStatus    = body.has(STATUS_KEY);
-    String status        = hasStatus ? body.getString(STATUS_KEY) : null;
-    boolean hasFileExt   = body.has(FILE_EXTERNAL_KEY);
-    boolean fileExternal = body.optBoolean(FILE_EXTERNAL_KEY, false);
-    boolean hasFileName  = body.has(FILE_NAME_KEY);
-    String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
-        ? body.getString(FILE_NAME_KEY) : null;
-    // manualData is the only optional field here that is an arbitrary nested object rather than
-    // a scalar the caller can't realistically malform, so it gets its own defensive setter
-    // (see setManualDataIfPresent) instead of the getString/optBoolean one-liners above.
-    //
-    // Unlike fileName above (hasFileName = body.has(...), no null-check — an explicit null there
-    // DOES clear the stored value via decl.set(..., null)), an explicit "manualData": null is
-    // treated as "not sent" rather than "clear the value": manualData is autosaved from ephemeral
-    // frontend state, so a caller wanting to reset it must send an empty object rather than null —
-    // treating null as "clear" would risk silently wiping real user data from a stray/racy
-    // autosave call. This asymmetry with fileName is intentional, not an oversight.
-    boolean hasManualData = body.has(MANUAL_DATA_KEY) && !body.isNull(MANUAL_DATA_KEY);
-    // submissionMethod (ETP-4755) follows the exact same "explicit null means not sent" precedent
-    // as manualData above, not fileName's "explicit null clears it" one: this field is set once,
-    // at the same time as the status change that makes the declaration "Presentado" (see
-    // FmOverlays.jsx's PresentModal / handlePresent call sites), and is never meant to be wiped by
-    // a stray/racy PUT that happens to include a null for it.
-    boolean hasSubmissionMethod = body.has(SUBMISSION_METHOD_KEY) && !body.isNull(SUBMISSION_METHOD_KEY);
-    String submissionMethod = hasSubmissionMethod ? body.getString(SUBMISSION_METHOD_KEY) : null;
-
-    if (hasStatus)     decl.set(PROPERTY_DECLARATION_STATUS, status);
-    if (hasFileExt)    decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
-    if (hasFileName)   decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
-    if (hasSubmissionMethod) decl.set(PROPERTY_SUBMISSION_METHOD, submissionMethod);
-    boolean manualDataApplied = !hasManualData || setManualDataIfPresent(decl, body);
-    decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
-    OBDal.getInstance().commitAndClose();
-    if (manualDataApplied) {
-      response.getWriter().write("{\"ok\":true}");
-    } else {
-      response.getWriter().write("{\"ok\":true,\"manualDataApplied\":false}");
+    JSONObject body = readJsonBody(request);
+    if (rejectTelematicReactivation(decl, body, id, response)) {
+      return;
     }
+    if (rejectRepresentation(decl, body, id, response)) {
+      return;
+    }
+    if (rejectNegativeManualBoxes(body, id, response)) {
+      return;
+    }
+    if (rejectOversizedIdentificationFields(body, id, response)) {
+      return;
+    }
+    String previousStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    String newStatus = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : null;
+    if (newStatus != null
+        && !snapshots.applyTransition(decl, previousStatus, newStatus, id, response)) {
+      return;
+    }
+    applyDeclPutScalarFields(decl, body);
+    boolean manualDataApplied = applyManualDataIfRequested(decl, body);
+    decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+    // Echo only a snapshot taken by THIS request; read before commitAndClose() closes the session.
+    boolean justSubmitted = newStatus != null && SUBMITTED_STATUSES.contains(newStatus)
+        && !SUBMITTED_STATUSES.contains(previousStatus);
+    JSONObject snapshot = justSubmitted ? FiscalSubmittedSnapshotSupport.parseSubmittedSnapshot(decl) : null;
+    OBDal.getInstance().commitAndClose();
+    writeDeclPutResponse(response, manualDataApplied, snapshot);
+  }
+
+  /**
+   * Guards "Reactivar declaración" (ETP-5338), which reverts a presented declaration back to
+   * draft via this same PUT path ({@code status: "draft"}). Defense in depth, mirroring
+   * {@link #handleDeclDelete}'s draft-only guard: the frontend already hides the Reactivar action
+   * for {@code aeat_telematic} declarations ({@code FmRowActions.jsx} / {@code FmListPage.jsx}),
+   * but this is what actually prevents one from being reopened regardless of what the client
+   * sends — reactivating a declaration that was genuinely filed with the AEAT would desync this
+   * table from what Hacienda has on record, which is unrecoverable from here.
+   *
+   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectTelematicReactivation(BaseOBObject decl, JSONObject body, String id,
+      HttpServletResponse response) throws Exception {
+    boolean hasStatus = body.has(STATUS_KEY);
+    String status = hasStatus ? body.getString(STATUS_KEY) : null;
+    if (!hasStatus || !DEFAULT_STATUS.equals(status)) {
+      return false;
+    }
+    String currentSubmissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
+    if (!SUBMISSION_METHOD_AEAT_TELEMATIC.equals(currentSubmissionMethod)) {
+      return false;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+        "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
+    return true;
+  }
+
+  /**
+   * Blocks re-presenting a declaration that is already in a {@link #SUBMITTED_STATUSES} status
+   * (ETP-5438) — "block re-presentation once already submitted". Defense in depth: the frontend
+   * already hides "Registrar/Presentar" once {@code isSubmitted} ({@code FmModel303Page.jsx} /
+   * {@code FmModel349Page.jsx}), but this is what actually prevents a raw PUT (or a future
+   * frontend regression) from silently re-filing an already-presented declaration.
+   *
+   * <p>Only fires when BOTH the current status and the incoming one are in
+   * {@link #SUBMITTED_STATUSES} — a transition INTO the submitted family from {@code draft}/
+   * {@code ready} (the normal, first-time presentation) is unaffected, and so is the existing
+   * "Reactivar declaración" transition BACK to {@code draft} ({@link #rejectTelematicReactivation}
+   * already guards that one on its own, narrower, terms). Deliberately model-agnostic — the same
+   * {@code ETGO_Fiscal_Decl} table and PUT path serve both Modelo 303 and Modelo 349, and nothing
+   * about "you cannot re-present an already-presented declaration" is specific to either.
+   *
+   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectRepresentation(BaseOBObject decl, JSONObject body, String id,
+      HttpServletResponse response) throws Exception {
+    boolean hasStatus = body.has(STATUS_KEY);
+    String newStatus = hasStatus ? body.getString(STATUS_KEY) : null;
+    if (!hasStatus || !SUBMITTED_STATUSES.contains(newStatus)) {
+      return false;
+    }
+    String currentStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    if (!SUBMITTED_STATUSES.contains(currentStatus)) {
+      return false;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+        "This declaration was already submitted (status: " + currentStatus + "): " + id);
+    return true;
+  }
+
+  // ETP-5393 Bug C — boxes the classic AEAT303Report engine hard-rejects when negative:
+  // box 111 "Rectificación – Importe" (AEAT303Report2024.java:276-278,
+  // @AEAT303_Negative_Not_Allowed_For_111@) and box 77 "IVA a la importación liquidado por la
+  // Aduana pendiente de ingreso" (AEAT303Report2015.java:149-162,
+  // @AEAT303_Negative_IVA_IMPORT_ADUANA@). The GO previsualización's manualOverrides had no
+  // equivalent server-side check at all — unlike setManualDataIfPresent's tolerant handling of a
+  // malformed manualData blob, a negative value here is a real business-rule violation the caller
+  // must be told about, not silently swallowed.
+  //
+  // ETP-5438 (AEAT spec audit) — boxes 70, 78, 109 and 110 are ALSO declared "Num" (numérico sin
+  // signo / unsigned) in the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01, the
+  // spec bundled with this ticket), exactly like 111 and 77 — the same class of bug ETP-5393 Bug C
+  // fixed for those two, just not caught at the time because the audit that found it (casilla-by-
+  // casilla cross-check of every editable box's AEAT type against this guard's coverage) hadn't
+  // been done yet. Added to the SAME set/mechanism rather than a parallel one, per the AEAT type
+  // legend confirmed in the spec's own "Nota" footer on every page: "1. Los campos deben ser A
+  // (Alfabético) An (Alfanumérico), Num (Numérico sin signo) o N (Numérico con signo)."
+  private static final java.util.Set<String> NEGATIVE_NOT_ALLOWED_BOX_KEYS =
+      java.util.Set.of("111", "77", "70", "78", "109", "110");
+
+  /**
+   * Rejects a PUT whose {@code manualData.manualOverrides} sets box 111 or box 77 to a negative
+   * value — see {@link #NEGATIVE_NOT_ALLOWED_BOX_KEYS}. A missing/malformed {@code manualData} or
+   * {@code manualOverrides} is not this method's concern (left to {@link #setManualDataIfPresent}'s
+   * existing tolerant handling); this only fires when one of the two watched boxes is present and
+   * parses to a negative number.
+   *
+   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectNegativeManualBoxes(JSONObject body, String id, HttpServletResponse response)
+      throws IOException {
+    if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
+      return false;
+    }
+    JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
+    JSONObject overrides = manualData != null ? manualData.optJSONObject("manualOverrides") : null;
+    if (overrides == null) {
+      return false;
+    }
+    for (String boxKey : NEGATIVE_NOT_ALLOWED_BOX_KEYS) {
+      if (!overrides.has(boxKey) || overrides.isNull(boxKey)) {
+        continue;
+      }
+      double value = overrides.optDouble(boxKey, 0d);
+      if (!Double.isNaN(value) && value < 0) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Box " + boxKey + " does not accept negative values: " + id);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Reads {@code manualData.identification} out of a PUT body, or {@code null} if
+   * {@code manualData} (or {@code identification} within it) is absent/malformed — used by
+   * {@link #rejectOversizedIdentificationFields} below, the ETP-5438 sibling of
+   * {@link #rejectNegativeManualBoxes}'s own {@code manualOverrides} read.
+   */
+  private JSONObject extractIdentification(JSONObject body) {
+    if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
+      return null;
+    }
+    JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
+    return manualData != null ? manualData.optJSONObject("identification") : null;
+  }
+
+  // ETP-5438 (AEAT spec audit) — max lengths for the alphanumeric ("An") identification fields,
+  // read straight off the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01): the
+  // DID page for the 6 bank_* fields (SWIFT-BIC 11, IBAN 34 — "Nota 6: Para el IBAN español
+  // deberá empezar por ES y únicamente se usan las primeras 24 posiciones", Bank name 70, Bank
+  // address 35, City 30, Country code 2) and page 3 for nro_justificante (13, "Número
+  // justificante identificativo de la autoliquidación anterior"). Same rationale as
+  // NEGATIVE_NOT_ALLOWED_BOX_KEYS above: the classic AEAT engine's fixed-width record slots make
+  // an oversized value a real business-rule violation, not a cosmetic nit — better to reject it
+  // here, where the user can still fix it, than have it silently truncated (or rejected outright)
+  // at file-generation time.
+  private static final java.util.Map<String, Integer> IDENTIFICATION_MAX_LENGTHS = buildIdentificationMaxLengths();
+
+  private static java.util.Map<String, Integer> buildIdentificationMaxLengths() {
+    java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+    m.put("bank_iban", 34);
+    m.put("bank_swift_bic", 11);
+    m.put("bank_nombre", 70);
+    m.put("bank_direccion", 35);
+    m.put("bank_ciudad", 30);
+    m.put("bank_pais", 2);
+    m.put("nro_justificante", 13);
+    return java.util.Collections.unmodifiableMap(m);
+  }
+
+  /**
+   * Rejects a PUT whose {@code manualData.identification} carries a value longer than its AEAT
+   * fixed-width slot (ETP-5438) — see {@link #IDENTIFICATION_MAX_LENGTHS}. A missing/malformed
+   * {@code manualData}/{@code identification}, or a field simply absent from the payload, is not
+   * this method's concern (same tolerant precedent as {@link #rejectNegativeManualBoxes}).
+   *
+   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectOversizedIdentificationFields(JSONObject body, String id,
+      HttpServletResponse response) throws IOException {
+    JSONObject identification = extractIdentification(body);
+    if (identification == null) {
+      return false;
+    }
+    for (java.util.Map.Entry<String, Integer> entry : IDENTIFICATION_MAX_LENGTHS.entrySet()) {
+      String key = entry.getKey();
+      if (!identification.has(key) || identification.isNull(key)) {
+        continue;
+      }
+      String value = identification.optString(key, "");
+      if (value.length() > entry.getValue()) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Field " + key + " exceeds its max length of " + entry.getValue() + " characters: " + id);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ETP-5438 (AEAT spec audit) — bank_sepa ("Devolución - Marca SEPA") is also declared a
+  // single-digit Num field on the DID page restricted to a 4-value enum (spec's own "Nota 2:
+  // Devolución marca SEPA" table: 0 Vacía, 1 Cuenta España, 2 Unión Europea SEPA, 3 Resto
+  // Países) in the same audit that found the gaps above. That fix (a `rejectInvalidBankSepa`
+  // guard here, paired with a `type: 'select'` conversion in fm303Layouts.js) was reverted from
+  // this ticket — it is being handled under a separate ticket instead. Do not re-add it here.
+
+  /**
+   * Applies every scalar (non-{@code manualData}) optional field {@link #handleDeclPut} accepts —
+   * {@code status}, {@code fileExternal}, {@code fileName}, {@code submissionMethod} — each only
+   * when the caller actually sent it.
+   *
+   * <p>{@code fileName}: unlike {@code submissionMethod} below, an explicit {@code null} here DOES
+   * clear the stored value via {@code decl.set(..., null)} — {@code hasFileName} does not check
+   * {@code isNull}, so a present-but-null {@code fileName} still reaches the setter as {@code null}.
+   *
+   * <p>{@code submissionMethod} (ETP-4755) follows the same "explicit null means not sent"
+   * precedent as {@code manualData} (see {@link #applyManualDataIfRequested}), not
+   * {@code fileName}'s "explicit null clears it" one: this field is set once, at the same time as
+   * the status change that makes the declaration "Presentado" (see {@code FmOverlays.jsx}'s
+   * {@code PresentModal} / {@code handlePresent} call sites), and is never meant to be wiped by a
+   * stray/racy PUT that happens to include a null for it.
+   */
+  private void applyDeclPutScalarFields(BaseOBObject decl, JSONObject body) throws JSONException {
+    if (body.has(STATUS_KEY)) {
+      decl.set(PROPERTY_DECLARATION_STATUS, body.getString(STATUS_KEY));
+    }
+    if (body.has(FILE_EXTERNAL_KEY)) {
+      decl.set(PROPERTY_FILE_EXTERNAL, body.optBoolean(FILE_EXTERNAL_KEY, false));
+    }
+    if (body.has(FILE_NAME_KEY)) {
+      String fileName = !body.isNull(FILE_NAME_KEY) ? body.getString(FILE_NAME_KEY) : null;
+      decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
+    }
+    if (body.has(SUBMISSION_METHOD_KEY) && !body.isNull(SUBMISSION_METHOD_KEY)) {
+      decl.set(PROPERTY_SUBMISSION_METHOD, body.getString(SUBMISSION_METHOD_KEY));
+    }
+  }
+
+  /**
+   * Applies {@code manualData} when the caller sent a non-null value — see
+   * {@link #setManualDataIfPresent} for the persistence/error-tolerance contract. manualData is
+   * the only optional {@link #handleDeclPut} field that is an arbitrary nested object rather than
+   * a scalar the caller can't realistically malform, so it gets its own defensive setter instead
+   * of a one-liner in {@link #applyDeclPutScalarFields}.
+   *
+   * <p>An explicit {@code "manualData": null} is treated as "not sent" rather than "clear the
+   * value": manualData is autosaved from ephemeral frontend state, so a caller wanting to reset it
+   * must send an empty object rather than null — treating null as "clear" would risk silently
+   * wiping real user data from a stray/racy autosave call. This asymmetry with {@code fileName} is
+   * intentional, not an oversight.
+   *
+   * @return {@code true} if manualData was applied or not requested; {@code false} if it was
+   *         requested but malformed and the write was skipped.
+   */
+  private boolean applyManualDataIfRequested(BaseOBObject decl, JSONObject body) {
+    boolean hasManualData = body.has(MANUAL_DATA_KEY) && !body.isNull(MANUAL_DATA_KEY);
+    return !hasManualData || setManualDataIfPresent(decl, body);
+  }
+
+  /**
+   * Writes the PUT response. When this request presented the declaration, the snapshot it took is
+   * echoed back as {@code submittedSnapshot} (ETP-5438), so the frontend can freeze the
+   * just-presented declaration on the exact persisted payload without refetching the list.
+   */
+  private void writeDeclPutResponse(HttpServletResponse response, boolean manualDataApplied,
+      JSONObject submittedSnapshot) throws IOException {
+    String head = manualDataApplied ? "{\"ok\":true" : "{\"ok\":true,\"manualDataApplied\":false";
+    String snapshotPart = submittedSnapshot != null
+        ? ",\"" + SUBMITTED_SNAPSHOT_KEY + "\":" + submittedSnapshot.toString() : "";
+    response.getWriter().write(head + snapshotPart + "}");
   }
 
   /**
@@ -617,6 +1017,8 @@ class FiscalDeclCrudHandler {
     String submissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
     o.put(SUBMISSION_METHOD_KEY, StringUtils.isNotBlank(submissionMethod)
         ? submissionMethod : JSONObject.NULL);
+    JSONObject snapshot = FiscalSubmittedSnapshotSupport.parseSubmittedSnapshot(decl);
+    o.put(SUBMITTED_SNAPSHOT_KEY, snapshot != null ? snapshot : JSONObject.NULL);
     return o;
   }
 
@@ -651,11 +1053,11 @@ class FiscalDeclCrudHandler {
         ? String.valueOf(((BaseOBObject) related).getId()) : "";
   }
 
-  private static String asString(Object value) {
+  static String asString(Object value) {
     return value != null ? String.valueOf(value) : "";
   }
 
-  private static int asInt(Object value) {
+  static int asInt(Object value) {
     if (value instanceof Number) {
       return ((Number) value).intValue();
     }

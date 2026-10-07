@@ -62,6 +62,17 @@ public final class NeoTelemetryEvents {
       "backend_stock_movement_validated";
 
   /**
+   * One MCP tool call, emitted by {@code McpUsageLogger} (Track B2).
+   * <p>
+   * A projection of the {@code ETGO_MCP_USAGE} row, never a replacement for it: D24 keeps the table
+   * authoritative precisely because this road can drop, cap or sample. Shape only — tool, verb,
+   * target entity, field NAMES, outcome, error code, latency, byte counts. Never argument values,
+   * never record identifiers, and never a feedback row's payload.
+   */
+  public static final String BACKEND_MCP_TOOL_CALL_COMPLETED =
+      "backend_mcp_tool_call_completed";
+
+  /**
    * Generic backend write-operation timing event emitted by NEO CRUD.
    */
   public static final String BACKEND_WRITE_OPERATION_COMPLETED =

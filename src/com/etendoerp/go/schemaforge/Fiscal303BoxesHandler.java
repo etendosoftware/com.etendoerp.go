@@ -18,7 +18,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -33,10 +32,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -102,6 +98,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     super(servlet);
     this.submissionSupport = new Fiscal303SubmissionSupport(this);
     this.sourcesSupport = new Fiscal303SourcesSupport(this);
+    this.snapshotSupport = new Fiscal303SnapshotSupport();
   }
 
   @Override
@@ -136,13 +133,17 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
-    try {
+    runDispatch(response, () -> {
       if (BOXES.equals(entityName)) {
-        ComputeResult cr = computeBoxes(orgId, year, period);
-        JSONObject result = buildResponse(cr.boxes, cr.sources);
+        // Deliberately NOT guarded (ETP-5438): boxes is a pure read. A submitted declaration is
+        // served from its persisted submission snapshot (never recomputed); a legacy submitted
+        // one without a snapshot, and every draft/ready one, is computed live. Only the
+        // side-effecting generate (file generation) is blocked once submitted.
+        JSONObject result = snapshotOrCompute(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         String tipo = request.getParameter("tipo");
         submissionSupport.handleGenerate(orgId, year, period, tipo, request, response);
       } else if (SUBMIT.equals(entityName)) {
@@ -153,11 +154,22 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
       }
-    } catch (FiscalHandlerException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new FiscalHandlerException(e);
-    }
+    });
+  }
+
+  /**
+   * ETP-5438 — thin, model-fixed wrapper around the shared {@link
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)} (see its
+   * javadoc). Applied to {@code generate} only — the {@code boxes} read stays open for a
+   * submitted declaration so the frontend can render (and freeze) its figures on a cold session
+   * cache. {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
+   * it already has its own, narrower, {@code submitted_ack}-only guard in {@link
+   * Fiscal303SubmissionSupport#handleSubmit} (the {@code ALREADY_SUBMITTED} check), which this
+   * does not replace or widen; that endpoint is a distinct concern (idempotency of a real AEAT
+   * filing action) from "must not silently regenerate a presented declaration".
+   */
+  void guardNotAlreadySubmitted(String orgId, int year, String period) {
+    guardNotAlreadySubmitted(orgId, year, period, "303");
   }
 
   @Override
@@ -407,30 +419,43 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
     // VAT_SALES_GENERAL — split by rate % → boxes 7/9 (21%), 4/6 (10%/7%/8%), 1/3 (4%/5%),
     // 150/152 (0%), 165/167 (2%)
+    List<TaxRate> salesGeneral = Collections.emptyList();
     TaxReportParameter paramGeneral =
         dao303.getTaxReportParameter(taxReport, VAT_SALES, "VAT_SALES_GENERAL");
     if (paramGeneral != null) {
-      List<TaxRate> salesGeneral =
+      salesGeneral =
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramGeneral);
       applyPercentageSplit(b, helper, salesGeneral, this::vatGeneralBoxes, rateToBoxes);
     }
 
     // VAT_SALES_EU → boxes 10, 11 (adq. intracomunitarias — buyer self-assesses)
-    fillGroupBoxes(b, helper, dao303, taxReport,
+    List<TaxRate> euRates = fillGroupBoxes(b, helper, dao303, taxReport,
         new BoxGroupConfig(VAT_SALES, "VAT_SALES_EU", PURCHASE, "No", "Yes", 10, 11), rateToBoxes);
 
     // VAT_SALES_ISP → boxes 12, 13 (inversión sujeto pasivo)
-    fillGroupBoxes(b, helper, dao303, taxReport,
+    List<TaxRate> ispRates = fillGroupBoxes(b, helper, dao303, taxReport,
         new BoxGroupConfig(VAT_SALES, "VAT_SALES_ISP", PURCHASE, "No", "No", 12, 13), rateToBoxes);
+
+    // ETP-5393 Bug F — Modificación bases y cuotas [14] [15]: corrective/credit-memo invoices
+    // over the SAME tax rates already resolved for regimen general + EU + ISP above. Mirrors
+    // the classic engine's `modificacionBICuotaTaxRates` accumulator (AEAT303Report2014#
+    // generateSalesLines, ~lines 424-513) — box 14/15 were never populated here before, so this
+    // row always rendered blank in the Go preview even though the classic file generator has
+    // always computed it from the same accounting data.
+    List<TaxRate> modificacionBases = new ArrayList<>(salesGeneral);
+    modificacionBases.addAll(euRates);
+    modificacionBases.addAll(ispRates);
+    fillMemoCorrectiveBoxPair(b, helper, modificacionBases, 14, 15);
 
     // VAT_SALES_EC (recargo equivalencia) — split by %.
     // Box assignment depends on form version: Oct 2024+ reassigned 0.5%/0.26% to 168/170
     // and introduced 1% in boxes 16/18.
     // Pre-2024: 0%, 0.50%, 0.62% all go to 16/18; box 17 = dominant rate by largest base.
+    List<TaxRate> ecTaxes = Collections.emptyList();
     TaxReportParameter paramEC =
         dao303.getTaxReportParameter(taxReport, VAT_SALES, "VAT_SALES_EC");
     if (paramEC != null) {
-      List<TaxRate> ecTaxes =
+      ecTaxes =
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramEC);
       applyPercentageSplit(b, helper, ecTaxes, pct -> vatEcBoxes(pct, isNewForm), rateToBoxes);
       if (!isNewForm && b.containsKey(16)) {
@@ -438,6 +463,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         if (dominantRate != null) b.put(17, dominantRate);
       }
     }
+
+    // ETP-5393 Bug F — Modificaciones bases y cuotas del recargo de equivalencia [25] [26]:
+    // same EC tax rates as above, corrective/credit-memo invoices only. Mirrors
+    // AEAT303Report2014#generateSalesLines ~lines 556-568.
+    fillMemoCorrectiveBoxPair(b, helper, ecTaxes, 25, 26);
   }
 
   List<Integer> vatGeneralBoxes(BigDecimal pct) {
@@ -492,7 +522,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       BigDecimal normRate = rate.setScale(2, java.math.RoundingMode.HALF_UP);
       List<TaxRate> group = split.get(normRate);
       if (group == null || group.isEmpty()) continue;
-      Map<String, BigDecimal> amounts = helper.calculateAmountsMap(group, InvoiceType.ALL);
+      Map<String, BigDecimal> amounts = helper.calculateAmountsMap(group, InvoiceType.ONLY_NORMAL);
       BigDecimal base = amounts.getOrDefault(TAX_BASE_AMOUNT, BigDecimal.ZERO).abs();
       if (base.compareTo(maxBase) > 0) {
         maxBase = base;
@@ -502,12 +532,17 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return dominantRate;
   }
 
+  // NOTE: uses InvoiceType.ONLY_NORMAL (not ALL) — the classic engine (AEAT303Report2014,
+  // every year-override 2015→2026) always computes these base boxes from normal invoices
+  // only. The corrective/credit-memo delta is added separately via fillMemoCorrectiveBoxPair
+  // (boxes 14/15, 25/26, 40/41). Using ALL here double-counts the corrective effect when both
+  // are summed into totals 27/45/46/66/69/71 — see ETP-5393 follow-up fix.
   private void applyPercentageSplit(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       List<TaxRate> rates, Function<BigDecimal, List<Integer>> boxMapper,
       Map<String, List<Integer>> rateToBoxes) {
     for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(rates).entrySet()) {
       BigDecimal pct = e.getKey();
-      Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
+      Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ONLY_NORMAL);
       List<Integer> boxes = boxMapper.apply(pct);
       if (!boxes.isEmpty()) {
         addToBox(b, boxes.get(0), r.get(TAX_BASE_AMOUNT));
@@ -519,53 +554,109 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   private void fillPurchaseBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
-    fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig(VAT_PURCHASE, "Normal_Operations",         PURCHASE, "No", "No",  28, 29), rateToBoxes);
-    fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig(VAT_PURCHASE, "Investment_Goods",           PURCHASE, "No", "No",  30, 31), rateToBoxes);
-    fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig(VAT_PURCHASE, "Import_Goods",               PURCHASE, "No", "No",  32, 33), rateToBoxes);
-    fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig(VAT_PURCHASE, "Import_Investment_Goods",    PURCHASE, "No", "No",  34, 35), rateToBoxes);
-    fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig(VAT_PURCHASE, "Intracommunity_Goods",       PURCHASE, "No", "Yes", 36, 37), rateToBoxes);
-    fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig(VAT_PURCHASE, "Intracommunity_Investments", PURCHASE, "No", "Yes", 38, 39), rateToBoxes);
+    List<TaxRate> rectificacionDeduccionesTaxes = new ArrayList<>();
+    rectificacionDeduccionesTaxes.addAll(fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_PURCHASE, "Normal_Operations",         PURCHASE, "No", "No",  28, 29), rateToBoxes));
+    rectificacionDeduccionesTaxes.addAll(fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_PURCHASE, "Investment_Goods",           PURCHASE, "No", "No",  30, 31), rateToBoxes));
+    rectificacionDeduccionesTaxes.addAll(fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_PURCHASE, "Import_Goods",               PURCHASE, "No", "No",  32, 33), rateToBoxes));
+    rectificacionDeduccionesTaxes.addAll(fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_PURCHASE, "Import_Investment_Goods",    PURCHASE, "No", "No",  34, 35), rateToBoxes));
+    rectificacionDeduccionesTaxes.addAll(fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_PURCHASE, "Intracommunity_Goods",       PURCHASE, "No", "Yes", 36, 37), rateToBoxes));
+    rectificacionDeduccionesTaxes.addAll(fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_PURCHASE, "Intracommunity_Investments", PURCHASE, "No", "Yes", 38, 39), rateToBoxes));
+
+    // ETP-5393 Bug F — Rectificación de deducciones [40] [41]: corrective/credit-memo invoices
+    // over the UNION of every deductible-purchase tax rate resolved above. Mirrors the classic
+    // engine's `rectificacionDeduccionesTaxes` accumulator (AEAT303Report2014#
+    // generatePurchaseLines, ~lines 618-689) — box 40/41 were never populated here before, so
+    // this row always rendered blank in the Go preview.
+    fillMemoCorrectiveBoxPair(b, helper, rectificacionDeduccionesTaxes, 40, 41);
   }
 
-  // taxBox == 0 means base-only (no corresponding tax amount box, e.g. 0% exempt rows)
-  private void fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
+  // taxBox == 0 means base-only (no corresponding tax amount box, e.g. 0% exempt rows).
+  // Returns the resolved TaxRate list (empty when the param/rates don't exist) so callers can
+  // accumulate it into a UNION for the "Modificación"/"Rectificación" corrective box pairs —
+  // see fillMemoCorrectiveBoxPair. Defaults to InvoiceType.ONLY_NORMAL for the same reason as
+  // applyPercentageSplit above — ALL would double-count the corrective delta added there. Groups
+  // with no dedicated correction-pair box (59/60) use the InvoiceType overload below instead.
+  private List<TaxRate> fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport,
       BoxGroupConfig cfg, Map<String, List<Integer>> rateToBoxes) {
+    return fillGroupBoxes(b, helper, dao303, taxReport, cfg, rateToBoxes, InvoiceType.ONLY_NORMAL);
+  }
+
+  // ETP (casillas 59/60 rectificativas) — explicit-InvoiceType overload. Boxes without a
+  // dedicated correction-pair box (unlike 14/15, 25/26, 40/41) must fold corrective/credit-memo
+  // invoices into the SAME single pass rather than adding them via fillMemoCorrectiveBoxPair,
+  // mirroring Classic's AEAT303Report2014#generatePage3 (boxes 59/60/61 all computed with
+  // InvoiceType.ALL in one call, no separate corrective accumulator). Callers that still need the
+  // base/corrective split (sales/purchase group boxes) keep using the ONLY_NORMAL overload above.
+  private List<TaxRate> fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303, TaxReport taxReport,
+      BoxGroupConfig cfg, Map<String, List<Integer>> rateToBoxes, InvoiceType invoiceType) {
     TaxReportParameter param = dao303.getTaxReportParameter(taxReport, cfg.groupKey, cfg.paramKey);
-    if (param == null) return;
+    if (param == null) return Collections.emptyList();
     List<TaxRate> rates =
         dao303.get303Taxes(taxReport.getId(), cfg.taxType, cfg.equivCharge, cfg.intracom, param);
-    if (rates.isEmpty()) return;
-    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ALL);
+    if (rates.isEmpty()) return rates;
+    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, invoiceType);
     addToBox(b, cfg.baseBox, result.get(TAX_BASE_AMOUNT));
     if (cfg.taxBox > 0) addToBox(b, cfg.taxBox, result.get(TAX_AMOUNT));
     List<Integer> boxes = cfg.taxBox > 0
         ? java.util.Arrays.asList(cfg.baseBox, cfg.taxBox)
         : java.util.Arrays.asList(cfg.baseBox);
     for (TaxRate tr : rates) rateToBoxes.put(tr.getId(), boxes);
+    return rates;
+  }
+
+  // ETP-5393 Bug F — shared computation for the three "Modificación"/"Rectificación" base/cuota
+  // box pairs (14/15, 25/26, 40/41): AEAT303Report's classic engine derives each of them from
+  // corrective/credit-memo invoices only (InvoiceType.ONLY_MEMO_AND_CORRECTIVE) over an
+  // already-resolved TaxRate set that Go computes for other boxes anyway — see call sites above
+  // for the exact classic-engine line references this mirrors. A no-op when `rates` is empty
+  // (no corrective activity this period leaves the boxes at their implicit zero).
+  private void fillMemoCorrectiveBoxPair(Map<Integer, BigDecimal> b,
+      AEAT303CalculationsHelper helper, List<TaxRate> rates, int baseBox, int taxBox) {
+    if (rates.isEmpty()) return;
+    Map<String, BigDecimal> result =
+        helper.calculateAmountsMap(rates, InvoiceType.ONLY_MEMO_AND_CORRECTIVE);
+    if (result == null) return;
+    addToBox(b, baseBox, result.get(TAX_BASE_AMOUNT));
+    addToBox(b, taxBox, result.get(TAX_AMOUNT));
   }
 
   private void fillAdditionalInfoBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
     // "Additional_Information" group only exists in monthly reports; quarterly reports use "Difference".
     // "Difference" is present in all reports and carries the same tax rates, so use it universally.
+    //
+    // Boxes 59/60 have no dedicated correction-pair box (unlike 14/15, 25/26, 40/41), so —
+    // mirroring Classic's AEAT303Report2014#generatePage3, which computes them in a single pass
+    // with InvoiceType.ALL — they must use InvoiceType.ALL here too (normal + corrective/
+    // credit-memo, positive + negative) instead of the ONLY_NORMAL default, which silently
+    // dropped every rectificativa/nota-de-crédito intracommunity-sales invoice from these boxes.
+    //
     // Box 59: intra-community deliveries (entregas intracomunitarias exentas)
     fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig("Difference", "IntracommunitySales", "All", "All", "All", 59, 0), rateToBoxes);
+        new BoxGroupConfig("Difference", "IntracommunitySales", "All", "All", "All", 59, 0),
+        rateToBoxes, InvoiceType.ALL);
     // Box 60: exports and other exempt operations with deduction right
     fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
+        new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0),
+        rateToBoxes, InvoiceType.ALL);
   }
 
   // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
   private void computeSummaryBoxes(Map<Integer, BigDecimal> b) {
-    int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167, 170 };
+    // ETP-5393 Bug F — box 26 (cuota, Modificaciones bases y cuotas del recargo de equivalencia)
+    // added: box 15 (mod. régimen general) and 24 (RE 5.20%) were already summed into box 27
+    // even while always zero (boxes 14/25/26 were never computed — see fillMemoCorrectiveBoxPair).
+    // 26 was missing from this list entirely, so once it starts being populated it must roll
+    // into the total exactly like its sibling cuota boxes always have.
+    int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 26, 152, 158, 167, 170 };
     int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
     BigDecimal accrued    = sumBoxes(b, accruedBoxes);
     BigDecimal deductible = sumBoxes(b, deductibleBoxes);
@@ -621,18 +712,8 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return base;
   }
 
-  /** Same org-scoped (falls back to org "0") searchKey lookup {@link #resolveTaxReport} always
-   *  used — extracted so it can be tried without throwing, letting callers fall through to a
-   *  different searchKey on an empty result instead of failing outright. */
-  private TaxReport findTaxReport(String orgId, String searchKey) {
-    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
-    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<TaxReport> list = crit.list();
-    return list.isEmpty() ? null : list.get(0);
-  }
+  // findTaxReport(orgId, searchKey) moved to AbstractFiscalHandler (SonarQube java:S1192 dedupe
+  // — was byte-identical to Fiscal349BoxesHandler's own copy).
 
   // ── Utility ──────────────────────────────────────────────────────
 
@@ -660,38 +741,5 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       map.computeIfAbsent(pct, k -> new ArrayList<>()).add(r);
     }
     return map;
-  }
-
-  private JSONObject buildResponse(Map<Integer, BigDecimal> b,
-      List<Map<String, Object>> sources) throws Exception {
-    JSONObject boxes = new JSONObject();
-    for (Map.Entry<Integer, BigDecimal> e : b.entrySet()) {
-      boxes.put(String.valueOf(e.getKey()), e.getValue().toString());
-    }
-    BigDecimal accrued    = b.getOrDefault(27, BigDecimal.ZERO);
-    BigDecimal deductible = b.getOrDefault(45, BigDecimal.ZERO);
-    BigDecimal result     = b.getOrDefault(46, BigDecimal.ZERO);
-    JSONObject summary = new JSONObject();
-    summary.put("accrued",    accrued.toString());
-    summary.put("deductible", deductible.toString());
-    summary.put("result",     result.toString());
-    JSONArray sourcesArr = new JSONArray();
-    for (Map<String, Object> row : sources) {
-      JSONObject s = new JSONObject();
-      for (Map.Entry<String, Object> e : row.entrySet()) {
-        Object v = e.getValue();
-        if (v instanceof BigDecimal) {
-          s.put(e.getKey(), v.toString());
-        } else {
-          s.put(e.getKey(), v != null ? v.toString() : "");
-        }
-      }
-      sourcesArr.put(s);
-    }
-    JSONObject root = new JSONObject();
-    root.put(BOXES,     boxes);
-    root.put("summary", summary);
-    root.put("sources", sourcesArr);
-    return root;
   }
 }

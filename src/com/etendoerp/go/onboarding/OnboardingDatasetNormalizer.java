@@ -49,6 +49,8 @@ public class OnboardingDatasetNormalizer {
 
   private static final String CLASS_LOADER_REQUIRED = "classLoader is required";
   private static final String AD_ORG_ID_COLUMN = "AD_ORG_ID";
+  private static final String PROFILE_REQUIRED = "profile is required";
+  private static final String SAMPLE_DATA_DIRECTORY_REQUIRED = "sampleDataDirectory is required";
 
   /**
    * Matches a plain, ddlutils-shaped timestamp literal ("yyyy-MM-dd HH:mm:ss[.f...]") as bundled
@@ -63,6 +65,7 @@ public class OnboardingDatasetNormalizer {
   private final SourceFileProvider sourceFileProvider;
   private final EntityResolver entityResolver;
   private final ReferenceIdResolver referenceIdResolver;
+  private final OnboardingDatasetProfile profile;
   /**
    * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
@@ -93,13 +96,24 @@ public class OnboardingDatasetNormalizer {
 
   OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver) {
     this(OnboardingSourceFiles.directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
-        "sampleDataDirectory is required")), entityResolver);
+        SAMPLE_DATA_DIRECTORY_REQUIRED)), entityResolver);
   }
 
   OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver,
       ReferenceIdResolver referenceIdResolver) {
     this(OnboardingSourceFiles.directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
-        "sampleDataDirectory is required")), entityResolver, referenceIdResolver);
+        SAMPLE_DATA_DIRECTORY_REQUIRED)), entityResolver, referenceIdResolver);
+  }
+
+  /**
+   * Test seam for the sample-data pass (ETP-5426): reads the given directory with the given profile.
+   */
+  OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver,
+      ReferenceIdResolver referenceIdResolver, OnboardingDatasetProfile profile) {
+    this(OnboardingSourceFiles.directorySourceFileProvider(
+        Objects.requireNonNull(sampleDataDirectory, SAMPLE_DATA_DIRECTORY_REQUIRED),
+        Objects.requireNonNull(profile, PROFILE_REQUIRED)::includesTable),
+        entityResolver, referenceIdResolver, profile);
   }
 
   private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
@@ -109,11 +123,33 @@ public class OnboardingDatasetNormalizer {
 
   private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
       EntityResolver entityResolver, ReferenceIdResolver referenceIdResolver) {
+    this(sourceFileProvider, entityResolver, referenceIdResolver, OnboardingDatasetProfile.ONBOARDING);
+  }
+
+  private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
+      EntityResolver entityResolver, ReferenceIdResolver referenceIdResolver,
+      OnboardingDatasetProfile profile) {
     this.sourceFileProvider = Objects.requireNonNull(sourceFileProvider,
         "sourceFileProvider is required");
     this.entityResolver = Objects.requireNonNull(entityResolver, "entityResolver is required");
     this.referenceIdResolver = Objects.requireNonNull(referenceIdResolver,
         "referenceIdResolver is required");
+    this.profile = Objects.requireNonNull(profile, PROFILE_REQUIRED);
+  }
+
+  /**
+   * ETP-5426 — creates the normalizer for the optional sample-data pass, reading the same packaged
+   * GOClient sourcedata as the base pass. See {@link OnboardingSampleDataDefinition}.
+   *
+   * @return a normalizer that builds only the sample-data rows
+   */
+  public static OnboardingDatasetNormalizer forSampleData() {
+    OnboardingDatasetProfile sampleData = OnboardingDatasetProfile.SAMPLE_DATA;
+    return new OnboardingDatasetNormalizer(
+        OnboardingSourceFiles.classpathSourceFileProvider(OnboardingSourceFiles.defaultClassLoader(),
+            sampleData::includesTable),
+        OnboardingDefaultResolvers.modelProviderEntityResolver(),
+        OnboardingDefaultResolvers.dalReferenceIdResolver(), sampleData);
   }
 
   /**
@@ -139,7 +175,7 @@ public class OnboardingDatasetNormalizer {
     output.appendChild(root);
 
     // Per-build state so repeated calls never leak excluded ids into one another.
-    RowExclusionFilter rowExclusionFilter = new RowExclusionFilter();
+    RowExclusionFilter rowExclusionFilter = new RowExclusionFilter(profile);
     for (SourceFile sourceFile : sourceFileProvider.listIncludedSourceFiles()) {
       appendEntities(sourceFile, builder, output, root, targetOrganizationId, rowExclusionFilter);
     }
@@ -187,6 +223,14 @@ public class OnboardingDatasetNormalizer {
       }
     }
 
+    for (Map.Entry<String, String> added : profile.addedColumns(entity.getTableName(), rawColumns)
+        .entrySet()) {
+      Property property = entity.getPropertyByColumnName(added.getKey(), false);
+      if (property != null) {
+        appendPropertyElement(output, entityElement, property, added.getValue());
+      }
+    }
+
     if (rowState.rowId == null) {
       throw new OBException("Missing ID for entity " + entity.getName());
     }
@@ -220,7 +264,9 @@ public class OnboardingDatasetNormalizer {
       return;
     }
     if (!property.isOneToMany()) {
-      appendPropertyElement(output, entityElement, property, rawValue);
+      // The sourcedata tag, not Property#getColumnName(): the tag is always upper-cased, while the
+      // model keeps the AD column's own casing ("Posted").
+      appendPropertyElement(output, entityElement, property, profile.rewriteValue(columnName, rawValue));
     }
   }
 
@@ -249,7 +295,7 @@ public class OnboardingDatasetNormalizer {
     return rawValue == null
         || rawValue.isEmpty()
         || "AD_CLIENT_ID".equals(columnName)
-        || OnboardingDatasetDefinition.isStrippedColumn(entity.getTableName(), columnName);
+        || profile.isStrippedColumn(entity.getTableName(), columnName);
   }
 
   private void appendPropertyElement(Document output, Element entityElement, Property property,
@@ -304,9 +350,10 @@ public class OnboardingDatasetNormalizer {
       return;
     }
 
-    String resolvedOrganizationId = "0".equals(sourceOrganizationId)
-        ? "0"
-        : targetOrganizationId;
+    String resolvedOrganizationId =
+        "0".equals(sourceOrganizationId) && profile.keepsClientLevelOrganization()
+            ? "0"
+            : targetOrganizationId;
     if (resolvedOrganizationId == null || resolvedOrganizationId.isBlank()) {
       return;
     }
@@ -384,15 +431,27 @@ public class OnboardingDatasetNormalizer {
    * accounting schema and has no valid combinations — a dangling chart. Importing it would create
    * an orphan chart of accounts in every onboarded tenant. This filter ignores it at import time
    * <em>without modifying the source dataset</em>: it drops the org-specific element row, then
-   * cascades the exclusion to that element's {@code C_ELEMENTVALUE} rows and their
-   * {@code C_ELEMENTVALUE_TRL} translations. The cascade relies on the alphabetical source-file
-   * order ({@code C_ELEMENT} → {@code C_ELEMENTVALUE} → {@code C_ELEMENTVALUE_TRL}), which the
+   * cascades the exclusion to that element's {@code C_ELEMENTVALUE} rows, their
+   * {@code C_ELEMENTVALUE_OPERAND} formula rows and their {@code C_ELEMENTVALUE_TRL} translations.
+   * The cascade relies on the alphabetical source-file order ({@code C_ELEMENT} →
+   * {@code C_ELEMENTVALUE} → {@code C_ELEMENTVALUE_OPERAND} → {@code C_ELEMENTVALUE_TRL}), which the
    * source providers guarantee.
+   *
+   * <p>The {@code C_ELEMENTVALUE_OPERAND} arm is not optional. GOClient ships 78 operand rows split
+   * exactly 39/39 between the two trees, so importing the table without this cascade sends the
+   * excluded tree's 39 rows into the XML pointing at the 38 element values this filter just dropped,
+   * and {@code DataImportService} aborts the whole onboarding with "Referenced object
+   * FinancialMgmtElementValue ... not present in the xml or in the database". Both foreign keys are
+   * checked, not just the owner: an operand is "P.G.D = P.G.C + P.G.19", so it is only meaningful
+   * when the account it belongs to AND the account it references both survive the filter.
    */
   private static final class AccountElementTreeFilter {
     private static final String ELEMENT_TABLE = "C_ELEMENT";
     private static final String ELEMENT_VALUE_TABLE = "C_ELEMENTVALUE";
+    private static final String ELEMENT_VALUE_OPERAND_TABLE = "C_ELEMENTVALUE_OPERAND";
     private static final String ELEMENT_VALUE_TRL_TABLE = "C_ELEMENTVALUE_TRL";
+    private static final String ELEMENT_VALUE_ID_COLUMN = "C_ELEMENTVALUE_ID";
+    private static final String ACCOUNT_ID_COLUMN = "ACCOUNT_ID";
     private static final String CLIENT_LEVEL_ORG = "0";
 
     private final Set<String> excludedElementIds = new HashSet<>();
@@ -407,8 +466,10 @@ public class OnboardingDatasetNormalizer {
           return excludeOrgSpecificElement(rawColumns);
         case ELEMENT_VALUE_TABLE:
           return excludeValueOfExcludedElement(rawColumns);
+        case ELEMENT_VALUE_OPERAND_TABLE:
+          return excludeOperandOfExcludedValue(rawColumns);
         case ELEMENT_VALUE_TRL_TABLE:
-          return excludedElementValueIds.contains(rawColumns.get("C_ELEMENTVALUE_ID"));
+          return excludedElementValueIds.contains(rawColumns.get(ELEMENT_VALUE_ID_COLUMN));
         default:
           return false;
       }
@@ -431,11 +492,21 @@ public class OnboardingDatasetNormalizer {
       if (parentElementId == null || !excludedElementIds.contains(parentElementId)) {
         return false;
       }
-      String valueId = rawColumns.get("C_ELEMENTVALUE_ID");
+      String valueId = rawColumns.get(ELEMENT_VALUE_ID_COLUMN);
       if (valueId != null) {
         excludedElementValueIds.add(valueId);
       }
       return true;
+    }
+
+    /**
+     * Drops a formula row whose owner account or referenced account belongs to the excluded tree.
+     * Nothing is recorded in {@code excludedElementValueIds}: {@code C_ELEMENTVALUE_OPERAND} is a
+     * leaf of the cascade, so the exclusion stops here.
+     */
+    private boolean excludeOperandOfExcludedValue(Map<String, String> rawColumns) {
+      return excludedElementValueIds.contains(rawColumns.get(ELEMENT_VALUE_ID_COLUMN))
+          || excludedElementValueIds.contains(rawColumns.get(ACCOUNT_ID_COLUMN));
     }
   }
 
@@ -445,19 +516,112 @@ public class OnboardingDatasetNormalizer {
    * {@link #buildDatasetXml(String)} call and shared across all source files of that build.
    */
   private static final class RowExclusionFilter {
+    private final OnboardingDatasetProfile profile;
     private final AccountElementTreeFilter accountElementTree = new AccountElementTreeFilter();
     private final DanglingCalendarFilter danglingCalendar = new DanglingCalendarFilter();
     private final DemoMasterDataFilter demoMasterData = new DemoMasterDataFilter();
+    private final TableCounterSequenceFilter tableCounterSequence = new TableCounterSequenceFilter();
+
+    private RowExclusionFilter(OnboardingDatasetProfile profile) {
+      this.profile = profile;
+    }
 
     private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (profile == OnboardingDatasetProfile.SAMPLE_DATA) {
+        return isExcludedFromSampleData(tableName, rawColumns);
+      }
       // Sub-filters still operate on disjoint table sets, so a row excluded by one is never
       // relevant to another and short-circuit evaluation keeps the unrelated filters' state
       // untouched. Verified when DemoMasterDataFilter was added: its nine tables (financial
       // accounts, products, warehouses, locators, product categories and their four child tables)
       // overlap neither the account-element tables (C_ELEMENT*) nor the fiscal calendar ones.
+      // TableCounterSequenceFilter (ETP-5364) owns AD_SEQUENCE alone, which none of the other
+      // three touches.
       return accountElementTree.isExcludedRow(tableName, rawColumns)
           || danglingCalendar.isExcludedRow(tableName, rawColumns)
-          || demoMasterData.isExcludedRow(tableName, rawColumns);
+          || demoMasterData.isExcludedRow(tableName, rawColumns)
+          || tableCounterSequence.isExcludedRow(tableName, rawColumns);
+    }
+
+    /**
+     * ETP-5426 — the sample-data pass is the mirror image of the base pass's demo master-data
+     * filter: in the tables that filter covers, it keeps ONLY the rows the base pass dropped (the
+     * rest already reached the tenant). Transactional tables are taken whole. The base pass's
+     * other filters own tables this pass never opens.
+     */
+    private boolean isExcludedFromSampleData(String tableName, Map<String, String> rawColumns) {
+      return OnboardingSampleDataDefinition.isDemoMasterDataTable(tableName)
+          && !demoMasterData.isExcludedRow(tableName, rawColumns);
+    }
+  }
+
+  /**
+   * ETP-5364 — skips the {@code DocumentNo_<table>} counters that Openbravo's
+   * {@code InitialClientSetup} has ALREADY created for the new client by the time this dataset is
+   * imported, so the tenant ends up with one of each instead of two.
+   *
+   * <p><b>The bug this closes.</b> Onboarding creates the client with {@code InitialClientSetup}
+   * (which writes 97 {@code DocumentNo_<table>} rows, {@code CREATEDBY='0'}, no mask) and then
+   * imports this dataset ~45s later, which re-inserted 96 of those same names as fresh rows
+   * ({@code CREATEDBY} = the tenant admin, mask {@code #######}). Measured fleet-wide before the
+   * fix: <b>9888 surplus {@code AD_Sequence} rows across 103 of 125 clients</b>, every duplicated
+   * name a {@code DocumentNo_*} one; not a single named document series was affected.
+   *
+   * <p><b>Why it matters, given that numbering appeared to work.</b> {@code ad_sequence_doc}
+   * increments EVERY row matching the name ({@code WHERE Name = … AND ad_client_id = …} — no org,
+   * no id) and then reads one back with a non-{@code STRICT} {@code SELECT INTO}, so PL/pgSQL takes
+   * an arbitrary row rather than raising. While both copies hold the same value either answer is
+   * correct — <b>140 pairs had already diverged</b>, and past that point the value actually applied
+   * is non-deterministic, with PostgreSQL free to relocate an updated row.
+   *
+   * <p><b>Not blamed on {@code generateOnboardingSequences}</b>, as earlier notes had it. Etendo's
+   * classic <i>Create Sequences</i> ({@code SequencesGenerator}) names its rows
+   * {@code <Table>-<Column>} and sets {@code AD_Column_ID}; only 206 such rows exist fleet-wide, so
+   * it produced none of the duplicates. Every duplicate carries {@code AD_Column_ID IS NULL}.
+   *
+   * <p><b>Why a filter and not a deletion from the source.</b> Same reason as
+   * {@link DemoMasterDataFilter} — see {@link OnboardingDemoMasterData} for the full account. The
+   * other consumer, {@code install.source} → {@code import.sample.data}, seeds the GOClient sample
+   * client from these files WHOLESALE: it never runs {@code InitialClientSetup}, so for that
+   * consumer the XML is the only source of those counters and deleting them would leave the sample
+   * client unable to number a document at all. (The deletion is also tempting because it produces
+   * no dangling foreign key — {@code OnboardingDatasetReferentialIntegrityTest} stays green — so
+   * the breakage would surface only when someone created a document in GOClient.)
+   *
+   * <p><b>Stateless and keyed on the name prefix</b>, like {@link DemoMasterDataFilter} and unlike
+   * the two order-dependent filters: the property that makes a row droppable is that the client
+   * setup creates it, and that is exactly what the {@code DocumentNo_<table>} name encodes, for
+   * whatever set of tables the running Etendo has.
+   *
+   * <p><b>{@link #GO_ONLY_COUNTERS} is the exception list and the thing to maintain.</b> Two names
+   * in this dataset are NOT created by {@code InitialClientSetup} — verified on the instance:
+   * exactly one row per client, in all 105 clients that have them, versus two for every other
+   * {@code DocumentNo_*} name. Dropping those would remove a counter the tenant has no other source
+   * for. A future {@code DocumentNo_*} row added to the dataset for a table the client setup does
+   * not cover must be added here, or it will be silently filtered out.
+   */
+  private static final class TableCounterSequenceFilter {
+    private static final String SEQUENCE_TABLE = "AD_SEQUENCE";
+    private static final String NAME_COLUMN = "NAME";
+    /** The name shape {@code InitialClientSetup} gives a per-table counter. */
+    private static final String TABLE_COUNTER_PREFIX = "DocumentNo_";
+
+    /**
+     * {@code DocumentNo_*} names this dataset must still ship, because the client setup does not
+     * create them. See the class javadoc for how that was established.
+     */
+    private static final Set<String> GO_ONLY_COUNTERS = Set.of(
+        "DocumentNo_C_ExtBP_Config_Filter_Opt",
+        "DocumentNo_C_ExtBP_Config_Prop_Opt");
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null || !SEQUENCE_TABLE.equalsIgnoreCase(tableName)) {
+        return false;
+      }
+      String name = rawColumns.get(NAME_COLUMN);
+      return name != null
+          && name.startsWith(TABLE_COUNTER_PREFIX)
+          && !GO_ONLY_COUNTERS.contains(name);
     }
   }
 

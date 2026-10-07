@@ -177,7 +177,8 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
       ShipmentInOut returnReceipt, BigDecimal returnQty, User currentUser, long lineNo) {
     ShipmentInOutLine returnLine = NeoReturnReceiptService.createReturnLineShell(
         returnReceipt, originalLine, lineNo);
-    returnLine.setMovementQuantity(returnQty.negate());
+    // ETP-5313: same stored-negative rule as every other return write path.
+    returnLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(returnQty));
     returnLine.setCreatedBy(currentUser);
     returnLine.setUpdatedBy(currentUser);
     returnLine.setCreationDate(new Date());

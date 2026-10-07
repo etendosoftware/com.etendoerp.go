@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -120,6 +121,15 @@ public class NeoDefaultsCascadeHelper {
         log.info("[NEO-CREATE] Callout cascade derived {} field updates",
             cascadeResult.updatedFieldCount());
       }
+      // IMP-45: hand the divergences to the context so the caller can be told. The REST path
+      // never reads it — there the protected value came from a form a person filled in, so there
+      // is nothing to warn about. The MCP path is the one that invites an agent to re-send what
+      // etendo_defaults handed it, which is how a generic default gets pinned over the one the
+      // business partner actually implies.
+      if (ctx != null && cascadeResult != null
+          && cascadeResult.getSupersededDefaults().length() > 0) {
+        ctx.setSupersededDefaults(cascadeResult.getSupersededDefaults());
+      }
     } catch (Exception e) {
       log.warn("[NEO-CREATE] Callout cascade failed (non-fatal): {}", e.getMessage());
     }
@@ -142,6 +152,40 @@ public class NeoDefaultsCascadeHelper {
 
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields, Set<String> protectedFields) {
+    return executeCalloutCascade(ctx, adTab, defaults, seqFields, protectedFields,
+        java.util.Collections.emptySet());
+  }
+
+  /**
+   * Runs the cascade with the two kinds of "hands off" declaration kept apart (ETP-5350).
+   *
+   * <p>{@code protectedFields} is a snapshot of the keys the CALLER submitted, so "protected"
+   * there can only ever mean "do not overwrite the value that is already here". A field absent
+   * from the body has nothing to keep, and {@link #shouldKeepExistingValue} correctly declines
+   * to protect it.
+   *
+   * <p>{@code suppressedFields} comes from {@code NeoHandler#protectedCreateCalloutFields},
+   * whose contract is strictly stronger — the cascade "must not <b>populate</b> or overwrite"
+   * them — and is therefore about fields that are typically NOT in the body at all. Folding the
+   * two sets into one gave the stronger declaration the weaker semantics and silently made it a
+   * no-op: {@code ContactHandler} declares {@code username} precisely so the core callout
+   * {@code SL_User_Name} cannot derive one from the contact's name, yet every contact created
+   * through NEO got one anyway, and two contacts sharing a person name collided on
+   * {@code AD_USER_UN_USERNAME} ("Ya existe un usuario que tiene el mismo Nombre usuario").
+   * Two different business partners each having a "Juan Perez" is ordinary data, so the
+   * constraint was never the thing to satisfy — the username should not have existed.
+   *
+   * @param ctx the NEO request context used to resolve callouts
+   * @param adTab the tab whose columns may trigger dependent callouts
+   * @param defaults the current defaults payload, updated in place during the cascade
+   * @param seqFields fields that should be skipped because they are sequence previews
+   * @param protectedFields keys the caller submitted, whose existing value must not be overwritten
+   * @param suppressedFields DAL property names the cascade may neither populate nor overwrite
+   * @return the aggregated cascade result with merged updates, combos, and messages
+   */
+  public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
+      JSONObject defaults, Set<String> seqFields, Set<String> protectedFields,
+      Set<String> suppressedFields) {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
     try {
       List<String> fieldsWithCallouts = collectFieldsWithCallouts(defaults, seqFields, adTab);
@@ -153,33 +197,146 @@ public class NeoDefaultsCascadeHelper {
           fieldsWithCallouts.size(), fieldsWithCallouts);
 
       JSONObject formState = new JSONObject(defaults.toString());
-      Set<String> pendingFields = new LinkedHashSet<>(fieldsWithCallouts);
-      int depth = 0;
-
-      while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
-        depth++;
-        Set<String> nextPending = new LinkedHashSet<>();
-        CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults, seqFields,
-            result, nextPending, protectedFields);
-        for (String fieldName : pendingFields) {
-          Object value = formState.opt(fieldName);
-          if (value != null && !JSONObject.NULL.equals(value)) {
-            processCalloutForField(ctx, adTab, fieldName, value, cCtx);
-          }
-        }
-        pendingFields = nextPending;
-      }
-
-      result.chainDepth = depth;
-      result.truncated = depth >= MAX_CALLOUT_CHAIN_DEPTH && !pendingFields.isEmpty();
-      if (result.truncated) {
-        log.warn("[NEO-DEFAULTS] Callout cascade reached max depth {} with pending fields: {}",
-            MAX_CALLOUT_CHAIN_DEPTH, pendingFields);
-      }
+      CascadeTargets targets = new CascadeTargets(formState, defaults, seqFields,
+          protectedFields, suppressedFields);
+      runCascadeLoop(ctx, adTab, targets, new LinkedHashSet<>(fieldsWithCallouts), result);
     } catch (Exception e) {
       log.error("[NEO-DEFAULTS] Error in callout cascade: {}", e.getMessage(), e);
     }
     return result;
+  }
+
+  /**
+   * Re-fires the callouts of a chosen set of trigger fields, and whatever they cascade into, as if
+   * the user had just typed those fields in the form (ETP-5528).
+   *
+   * <p><b>Why a separate entry point.</b> {@link #executeCalloutCascade} fires the callout of
+   * EVERY field present in the payload, in AD sequence order. That is right for a first pass over a
+   * fresh create body, but wrong once part of the body has been resolved by something the cascade
+   * never saw. The MCP write path is the case in point: {@code McpLinePriceInjector} resolves the
+   * line's prices from the parent document's price list AFTER the create cascade ran, so the
+   * {@code SL_Order_Amt} run on {@code discount} inside that cascade computed the discounted price
+   * from a price of 0 and was then overwritten. Re-running the whole cascade would fire
+   * {@code SL_Order_Product} again and reset the prices; re-running only {@code discount} is exactly
+   * what the React form does when the user types a discount (it calls
+   * {@link NeoCalloutService#executeCallout} for that field), so both paths end up running the same
+   * core callout on the same inputs.
+   *
+   * <p>{@code formState} and {@code body} are deliberately separate:
+   * <ul>
+   *   <li>{@code formState} is what the callout READS — the full picture of the record. On a create
+   *       it is a copy of the body; on a sparse update it is the persisted record overlaid with the
+   *       patch, because the callout needs price list, quantity and tax even when the caller only
+   *       sent {@code discount}.</li>
+   *   <li>{@code body} is what gets WRITTEN — callout updates land here for every field not in
+   *       {@code protectedFields}, the same merge rules the create cascade applies.</li>
+   * </ul>
+   *
+   * <p>Total: never throws. A trigger field with no value in {@code formState}, or no callout on the
+   * tab, is skipped; a failing callout is logged and leaves {@code body} as it was.
+   *
+   * @param ctx             the NEO request context the callouts run under
+   * @param adTab           the tab whose callouts are resolved
+   * @param formState       the values the callouts read; mutated with each callout's updates
+   * @param body            the write payload the updates are merged into; mutated in place
+   * @param triggerFields   DAL property names whose callouts start the chain
+   * @param protectedFields keys the caller submitted, whose value in {@code body} must not be
+   *                        overwritten by a callout
+   * @return the aggregated cascade result (updates, combos, messages)
+   */
+  public static NeoDefaultsService.CalloutCascadeResult executeCalloutsForTriggerFields(
+      NeoContext ctx, Tab adTab, JSONObject formState, JSONObject body,
+      Collection<String> triggerFields, Set<String> protectedFields) {
+    return executeCalloutsForTriggerFields(ctx, adTab, formState, body, triggerFields,
+        protectedFields, java.util.Collections.<String>emptySet());
+  }
+
+  /**
+   * {@link #executeCalloutsForTriggerFields(NeoContext, Tab, JSONObject, JSONObject, Collection, Set)}
+   * with a set of fields the re-fired chain may neither populate nor overwrite — the same
+   * "suppressed" semantics {@link #executeCalloutCascade} gives
+   * {@code NeoHandler#protectedCreateCalloutFields} (ETP-5350), and for the same reason:
+   * {@code protectedFields} only keeps a value already in {@code body}, so it cannot stop a callout
+   * from writing a field the body does not carry. A suppressed field is also left untouched in
+   * {@code formState}, so later callouts of the chain keep reading its prior value.
+   *
+   * <p>Generic: the caller names the fields; nothing here knows any entity.
+   *
+   * @param ctx              the NEO request context the callouts run under
+   * @param adTab            the tab whose callouts are resolved
+   * @param formState        the values the callouts read; mutated with each callout's updates
+   * @param body             the write payload the updates are merged into; mutated in place
+   * @param triggerFields    DAL property names whose callouts start the chain
+   * @param protectedFields  keys the caller submitted, whose value in {@code body} must not be
+   *                         overwritten by a callout
+   * @param suppressedFields DAL property names no callout of the chain may write, present in
+   *                         {@code body} or not; {@code null} means none
+   * @return the aggregated cascade result (updates, combos, messages)
+   */
+  public static NeoDefaultsService.CalloutCascadeResult executeCalloutsForTriggerFields(
+      NeoContext ctx, Tab adTab, JSONObject formState, JSONObject body,
+      Collection<String> triggerFields, Set<String> protectedFields,
+      Set<String> suppressedFields) {
+    NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
+    if (ctx == null || adTab == null || formState == null || body == null
+        || triggerFields == null || triggerFields.isEmpty()) {
+      return result;
+    }
+    try {
+      Set<String> pendingFields = new LinkedHashSet<>();
+      for (String fieldName : triggerFields) {
+        Object value = formState.opt(fieldName);
+        if (value != null && !JSONObject.NULL.equals(value)
+            && NeoCalloutService.resolveCallout(adTab, fieldName) != null) {
+          pendingFields.add(fieldName);
+        }
+      }
+      if (pendingFields.isEmpty()) {
+        return result;
+      }
+      log.info("[NEO-DEFAULTS] Re-firing callouts for trigger fields: {}", pendingFields);
+      CascadeTargets targets = new CascadeTargets(formState, body,
+          java.util.Collections.<String>emptySet(), protectedFields,
+          suppressedFields != null ? suppressedFields : java.util.Collections.<String>emptySet());
+      runCascadeLoop(ctx, adTab, targets, pendingFields, result);
+    } catch (Exception e) {
+      log.warn("[NEO-DEFAULTS] Trigger-field callout re-fire failed (non-fatal): {}",
+          e.getMessage(), e);
+    }
+    return result;
+  }
+
+  /**
+   * The breadth-first callout loop shared by {@link #executeCalloutCascade} and
+   * {@link #executeCalloutsForTriggerFields}: runs the callouts of {@code pendingFields}, queues
+   * every field their updates changed that has a callout of its own, and repeats until nothing is
+   * pending or {@link #MAX_CALLOUT_CHAIN_DEPTH} is reached.
+   */
+  private static void runCascadeLoop(NeoContext ctx, Tab adTab, CascadeTargets targets,
+      Set<String> pendingFields, NeoDefaultsService.CalloutCascadeResult result) {
+    int depth = 0;
+    Set<String> pending = pendingFields;
+    while (!pending.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
+      depth++;
+      Set<String> nextPending = new LinkedHashSet<>();
+      CalloutFieldContext cCtx = new CalloutFieldContext(targets.formState, targets.defaults,
+          targets.seqFields, result, nextPending, targets.protectedFields,
+          targets.suppressedFields);
+      for (String fieldName : pending) {
+        Object value = targets.formState.opt(fieldName);
+        if (value != null && !JSONObject.NULL.equals(value)) {
+          processCalloutForField(ctx, adTab, fieldName, value, cCtx);
+        }
+      }
+      pending = nextPending;
+    }
+
+    result.chainDepth = depth;
+    result.truncated = depth >= MAX_CALLOUT_CHAIN_DEPTH && !pending.isEmpty();
+    if (result.truncated) {
+      log.warn("[NEO-DEFAULTS] Callout cascade reached max depth {} with pending fields: {}",
+          MAX_CALLOUT_CHAIN_DEPTH, pending);
+    }
   }
 
   static NeoDefaultsService.CalloutCascadeResult cascadeInteractiveCallout(
@@ -291,8 +448,13 @@ public class NeoDefaultsCascadeHelper {
     // Reuse it as protectedFields so a re-cascaded callout from a different field cannot
     // overwrite the value the user is actively editing (mirrors the create-path fix where
     // protectedFields comes from the submitted body's keys).
+    // No suppressed set on this path: NeoHandler#protectedCreateCalloutFields is declared for
+    // the CREATE request context, and this is the interactive callout of a record being edited.
+    // Explicitly typed - with two Set<String> parameters in a row, an untyped emptySet() infers
+    // Set<Object> and the overload no longer resolves.
     CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults,
-        java.util.Collections.emptySet(), result, nextPending, skipFields);
+        java.util.Collections.<String>emptySet(), result, nextPending, skipFields,
+        java.util.Collections.<String>emptySet());
 
     for (String fieldName : pendingFields) {
       boolean shouldSkip = skipFields != null && skipFields.contains(fieldName);
@@ -395,8 +557,9 @@ public class NeoDefaultsCascadeHelper {
       }
 
       mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
-          adTab, cCtx.result, cCtx.nextPending, cCtx.protectedFields);
-      mergeCalloutCombos(calloutBody, cCtx.formState, cCtx.defaults, cCtx.result, cCtx.protectedFields);
+          adTab, cCtx.result, cCtx.nextPending, cCtx.protectedFields, cCtx.suppressedFields);
+      mergeCalloutCombos(calloutBody, cCtx.formState, cCtx.defaults, cCtx.result,
+          cCtx.protectedFields, cCtx.suppressedFields);
 
       JSONArray messages = calloutBody.optJSONArray("messages");
       if (messages != null) {
@@ -426,7 +589,7 @@ public class NeoDefaultsCascadeHelper {
   private static void mergeCalloutUpdates(JSONObject calloutBody, JSONObject formState,
       JSONObject defaults, Set<String> seqFields, Tab adTab,
       NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending,
-      Set<String> protectedFields) throws Exception {
+      Set<String> protectedFields, Set<String> suppressedFields) throws Exception {
     JSONObject updates = calloutBody.optJSONObject(KEY_UPDATES);
     if (updates == null) {
       return;
@@ -435,7 +598,7 @@ public class NeoDefaultsCascadeHelper {
     // `result` is serialized back to the browser (NeoCalloutEndpoint#applyCascade) and
     // applied to the form as-is, so a protected field's stale/overwritten value must never
     // reach it, even though the create path never surfaces `result` to a client.
-    result.mergeUpdates(filterProtectedFields(updates, defaults, protectedFields));
+    result.mergeUpdates(filterProtectedFields(updates, defaults, protectedFields, suppressedFields));
     Iterator<String> updateKeys = updates.keys();
     while (updateKeys.hasNext()) {
       String updatedField = updateKeys.next();
@@ -443,7 +606,13 @@ public class NeoDefaultsCascadeHelper {
       if (updateObj == null || !updateObj.has(FIELD_VALUE)) {
         continue;
       }
-      if (shouldKeepExistingValue(defaults, updatedField, protectedFields)) {
+      if (shouldKeepExistingValue(defaults, updatedField, protectedFields, suppressedFields)) {
+        // IMP-45: the caller's value wins, as it always has — but this is the exact point where a
+        // callout that knows the record's real context (the business partner's payment terms, for
+        // one) is told to stand down in favour of a value the caller may simply have echoed back
+        // from etendo_defaults. Recorded so the divergence can be reported; nothing here changes what
+        // gets persisted.
+        recordSupersededDefault(result, defaults, updatedField, updateObj);
         continue;
       }
       Object newValue = updateObj.get(FIELD_VALUE);
@@ -499,18 +668,19 @@ public class NeoDefaultsCascadeHelper {
 
   private static void mergeCalloutCombos(JSONObject calloutBody, JSONObject formState,
       JSONObject defaults, NeoDefaultsService.CalloutCascadeResult result,
-      Set<String> protectedFields) throws Exception {
+      Set<String> protectedFields, Set<String> suppressedFields) throws Exception {
     JSONObject combos = calloutBody.optJSONObject(KEY_COMBOS);
     if (combos == null) {
       return;
     }
-    result.mergeCombos(filterProtectedFields(combos, defaults, protectedFields));
+    result.mergeCombos(filterProtectedFields(combos, defaults, protectedFields, suppressedFields));
     Iterator<String> comboKeys = combos.keys();
     while (comboKeys.hasNext()) {
       String comboField = comboKeys.next();
       JSONObject comboObj = combos.optJSONObject(comboField);
       boolean hasSelected = comboObj != null && comboObj.has(KEY_SELECTED);
-      boolean isProtected = hasSelected && shouldKeepExistingValue(defaults, comboField, protectedFields);
+      boolean isProtected = hasSelected
+          && shouldKeepExistingValue(defaults, comboField, protectedFields, suppressedFields);
       if (isProtected) {
         log.debug("[NEO-DEFAULTS] Skipping combo update for protected field '{}'", comboField);
       }
@@ -536,6 +706,29 @@ public class NeoDefaultsCascadeHelper {
     return !oldValue.toString().equals(newValue.toString());
   }
 
+  /**
+   * The values {@link #runCascadeLoop} threads unchanged through every depth of the loop: what the
+   * callouts read ({@code formState}), where their updates land ({@code defaults}), and the three
+   * field sets that restrict those writes. Immutable references; the JSON objects themselves are
+   * mutated by the loop.
+   */
+  private static final class CascadeTargets {
+    final JSONObject formState;
+    final JSONObject defaults;
+    final Set<String> seqFields;
+    final Set<String> protectedFields;
+    final Set<String> suppressedFields;
+
+    CascadeTargets(JSONObject formState, JSONObject defaults, Set<String> seqFields,
+        Set<String> protectedFields, Set<String> suppressedFields) {
+      this.formState = formState;
+      this.defaults = defaults;
+      this.seqFields = seqFields;
+      this.protectedFields = protectedFields;
+      this.suppressedFields = suppressedFields;
+    }
+  }
+
   private static class CalloutFieldContext {
     final JSONObject formState;
     final JSONObject defaults;
@@ -543,16 +736,19 @@ public class NeoDefaultsCascadeHelper {
     final NeoDefaultsService.CalloutCascadeResult result;
     final Set<String> nextPending;
     final Set<String> protectedFields;
+    final Set<String> suppressedFields;
 
     CalloutFieldContext(JSONObject formState, JSONObject defaults, Set<String> seqFields,
         NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending,
-        Set<String> protectedFields) {
+        Set<String> protectedFields, Set<String> suppressedFields) {
       this.formState = formState;
       this.defaults = defaults;
       this.seqFields = seqFields;
       this.result = result;
       this.nextPending = nextPending;
       this.protectedFields = protectedFields != null ? protectedFields
+          : java.util.Collections.emptySet();
+      this.suppressedFields = suppressedFields != null ? suppressedFields
           : java.util.Collections.emptySet();
     }
   }
@@ -566,15 +762,17 @@ public class NeoDefaultsCascadeHelper {
    * to {@code formState}/{@code defaults}.
    */
   private static JSONObject filterProtectedFields(JSONObject source, JSONObject defaults,
-      Set<String> protectedFields) throws JSONException {
-    if (protectedFields == null || protectedFields.isEmpty()) {
+      Set<String> protectedFields, Set<String> suppressedFields) throws JSONException {
+    boolean noProtected = protectedFields == null || protectedFields.isEmpty();
+    boolean noSuppressed = suppressedFields == null || suppressedFields.isEmpty();
+    if (noProtected && noSuppressed) {
       return source;
     }
     JSONObject filtered = new JSONObject();
     Iterator<String> keys = source.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      if (shouldKeepExistingValue(defaults, key, protectedFields)) {
+      if (shouldKeepExistingValue(defaults, key, protectedFields, suppressedFields)) {
         log.debug("[NEO-DEFAULTS] Excluding protected field '{}' from cascade result", key);
         continue;
       }
@@ -583,8 +781,42 @@ public class NeoDefaultsCascadeHelper {
     return filtered;
   }
 
+  /**
+   * IMP-45: note that a protected field kept the caller's value over a callout-derived one.
+   *
+   * <p>Only a genuine divergence is recorded. A callout that re-proposes the value already on the
+   * record has superseded nothing, and an identifier companion key ({@code x$_identifier}) is the
+   * label of a field already reported under its own name.</p>
+   *
+   * @param result       the cascade result collecting the divergences
+   * @param defaults     the in-progress payload, holding the caller's value
+   * @param fieldName    the protected field
+   * @param updateObj    the callout's proposed update for that field
+   */
+  private static void recordSupersededDefault(NeoDefaultsService.CalloutCascadeResult result,
+      JSONObject defaults, String fieldName, JSONObject updateObj) {
+    if (result == null || fieldName.endsWith(IDENTIFIER_SUFFIX)) {
+      return;
+    }
+    Object kept = defaults.opt(fieldName);
+    Object proposed = updateObj.opt(FIELD_VALUE);
+    if (proposed == null || JSONObject.NULL.equals(proposed)) {
+      return;
+    }
+    if (kept != null && String.valueOf(kept).equals(String.valueOf(proposed))) {
+      return;
+    }
+    result.recordSuperseded(fieldName, kept, proposed);
+  }
+
   private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,
-      Set<String> protectedFields) {
+      Set<String> protectedFields, Set<String> suppressedFields) {
+    // A suppressed field is refused unconditionally: its declaration says the cascade may not
+    // POPULATE it either, so the "is there already a value to keep" test below - which answers
+    // no for a field absent from the body, as a suppressed one nearly always is - must not run.
+    if (suppressedFields != null && suppressedFields.contains(fieldName)) {
+      return true;
+    }
     if (protectedFields == null || !protectedFields.contains(fieldName)) {
       return false;
     }

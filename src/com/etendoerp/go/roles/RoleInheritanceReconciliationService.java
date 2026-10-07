@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
@@ -35,15 +37,19 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleInheritance;
 import org.openbravo.model.ad.access.WindowAccess;
 
+import com.etendoerp.go.roles.overlap.HigherPrecedenceSkip;
+
 /**
  * ETP-5019 — extracted out of {@link UserRoleCompositionService} (SonarQube S1448, that class was
  * over the 35-method limit) to keep this one responsibility — reconciling a personal role's
  * {@code AD_Role_Inheritance} rows and the {@code AD_Window_Access} side effects that go with
  * them — separate from the identity/authorization concerns (owner protection, admin
- * promotion/demotion) the rest of that class handles. Purely behavior-preserving: every method
- * here is the exact body moved verbatim from {@code UserRoleCompositionService}, called from the
- * same two call sites ({@code UserRoleCompositionService#assignTemplateRoles}'s 4-arg overload
- * and {@code #getAppliedTemplateRoleIds(String, Role)}), with no logic changes.
+ * promotion/demotion) the rest of that class handles. The extraction itself was
+ * behavior-preserving (bodies moved verbatim, same two call sites: {@code
+ * UserRoleCompositionService#assignTemplateRoles}'s 4-arg overload and {@code
+ * #getAppliedTemplateRoleIds(String, Role)}); later tickets changed the logic here: ETP-5503
+ * (per-call metrics) and ETP-5507 (multi-template adds in descending precedence, see {@link
+ * #addInheritance}).
  *
  * <p>Covers two cohesive pieces of composing a personal role from templates: (1) reconciling
  * {@code AD_Role_Inheritance} itself ({@link #reconcileInheritances}); (2) the
@@ -53,6 +59,8 @@ import org.openbravo.model.ad.access.WindowAccess;
  * the read helpers both of those and the two call sites above share.</p>
  */
 class RoleInheritanceReconciliationService {
+
+  private static final Logger log = LogManager.getLogger(RoleInheritanceReconciliationService.class);
 
   private static final long SEQNO_STEP = 10L;
 
@@ -76,9 +84,20 @@ class RoleInheritanceReconciliationService {
    * which also always queries fresh rather than trusting {@code role.getADRoleInheritanceList()}.
    * </p>
    *
+   * <p>Logs one INFO summary line per call (ETP-5503) — see {@link RoleCompositionMetrics}.</p>
+   *
    * @return {@code {addedCount, removedCount}}
    */
   int[] reconcileInheritances(Role personalRole, List<Role> templates) {
+    try (RoleCompositionMetrics metrics = RoleCompositionMetrics.start()) {
+      int[] counters = applyInheritanceChanges(personalRole, templates);
+      log.info("Reconciled template inheritances of role {} (+{} / -{}): {}",
+          personalRole.getId(), counters[0], counters[1], metrics.summary());
+      return counters;
+    }
+  }
+
+  private int[] applyInheritanceChanges(Role personalRole, List<Role> templates) {
     Set<String> desiredIds = new LinkedHashSet<>();
     for (Role template : templates) {
       desiredIds.add(template.getId());
@@ -98,6 +117,7 @@ class RoleInheritanceReconciliationService {
     int removed = 0;
     for (RoleInheritance inheritance : existing) {
       if (!desiredIds.contains(inheritance.getInheritFrom().getId())) {
+        long removeStart = System.nanoTime();
         OBDal.getInstance().remove(inheritance);
         // Same core RoleInheritanceEventHandler fan-out as the ADD loop below (see its own
         // comment) — deleting this row triggers RoleInheritanceManager#applyRemoveInheritance,
@@ -112,53 +132,89 @@ class RoleInheritanceReconciliationService {
         } finally {
           OBContext.restorePreviousMode();
         }
+        RoleCompositionMetrics.addStageTime("remove", System.nanoTime() - removeStart);
         removed++;
       }
     }
 
-    int added = 0;
+    // ETP-5507: SeqNo in request order (unchanged precedence), but saved highest SeqNo first
+    // when core can see the role, so a lower template finds the items it shares with a higher one
+    // already sourced from it and HigherPrecedenceSkip leaves them in place. See addInheritance.
+    List<Role> toAdd = new ArrayList<>();
     for (Role template : templates) {
-      if (existingIds.contains(template.getId())) {
-        continue;
+      if (!existingIds.contains(template.getId())) {
+        toAdd.add(template);
       }
-      preventWindowAccessOverlapCorruption(personalRole, template);
-      maxSeqno += SEQNO_STEP;
-      RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
-      inheritance.setNewOBObject(true);
-      inheritance.setClient(personalRole.getClient());
-      inheritance.setOrganization(personalRole.getOrganization());
-      inheritance.setActive(true);
-      inheritance.setRole(personalRole);
-      inheritance.setInheritFrom(template);
-      inheritance.setSequenceNumber(maxSeqno);
-      OBDal.getInstance().save(inheritance);
-      // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
-      // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
-      // OBUIAPP process, ...) to copy the template's accesses onto personalRole. Each injector's
-      // own copyRoleAccess() bypasses the client/org check while it saves (OBContext.setAdminMode
-      // (false)), but that bypass is popped again before this flush runs, so anything it left
-      // dirty/pending gets re-checked HERE under the caller's normal context. That's harmless for
-      // window access (reconcileWindowAccessAfterComposition below re-pins its client/org right
-      // after), but a system-level template (AD_Client_ID = '0', see
-      // EnsureSystemRoleTemplatesScript) that also grants process/report access has nothing
-      // equivalent for those rows, so the copy — still carrying the template's client "0" — fails
-      // this flush with OBSecurityException as soon as a template actually has any (ETP-4830's
-      // own EnsureSystemRoleTemplatesScript#reconcileProcessAccess started seeding those rows).
-      // Same bypass RoleInheritanceManager's own internal saves use, scoped to just this flush.
-      OBContext.setAdminMode(false);
-      try {
-        OBDal.getInstance().flush();
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-      added++;
     }
+    boolean descending = HigherPrecedenceSkip.isVisibleToCore(personalRole);
+    for (int step = 0; step < toAdd.size(); step++) {
+      int index = descending ? toAdd.size() - 1 - step : step;
+      addInheritance(personalRole, toAdd.get(index), maxSeqno + SEQNO_STEP * (index + 1));
+    }
+    int added = toAdd.size();
 
+    long reconcileStart = System.nanoTime();
     if (added > 0) {
       reconcileWindowAccessAfterComposition(personalRole, templates);
     }
     syncShowAccountingFieldsFlag(personalRole, templates);
+    RoleCompositionMetrics.addStageTime("reconcile", System.nanoTime() - reconcileStart);
     return new int[] { added, removed };
+  }
+
+  /**
+   * Adds one {@code AD_Role_Inheritance} and flushes it on its own, so core's propagation for the
+   * next template sees this one's rows: two templates must never propagate within one flush
+   * ({@code FlushMode.COMMIT} keeps the first one's copies invisible to the second, which then
+   * INSERTs duplicates).
+   *
+   * <p><b>Descending precedence (ETP-5507).</b> {@link #applyInheritanceChanges} calls this for
+   * the new templates from the highest {@code SeqNo} down whenever core can see the personal role
+   * ({@code HigherPrecedenceSkip#isVisibleToCore}); otherwise in request order, exactly as before,
+   * because with nothing kept a descending add would leave shared items sourced from the lowest
+   * template. Core's {@code
+   * getUpdatedRoleInheritancesList} reads the already-flushed higher inheritances and slots each
+   * lower one below them, so the precedence list, and therefore the end state, is the same as in
+   * request order. Only core's {@code RoleInheritanceEventHandler}, {@code
+   * InheritedAccessEnabledEventHandler} and the overlap guards react to this save, so the order
+   * changes nothing else.</p>
+   */
+  private void addInheritance(Role personalRole, Role template, long sequenceNumber) {
+    long preclearStart = System.nanoTime();
+    preventWindowAccessOverlapCorruption(personalRole, template, sequenceNumber);
+    RoleCompositionMetrics.addStageTime("windowPreclear", System.nanoTime() - preclearStart);
+    RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
+    inheritance.setNewOBObject(true);
+    inheritance.setClient(personalRole.getClient());
+    inheritance.setOrganization(personalRole.getOrganization());
+    inheritance.setActive(true);
+    inheritance.setRole(personalRole);
+    inheritance.setInheritFrom(template);
+    inheritance.setSequenceNumber(sequenceNumber);
+    long saveStart = System.nanoTime();
+    OBDal.getInstance().save(inheritance);
+    RoleCompositionMetrics.addStageTime("save", System.nanoTime() - saveStart);
+    // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
+    // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
+    // OBUIAPP process, ...) to copy the template's accesses onto personalRole. Each injector's
+    // own copyRoleAccess() bypasses the client/org check while it saves (OBContext.setAdminMode
+    // (false)), but that bypass is popped again before this flush runs, so anything it left
+    // dirty/pending gets re-checked HERE under the caller's normal context. That's harmless for
+    // window access (reconcileWindowAccessAfterComposition below re-pins its client/org right
+    // after), but a system-level template (AD_Client_ID = '0', see
+    // EnsureSystemRoleTemplatesScript) that also grants process/report access has nothing
+    // equivalent for those rows, so the copy — still carrying the template's client "0" — fails
+    // this flush with OBSecurityException as soon as a template actually has any (ETP-4830's
+    // own EnsureSystemRoleTemplatesScript#reconcileProcessAccess started seeding those rows).
+    // Same bypass RoleInheritanceManager's own internal saves use, scoped to just this flush.
+    long flushStart = System.nanoTime();
+    OBContext.setAdminMode(false);
+    try {
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    RoleCompositionMetrics.addStageTime("flush", System.nanoTime() - flushStart);
   }
 
   /**
@@ -213,15 +269,31 @@ class RoleInheritanceReconciliationService {
    * <p>Uses the SAME {@code OBContext.setAdminMode(false)} bypass core's own {@code
    * deleteRoleAccess} uses for removing a cross-client-owned inherited access row — scoped to
    * just this removal, not the whole method.</p>
+   *
+   * <p>Leaves in place a row {@link HigherPrecedenceSkip} keeps (ETP-5507): already sourced from
+   * a higher-precedence template added earlier in the same call, at least as permissive, and
+   * visible to core. The window guard's own add-path clear applies the same rule, so the row
+   * survives both.</p>
    */
-  private void preventWindowAccessOverlapCorruption(Role personalRole, Role template) {
-    Set<String> templateWindowIds = activeWindowIdsFor(template);
-    if (templateWindowIds.isEmpty()) {
+  private void preventWindowAccessOverlapCorruption(Role personalRole, Role template,
+      long sequenceNumber) {
+    Map<String, Boolean> templateWindowLevels = activeWindowLevelsFor(template);
+    if (templateWindowLevels.isEmpty()) {
       return;
     }
+    // Built on the first overlapping row only: its lookup is pointless when nothing overlaps.
+    HigherPrecedenceSkip skip = null;
     List<WindowAccess> overlapping = new ArrayList<>();
     for (WindowAccess access : findActiveWindowAccess(personalRole)) {
-      if (templateWindowIds.contains(access.getWindow().getId())) {
+      String windowId = access.getWindow().getId();
+      if (!templateWindowLevels.containsKey(windowId)) {
+        continue;
+      }
+      if (skip == null) {
+        skip = HigherPrecedenceSkip.forNewInheritance(personalRole, sequenceNumber);
+      }
+      if (!skip.keepsExisting(access, access.getInheritedFrom(), access.isEditableField(),
+          templateWindowLevels.get(windowId))) {
         overlapping.add(access);
       }
     }
@@ -316,12 +388,13 @@ class RoleInheritanceReconciliationService {
     return result;
   }
 
-  private Set<String> activeWindowIdsFor(Role role) {
-    Set<String> windowIds = new LinkedHashSet<>();
+  /** window id → {@code editableField} of {@code role}'s active window grants. */
+  private Map<String, Boolean> activeWindowLevelsFor(Role role) {
+    Map<String, Boolean> levels = new LinkedHashMap<>();
     for (WindowAccess access : findActiveWindowAccess(role)) {
-      windowIds.add(access.getWindow().getId());
+      levels.put(access.getWindow().getId(), access.isEditableField());
     }
-    return windowIds;
+    return levels;
   }
 
   /**
@@ -354,6 +427,16 @@ class RoleInheritanceReconciliationService {
   List<RoleInheritance> findExistingInheritances(Role personalRole) {
     OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
         .createCriteria(RoleInheritance.class);
+    // A system-OBContext caller (e.g. the environment-login flow, which runs under
+    // OBContext.setOBContext("0","0","0",...)) does not have the target tenant's client in its
+    // readable-clients set, so the default readable-clients/organization filter silently returns
+    // zero rows for a personal role that genuinely has composed templates — mirrors the same fix
+    // already applied to the bulk equivalent, findActiveTemplateIdsByPersonalRoleId. Safe to widen
+    // unconditionally: this query is already pinned to one exact personalRole via the
+    // Restrictions.eq below, so disabling the filter cannot leak any OTHER role's data — it only
+    // fixes false negatives for a caller whose own OBContext client doesn't include this role's.
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, personalRole));
     criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, true);
     return criteria.list();

@@ -258,16 +258,18 @@ public class OnboardingDatasetNormalizerTest {
     // Product categories: exactly two survive. "Beverages" is filtered out (ETP-5079, after
     // inspecting the FranOB2 tenant); the starter category stays, and "Discounts" is required by
     // ETGO_DTO.
-    // The starter category was also renamed as part of ETP-5079 — English base name and VALUE
-    // "Generic", with the Spanish "Genérico" moved into a real M_PRODUCT_CATEGORY_TRL row, the
-    // same English-base-plus-translation convention this ticket applied to document types.
+    // The starter category was renamed twice: ETP-5079 moved it from the Spanish "Otros" to the
+    // English base name "Generic" plus a real M_PRODUCT_CATEGORY_TRL row ("Genérico"); ETP-5498
+    // moved the base itself to "Genérico" (both VALUE and NAME), because the Product Category
+    // window and the Stock Report read the base NAME directly and never consulted the Trl row —
+    // so the category now needs NO translation row at all, and the old one was deleted.
     //
     // It is still asserted BY ID rather than by name, and that reason has not weakened: an ID is
     // the only handle that cannot be satisfied by a coincidental string somewhere else in the
     // dataset. The old name Otros used to collide with the Spanish chart of accounts in
-    // C_ELEMENTVALUE. The new Generic and Generico are far less collision-prone, but a name
-    // assertion would still pass on a row that merely mentions the word, and it would break
-    // again on the next rename.
+    // C_ELEMENTVALUE; the current name "Genérico" collides with an A_ASSET_GROUP row of the same
+    // name (see below) — a bare substring assertion on the category's own name is therefore unsafe
+    // and would pass even on the wrong row, or on no row at all.
     // Both halves of the filtered category: its English base name and the es_ES translation row
     // the dataset now ships for it. "Bebidas" absent is the assertion that would catch the _TRL
     // row leaking through while its parent category is dropped — a tenant would then hold a
@@ -277,22 +279,28 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue("starter product category (M_Product_Category EBAE46FD...) missing",
         xml.contains("EBAE46FD129049DEB26B948E160C6AD8"));
     assertTrue("Discounts category (required by ETGO_DTO) missing", xml.contains("Discounts"));
-    // The rename itself. "Generic" is safe to assert as a bare substring: across the whole GOClient
-    // sampledata it occurs in M_PRODUCT_CATEGORY.xml and nowhere else. "Otros" is deliberately NOT
-    // asserted absent — it legitimately survives in the Spanish chart of accounts (C_ELEMENTVALUE
-    // and C_ELEMENTVALUE_TRL), which is the same collision that made the ID the right handle above.
-    assertTrue("starter product category must ship its English base name",
-        xml.contains("Generic"));
-    // The es_ES translation is asserted through the TRL ELEMENT, not through the string "Genérico":
-    // that word also names the A_ASSET_GROUP row, which is an included table, so a substring
-    // assertion would stay green with M_PRODUCT_CATEGORY_TRL.xml deleted. The element tag comes
-    // from the entity name (toLowerCamel of the table), so it can only be emitted by the category
-    // translation file being normalized into the dataset.
-    assertTrue("M_PRODUCT_CATEGORY_TRL.xml must be normalized into the dataset",
+    // The rename itself, scoped to the starter category's OWN element rather than a bare substring:
+    // "Genérico" also names an A_ASSET_GROUP row (an included table), so xml.contains("Genérico")
+    // would stay green even on the wrong entity. Bounding the search to between this category's
+    // <mProductCategory id="EBAE46FD..."> opening tag and its closing tag makes the assertion
+    // specific to this row's own <name> element.
+    int categoryStart = xml.indexOf("<mProductCategory id=\"EBAE46FD129049DEB26B948E160C6AD8\"");
+    assertTrue("starter product category element (id EBAE46FD...) missing", categoryStart >= 0);
+    int categoryEnd = xml.indexOf("</mProductCategory>", categoryStart);
+    assertTrue("starter product category element (id EBAE46FD...) not closed", categoryEnd >= 0);
+    String categoryXml = xml.substring(categoryStart, categoryEnd);
+    assertTrue("starter product category must ship its Spanish base name 'Genérico' (ETP-5498)",
+        categoryXml.contains("<name>Genérico</name>"));
+    // No M_PRODUCT_CATEGORY_TRL row survives normalization any more: "Beverages" is filtered out
+    // together with its own Trl row ("Bebidas", asserted absent above), and the starter category's
+    // Trl row ("Genérico") was deleted outright by ETP-5498 since it only repeated the base NAME
+    // once the base itself became Spanish. The element tag comes from the entity name (toLowerCamel
+    // of the table), so its absence can only mean no M_PRODUCT_CATEGORY_TRL row was normalized.
+    assertFalse("no M_Product_Category_Trl row should survive normalization any more (ETP-5498)",
         xml.contains("<mProductCategoryTrl"));
-    // ...and shipping the row is only half the claim: without the table in the import allowlist the
-    // es_ES name never reaches a tenant and the category renders as "Generic" for a Spanish user.
-    // That is the exact trap C_DOCTYPE_TRL fell into (ETP-5079).
+    // The table stays in the import allowlist regardless: a future category whose base name is
+    // still English (or a tenant-added translation) still needs it to actually reach the tenant —
+    // that is the exact trap C_DOCTYPE_TRL fell into (ETP-5079).
     assertTrue("M_PRODUCT_CATEGORY_TRL must be an included table",
         OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
 
@@ -354,8 +362,68 @@ public class OnboardingDatasetNormalizerTest {
         countEntities(xml, "mLocator"));
     assertEquals("only the primary warehouse keeps its organization assignment", 1,
         countEntities(xml, "adOrgWarehouse"));
-    assertEquals("only the starter category keeps its es_ES translation", 1,
+    // ETP-5498 deleted the starter category's own M_Product_Category_Trl row (its base NAME is now
+    // Spanish itself, "Genérico"), and "Beverages" — the other category with one — is filtered out
+    // together with its Trl row. No M_Product_Category_Trl row survives normalization any more.
+    assertEquals("no product category translation row should survive normalization (ETP-5498)", 0,
         countEntities(xml, "mProductCategoryTrl"));
+  }
+
+  /**
+   * ETP-5364 — the {@code DocumentNo_<table>} counters that {@code InitialClientSetup} has already
+   * written for the new client are dropped here, so the tenant ends up with one of each instead of
+   * two.
+   *
+   * <p>The duplication was real and measured: 9888 surplus {@code AD_Sequence} rows across 103 of
+   * 125 clients before the fix, every duplicated name a {@code DocumentNo_*} one. Numbering
+   * survived it only by accident ({@code ad_sequence_doc} bumps every row matching the name and
+   * reads one back non-{@code STRICT}), and 140 pairs had already diverged, at which point the
+   * value actually applied becomes non-deterministic.
+   *
+   * <p>Counted rather than name-checked one by one: the failure this guards against is a filter
+   * that drops too much. The source ships 142 {@code AD_SEQUENCE} rows, 98 of them
+   * {@code DocumentNo_*}, of which 96 collide with the client setup — so 46 must survive.
+   */
+  @Test
+  public void testNormalizerDropsTheDocumentNoCountersTheClientSetupAlreadyCreates() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertEquals("the 43 named document series, AP Invoice, and the two GO-only counters", 46,
+        countEntities(xml, "adSequence"));
+    assertFalse("DocumentNo_C_Invoice is created by InitialClientSetup",
+        xml.contains("DocumentNo_C_Invoice"));
+    assertFalse("DocumentNo_M_InOut is created by InitialClientSetup",
+        xml.contains("DocumentNo_M_InOut"));
+  }
+
+  /**
+   * The exception list, asserted separately because getting it wrong is silent: these two names
+   * are NOT created by {@code InitialClientSetup} (verified on the instance — exactly one row per
+   * client in all 105 clients that have them, versus two for every other {@code DocumentNo_*}
+   * name), so filtering them out would leave the tenant with no counter for those tables at all.
+   */
+  @Test
+  public void testNormalizerKeepsTheDocumentNoCountersOnlyThisDatasetProvides() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Filter_Opt"));
+    assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Prop_Opt"));
+  }
+
+  /**
+   * The named document series are untouched by that filter — it keys on the {@code DocumentNo_}
+   * prefix, and these are what the tenant actually configures in the Document Sequence window.
+   * {@code AP Invoice} is ETP-5364's own new series (prefix {@code FC}); the rest predate it.
+   */
+  @Test
+  public void testNormalizerKeepsEveryNamedDocumentSeries() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    for (String series : new String[] { "Purchase Order", "Standard Order", "AR Invoice",
+        "Factura Rectificativa (Ventas)", "AP Invoice", "Factura Rectificativa (Compras)" }) {
+      assertTrue(series + " is a document series a tenant configures, not a table counter",
+          xml.contains(series));
+    }
   }
 
   /**
@@ -437,6 +505,113 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5442: extends the exclusion above to {@code C_ELEMENTVALUE_OPERAND}. A formula account
+   * (e.g. {@code P.G.D}, "D) RESULTADO DEL EJERCICIO") carries no children in the account tree —
+   * its report amount comes exclusively from operand rows — so an operand belonging to the orphan
+   * org-specific tree must be dropped exactly like the element/element-value rows above. Without
+   * this cascade, the excluded tree's operands would be emitted pointing at element values this
+   * same filter just removed, and a real {@code DataImportService} import aborts with "Referenced
+   * object FinancialMgmtElementValue ... not present in the xml or in the database" (reproduced
+   * live before this fix, ETP-5442). Both row ids below are real GOClient data: {@code 841C6B18...}
+   * is P.G.D's "+ P.G.C" operand line owned by the wired (client-level) P.G.D
+   * ({@code 99EB7D8D...}); {@code D6D980B2...} is the identical formula line owned by the orphan
+   * (org-specific) P.G.D ({@code D123E89F...}).
+   */
+  @Test
+  public void testNormalizerExcludesOperandsOfOrgSpecificAccountElementTree() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    String wiredTreeOperandId = "841C6B189D5D49C79FB542D847B32EFA";
+    String orphanTreeOperandId = "D6D980B2CC284EA08884E5C398FEAFDC";
+
+    assertTrue(xml.contains(wiredTreeOperandId));
+    assertFalse(xml.contains(orphanTreeOperandId));
+  }
+
+  /**
+   * ETP-5442 — the real GOClient dataset never exercises this branch: verified live that its 39
+   * excluded-tree operand rows reference ONLY accounts within that same tree (zero cross-tree
+   * references), so a real-data test can only prove the OWNER side is checked. An operand's owner
+   * account ({@code C_ELEMENTVALUE_ID}) and its referenced account ({@code ACCOUNT_ID}) are two
+   * independent foreign keys into {@code C_ELEMENTVALUE}; both must be excluded independently
+   * when either belongs to the orphan tree. Checking only the owner (mirroring the single-FK
+   * {@code C_ELEMENTVALUE_TRL} cascade) would let a row through whose REFERENCED account was
+   * removed, which breaks the same import the same way — a dangling FK. This synthetic fixture
+   * builds two account-element trees (wired: {@code AD_ORG_ID='0'}; orphan: org-owned) and three
+   * operand rows that isolate each combination.
+   */
+  @Test
+  public void testNormalizerExcludesOperandWhenEitherOwnerOrAccountIsOrgSpecific() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-operand-cascade");
+
+    Files.write(sampleDir.resolve("C_ELEMENT.xml"),
+        ("<data>"
+            + "<C_ELEMENT>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "<AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>"
+            + "</C_ELEMENT>"
+            + "<C_ELEMENT>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "<AD_ORG_ID><![CDATA[SOME_ORG]]></AD_ORG_ID>"
+            + "</C_ELEMENT>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE.xml"),
+        ("<data>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_ACCOUNT]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_ACCOUNT]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE_OPERAND.xml"),
+        ("<data>"
+            // Both sides wired -> must survive.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_BOTH_WIRED]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[WIRED_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            // Owner is orphan, account is wired -> must be dropped.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_OWNER_ORPHAN]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[WIRED_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            // Owner is wired, account is orphan -> must ALSO be dropped. This is the branch the
+            // real-dataset test above cannot reach.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_ACCOUNT_ORPHAN]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[ORPHAN_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    String xml = new OnboardingDatasetNormalizer(sampleDir, this::mockEntityForTable)
+        .buildDatasetXml();
+
+    assertTrue("Operand whose owner and account both survive must be kept",
+        xml.contains("OP_BOTH_WIRED"));
+    assertFalse("Operand whose OWNER belongs to the excluded tree must be dropped",
+        xml.contains("OP_OWNER_ORPHAN"));
+    assertFalse("Operand whose ACCOUNT (referenced side) belongs to the excluded tree must be "
+        + "dropped too, even though its owner is in the kept tree",
+        xml.contains("OP_ACCOUNT_ORPHAN"));
+  }
+
+  /**
    * ETP-4245 (TC-40): verifies that a freshly-provisioned tenant is born with all 8 accounting
    * dimensions on {@code C_ACCTSCHEMA_ELEMENT} — the 2 mandatory ones (Organization, Account) plus
    * all 6 optional ones (Project, Bus.Partner, Product, Cost Center, User1, User2) — instead of just
@@ -482,6 +657,21 @@ public class OnboardingDatasetNormalizerTest {
         xml.contains("<allownegative>N</allownegative>"));
     assertTrue("iscentrallymaintained must remain Y (out of scope for ETP-4947)",
         xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
+  }
+
+  /**
+   * ETP-5372: a freshly-provisioned tenant's accounting schema must be born with
+   * {@code IsAccrual=Y} (Devengo) — Etendo Go doesn't support Caja (cash-basis) for taxes.
+   * {@code GeneralLedgerConfigurationHandler.applyGeneralChanges} now refuses to change this
+   * value after creation (see its own test), so this dataset default is the only place a
+   * schema's accrual value is ever set — it must never regress to {@code N}.
+   */
+  @Test
+  public void testNormalizerAccountingSchemaAccrualDefaultsToDevengo() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("isaccrual must be Y (Devengo) — Etendo Go doesn't support Caja for taxes",
+        xml.contains("<isaccrual>Y</isaccrual>"));
   }
 
   /**

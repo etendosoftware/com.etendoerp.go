@@ -421,6 +421,50 @@ public class AbstractOrderHeaderHandlerTest {
     assertEquals("2026-07-15", body.getString("accountingDate"));
   }
 
+  // ── calculatePercentage (ETP-5317) ──────────────────────────────────────────
+  //
+  // Pure math shared by every row of batchComputeStatusPercentages. The exclusion of the
+  // Total Discount dummy line happens in the SQL that produces numerator/denominator (not
+  // exercised here, since it needs a DB connection); these cases assert that once that line is
+  // correctly excluded, a fully invoiced/delivered order reports 100%, matching the ticket's
+  // examples ("1 producto (cant. 1) + 1 línea de descuento total" must yield 100%, not 50%).
+
+  @Test
+  public void calculatePercentage_zeroDenominator_returnsZero() {
+    assertEquals(0L, AbstractOrderHeaderHandler.calculatePercentage(0, 0, false));
+  }
+
+  @Test
+  public void calculatePercentage_cancelled_returnsZeroRegardlessOfQuantities() {
+    assertEquals(0L, AbstractOrderHeaderHandler.calculatePercentage(10, 10, true));
+  }
+
+  @Test
+  public void calculatePercentage_fullyInvoiced_returns100() {
+    // Ticket example: 1 product line (qty 1) fully invoiced, discount line already excluded
+    // from both sides by the SQL query -> 1/1, not 1/2.
+    assertEquals(100L, AbstractOrderHeaderHandler.calculatePercentage(1, 1, false));
+  }
+
+  @Test
+  public void calculatePercentage_fullyInvoicedLargerQuantity_returns100() {
+    // Ticket example: 1 product line (qty 10) fully invoiced -> 10/10, not 10/11.
+    assertEquals(100L, AbstractOrderHeaderHandler.calculatePercentage(10, 10, false));
+  }
+
+  @Test
+  public void calculatePercentage_partial_roundsToNearestInteger() {
+    // 1/3 = 33.33... -> rounds to 33
+    assertEquals(33L, AbstractOrderHeaderHandler.calculatePercentage(1, 3, false));
+    // 2/3 = 66.66... -> rounds to 67
+    assertEquals(67L, AbstractOrderHeaderHandler.calculatePercentage(2, 3, false));
+  }
+
+  @Test
+  public void calculatePercentage_zeroInvoiced_returnsZero() {
+    assertEquals(0L, AbstractOrderHeaderHandler.calculatePercentage(0, 5, false));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   private static JSONObject bodyWith(String key, String value) {

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigInteger;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
@@ -37,6 +38,7 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 
@@ -61,6 +63,11 @@ final class FinancialAccountCountrySupport {
   /** ISO 13616 defines 15 as the shortest real IBAN (Norway); nothing shorter is worth checking
    *  against a country at all. */
   static final int IBAN_MIN_LENGTH = 15;
+  /** Returned for a Bank account whose effective IBAN is non-blank but has no country — both by
+   *  {@link #validateIbanCountryPair} and by {@code FinancialAccountHandler#validateCountryAndIban}
+   *  (ETP-5473). A wire contract with the SPA: {@code backendErrors.js} maps this exact text to
+   *  {@code backendError.countryIban}, so rewording it silently un-translates the toast. */
+  static final String MSG_IBAN_REQUIRES_COUNTRY = "A bank account with an IBAN must have a country.";
 
   private static final String KEY_ID = "id";
   private static final String KEY_ISO = "iso";
@@ -76,13 +83,17 @@ final class FinancialAccountCountrySupport {
 
   /**
    * The {@code countryIbanRules} catalog (≤45 countries with IBAN metadata, out of 243) is static
-   * master data shared by every client, so a single cached entry is enough — unlike
-   * {@code FinancialAccountBankConnectionHandler.PROVIDERS_CACHE}, which is keyed per client
-   * because Salt Edge providers differ by API key. 24h TTL mirrors that same cache: editing a
-   * Country's IBAN metadata takes up to a day to reach the SPA, accepted for the same reason.
+   * master data shared by every client, so it is not keyed per client — unlike
+   * {@code FinancialAccountBankConnectionHandler.PROVIDERS_CACHE}, which is because Salt Edge
+   * providers differ by API key. It IS keyed per language (ETP-5579): each rule's {@code name} is
+   * translated, so a single entry would serve whichever language filled it first to everyone.
+   * The key space is bounded by the active AD_Language rows (~100), but only a handful are in real
+   * use; a language evicted or not yet cached costs one ~45-row rebuild. 24h TTL mirrors that same
+   * cache: editing a Country's IBAN metadata takes up to a day to reach the SPA, accepted for the
+   * same reason.
    */
   private static final Cache<String, String> IBAN_RULES_CACHE = CacheBuilder.newBuilder()
-      .maximumSize(1)
+      .maximumSize(32)
       .expireAfterWrite(24, TimeUnit.HOURS)
       .build();
   private static final String IBAN_RULES_CACHE_KEY = "countryIbanRules";
@@ -162,7 +173,7 @@ final class FinancialAccountCountrySupport {
       return "The IBAN is too short.";
     }
     if (country == null) {
-      return "A bank account with an IBAN must have a country.";
+      return MSG_IBAN_REQUIRES_COUNTRY;
     }
     String ibanPrefix = country.getIBANCode();
     Long ibanLength = country.getIBANLength();
@@ -188,28 +199,6 @@ final class FinancialAccountCountrySupport {
   // ---------------------------------------------------------------------------
   // Country resolution
   // ---------------------------------------------------------------------------
-
-  /**
-   * Resolves the {@link Country} an IBAN belongs to from its first two characters, preferring a
-   * match on {@link Country#PROPERTY_IBANCODE} over {@link Country#PROPERTY_ISOCOUNTRYCODE}: only
-   * ~45 of 243 seeded countries carry IBAN metadata, and matching on the plain ISO code can return
-   * one of the other ~198, which {@code FIN_FINANCIAL_ACCOUNT_TRG2} then rejects. The ISO match is
-   * kept as a fallback for datasets where {@code IBANCOUNTRY} was never populated.
-   *
-   * @return the matching country, or {@code null} when the IBAN is too short or no active country
-   *         matches the prefix either way.
-   */
-  static Country resolveCountryForIbanPrefix(String normalizedIban) {
-    if (normalizedIban == null || normalizedIban.length() < 2) {
-      return null;
-    }
-    String prefix = normalizedIban.substring(0, 2).toUpperCase(Locale.ROOT);
-    Country byIbanCode = findCountryByIbanCode(prefix);
-    if (byIbanCode != null) {
-      return byIbanCode;
-    }
-    return findCountryByIsoCode(prefix);
-  }
 
   /**
    * The active organization's country (ETP-4896 requirement 1), walking up the org tree when the
@@ -270,29 +259,22 @@ final class FinancialAccountCountrySupport {
     return (Country) criteria.uniqueResult();
   }
 
-  private static Country findCountryByIsoCode(String isoCode) {
-    OBCriteria<Country> criteria = OBDal.getInstance().createCriteria(Country.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, isoCode));
-    criteria.add(Restrictions.eq(Country.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Country) criteria.uniqueResult();
-  }
-
   // ---------------------------------------------------------------------------
   // countryIbanRules catalog
   // ---------------------------------------------------------------------------
 
   /**
    * The ≤45 countries that carry IBAN metadata, as {@code [{ id, iso, name, ibanPrefix,
-   * ibanLength }, …]} ordered by name — everything the SPA needs to validate an IBAN against a
-   * chosen country inline, without a second round-trip per keystroke. {@code name} is the
-   * base-language name for message text only; the SPA should keep using the translated label from
-   * the {@code C_Country_ID} selector for display.
+   * ibanLength }, …]} ordered by base name — everything the SPA needs to validate an IBAN against
+   * a chosen country inline, without a second round-trip per keystroke. {@code name} is translated
+   * to the OBContext language (ETP-5579): the New Account form shows it as the country chip label.
+   * <p>Ordering contract: rules are ordered by the BASE (untranslated) name, not by {@code name}.
+   * Today no consumer renders them as a list (the SPA only looks rules up by id/iso); any consumer
+   * that does must sort client-side by {@code name}.
    */
   static JSONArray buildIbanRules() throws JSONException {
-    String cached = IBAN_RULES_CACHE.getIfPresent(IBAN_RULES_CACHE_KEY);
+    String cacheKey = ibanRulesCacheKey();
+    String cached = IBAN_RULES_CACHE.getIfPresent(cacheKey);
     if (cached != null) {
       return new JSONArray(cached);
     }
@@ -300,9 +282,16 @@ final class FinancialAccountCountrySupport {
     // Never cache an empty result, mirroring FinancialAccountBankConnectionHandler#cachedProviders:
     // an empty catalog is more likely a transient DAL hiccup than a real "no countries" state.
     if (rules.length() > 0) {
-      IBAN_RULES_CACHE.put(IBAN_RULES_CACHE_KEY, rules.toString());
+      IBAN_RULES_CACHE.put(cacheKey, rules.toString());
     }
     return rules;
+  }
+
+  /** Per-language cache key (ETP-5579), keyed on the same OBContext language IdentifierProvider
+   *  translates with. Without a request language the identifier is resolved untranslated, so it
+   *  shares the language-less entry. */
+  private static String ibanRulesCacheKey() {
+    return IBAN_RULES_CACHE_KEY + ":" + Objects.toString(NeoLanguage.currentCode(), "");
   }
 
   /** Test-only: {@link #IBAN_RULES_CACHE} is a static field shared for the whole JVM/test run, so
@@ -326,7 +315,10 @@ final class FinancialAccountCountrySupport {
       JSONObject rule = new JSONObject();
       rule.put(KEY_ID, country.getId());
       rule.put(KEY_ISO, country.getISOCountryCode());
-      rule.put(KEY_NAME, country.getName());
+      // ETP-5579: getIdentifier(), NOT getName() — getName() never consults C_Country_Trl, so the
+      // New Account chip showed "Spain" to an es_ES user. Same reasoning as ETP-5022 in
+      // ContactsLocationAddressHandler; Country's identifier is the single Name column.
+      rule.put(KEY_NAME, country.getIdentifier());
       rule.put(KEY_IBAN_PREFIX, country.getIBANCode());
       rule.put(KEY_IBAN_LENGTH, country.getIBANLength());
       rules.put(rule);
@@ -385,6 +377,12 @@ final class FinancialAccountCountrySupport {
       return StringUtils.trimToEmpty(bodyString(body, FinancialAccountHandler.FIELD_TYPE));
     }
     return stored != null ? stored.getType() : null;
+  }
+
+  /** The stored account's country, or {@code null} when there is no stored account (create) or
+   *  it has none (legacy rows). Used by the update-path IBAN pair check (ETP-5473). */
+  static Country storedCountry(FIN_FinancialAccount stored) {
+    return stored != null ? stored.getCountry() : null;
   }
 
   /**

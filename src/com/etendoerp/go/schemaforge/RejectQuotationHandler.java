@@ -31,6 +31,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.RejectReason;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that closes a Sales Quotation as "Closed - Rejected" (DocStatus
  * {@code CJ}). Invoked as an ACTION endpoint via:
@@ -46,6 +48,13 @@ import org.openbravo.model.common.order.RejectReason;
  *   <li>The supplied {@code rejectReason} must resolve to an active
  *       {@link RejectReason} row.</li>
  * </ul>
+ *
+ * <p><b>Also reached through {@code DocAction = RJ} (ETP-5535).</b> The {@code DocAction} button
+ * lists "Reject" among its values, so an agent reads it as the way to reject a quotation. Run through
+ * {@code C_Order_Post} it fails for want of a reason the caller cannot set ({@code rejectReason} is
+ * read-only): core raises {@code @NoRejectReason@}. {@link SalesQuotationHeaderHandler} therefore
+ * routes that request to {@link #reject}, the same flow this action runs for the UI, on every
+ * channel. The reason travels in the same body, as {@code rejectReason}.</p>
  *
  * <p>On success the quotation is updated via direct OBDal writes (no
  * {@code C_Order_Post} invocation, mirroring the pattern used by
@@ -66,11 +75,34 @@ public class RejectQuotationHandler implements NeoHandler {
   private static final String STATUS_UNDER_EVALUATION = "UE";
   private static final String FIELD_REJECT_REASON = "rejectReason";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
-  private static final String ERR_REASON_REQUIRED = "A rejection reason is required";
+  /**
+   * ETP-5535: names where the id comes from. The React modal cannot submit without a selected
+   * reason, so only an API caller ever reads this message.
+   */
+  private static final String ERR_REASON_REQUIRED = "A rejection reason is required: send "
+      + "rejectReason with the id of an active rejection reason (C_Reject_Reason_ID). List them "
+      + "with the rejectReason selector of sales-quotation/quotation, or create one with the "
+      + "createRejectReason action.";
+  private static final String KEY_FIELD_VALUES = "fieldValues";
   private static final String ERR_REASON_NOT_FOUND = "Rejection reason not found: ";
   private static final String ERR_QUOTATION_NOT_FOUND = "Quotation not found: ";
   private static final String ERR_QUOTATION_NOT_UE = "Only quotations in Under Evaluation can be rejected";
   private static final String KEY_RESPONSE = "response";
+
+  /**
+   * The action as {@code etendo_schema(view:"actions")} publishes it (ETP-5535), declared by
+   * {@link SalesQuotationHeaderHandler#actionContracts()}. Only for discovery: the body is still
+   * judged by {@link #reject}, not by {@link NeoActionContract#validate}, so the React modal's
+   * request is accepted exactly as before.
+   */
+  static final NeoActionContract CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Rejects a quotation in Under Evaluation (documentStatus UE): it becomes Closed - Rejected "
+          + "(CJ), keeps the reason and is locked. The same flow as the Reject button of the UI. "
+          + "Also reached by DocAction with docAction RJ, which takes the same rejectReason.",
+      NeoActionContract.Param.required(FIELD_REJECT_REASON, NeoActionContract.TYPE_STRING,
+          "Id of an active rejection reason (C_Reject_Reason_ID). List them with the "
+              + "rejectReason selector of this entity, or create one with createRejectReason."))
+      .withIdDescription("The id of the quotation to reject.");
 
   /**
    * Entry point for ACTION requests. Returns {@code null} for any other
@@ -85,7 +117,19 @@ public class RejectQuotationHandler implements NeoHandler {
     if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
+    return reject(context);
+  }
 
+  /**
+   * Rejects the quotation named by the context's record id with the reason carried in its body.
+   * The action-name check is the caller's: {@link #handle} runs it for {@code rejectQuotation}, and
+   * {@link SalesQuotationHeaderHandler} for {@code DocAction = RJ} (ETP-5535). Both therefore get
+   * the same validation, the same writes and the same response.
+   *
+   * @param context an ACTION context whose record id is the quotation
+   * @return the success envelope, or a 400 naming what is missing or wrong
+   */
+  public NeoResponse reject(NeoContext context) {
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
@@ -136,14 +180,29 @@ public class RejectQuotationHandler implements NeoHandler {
    * Reads {@code rejectReason} from the request body. Accepts both the camelCase
    * key (the one the React modal sends, matching the entity field name) and the
    * Etendo column name {@code C_Reject_Reason_ID} as a defensive fallback.
+   *
+   * <p>ETP-5535: when the root carries neither, the same two keys are read from a nested
+   * {@code fieldValues} object, the body shape of a {@code DocAction} button request. The root
+   * still wins, so the modal's request is read exactly as before.
    */
   protected String extractReasonId(JSONObject body) {
     if (body == null) {
       return null;
     }
-    String reasonId = body.optString(FIELD_REJECT_REASON, null);
+    String reasonId = readReasonId(body);
+    if (reasonId == null) {
+      reasonId = readReasonId(body.optJSONObject(KEY_FIELD_VALUES));
+    }
+    return reasonId;
+  }
+
+  private static String readReasonId(JSONObject source) {
+    if (source == null) {
+      return null;
+    }
+    String reasonId = source.optString(FIELD_REJECT_REASON, null);
     if (StringUtils.isBlank(reasonId)) {
-      reasonId = body.optString("C_Reject_Reason_ID", null);
+      reasonId = source.optString("C_Reject_Reason_ID", null);
     }
     return StringUtils.isBlank(reasonId) ? null : reasonId;
   }

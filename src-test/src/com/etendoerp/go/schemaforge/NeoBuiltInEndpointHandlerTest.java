@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,6 +51,7 @@ import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
@@ -447,7 +449,8 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Verifies successful GET handling for the fiscal models catalog endpoint.
+   * Verifies successful GET handling for the fiscal models catalog endpoint, with a role that
+   * holds the Tax Report window grant (ETP-5546: "Modelos Fiscales" access proxy).
    */
   @Test
   public void handleFiscalModelsCatalogGetWritesActiveModelsResponse() throws Exception {
@@ -456,7 +459,10 @@ public class NeoBuiltInEndpointHandlerTest {
     NeoResponse payload = NeoResponse.ok(new JSONObject());
 
     try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
-        Mockito.mockStatic(NeoFiscalModelsCatalogService.class)) {
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(true);
       catalogMock.when(NeoFiscalModelsCatalogService::getActiveModels).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
@@ -468,7 +474,32 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Verifies PUT saves the active-models JSON body and responds 204 (via a null NeoResponse).
+   * ETP-5546 — a role without the Tax Report window grant gets 403 from the fiscal models
+   * catalog GET, instead of reaching the service.
+   */
+  @Test
+  public void handleFiscalModelsCatalogGetDeniedWithoutWindowAccess() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(false);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+      catalogMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Verifies PUT saves the active-models JSON body and responds 204 (via a null NeoResponse),
+   * with a role that holds the Tax Report window grant.
    */
   @Test
   public void handleFiscalModelsCatalogPutSavesAndFlushes() throws Exception {
@@ -480,8 +511,11 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoRequestBodyParser> bodyParserMock =
              Mockito.mockStatic(NeoRequestBodyParser.class);
-         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
           .thenReturn("{\"303\":true,\"349\":false}");
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -497,6 +531,30 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
+   * ETP-5546 — a role without the Tax Report window grant gets 403 from the fiscal models
+   * catalog PUT, instead of reaching the service (write tier, not just GET).
+   */
+  @Test
+  public void handleFiscalModelsCatalogPutDeniedWithoutWindowAccess() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(false);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+      catalogMock.verifyNoInteractions();
+    }
+  }
+
+  /**
    * Verifies PUT with an invalid JSON body returns 400, matching the service's
    * {@link IllegalArgumentException} contract.
    */
@@ -508,8 +566,11 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoRequestBodyParser> bodyParserMock =
-             Mockito.mockStatic(NeoRequestBodyParser.class)) {
+             Mockito.mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("not-json");
       catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("not-json"))
           .thenThrow(new IllegalArgumentException("Invalid JSON body"));
@@ -531,12 +592,17 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
 
-    boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
-        "DELETE", request, response);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "DELETE")).thenReturn(true);
 
-    assertTrue(handled);
-    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
-        eq("Fiscal models catalog endpoint only supports GET and PUT"));
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "DELETE", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+          eq("Fiscal models catalog endpoint only supports GET and PUT"));
+    }
   }
 
   /**
@@ -663,7 +729,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(request.getPathInfo()).thenReturn("/attachments/c_order/100");
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "100")).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
@@ -685,7 +754,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(request.getPathInfo()).thenReturn("/attachments/c_order/100");
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpload("c_order", "100", request, false))
           .thenReturn(payload);
 
@@ -694,6 +766,87 @@ public class NeoBuiltInEndpointHandlerTest {
 
       assertTrue(handled);
       verify(servlet).writeResponse(response, payload);
+    }
+  }
+
+  /**
+   * ETP-5205 — a Solo-Lectura role gets the authorizer's 403 and the upload never runs.
+   */
+  @Test
+  public void handleAttachmentsRecordPostWritesAuthorizerDenialWithoutUploading() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse denied = NeoResponse.error(403, "Access denied to spec for current role");
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/100");
+
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      authorizerMock.when(() -> NeoAttachmentAuthorizer.checkWriteOnTable("c_order"))
+          .thenReturn(denied);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "POST", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, denied);
+      attachmentsMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5205 — delete, description and mark-main are all refused by the authorizer, which reads
+   * the table from the attachment id, and none of the write helpers runs.
+   */
+  @Test
+  public void handleAttachmentsFileWritesAreRefusedByTheAuthorizer() throws Exception {
+    String[][] cases = {
+        {"DELETE", "/attachments/file/ATT123"},
+        {"PATCH", "/attachments/file/ATT123"},
+        {"PATCH", "/attachments/file/ATT123/main"},
+    };
+    for (String[] c : cases) {
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      NeoResponse denied = NeoResponse.error(403, "Access denied to spec for current role");
+      when(request.getPathInfo()).thenReturn(c[1]);
+
+      try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+          NeoAttachmentsHelper.class);
+           MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+               NeoAttachmentAuthorizer.class)) {
+        authorizerMock.when(() -> NeoAttachmentAuthorizer.checkWriteOnAttachment("ATT123"))
+            .thenReturn(denied);
+
+        boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+            c[0], request, response);
+
+        assertTrue(c[0] + " " + c[1], handled);
+        verify(servlet).writeResponse(response, denied);
+        attachmentsMock.verifyNoInteractions();
+      }
+    }
+  }
+
+  /**
+   * ETP-5205 — reads are out of this slice's scope: a GET download never consults the authorizer.
+   */
+  @Test
+  public void handleAttachmentsFileGetDoesNotConsultTheWriteAuthorizer() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
+
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownload("ATT123", response));
+      authorizerMock.verifyNoInteractions();
     }
   }
 
@@ -724,7 +877,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(request.getPathInfo()).thenReturn("/attachments/c_order/100/zip");
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
@@ -748,6 +904,86 @@ public class NeoBuiltInEndpointHandlerTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Attachments zip endpoint only supports GET"));
+  }
+
+  /**
+   * ETP-5526 — GET /attachments/{table}/{record}/count writes handleCount's response and never
+   * loads the list.
+   */
+  @Test
+  public void handleAttachmentsCountGetDelegatesToHandleCount() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse payload = NeoResponse.ok(new JSONObject().put("count", 2));
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/123/count");
+
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleCount("c_order", "123")).thenReturn(payload);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, payload);
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleList(Mockito.anyString(), Mockito.anyString()),
+          never());
+    }
+  }
+
+  /**
+   * ETP-5526 — the count subresource is read-only: any other verb is a 405 and no helper runs
+   * (in particular a POST must not fall through to the upload).
+   */
+  @Test
+  public void handleAttachmentsCountRejectsNonGetMethod() throws Exception {
+    for (String method : new String[] { "POST", "DELETE", "PATCH" }) {
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      HttpServletResponse response = mock(HttpServletResponse.class);
+      when(request.getPathInfo()).thenReturn("/attachments/c_order/123/count");
+
+      try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+          NeoAttachmentsHelper.class);
+           MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+               NeoAttachmentAuthorizer.class)) {
+        boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+            method, request, response);
+
+        assertTrue(method, handled);
+        verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+            eq("Attachments count endpoint only supports GET"));
+        attachmentsMock.verifyNoInteractions();
+      }
+    }
+  }
+
+  /**
+   * ETP-5526 — "count" is only the subresource as a THIRD segment: with two segments it is the
+   * record id, so GET /attachments/c_order/count is still the list of record "count".
+   */
+  @Test
+  public void handleAttachmentsTwoSegmentCountPathIsTheListOfRecordCount() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/count");
+
+    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
+        NeoAttachmentsHelper.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      attachmentsMock.when(() -> NeoAttachmentsHelper.handleList("c_order", "count")).thenReturn(payload);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, payload);
+      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleCount(Mockito.anyString(), Mockito.anyString()),
+          never());
+    }
   }
 
   /**
@@ -777,7 +1013,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
@@ -816,7 +1055,10 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
         NeoAttachmentsHelper.class);
-        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
 
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleDelete("ATT123")).thenReturn(deleteResponse);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -843,7 +1085,10 @@ public class NeoBuiltInEndpointHandlerTest {
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
         NeoAttachmentsHelper.class);
-        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
 
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleDelete("ATT123")).thenReturn(deleteResponse);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -869,7 +1114,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(request.getReader()).thenReturn(new BufferedReader(new StringReader("{\"description\":\"new\"}")));
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpdateDescription("ATT123", "new"))
           .thenReturn(payload);
 
@@ -893,7 +1141,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(response.isCommitted()).thenReturn(true);
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "PATCH", request, response);
 
@@ -918,7 +1169,10 @@ public class NeoBuiltInEndpointHandlerTest {
     when(response.isCommitted()).thenReturn(false);
 
     try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class)) {
+        NeoAttachmentsHelper.class);
+         // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
       attachmentsMock.when(() -> NeoAttachmentsHelper.handleUpdateDescription("ATT123", null))
           .thenReturn(payload);
 

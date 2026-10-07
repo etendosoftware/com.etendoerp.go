@@ -111,7 +111,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
         // ETP-5071: every role card now also resolves 3 proxy access tiers (2 extra
         // WindowAccess lookups plus one ProcessAccess lookup — see
-        // SFRolesOverview#mergeProxyAccessTiers) right after its own real-GO-window tier map.
+        // RoleAccessMatrix#mergeProxyAccessTiers) right after its own real-GO-window tier map.
         // Default the new ProcessAccess criteria to "no grants" so tests that don't care about
         // it don't need to know about it (mirrors categoryQuery's own default above). Tests
         // that stub OBCriteria<WindowAccess>'s list() with an exact per-role sequence must
@@ -250,13 +250,13 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
     /**
      * Stubs the shared {@code OBCriteria<WindowAccess>} mock so {@code list()} returns the rows
-     * for whichever role {@link SFRolesOverview#resolveWindowTierMap(Role, java.util.Set)} most
+     * for whichever role {@link RoleAccessMatrix#resolveWindowTierMap(Role, java.util.Set)} most
      * recently built the criteria for — keyed by the {@code WindowAccess.role.id} restriction the
      * production code adds via {@code Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id",
      * role.getId())}, the same restriction shape structurally asserted in {@link
      * #testAdminRoleCountExcludesCrossClientBootstrapUser}.
      *
-     * <p>ETP-5071's {@link SFRolesOverview#mergeProxyAccessTiers} issues an EXTRA {@code
+     * <p>ETP-5071's {@link RoleAccessMatrix#mergeProxyAccessTiers} issues an EXTRA {@code
      * WindowAccess.list()} call per role card (for {@code TAX_MODELS_PROXY_WINDOW_ID}), on top of
      * the role's own real-window tier-map call. A fixed-length positional {@code thenReturn(a, b,
      * c, ...)} sequence — one value per role, in role order — silently misaligns the moment an
@@ -292,7 +292,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     /**
      * The {@link ProcessAccess} equivalent of {@link #stubWindowAccessCriteriaKeyedByRole(Map)} —
      * keys {@code list()}'s return by the {@code ProcessAccess.role.id} restriction {@link
-     * SFRolesOverview#resolveProcessTierMap(Role, String)} adds via {@code
+     * RoleAccessMatrix#resolveProcessTierMap(Role, String)} adds via {@code
      * Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", role.getId())}, so a test can grant a
      * real {@code OBUIAPP_Process_Access} row to exactly one role in a multi-role response without
      * every other role's (default-empty, per {@code setUp()}) call being misaligned by a
@@ -1439,7 +1439,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
      * Monitor already backs its own active Etendo-GO window/spec today, so its id is already a
      * key in {@code goWindowsById} and already produces its own real {@code matrix} row from the
      * main window loop. Appending the "Fiscal Monitor" proxy row (same id — see {@code
-     * SFRolesOverview#FISCAL_MONITOR_PROXY_WINDOW_ID}) unconditionally would have added a SECOND
+     * RoleAccessMatrix#FISCAL_MONITOR_PROXY_WINDOW_ID}) unconditionally would have added a SECOND
      * row with the identical id — a real collision, since the frontend keys matrix rows by
      * category+id ({@code buildRowKey} in {@code useRolesOverviewData.js}). Exactly one row for
      * that id must survive, carrying the real window's own raw name (the frontend's own {@code
@@ -1477,9 +1477,9 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Positive-path regression test for {@link SFRolesOverview#mergeProxyAccessTiers(Role, Map)}'s
+     * Positive-path regression test for {@link RoleAccessMatrix#mergeProxyAccessTiers(Role, Map)}'s
      * window-based proxy call — {@code resolveWindowTierMap(role, Set.of(TAX_MODELS_PROXY_WINDOW_ID))}
-     * — which reuses the already-well-tested {@link SFRolesOverview#resolveWindowTierMap(Role,
+     * — which reuses the already-well-tested {@link RoleAccessMatrix#resolveWindowTierMap(Role,
      * java.util.Set)} method, so it is very likely correct, but was completely unverified for this
      * specific proxy id before this test (mirrors {@link
      * #testResolveProcessTierMapWithEditableGrantResolvesToFull()}'s rationale for the process-based
@@ -1487,7 +1487,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
      *
      * <p>Grants Finance an active {@code AD_Window_Access} row on {@code TAX_MODELS_PROXY_WINDOW_ID}
      * with {@code isEditableField() == true} and asserts its "Fiscal Models" {@code matrix} row
-     * resolves to {@link SFRolesOverview#FULL "full"} for Finance, while every other role (which
+     * resolves to {@link RoleAccessMatrix#FULL "full"} for Finance, while every other role (which
      * got no grant) still reads {@code "none"}.
      *
      * <p>The baseline Etendo-GO window set is empty (see {@link #stubBaselineQueries(List, List)}),
@@ -1542,9 +1542,9 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Proves the id-intersection filter inside {@link SFRolesOverview#resolveWindowTierMap(Role,
+     * Proves the id-intersection filter inside {@link RoleAccessMatrix#resolveWindowTierMap(Role,
      * java.util.Set)}'s loop, for the Tax Models proxy call specifically: a grant on a DIFFERENT
-     * {@code AD_Window_ID} (not {@link SFRolesOverview#TAX_MODELS_PROXY_WINDOW_ID}) must be
+     * {@code AD_Window_ID} (not {@link RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID}) must be
      * ignored — without the filter, any active {@code WindowAccess} row at all (on any window)
      * would incorrectly light up the "Fiscal Models" proxy row.
      */
@@ -1604,7 +1604,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     /**
      * Finds the {@code "access"} map of the {@code matrix} row identified by {@code rowId},
      * searching across every category — used by the {@code resolveProcessTierMap} tests below,
-     * which do not care which category {@link SFRolesOverview#buildMatrix(Map, Map)} bucketed the
+     * which do not care which category {@link RoleAccessMatrix#buildMatrix(Map, Map)} bucketed the
      * row into (categoryQuery defaults to empty in {@code setUp()}, so it is always "Other" here,
      * but asserting via id search keeps these tests decoupled from that incidental fact).
      */
@@ -1623,7 +1623,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Positive-path regression test for {@link SFRolesOverview#resolveProcessTierMap(Role,
+     * Positive-path regression test for {@link RoleAccessMatrix#resolveProcessTierMap(Role,
      * String)}: before this test, every existing test relied on {@code setUp()}'s blanket
      * {@code processAccessCriteria.list() -> emptyList()} default, so the tri-state logic
      * ({@code isEditableField() ? FULL : READ_ONLY}) and the id-equality filter inside that
@@ -1633,7 +1633,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
      * <p>Grants Finance an active {@code OBUIAPP_Process_Access} row on {@code
      * NOT_POSTED_DOCS_PROXY_PROCESS_ID} with {@code isEditableField() == true} and asserts its
      * "Not Posted Documents" {@code matrix} row resolves to {@link
-     * SFRolesOverview#FULL "full"} for Finance, while every other role (which got no grant, per
+     * RoleAccessMatrix#FULL "full"} for Finance, while every other role (which got no grant, per
      * {@code setUp()}'s default) still reads {@code "none"}.
      */
     @Test
@@ -1681,9 +1681,9 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Proves the id-equality filter inside {@link SFRolesOverview#resolveProcessTierMap(Role,
+     * Proves the id-equality filter inside {@link RoleAccessMatrix#resolveProcessTierMap(Role,
      * String)}'s loop: a grant on a DIFFERENT {@code OBUIAPP_Process_ID} (not {@link
-     * SFRolesOverview#NOT_POSTED_DOCS_PROXY_PROCESS_ID}) must be ignored — without the filter, any
+     * RoleAccessMatrix#NOT_POSTED_DOCS_PROXY_PROCESS_ID}) must be ignored — without the filter, any
      * active {@code ProcessAccess} row at all (on any process) would incorrectly light up the
      * "Not Posted Documents" proxy row.
      */
@@ -1707,16 +1707,16 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * Proves {@link SFRolesOverview#buildMatrix(Map, Map)}'s {@code categoryLookupIds} union
-     * actually resolves a REAL non-{@link SFRolesOverview#OTHER_CATEGORY "Other"} category for
-     * {@link SFRolesOverview#TAX_MODELS_PROXY_WINDOW_ID} when the classic-AD-menu-tree SQL
+     * Proves {@link RoleAccessMatrix#buildMatrix(Map, Map)}'s {@code categoryLookupIds} union
+     * actually resolves a REAL non-{@link RoleAccessMatrix#OTHER_CATEGORY "Other"} category for
+     * {@link RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID} when the classic-AD-menu-tree SQL
      * legitimately has one for it — every other test in this class leaves {@code categoryQuery} at
      * its {@code setUp()} default (empty result), so the Tax Models proxy row has only ever been
      * seen landing in "Other" by omission, never actually exercising the lookup for its own id.
      *
-     * <p>{@link SFRolesOverview#FISCAL_MONITOR_PROXY_WINDOW_ID} is also in {@code
+     * <p>{@link RoleAccessMatrix#FISCAL_MONITOR_PROXY_WINDOW_ID} is also in {@code
      * categoryLookupIds}, but this test's {@code categoryQuery} stub deliberately has no row for
-     * it (nor for {@link SFRolesOverview#NOT_POSTED_DOCS_PROXY_PROCESS_ID}, which the SQL cannot
+     * it (nor for {@link RoleAccessMatrix#NOT_POSTED_DOCS_PROXY_PROCESS_ID}, which the SQL cannot
      * resolve at all — it is a process id, not a window id) — both fall back to "Other", which
      * this test also asserts, so the "Fiscal Reports" bucket is shown to hold ONLY the Tax Models
      * row, not every proxy row indiscriminately.
@@ -1751,6 +1751,216 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         JSONArray otherWindows = other.getJSONArray("windows");
         assertEquals(2, otherWindows.length(),
                 "Fiscal Monitor and Not Posted Documents have no category-query match here and fall back to 'Other'");
+    }
+
+    // ── ETP-5402: Informes subsection (reports / reportCount / reportsMatrix) ───────────
+
+    // Mirror ReportAccessCatalog's own (public) constants — same convention this file already
+    // uses for the ETP-5071 proxy ids above.
+    private static final String TAX_REPORT_PROCESS_ID = "8C1331B9EC14CED7E040007F010119A0";
+    private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
+    private static final String FINANCIAL_REPORTS_WINDOW_ID = "D647D118F5014D00AF47A636B2CD0DD3";
+    private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
+
+    /** Builds a mock classic {@link org.openbravo.model.ad.ui.Process} with the given id. */
+    private org.openbravo.model.ad.ui.Process mockClassicProcess(String id) {
+        org.openbravo.model.ad.ui.Process process = mock(org.openbravo.model.ad.ui.Process.class);
+        when(process.getId()).thenReturn(id);
+        return process;
+    }
+
+    /**
+     * Builds a mock classic {@code AD_Process_Access} row — the {@link
+     * org.openbravo.model.ad.access.ProcessAccess}/{@link org.openbravo.model.ad.ui.Process}
+     * equivalent of {@link #mockProcessAccessRow(Process, boolean)}, used by ETP-5402's {@code
+     * tax-report} tests.
+     */
+    private org.openbravo.model.ad.access.ProcessAccess mockClassicProcessAccessRow(
+            org.openbravo.model.ad.ui.Process process, boolean editable) {
+        org.openbravo.model.ad.access.ProcessAccess row =
+                mock(org.openbravo.model.ad.access.ProcessAccess.class);
+        when(row.getProcess()).thenReturn(process);
+        when(row.isEditableField()).thenReturn(editable);
+        return row;
+    }
+
+    /**
+     * The classic-{@code ProcessAccess} equivalent of {@link
+     * #stubProcessAccessCriteriaKeyedByRole(Map)} — keys {@code list()}'s return by the classic
+     * {@code ProcessAccess.role.id} restriction {@code ReportAccessCatalog}'s own classic-process
+     * resolution adds.
+     */
+    private OBCriteria<org.openbravo.model.ad.access.ProcessAccess> stubClassicProcessAccessCriteriaKeyedByRole(
+            Map<String, List<org.openbravo.model.ad.access.ProcessAccess>> rowsByRoleId) {
+        OBCriteria<org.openbravo.model.ad.access.ProcessAccess> criteria =
+                mockCriteria(org.openbravo.model.ad.access.ProcessAccess.class);
+        AtomicReference<String> currentRoleId = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Object restriction = invocation.getArgument(0);
+            if (restriction instanceof SimpleExpression) {
+                SimpleExpression expr = (SimpleExpression) restriction;
+                if ((org.openbravo.model.ad.access.ProcessAccess.PROPERTY_ROLE + ".id")
+                        .equals(expr.getPropertyName())) {
+                    currentRoleId.set((String) expr.getValue());
+                }
+            }
+            return criteria;
+        }).when(criteria).add(any());
+        when(criteria.list()).thenAnswer(invocation ->
+                rowsByRoleId.getOrDefault(currentRoleId.get(), Collections.emptyList()));
+        return criteria;
+    }
+
+    @Test
+    @DisplayName("ETP-5402: a role with no grants at all has an empty reports array and reportCount=0")
+    void testReportsEmptyWhenNoGrants() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        invokeWebhookWithNoTemplateComposition();
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminCard = result.getJSONArray("roles").getJSONObject(0);
+        assertEquals(0, adminCard.getJSONArray("reports").length());
+        assertEquals(0, adminCard.getInt("reportCount"));
+    }
+
+    @Test
+    @DisplayName("ETP-5402: an OBUIAPP grant on the Receivables Aging process surfaces aging-receivable in reports[]")
+    void testObuiappProcessGrantSurfacesAgingReceivableReport() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Process agingReceivable = mockProcess(AGING_RECEIVABLE_PROCESS_ID);
+        stubProcessAccessCriteriaKeyedByRole(Map.of(
+                ADMIN_ROLE_ID, List.of(mockProcessAccessRow(agingReceivable, false))));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminCard = result.getJSONArray("roles").getJSONObject(0);
+        JSONArray reports = adminCard.getJSONArray("reports");
+        assertEquals(1, reports.length());
+        assertEquals("aging-receivable", reports.getJSONObject(0).getString("id"));
+        assertEquals("read-only", reports.getJSONObject(0).getString("tier"));
+        assertEquals(1, adminCard.getInt("reportCount"));
+    }
+
+    @Test
+    @DisplayName("ETP-5402: a classic AD_Process_Access grant on tax-report is always 'full', never 'read-only'")
+    void testClassicProcessGrantOnTaxReportIsAlwaysFull() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        org.openbravo.model.ad.ui.Process taxReportProcess = mockClassicProcess(TAX_REPORT_PROCESS_ID);
+        // IsReadWrite = false on the grant itself — classic process access is binary, so this
+        // must NOT downgrade the resolved tier to "read-only" (see ReportAccessCatalog's own
+        // javadoc on why it deliberately never derives READ_ONLY for this kind).
+        stubClassicProcessAccessCriteriaKeyedByRole(Map.of(
+                ADMIN_ROLE_ID, List.of(mockClassicProcessAccessRow(taxReportProcess, false))));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminCard = result.getJSONArray("roles").getJSONObject(0);
+        JSONArray reports = adminCard.getJSONArray("reports");
+        assertEquals(1, reports.length());
+        assertEquals("tax-report", reports.getJSONObject(0).getString("id"));
+        assertEquals("full", reports.getJSONObject(0).getString("tier"));
+    }
+
+    @Test
+    @DisplayName("ETP-5402: full access to the Financial Reports pseudo-window surfaces all 5 financial-family reports without a separate grant")
+    void testFinancialReportsWindowGrantSurfacesAllFiveFinancialReports() throws Exception {
+        givenSystemAdminCallerRole();
+        // The Financial Reports pseudo-window is NOT itself an active Etendo-GO spec (0 tabs,
+        // never opened directly — see ReportAccessCatalog's own javadoc) — goWindows stays
+        // empty, matching how it's genuinely resolved in production.
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Window financialReports = mockWindow(FINANCIAL_REPORTS_WINDOW_ID, "Financial Reports");
+        stubWindowAccessCriteriaKeyedByRole(Map.of(
+                ADMIN_ROLE_ID, List.of(mockWindowAccessRow(financialReports, true))));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminCard = result.getJSONArray("roles").getJSONObject(0);
+        JSONArray reports = adminCard.getJSONArray("reports");
+        assertEquals(5, reports.length(),
+                "balance-sheet, profit-loss, report-general-ledger, report-journal-entries, "
+                        + "report-trial-balance");
+        for (int i = 0; i < reports.length(); i++) {
+            assertEquals("full", reports.getJSONObject(i).getString("tier"));
+        }
+    }
+
+    @Test
+    @DisplayName("ETP-5402: inventory-stock-report resolves via its own pseudo-window grant, independent of goWindows membership")
+    void testInventoryStockReportResolvesViaOwnPseudoWindowGrant() throws Exception {
+        givenSystemAdminCallerRole();
+        // The pseudo-window backing inventory-stock-report is NOT itself an active Etendo-GO
+        // spec (windowless-page precedent, see ReportAccessCatalog's own javadoc) — goWindows
+        // stays empty, but the grant must still be resolved via a dedicated query.
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Window inventoryStockReportWindow = mockWindow(INVENTORY_STOCK_REPORT_WINDOW_ID, "Stock Report");
+        stubWindowAccessCriteriaKeyedByRole(Map.of(
+                ADMIN_ROLE_ID, List.of(mockWindowAccessRow(inventoryStockReportWindow, false))));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminCard = result.getJSONArray("roles").getJSONObject(0);
+        JSONArray reports = adminCard.getJSONArray("reports");
+        assertEquals(1, reports.length());
+        assertEquals("inventory-stock-report", reports.getJSONObject(0).getString("id"));
+        assertEquals("read-only", reports.getJSONObject(0).getString("tier"));
+        // Confirms this pseudo-window never leaks into the real windows array/windowCount.
+        assertEquals(0, adminCard.getJSONArray("windows").length());
+    }
+
+    @Test
+    @DisplayName("ETP-5402: reportsMatrix groups rows by hardcoded category and marks 'none' for unreached reports")
+    void testReportsMatrixGroupsByCategoryAndMarksNoneForUnreachedReport() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        org.openbravo.model.ad.ui.Process taxReportProcess = mockClassicProcess(TAX_REPORT_PROCESS_ID);
+        stubClassicProcessAccessCriteriaKeyedByRole(Map.of(
+                ADMIN_ROLE_ID, List.of(mockClassicProcessAccessRow(taxReportProcess, true))));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("reportsMatrix").getJSONArray("categories");
+        // "Finance" (8 rows: tax-report + both aging schedules + 5 financial-family) and
+        // "Inventory" (1 row: inventory-stock-report), sorted case-insensitively.
+        assertEquals(2, categories.length());
+
+        JSONObject finance = categories.getJSONObject(0);
+        assertEquals("Finance", finance.getString("name"));
+        JSONArray financeReports = finance.getJSONArray("reports");
+        assertEquals(8, financeReports.length());
+
+        JSONObject inventory = categories.getJSONObject(1);
+        assertEquals("Inventory", inventory.getString("name"));
+        assertEquals(1, inventory.getJSONArray("reports").length());
+
+        // Every Finance row except tax-report is unreached by the admin role in this test.
+        boolean sawTaxReportFull = false;
+        for (int i = 0; i < financeReports.length(); i++) {
+            JSONObject row = financeReports.getJSONObject(i);
+            String access = row.getJSONObject("access").getString(ADMIN_ROLE_ID);
+            if ("tax-report".equals(row.getString("id"))) {
+                assertEquals("full", access);
+                sawTaxReportFull = true;
+            } else {
+                assertEquals("none", access);
+            }
+        }
+        assertTrue(sawTaxReportFull, "tax-report row must be present in the Finance category");
     }
 
     // ── exception handling ───────────────────────────────────────────────

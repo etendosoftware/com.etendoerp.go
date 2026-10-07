@@ -33,12 +33,18 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -58,6 +64,11 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductAccounts;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumption;
+import org.openbravo.model.materialmgmt.transaction.InternalConsumptionLine;
+import org.openbravo.model.materialmgmt.transaction.InventoryCount;
+import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
+import org.openbravo.model.materialmgmt.transaction.MaterialTransaction;
 import org.openbravo.model.procurement.ReceiptInvoiceMatch;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -165,7 +176,7 @@ public class DocumentPostingServiceTest {
   /**
    * ETP-4706: when {@code AcctServer} fails with {@code STATUS_InvalidAccount} and no entity
    * detail (core Etendo's own generic fallback — see {@link DocumentPostingService}'s
-   * {@code enrichWithFailingEntity} javadoc), the message must be enriched with the Business
+   * {@code failureOf} javadoc), the message must be enriched with the Business
    * Partner / BP Group resolved from {@code AcctServer.C_BPartner_ID} so a person diagnosing an
    * "account not configured" gap does not have to grep server logs to find them.
    */
@@ -205,7 +216,7 @@ public class DocumentPostingServiceTest {
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       // Real AD_MESSAGE (ETGO_InvalidAccountBpAndGroup) catalog text — see AD_MESSAGE.xml.
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
@@ -214,7 +225,11 @@ public class DocumentPostingServiceTest {
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
       assertTrue(r.message()
-          .contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+          .contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      // ETP-5175 pasada 1: the same detail also travels as identity, so the SPA can render it.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup"), r.messageKeys());
+      assertEquals(Map.of("bpName", "Fernet Branca S.A.", "bpGroup", "Proveedores Generales"),
+          r.messageParams());
     }
   }
 
@@ -344,6 +359,8 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertEquals("Period is closed.", r.message());
+      assertTrue(r.messageKeys().isEmpty());
+      assertTrue(r.messageParams().isEmpty());
     }
   }
 
@@ -464,6 +481,85 @@ public class DocumentPostingServiceTest {
       assertFalse(r.ok());
       assertEquals("Period is closed.", r.message());
       msgMock.verify(() -> OBMessageUtils.messageBD("InvalidAccount"), never());
+    }
+  }
+
+  /**
+   * ETP-5436: {@code STATUS_DocumentDisabled} ('D') on a Goods Movement
+   * ({@code acct.tableName == "M_Movement"}) is rewritten to the same
+   * {@code NotCalculatedCost} {@code AD_MESSAGE} text ETP-5360 already uses for Physical
+   * Inventory — reused as-is rather than a second, hand-written EN/ES pair (see
+   * {@link DocumentPostingService}'s {@code MSG_NOT_CALCULATED_COST} javadoc). No separate
+   * EN/ES test needed here: the message text now comes entirely from the mocked
+   * {@code OBMessageUtils.messageBD} call, which already follows {@code OBContext}'s language
+   * (proven generically by ETP-5360's own tests) — this test only needs to prove the rewrite
+   * itself fires for this status/table pair.
+   */
+  @Test
+  public void postRewritesDocumentDisabledMessageForMovementWithNotCalculatedCost() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "M_Movement";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+    }
+  }
+
+  /**
+   * ETP-5436 scoping guard: {@code STATUS_DocumentDisabled} on a NON-M_Movement table must
+   * NOT be rewritten — core's own message passes through untouched, proving the
+   * {@code TABLE_M_MOVEMENT} check actually scopes the rewrite.
+   */
+  @Test
+  public void postDoesNotRewriteDocumentDisabledMessageForNonMovementTable() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "C_Invoice";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Document disabled", r.message());
     }
   }
 
@@ -751,6 +847,103 @@ public class DocumentPostingServiceTest {
     assertEquals("Account could not be found.", resp.getBody().getString("message"));
   }
 
+  /**
+   * ETP-5175 pasada 1: {@code handleAction} must send the Invalid-Account identity on the flat
+   * failure body — {@code messageKeys} as an array and {@code messageParams} as an object whose
+   * account lists are JSON arrays (not a {@code List.toString()} string), so the SPA can render
+   * the sentence in its own locale.
+   */
+  @Test
+  public void handleActionSendsMessageKeysAndParamsWhenPostFailsWithInvalidAccount() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(false, "Account could not be found. (Contact: X, Contact Category: Y)",
+            List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup", "ETGO_InvalidAccountMissingProductAccounts"),
+            Map.of("bpName", "X", "bpGroup", "Y", "missingProductAccounts", List.of("invoicePriceVariance")));
+      }
+    };
+    NeoContext ctx = mockPostActionContext();
+
+    NeoResponse resp = svc.handleAction(ctx);
+
+    assertEquals(422, resp.getHttpStatus());
+    JSONObject body = resp.getBody();
+    assertEquals("ETGO_InvalidAccountBpAndGroup", body.getJSONArray("messageKeys").getString(1));
+    JSONObject params = body.getJSONObject("messageParams");
+    assertEquals("X", params.getString("bpName"));
+    assertEquals("Y", params.getString("bpGroup"));
+    assertEquals("invoicePriceVariance", params.getJSONArray("missingProductAccounts").getString(0));
+  }
+
+  /**
+   * ETP-5175 pasada 1: a failure with no identity keeps the flat body exactly as before — neither
+   * {@code messageKeys} nor {@code messageParams} is written.
+   */
+  @Test
+  public void handleActionOmitsMessageIdentityWhenPostResultHasNone() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(false, "Period is closed.");
+      }
+    };
+
+    NeoResponse resp = svc.handleAction(mockPostActionContext());
+
+    assertFalse(resp.getBody().has("messageKeys"));
+    assertFalse(resp.getBody().has("messageParams"));
+  }
+
+  /** A {@code post} ACTION context on table {@code 318}, record {@code rec-1}. */
+  private static NeoContext mockPostActionContext() {
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("318");
+    when(tab.getTable()).thenReturn(table);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("post");
+    when(ctx.getAdTab()).thenReturn(tab);
+    when(ctx.getRecordId()).thenReturn("rec-1");
+    return ctx;
+  }
+
+  /**
+   * ETP-5175 pasada 1: when the Business Partner cannot be resolved, the failure still names its
+   * identity ({@code InvalidAccount}) but carries NO params — the SPA composer is gated on params,
+   * so it falls back to the backend's (bare) prose instead of rendering an empty sentence.
+   */
+  @Test
+  public void postSendsOnlyInvalidAccountKeyWithoutParamsWhenBusinessPartnerDoesNotResolve() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    OBDal obDal = mock(OBDal.class);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Account could not be found.", r.message());
+      assertEquals(List.of("InvalidAccount"), r.messageKeys());
+      assertTrue(r.messageParams().isEmpty());
+    }
+  }
+
   /** Builds an {@code AcctServer} mock ready for the InvalidAccount + BP + BP Group enrichment path. */
   private static AcctServer stubAcctServerForBpGroupEnrichment() throws Exception {
     AcctServer acct = mock(AcctServer.class);
@@ -788,9 +981,9 @@ public class DocumentPostingServiceTest {
   /** Stubs the two message-catalog keys used by the BP+Group and missing-accounts enrichment. */
   private static void stubBpGroupAndMissingAccountsMessages(MockedStatic<OBMessageUtils> msgMock) {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-        .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+        .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingBpGroupAccounts"))
-        .thenReturn("Please review the BP Group's accounting setup: @missingAccounts@.");
+        .thenReturn("Please review the following accounts of the Contact Category: @missingAccounts@.");
   }
 
   /** Mocks {@code OBDal.getInstance().createCriteria(CategoryAccounts.class)} to return {@code row}. */
@@ -852,8 +1045,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
     }
   }
 
@@ -895,7 +1088,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+          .contains("Please review the following accounts of the Contact Category: Non-Invoiced Receipts."));
     }
   }
 
@@ -938,7 +1131,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains(
-          "Please review the BP Group's accounting setup: Non-Invoiced Receipts, Vendor Prepayment."));
+          "Please review the following accounts of the Contact Category: Non-Invoiced Receipts, Vendor Prepayment."));
     }
   }
 
@@ -980,7 +1173,7 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("Please review the BP Group's accounting setup: "
+      assertTrue(r.message().contains("Please review the following accounts of the Contact Category: "
           + "Non-Invoiced Receipts, Customer Receivables No., "
           + "Vendor Liability, Customer Prepayment, Vendor Prepayment."));
     }
@@ -1015,13 +1208,13 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
@@ -1056,13 +1249,13 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
@@ -1101,7 +1294,7 @@ public class DocumentPostingServiceTest {
   /** Stubs the {@code M_Product_Acct} missing-accounts message-catalog key (ETP-5175). */
   private static void stubMissingProductAccountsMessage(MockedStatic<OBMessageUtils> msgMock) {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-        .thenReturn("Please review the Product's accounting setup: @missingAccounts@.");
+        .thenReturn("Please review the following accounts of the Product: @missingAccounts@.");
   }
 
   /**
@@ -1146,8 +1339,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
     }
   }
 
@@ -1194,7 +1387,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
+          .contains("Please review the following accounts of the Product: Invoice Price Variance."));
     }
   }
 
@@ -1240,7 +1433,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Product Expense, Invoice Price Variance."));
+          .contains("Please review the following accounts of the Product: Product Expense, Invoice Price Variance."));
     }
   }
 
@@ -1286,8 +1479,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
       verify(obDal, never()).get(ReceiptInvoiceMatch.class, "invoice-1");
       verify(obDal, never()).createCriteria(ProductAccounts.class);
     }
@@ -1296,8 +1489,8 @@ public class DocumentPostingServiceTest {
   /**
    * ETP-5175 fail-closed: same regression class as {@code
    * postKeepsBpGroupDetailWhenMissingAccountsLookupThrows}, mirrored on the product-lookup side.
-   * {@code resolveMissingProductAccountsDetail} runs UNCONDITIONALLY before the BP-Group branching
-   * inside {@code resolveBusinessPartnerDetail}'s outer try — if it were not caught locally, a
+   * {@code resolveMissingProductAccounts} runs UNCONDITIONALLY before the BP-Group branching
+   * inside {@code resolveInvalidAccountDetail}'s outer try — if it were not caught locally, a
    * thrown {@code M_MatchInv} lookup would discard the already-resolved BP + BP Group detail along
    * with it. Proves the outer detail survives and only the product addendum is skipped.
    */
@@ -1341,19 +1534,19 @@ public class DocumentPostingServiceTest {
       // closed on its own instead of unwinding the outer try block.
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
     }
   }
 
   /**
-   * ETP-5175 BUG FIX (QA finding, see QA report / BUG-1): {@code resolveMissingAccountsDetail}
-   * used to run INSIDE the same outer {@code try} block in {@code resolveBusinessPartnerDetail}
+   * ETP-5175 BUG FIX (QA finding, see QA report / BUG-1): {@code resolveMissingBpGroupAccounts}
+   * used to run INSIDE the same outer {@code try} block in {@code resolveInvalidAccountDetail}
    * that already built the BP+Group {@code detail} string, so a thrown {@code CategoryAccounts}
    * criteria query (e.g. a transient DB error, an OBDal/Hibernate mapping issue) discarded the
    * ALREADY-SUCCESSFULLY-BUILT BP+Group detail along with it — degrading the pre-existing,
    * working ETP-4706 enrichment (Business Partner name + BP Group name) down to the bare
    * accounting-engine message, solely because of a failure in the optional missing-accounts
-   * lookup. {@code resolveMissingAccountsDetail} now fails closed on its own (catches locally and
+   * lookup. {@code resolveMissingBpGroupAccounts} now fails closed on its own (catches locally and
    * returns {@code null}), so this proves the outer BP+Group detail survives and only the
    * missing-accounts addendum is skipped.
    */
@@ -1393,18 +1586,18 @@ public class DocumentPostingServiceTest {
       // try block.
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
     }
   }
 
   /**
    * ETP-5175 QA finding (Alex review W1): the {@code appendDetail(bpOnly, productAccountsDetail)}
-   * branch in {@code resolveBusinessPartnerDetail} — "BP has NO BP Group" composed with "MXI
+   * branch in {@code resolveInvalidAccountDetail} — "BP has NO BP Group" composed with "MXI
    * product accounts missing" — was a reachable code path with ZERO test coverage: every other
    * ETP-5175 test uses {@link #stubBusinessPartnerWithGroup}. Proves the two independent addenda
    * compose correctly even when the BP-Group one has nothing to contribute: the base message stays
    * the {@code ETGO_InvalidAccountBpOnly} template (no BP-Group text at all, since {@code
-   * resolveMissingAccountsDetail} is never reached when {@code bpGroup == null}), with the product
+   * resolveMissingBpGroupAccounts} is never reached when {@code bpGroup == null}), with the product
    * addendum appended after it.
    */
   @Test
@@ -1439,21 +1632,26 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpOnly"))
-          .thenReturn("(Business Partner: @bpName@)");
+          .thenReturn("(Contact: @bpName@)");
       stubMissingProductAccountsMessage(msgMock);
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      // BP-only baseline (no BP Group / no "Please review the BP Group's accounting setup" text at all)...
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A.)"));
+      // BP-only baseline (no BP Group / no "Please review the following accounts of the Contact Category" text at all)...
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A.)"));
       assertFalse(r.message().contains("BP Group"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
       // ...plus the independent product-accounts addendum, appended after it.
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
-      assertTrue(r.message().indexOf("(Business Partner: Fernet Branca S.A.)")
-          < r.message().indexOf("Please review the Product's accounting setup:"));
+          .contains("Please review the following accounts of the Product: Invoice Price Variance."));
+      assertTrue(r.message().indexOf("(Contact: Fernet Branca S.A.)")
+          < r.message().indexOf("Please review the following accounts of the Product:"));
+      // ETP-5175 pasada 1: BP-only identity — no bpGroup param, no BP-Group accounts key.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpOnly",
+          "ETGO_InvalidAccountMissingProductAccounts"), r.messageKeys());
+      assertEquals(Map.of("bpName", "Fernet Branca S.A.", "missingProductAccounts",
+          List.of("invoicePriceVariance")), r.messageParams());
     }
   }
 
@@ -1506,11 +1704,17 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+          .contains("Please review the following accounts of the Contact Category: Non-Invoiced Receipts."));
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
+          .contains("Please review the following accounts of the Product: Invoice Price Variance."));
+      // ETP-5175 pasada 1: both addenda as identity, in composition order.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup",
+          "ETGO_InvalidAccountMissingBpGroupAccounts", "ETGO_InvalidAccountMissingProductAccounts"),
+          r.messageKeys());
+      assertEquals(List.of("nonInvoicedReceipts"), r.messageParams().get("missingBpGroupAccounts"));
+      assertEquals(List.of("invoicePriceVariance"), r.messageParams().get("missingProductAccounts"));
     }
   }
 
@@ -1559,8 +1763,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the Product's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Product"));
       verify(obDal, never()).createCriteria(ProductAccounts.class);
     }
   }
@@ -1607,7 +1811,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Recibos no facturados."));
+          .contains("Please review the following accounts of the Contact Category: Recibos no facturados."));
       assertFalse(r.message().contains("Non-Invoiced Receipts"));
     }
   }
@@ -1658,7 +1862,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the Product's accounting setup: Desviación Pr. Factura."));
+          .contains("Please review the following accounts of the Product: Desviación Pr. Factura."));
       assertFalse(r.message().contains("Invoice Price Variance"));
     }
   }
@@ -1706,7 +1910,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+          .contains("Please review the following accounts of the Contact Category: Non-Invoiced Receipts."));
       assertFalse(r.message().contains("Recibos no facturados"));
     }
   }
@@ -1755,7 +1959,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains(
-          "Please review the BP Group's accounting setup: Recibos no facturados, "
+          "Please review the following accounts of the Contact Category: Recibos no facturados, "
               + "Pagos por adelantado del proveedor."));
       assertFalse(r.message().contains("Non-Invoiced Receipts"));
       assertFalse(r.message().contains("Vendor Prepayment"));
@@ -1767,7 +1971,7 @@ public class DocumentPostingServiceTest {
    * (e.g. a background/scheduled process without a full session) must NOT crash the whole
    * {@code post()} call. {@code resolveMissingBpGroupAccounts}/{@code resolveMissingProductAccounts}
    * dereference {@code .getLanguage().getLanguage()} unguarded, but that call is wrapped by the
-   * caller's own try/catch ({@code resolveMissingAccountsDetail}, same fail-closed contract as
+   * caller's own try/catch ({@code resolveMissingBpGroupAccounts}, same fail-closed contract as
    * every other lookup failure in this class) — so the NPE is swallowed, the missing-accounts
    * addendum is silently omitted, and the already-built BP + BP Group detail is preserved.
    */
@@ -1815,8 +2019,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+      assertTrue(r.message().contains("(Contact: Fernet Branca S.A., Contact Category: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the following accounts of the Contact Category"));
     }
   }
 
@@ -1873,42 +2077,37 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+          .thenReturn("(Contact: @bpName@, Contact Category: @bpGroup@)");
       stubMissingProductAccountsMessage(msgMock);
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertEquals("Account could not be found. (Business Partner: Blanquiceleste S.A., "
-          + "BP Group: Proveedora) Please review the Product's accounting setup: "
+      assertEquals("Account could not be found. (Contact: Blanquiceleste S.A., "
+          + "Contact Category: Proveedora) Please review the following accounts of the Product: "
           + "Invoice Price Variance.", r.message());
+      // ETP-5175 pasada 1: keys in composition order; accounts as stable codes, never labels.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup",
+          "ETGO_InvalidAccountMissingProductAccounts"), r.messageKeys());
+      assertEquals(List.of("bpName", "bpGroup", "missingProductAccounts"),
+          new ArrayList<>(r.messageParams().keySet()));
+      assertEquals(List.of("invoicePriceVariance"), r.messageParams().get("missingProductAccounts"));
     }
   }
 
   /**
    * ETP-5175 QA follow-up: the Spanish counterpart of {@code
    * postComposesExactEnglishMessageForBpGroupAndProductScenario} — same scenario, {@code es_ES}
-   * session, pinning the exact composed message using the NEW {@code AD_MESSAGE_TRL} Spanish
-   * translations for {@code ETGO_InvalidAccountBpAndGroup} and {@code
-   * ETGO_InvalidAccountMissingProductAccounts} plus the Spanish {@code Desviación Pr. Factura}
-   * column label.
+   * session, pinning the exact composed message from Spanish {@code AD_MESSAGE_TRL} rows for
+   * {@code ETGO_InvalidAccountBpAndGroup} and {@code ETGO_InvalidAccountMissingProductAccounts}
+   * plus the Spanish {@code Desviación Pr. Factura} column label.
    *
-   * <p><b>QA BUG (HIGH, ETP-5175):</b> this pins the ACTUAL current output, which does NOT match
-   * the ticket's own target string. The English base {@code ETGO_InvalidAccountBpAndGroup}
-   * {@code MSGTEXT} is {@code "(Business Partner: @bpName@, BP Group: @bpGroup@)"} — wrapped in
-   * parentheses — but its new {@code AD_MESSAGE_TRL} Spanish translation
-   * ({@code src-db/database/sourcedata/AD_MESSAGE_TRL.xml}, id {@code 30005C8B...}) is
-   * {@code "Contacto: @bpName@, Grupo de Terceros: @bpGroup@"} with NO parentheses (same gap on
-   * the BP-only translation, id {@code 0DCEE0AA...}). {@link
-   * DocumentPostingService#resolveBusinessPartnerDetail} appends the next detail with a single
-   * space and no other punctuation, so losing the closing paren merges the BP+Group clause
-   * directly into the following sentence with no delimiter — e.g. {@code "...Grupo de Terceros:
-   * Proveedora Revise la configuración contable del Producto: ..."} — reintroducing, in Spanish
-   * only, exactly the kind of ambiguous run-on wording this ticket set out to fix. Once
-   * {@code AD_MESSAGE_TRL} is corrected to wrap the Spanish text in parentheses (matching the
-   * English structure), update this assertion to the ticket's target string:
-   * {@code "No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros:
-   * Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."}</p>
+   * <p>ETP-5175 pasada 1: those TRL rows are NOT versioned — {@code com.etendoerp.go} is not a
+   * translation module, so {@code export.database} never exports {@code AD_MESSAGE_TRL} for it
+   * (the hand-written {@code AD_MESSAGE_TRL.xml} was deleted in ETP-5329) and each environment
+   * holds whatever it was given. The Spanish text mocked here is illustrative; the backend just
+   * interpolates it. What the SPA shows comes from the {@code messageKeys} + {@code
+   * messageParams} identity, which is language-independent and pinned below.</p>
    */
   @Test
   public void postComposesExactSpanishMessageForBpGroupAndProductScenario() throws Exception {
@@ -1956,18 +2155,21 @@ public class DocumentPostingServiceTest {
           .thenReturn(acct);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("Contacto: @bpName@, Grupo de Terceros: @bpGroup@");
+          .thenReturn("(Contacto: @bpName@, Categoría de contacto: @bpGroup@)");
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-          .thenReturn("Revise la configuración contable del Producto: @missingAccounts@.");
+          .thenReturn("Revise las siguientes cuentas contables del Producto: @missingAccounts@.");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      // ACTUAL (buggy) output — see the QA BUG note above. Missing parentheses around the
-      // "Contacto: ..., Grupo de Terceros: ..." clause make it run into the next sentence.
-      assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
-          + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
-          + "Desviación Pr. Factura.", r.message());
+      assertEquals("No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., "
+          + "Categoría de contacto: Proveedora) Revise las siguientes cuentas contables del "
+          + "Producto: Desviación Pr. Factura.", r.message());
+      // The identity does not depend on the session language: codes, not Spanish labels.
+      assertEquals(List.of("InvalidAccount", "ETGO_InvalidAccountBpAndGroup",
+          "ETGO_InvalidAccountMissingProductAccounts"), r.messageKeys());
+      assertEquals(Map.of("bpName", "Blanquiceleste S.A.", "bpGroup", "Proveedora",
+          "missingProductAccounts", List.of("invoicePriceVariance")), r.messageParams());
     }
   }
 
@@ -2044,9 +2246,9 @@ public class DocumentPostingServiceTest {
       msgMock.when(() -> OBMessageUtils.messageBD("InvalidAccount"))
           .thenReturn("No se pudo encontrar la cuenta.");
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
-          .thenReturn("Contacto: @bpName@, Grupo de Terceros: @bpGroup@");
+          .thenReturn("(Contacto: @bpName@, Categoría de contacto: @bpGroup@)");
       msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-          .thenReturn("Revise la configuración contable del Producto: @missingAccounts@.");
+          .thenReturn("Revise las siguientes cuentas contables del Producto: @missingAccounts@.");
 
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
@@ -2054,9 +2256,640 @@ public class DocumentPostingServiceTest {
       // Same composed shape as postComposesExactSpanishMessageForBpGroupAndProductScenario, but
       // this time the leading sentence is proven to come from re-resolution, not a lucky baked-in
       // value — and it must not have reverted to the English text seeded on the OBError above.
-      assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
-          + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
-          + "Desviación Pr. Factura.", r.message());
+      assertEquals("No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., "
+          + "Categoría de contacto: Proveedora) Revise las siguientes cuentas contables del "
+          + "Producto: Desviación Pr. Factura.", r.message());
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5360 (review finding B1): isUncalculatedCost pre-check (originally M_Inventory only,
+  // extended to M_Internal_Consumption by ETP-5445 — see the section at the end of this class) +
+  // its integration into post(). See the method's javadoc in DocumentPostingService for the full
+  // rationale (why the check is scoped to those two tables only, and why it fails OPEN on lookup
+  // error).
+  // ---------------------------------------------------------------------------------------------
+
+  /** Arbitrary test AD_Table_ID standing in for the M_Inventory table (fully mocked, never looked up live). */
+  private static final String TABLE_ID_M_INVENTORY = "321";
+
+  /** Stubs {@code OBDal.getInstance().get(Table.class, tableId)} to resolve to a table with the given DB name. */
+  private static Table stubTableWithDbName(OBDal obDal, String tableId, String dbTableName) {
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(dbTableName);
+    when(obDal.get(Table.class, tableId)).thenReturn(table);
+    return table;
+  }
+
+  /**
+   * Stubs {@code OBDal.getInstance().get(InventoryCount.class, recordId)} to resolve to a single
+   * {@code InventoryCountLine} whose {@code MaterialTransaction} list has one transaction per
+   * entry in {@code costCalculatedFlags} (in order), with {@code isCostCalculated()} returning
+   * that entry (a {@code null} entry stubs a null/unset flag).
+   */
+  private static void stubInventoryCountWithTransactions(OBDal obDal, String recordId,
+      Boolean... costCalculatedFlags) {
+    List<MaterialTransaction> transactions = new ArrayList<>();
+    for (Boolean flag : costCalculatedFlags) {
+      MaterialTransaction transaction = mock(MaterialTransaction.class);
+      when(transaction.isCostCalculated()).thenReturn(flag);
+      transactions.add(transaction);
+    }
+    InventoryCountLine line = mock(InventoryCountLine.class);
+    when(line.getMaterialMgmtMaterialTransactionList()).thenReturn(transactions);
+
+    InventoryCount inventoryCount = mock(InventoryCount.class);
+    when(inventoryCount.getMaterialMgmtInventoryCountLineList()).thenReturn(List.of(line));
+    when(obDal.get(InventoryCount.class, recordId)).thenReturn(inventoryCount);
+  }
+
+  /**
+   * ETP-5360 (B1) — the core regression this whole ticket fixes: an {@code M_Inventory} document
+   * with at least one line transaction whose cost has not been calculated must be blocked BEFORE
+   * {@code acct.post()} (and even before {@code AcctServer.get()}) is ever invoked, returning the
+   * plain, generic {@code NotCalculatedCost} message instead of letting core's accounting engine
+   * throw its bare, swallowed {@code IllegalStateException}.
+   */
+  @Test
+  public void postBlocksMInventoryWhenCostNotCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    AcctServer acct = mock(AcctServer.class);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, TABLE_ID_M_INVENTORY, "M_Inventory");
+    stubInventoryCountWithTransactions(obDal, "inv-1", Boolean.FALSE);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+      verify(acct, never()).post(anyString(), eq(false), any(), any(), any());
+      acctStatic.verify(
+          () -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)), never());
+      verify(conn, never()).getTransactionConnection();
+    }
+  }
+
+  /**
+   * ETP-5360: a {@code null} {@code isCostCalculated()} flag on any line transaction is treated as
+   * not-calculated (the check is the null-safe {@code !Boolean.TRUE.equals(...)}), blocking exactly
+   * like an explicit {@code false} — even when another transaction on the same document IS
+   * calculated, proving the "ANY" semantics.
+   */
+  @Test
+  public void postBlocksMInventoryWhenAnyTransactionHasNullCostCalculatedFlag() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    AcctServer acct = mock(AcctServer.class);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, TABLE_ID_M_INVENTORY, "M_Inventory");
+    stubInventoryCountWithTransactions(obDal, "inv-3", Boolean.TRUE, null);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-3", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+      verify(acct, never()).post(anyString(), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5360: when every line transaction on an {@code M_Inventory} document already has its cost
+   * calculated, the pre-check is a no-op and posting proceeds through the normal {@code
+   * acct.post()} path exactly as it did before this ticket.
+   */
+  @Test
+  public void postProceedsNormallyWhenMInventoryCostIsFullyCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("inv-2"), eq(false), any(), any(), any())).thenReturn(true);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, TABLE_ID_M_INVENTORY, "M_Inventory");
+    stubInventoryCountWithTransactions(obDal, "inv-2", Boolean.TRUE, Boolean.TRUE);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(
+              () -> AcctServer.get(eq(TABLE_ID_M_INVENTORY), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-2", conn);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(acct).post(eq("inv-2"), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5360: on a non-{@code M_Inventory} document the pre-check resolves the table but bails out
+   * immediately on the {@code !TABLE_M_INVENTORY.equals(...)} branch — normal posting proceeds
+   * unaffected. Extends the pre-existing non-Inventory coverage (tables "259"/"318"/"999", which
+   * exercise this pre-check with an UNRESOLVED/null table) with an explicit assertion that a
+   * RESOLVED, non-M_Inventory table name is itself just as much a no-op.
+   */
+  @Test
+  public void postIsUnaffectedByPreCheckForResolvedNonInventoryTable() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("rec-1"), eq(false), any(), any(), any())).thenReturn(true);
+
+    OBDal obDal = mock(OBDal.class);
+    stubTableWithDbName(obDal, "318", "M_InOut");
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(() -> AcctServer.get(eq("318"), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertTrue(r.ok());
+      verify(acct).post(eq("rec-1"), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5360: the pre-check fails OPEN — when the lookup itself throws (e.g. a Hibernate/mapping
+   * error resolving the table), the exception is caught and logged, and posting falls through to
+   * the normal {@code acct.post()} path exactly as if the pre-check had never run. Pins the
+   * deliberate fail-open behavior (see the method's javadoc) so a future refactor cannot silently
+   * flip it to fail-closed without a test failing.
+   */
+  @Test
+  public void postFailsOpenWhenCostCheckLookupThrows() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 0;
+    when(acct.post(eq("inv-4"), eq(false), any(), any(), any())).thenReturn(true);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Table.class, TABLE_ID_M_INVENTORY)).thenThrow(new RuntimeException("mapping error"));
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      acctStatic.when(
+              () -> AcctServer.get(eq(TABLE_ID_M_INVENTORY), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-4", conn);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(acct).post(eq("inv-4"), eq(false), any(), any(), any());
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5445: the same cost-calculated pre-check extended to Internal Consumption
+  // (M_Internal_Consumption). Core's DocInternalConsumption#validateCostCalculation has the same
+  // shape as DocInventory#createFact: an uncalculated line transaction makes it throw a bare,
+  // swallowed IllegalStateException, so the gate must block BEFORE AcctServer is ever touched.
+  // ---------------------------------------------------------------------------------------------
+
+  /** Real AD_Table_ID of M_Internal_Consumption (fully mocked here, never looked up live). */
+  private static final String TABLE_ID_M_INTERNAL_CONSUMPTION = "800168";
+  private static final String DB_TABLE_M_INTERNAL_CONSUMPTION = "M_Internal_Consumption";
+  private static final String IC_RECORD_ID = "ic-1";
+  private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
+  private static final String NOT_CALCULATED_COST_TEXT =
+      "Cost has not yet been calculated for all products in the document.";
+
+  @Mock
+  private ConnectionProvider mockIcConnectionProvider;
+  @Mock
+  private Connection mockIcConnection;
+  @Mock
+  private AcctServer mockIcAcctServer;
+  @Mock
+  private OBDal mockIcObDal;
+  @Mock
+  private Table mockIcTable;
+  @Mock
+  private InternalConsumption mockInternalConsumption;
+  @Mock
+  private InternalConsumptionLine mockInternalConsumptionLine;
+  @Mock
+  private MaterialTransaction mockCalculatedTransaction;
+  @Mock
+  private MaterialTransaction mockUncalculatedTransaction;
+
+  /**
+   * Stubs the table lookup to resolve {@code M_Internal_Consumption} and the header lookup to a
+   * single-line Internal Consumption whose line carries the given transactions.
+   */
+  private void stubInternalConsumption(MaterialTransaction... transactions) {
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockCalculatedTransaction.isCostCalculated()).thenReturn(Boolean.TRUE);
+    when(mockUncalculatedTransaction.isCostCalculated()).thenReturn(Boolean.FALSE);
+    when(mockInternalConsumptionLine.getMaterialMgmtMaterialTransactionList())
+        .thenReturn(List.of(transactions));
+    when(mockInternalConsumption.getMaterialMgmtInternalConsumptionLineList())
+        .thenReturn(List.of(mockInternalConsumptionLine));
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(mockInternalConsumption);
+  }
+
+  /** Stubs a successful {@code acct.post()} for the Internal Consumption record. */
+  private void stubSuccessfulIcPost() throws Exception {
+    when(mockIcConnectionProvider.getTransactionConnection()).thenReturn(mockIcConnection);
+    mockIcAcctServer.errors = 0;
+    when(mockIcAcctServer.post(eq(IC_RECORD_ID), eq(false), any(), any(), any())).thenReturn(true);
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption with at least one line transaction whose cost is not
+   * calculated is blocked with the plain {@code NotCalculatedCost} message, and neither
+   * {@code AcctServer.get()} nor {@code acct.post()} nor the transaction connection is touched.
+   */
+  @Test
+  public void testPostBlocksInternalConsumptionWhenCostNotCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption(mockCalculatedTransaction, mockUncalculatedTransaction);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST))
+          .thenReturn(NOT_CALCULATED_COST_TEXT);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertFalse(r.ok());
+      assertEquals(NOT_CALCULATED_COST_TEXT, r.message());
+      verify(mockIcAcctServer, never()).post(anyString(), eq(false), any(), any(), any());
+      acctStatic.verify(
+          () -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)), never());
+      verify(mockIcConnectionProvider, never()).getTransactionConnection();
+    }
+  }
+
+  /**
+   * ETP-5445 — a {@code null} {@code isCostCalculated()} flag on an Internal Consumption line
+   * transaction counts as not calculated (null-safe check), blocking exactly like {@code false}.
+   */
+  @Test
+  public void testPostBlocksInternalConsumptionWhenCostCalculatedFlagIsNull() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption(mockCalculatedTransaction, mockUncalculatedTransaction);
+    when(mockUncalculatedTransaction.isCostCalculated()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      msgMock.when(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST))
+          .thenReturn(NOT_CALCULATED_COST_TEXT);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertFalse(r.ok());
+      assertEquals(NOT_CALCULATED_COST_TEXT, r.message());
+      acctStatic.verify(
+          () -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)), never());
+    }
+  }
+
+  /**
+   * ETP-5445 — when every Internal Consumption line transaction already has its cost calculated,
+   * the pre-check is a no-op and posting proceeds through {@code acct.post()}.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionCostIsFullyCalculated() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption(mockCalculatedTransaction);
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption id that cannot be resolved (null header) is not blocked by
+   * the pre-check; posting proceeds and core's accounting engine gets the final word.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionRecordIsNotFound() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(null);
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5445 — the pre-check still fails OPEN for Internal Consumption: an exception while
+   * walking the header lines is caught and posting proceeds normally.
+   */
+  @Test
+  public void testPostFailsOpenWhenInternalConsumptionLookupThrows() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(mockInternalConsumption);
+    when(mockInternalConsumption.getMaterialMgmtInternalConsumptionLineList())
+        .thenThrow(new RuntimeException("lazy init error"));
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+    }
+  }
+
+  /**
+   * ETP-5445 — the M_Inventory branch must never consult the Internal Consumption DAL entity: an
+   * Inventory post (here with an unresolved inventory record, so the pre-check is a no-op) never
+   * looks up {@code InternalConsumption}.
+   */
+  @Test
+  public void testPostInventoryNeverLooksUpInternalConsumption() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn("M_Inventory");
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INVENTORY)).thenReturn(mockIcTable);
+    when(mockIcConnectionProvider.getTransactionConnection()).thenReturn(mockIcConnection);
+    mockIcAcctServer.errors = 0;
+    when(mockIcAcctServer.post(eq("inv-9"), eq(false), any(), any(), any())).thenReturn(true);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(
+              () -> AcctServer.get(eq(TABLE_ID_M_INVENTORY), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r = svc.post(TABLE_ID_M_INVENTORY, "inv-9", mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      verify(mockIcObDal, never()).get(eq(InternalConsumption.class), anyString());
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ETP-5445 QA gaps: the cost gate must not block an Internal Consumption that has nothing to
+  // check (no lines / no line transactions), and unposting a never-posted document must answer a
+  // clean, handled NEO response — never an exception or a 500.
+  // ---------------------------------------------------------------------------------------------
+
+  private static final String ACTION_UNPOST = "unpost";
+  private static final String BODY_SUCCESS = "success";
+  private static final String BODY_MESSAGE = "message";
+
+  @Mock
+  private Tab mockIcTab;
+  @Mock
+  private NeoContext mockIcContext;
+
+  /** Stubs {@code mockIcContext} as an ACTION request for {@code action} on the IC record. */
+  private void stubIcActionContext(String action) {
+    when(mockIcTable.getId()).thenReturn(TABLE_ID_M_INTERNAL_CONSUMPTION);
+    when(mockIcTab.getTable()).thenReturn(mockIcTable);
+    when(mockIcContext.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(mockIcContext.getFieldName()).thenReturn(action);
+    when(mockIcContext.getAdTab()).thenReturn(mockIcTab);
+    when(mockIcContext.getRecordId()).thenReturn(IC_RECORD_ID);
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption with ZERO lines has no transaction to be uncalculated, so
+   * the cost gate does not block it: posting proceeds and {@code acct.post()} is called.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionHasNoLines() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    when(mockIcTable.getDBTableName()).thenReturn(DB_TABLE_M_INTERNAL_CONSUMPTION);
+    when(mockIcObDal.get(Table.class, TABLE_ID_M_INTERNAL_CONSUMPTION)).thenReturn(mockIcTable);
+    when(mockInternalConsumption.getMaterialMgmtInternalConsumptionLineList()).thenReturn(new ArrayList<>());
+    when(mockIcObDal.get(InternalConsumption.class, IC_RECORD_ID)).thenReturn(mockInternalConsumption);
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+      msgMock.verify(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST), never());
+    }
+  }
+
+  /**
+   * ETP-5445 — an Internal Consumption whose line has an EMPTY {@code MaterialTransaction} list
+   * (e.g. a draft that was never processed) is not blocked either: the per-line scan finds no
+   * uncalculated transaction, so {@code acct.post()} is still called.
+   */
+  @Test
+  public void testPostProceedsWhenInternalConsumptionLinesHaveNoTransactions() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubInternalConsumption();
+    stubSuccessfulIcPost();
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      obDalStatic.when(OBDal::getInstance).thenReturn(mockIcObDal);
+      acctStatic.when(() -> AcctServer.get(eq(TABLE_ID_M_INTERNAL_CONSUMPTION), anyString(), anyString(),
+              any(ConnectionProvider.class)))
+          .thenReturn(mockIcAcctServer);
+
+      DocumentPostingService.PostResult r =
+          svc.post(TABLE_ID_M_INTERNAL_CONSUMPTION, IC_RECORD_ID, mockIcConnectionProvider);
+
+      assertTrue(r.ok());
+      assertEquals("Document posted", r.message());
+      verify(mockIcAcctServer).post(eq(IC_RECORD_ID), eq(false), any(), any(), any());
+      msgMock.verify(() -> OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST), never());
+    }
+  }
+
+  /**
+   * ETP-5445 — unposting a NOT-posted Internal Consumption (Posted = 'N', no Fact_Acct rows).
+   * Core's {@code ResetAccounting.delete} finds nothing to remove and returns zero counts; the
+   * service answers a handled 200 with a flat body reporting 0 removed entries — no exception
+   * escapes and no 500 is produced.
+   */
+  @Test
+  public void testHandleActionUnpostOfNotPostedInternalConsumptionReturnsHandledResponse() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubIcActionContext(ACTION_UNPOST);
+    HashMap<String, Integer> zeroCounts = new HashMap<>();
+    zeroCounts.put("deleted", 0);
+    zeroCounts.put("updated", 0);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), eq(TABLE_ID_M_INTERNAL_CONSUMPTION),
+              eq(IC_RECORD_ID), eq(""), eq("")))
+          .thenReturn(zeroCounts);
+
+      NeoResponse resp = svc.handleAction(mockIcContext);
+
+      assertNotNull(resp);
+      assertEquals(200, resp.getHttpStatus());
+      assertTrue(resp.getBody().getBoolean(BODY_SUCCESS));
+      assertEquals("Unposted (0 entries removed)", resp.getBody().getString(BODY_MESSAGE));
+    }
+  }
+
+  /**
+   * ETP-5445 — a zero-count result map without a {@code deleted} key (defensive) is still a
+   * handled 200 reporting 0 removed entries, not a {@code NullPointerException}.
+   */
+  @Test
+  public void testHandleActionUnpostWithEmptyCountsMapReturnsHandledResponse() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubIcActionContext(ACTION_UNPOST);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), anyString(), anyString(), anyString(),
+              anyString()))
+          .thenReturn(new HashMap<String, Integer>());
+
+      NeoResponse resp = svc.handleAction(mockIcContext);
+
+      assertEquals(200, resp.getHttpStatus());
+      assertTrue(resp.getBody().getBoolean(BODY_SUCCESS));
+      assertEquals("Unposted (0 entries removed)", resp.getBody().getString(BODY_MESSAGE));
+    }
+  }
+
+  /**
+   * ETP-5445 — when core refuses the unpost of a not-posted document with an {@link OBException}
+   * (e.g. its period is closed), the failure is converted into a clean 422 with a flat
+   * {@code success=false} body carrying core's message — never propagated as a 500.
+   */
+  @Test
+  public void testHandleActionUnpostReturns422WhenResetAccountingRefuses() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+    stubIcActionContext(ACTION_UNPOST);
+    String coreMessage = "The period is closed for unposting.";
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), anyString(), anyString(), anyString(),
+              anyString()))
+          .thenThrow(new OBException(coreMessage));
+
+      NeoResponse resp = svc.handleAction(mockIcContext);
+
+      assertNotNull(resp);
+      assertEquals(422, resp.getHttpStatus());
+      assertFalse(resp.getBody().getBoolean(BODY_SUCCESS));
+      assertEquals(coreMessage, resp.getBody().getString(BODY_MESSAGE));
     }
   }
 }

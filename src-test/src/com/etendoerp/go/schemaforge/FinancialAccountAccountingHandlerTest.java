@@ -234,6 +234,23 @@ class FinancialAccountAccountingHandlerTest {
     return response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
   }
 
+  /**
+   * Builds the body by PARSING raw JSON, the way {@code NeoRequestBodyParser} does on a real
+   * request, rather than assembling it with {@code put()}.
+   *
+   * <p>Only this path can produce a {@code JSONObject.NULL} value, which is what an explicit
+   * {@code "field": null} on the wire becomes — and which {@code optString(key, null)} renders as
+   * the literal 4-character string {@code "null"} instead of a Java {@code null} (ETP-5305).
+   * A {@code put(key, (Object) null)} stores a Java null and silently misses that case, so a test
+   * written that way would pass against the bug.</p>
+   *
+   * @param fieldsJson the field entries, already JSON-encoded and comma-separated
+   */
+  private JSONObject jsonBody(String fieldsJson) throws Exception {
+    return new JSONObject(
+        "{\"" + PARAM_ACCOUNT_ID + "\":\"" + ACCOUNT_ID + "\"," + fieldsJson + "}");
+  }
+
   /** Body carrying every field with a distinct fake id (fieldName + "-id"). */
   private JSONObject fullBody() throws Exception {
     JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
@@ -412,8 +429,9 @@ class FinancialAccountAccountingHandlerTest {
       verify(newRow, never()).setFINOutIntransitAcct(any());
       verify(newRow, never()).setWithdrawalAccount(any());
       verify(newRow, never()).setClearedPaymentAccountOUT(any());
-      // enablebankstatement is still forced true — unconditional side effect of a successful save.
-      verify(newRow).setEnablebankstatement(true);
+      // ETP-5305: a brand-new row has no FIN_Asset_Acct/FIN_Transitory_Acct, so the flag must NOT
+      // be forced — 'Y' with either account null violates fin_finacc_acct_bsconfig_check.
+      verify(newRow, never()).setEnablebankstatement(any(Boolean.class));
       verify(obDal).save(newRow);
       verify(obDal).flush();
 
@@ -477,6 +495,70 @@ class FinancialAccountAccountingHandlerTest {
 
     assertEquals(200, response.getHttpStatus());
     verify(existingRow).setDepositAccount(null);
+  }
+
+  @Test
+  @DisplayName("A field present as an explicit JSON null clears the stored value, instead of failing"
+      + " with 'Accounting combination not found: null' (ETP-5305)")
+  void saveFieldPresentAsJsonNullClearsStoredValue() throws Exception {
+    wireAccountWithLedger();
+
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    when(existingRow.getId()).thenReturn("row-existing");
+
+    wireFindRowCriteria(existingRow);
+    wireAccountOptionsCriteria(Collections.emptyList());
+
+    // Parsed from raw JSON exactly as NeoRequestBodyParser does on the real request, so the key
+    // holds JSONObject.NULL — NOT the Java null a `new JSONObject().put(key, null)` would store.
+    // That distinction IS the bug: only the parsed form reaches optString's "null" string.
+    NeoResponse response = handler.handle(saveCtx("POST", jsonBody("\"" + F_DEPOSIT + "\":null")));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(existingRow).setDepositAccount(null);
+  }
+
+  @Test
+  @DisplayName("ETP-5305 repro: the 9-key body the edit form actually sends (one real id, the rest"
+      + " explicit JSON nulls) saves, rather than rejecting every edit with a 400")
+  void saveFullBodyWithJsonNullsPersistsEditedFieldAndClearsTheRest() throws Exception {
+    wireAccountWithLedger();
+
+    AccountingCombination gainCombo = combinationOnLedger("gain-1", "76800000", "Diferencias");
+
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    when(existingRow.getId()).thenReturn("row-existing");
+
+    wireFindRowCriteria(existingRow);
+    wireAccountOptionsCriteria(Collections.emptyList());
+
+    // useFinancialAccountAccounting.js serialises ALL nine keys on every save, defaulting each to
+    // `|| null` — so a user who edits one account sends one id and eight explicit JSON nulls, and
+    // two of them (clearedPaymentAccount/OUT) are null by design since ETP-5207. Before the fix
+    // the FIRST null field aborted the whole save with 400 "Accounting combination not found:
+    // null", which made the Contabilidad tab unsaveable for every account (QA case OF-24).
+    StringBuilder keys = new StringBuilder("\"" + F_BANK_REVAL_GAIN + "\":\"gain-1\"");
+    for (String field : ALL_FIELDS) {
+      if (!F_BANK_REVAL_GAIN.equals(field)) {
+        keys.append(",\"").append(field).append("\":null");
+      }
+    }
+
+    NeoResponse response = handler.handle(saveCtx("POST", jsonBody(keys.toString())));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(existingRow).setFINBankrevaluationgainAcct(gainCombo);
+    // Every other field arrived as an explicit null => cleared, not rejected.
+    verify(existingRow).setFINBankrevaluationlossAcct(null);
+    verify(existingRow).setFINBankfeeAcct(null);
+    verify(existingRow).setInTransitPaymentAccountIN(null);
+    verify(existingRow).setDepositAccount(null);
+    verify(existingRow).setClearedPaymentAccount(null);
+    verify(existingRow).setFINOutIntransitAcct(null);
+    verify(existingRow).setWithdrawalAccount(null);
+    verify(existingRow).setClearedPaymentAccountOUT(null);
+    verify(obDal).save(existingRow);
+    verify(obDal).flush();
   }
 
   @Test
@@ -628,8 +710,9 @@ class FinancialAccountAccountingHandlerTest {
       verify(newRow).setFINOutIntransitAcct(inTransitOut);
       verify(newRow).setWithdrawalAccount(withdrawal);
       verify(newRow).setClearedPaymentAccountOUT(clearedOut);
-      // The enablebankstatement side effect must fire on every successful save.
-      verify(newRow).setEnablebankstatement(true);
+      // ETP-5305: writing all 9 fields does NOT satisfy the bank-statement gate — that needs
+      // FIN_Asset_Acct/FIN_Transitory_Acct, which this handler no longer writes (ETP-4872).
+      verify(newRow, never()).setEnablebankstatement(any(Boolean.class));
       verify(obDal).save(newRow);
       verify(obDal).flush();
 
@@ -669,14 +752,77 @@ class FinancialAccountAccountingHandlerTest {
       // find-or-create must reuse the existing row: OBProvider is never asked for a new one.
       obProviderMock.verifyNoInteractions();
       verify(existingRow).setDepositAccount(deposit);
-      // The enablebankstatement side effect must fire on every successful save.
-      verify(existingRow).setEnablebankstatement(true);
+      // ETP-5305: not forced here either — this row carries no FIN_Asset_Acct/FIN_Transitory_Acct.
+      // The dedicated pair of tests above covers both branches of that guard explicitly.
+      verify(existingRow, never()).setEnablebankstatement(any(Boolean.class));
       verify(obDal).save(existingRow);
       verify(obDal).flush();
 
       JSONObject row = row(response);
       assertEquals("row-existing", row.getString("id"));
     }
+  }
+
+  // ── enablebankstatement / check-constraint guard (ETP-5305) ──────────────────
+
+  @Test
+  @DisplayName("enablebankstatement is NOT forced when FIN_Asset_Acct/FIN_Transitory_Acct are"
+      + " absent — flipping it would violate fin_finacc_acct_bsconfig_check and 500 the save")
+  void saveDoesNotForceBankStatementFlagWhenAssetTransitoryPairIsMissing() throws Exception {
+    wireAccountWithLedger();
+
+    AccountingCombination deposit = combinationOnLedger("deposit-1", "57200000", "Bancos");
+
+    // The realistic state of EVERY row in a real instance: the pair is null, because ETP-4872
+    // retired both fields from this handler and nothing else writes them.
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    when(existingRow.getId()).thenReturn("row-existing");
+    when(existingRow.getFINAssetAcct()).thenReturn(null);
+    when(existingRow.getFINTransitoryAcct()).thenReturn(null);
+
+    wireFindRowCriteria(existingRow);
+    wireAccountOptionsCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(F_DEPOSIT, "deposit-1");
+
+    NeoResponse response = handler.handle(saveCtx("PUT", body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(existingRow).setDepositAccount(deposit);
+    verify(existingRow, never()).setEnablebankstatement(any(Boolean.class));
+    verify(obDal).save(existingRow);
+    verify(obDal).flush();
+  }
+
+  @Test
+  @DisplayName("enablebankstatement IS forced when both FIN_Asset_Acct and FIN_Transitory_Acct are"
+      + " present — the one case where it satisfies Classic's gate and the DB constraint")
+  void saveForcesBankStatementFlagWhenAssetTransitoryPairIsPresent() throws Exception {
+    wireAccountWithLedger();
+
+    AccountingCombination deposit = combinationOnLedger("deposit-1", "57200000", "Bancos");
+    AccountingCombination assetAcct = combination("asset-1", null, "57200000", "Asset");
+    AccountingCombination transitoryAcct = combination("transitory-1", null, "55500000", "Transit");
+
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    when(existingRow.getId()).thenReturn("row-existing");
+    when(existingRow.getFINAssetAcct()).thenReturn(assetAcct);
+    when(existingRow.getFINTransitoryAcct()).thenReturn(transitoryAcct);
+
+    wireFindRowCriteria(existingRow);
+    wireAccountOptionsCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(F_DEPOSIT, "deposit-1");
+
+    NeoResponse response = handler.handle(saveCtx("PUT", body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(existingRow).setDepositAccount(deposit);
+    verify(existingRow).setEnablebankstatement(true);
   }
 
   // ── catalog building ─────────────────────────────────────────────────────────

@@ -28,10 +28,102 @@ import java.util.Set;
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
 
-/** Tests for OAuth2 policy helpers that do not require DAL state. */
+/**
+ * Tests for OAuth2 policy helpers that do not require DAL state.
+ *
+ * @covers com.etendoerp.go.oauth2.OAuth2ClientPolicy
+ * @covers com.etendoerp.go.oauth2.PublicApiKeyPolicy
+ */
 public class OAuth2ClientPolicyTest {
   private static final Set<String> VALID_SCOPES = new HashSet<>(
       Arrays.asList("neo:read", "neo:write", "neo:process", "neo:report", "neo:*"));
+
+  @Test
+  public void publicApiKeyNamesAreNormalizedAndBounded() {
+    assertEquals("Production key", PublicApiKeyPolicy.normalizeName("  Production   key "));
+    try {
+      PublicApiKeyPolicy.normalizeName("x".repeat(PublicApiKeyPolicy.MAX_NAME_LENGTH + 1));
+      throw new AssertionError("expected an overlong name to be rejected");
+    } catch (PublicApiKeyPolicy.InvalidRequestException expected) {
+      assertTrue(expected.getMessage().contains("at most"));
+    }
+  }
+
+  @Test
+  public void publicApiKeyCapabilitiesMapToInternalScopesWithoutWildcard() {
+    Set<String> capabilities = PublicApiKeyPolicy.normalizeCapabilities(
+        new String[] { PublicApiKeyPolicy.CAPABILITY_READ, PublicApiKeyPolicy.CAPABILITY_WRITE });
+    assertEquals("etendo:read etendo:write", PublicApiKeyPolicy.toInternalScopes(capabilities));
+    assertFalse(PublicApiKeyPolicy.toInternalScopes(capabilities).contains("*"));
+  }
+
+  /** Keys issued before ETP-5602 store neo: scopes; they keep mapping to the same capabilities. */
+  @Test
+  public void publicApiKeyLegacyScopesMapToTheSameCapabilities() {
+    assertEquals(
+        new java.util.LinkedHashSet<>(Arrays.asList(
+            PublicApiKeyPolicy.CAPABILITY_READ, PublicApiKeyPolicy.CAPABILITY_WRITE)),
+        PublicApiKeyPolicy.capabilitiesForScopes(
+            PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + " neo:read neo:write"));
+  }
+
+  /** A requested scope is allowed by its alias of the other prefix, and by either wildcard. */
+  @Test
+  public void isScopeAllowedAppliesTheNeoEtendoEquivalence() {
+    assertTrue(OAuth2ClientPolicy.isScopeAllowed(
+        Collections.singleton("etendo:read"), Collections.singleton("neo:read")));
+    assertTrue(OAuth2ClientPolicy.isScopeAllowed(
+        Collections.singleton("neo:read"), Collections.singleton("etendo:read")));
+    assertTrue(OAuth2ClientPolicy.isScopeAllowed(
+        new HashSet<>(Arrays.asList("neo:read", "etendo:write")), Collections.singleton("neo:*")));
+    assertTrue(OAuth2ClientPolicy.isScopeAllowed(
+        new HashSet<>(Arrays.asList("neo:report", "etendo:process")),
+        Collections.singleton("etendo:*")));
+  }
+
+  /** The equivalence never widens access: an alias grants its counterpart and nothing else. */
+  @Test
+  public void isScopeAllowedDoesNotWidenAccessAcrossPrefixes() {
+    assertFalse(OAuth2ClientPolicy.isScopeAllowed(
+        Collections.singleton("etendo:write"), Collections.singleton("neo:read")));
+    assertFalse(OAuth2ClientPolicy.isScopeAllowed(
+        Collections.singleton("neo:*"), Collections.singleton("etendo:read")));
+    assertFalse(OAuth2ClientPolicy.isScopeAllowed(
+        new HashSet<>(Arrays.asList("etendo:read", "etendo:report")),
+        Collections.singleton("neo:read")));
+  }
+
+  /** Both prefixes are supported request values; unknown scopes of either prefix are not. */
+  @Test
+  public void hasUnsupportedScopesAcceptsBothPrefixesAndRejectsUnknownOnes() {
+    assertFalse(OAuth2ClientPolicy.hasUnsupportedScopes(
+        "etendo:read neo:write etendo:* neo:*", ApiScopes.ACCEPTED));
+    assertTrue(OAuth2ClientPolicy.hasUnsupportedScopes("etendo:admin", ApiScopes.ACCEPTED));
+    assertTrue(OAuth2ClientPolicy.hasUnsupportedScopes("neo:admin", ApiScopes.ACCEPTED));
+    assertTrue(OAuth2ClientPolicy.hasUnsupportedScopes(
+        PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER, ApiScopes.ACCEPTED));
+  }
+
+  @Test
+  public void publicApiKeyStorageAddsPrivateMarkerWithoutExposingItAsCapability() {
+    Set<String> capabilities = Collections.singleton(PublicApiKeyPolicy.CAPABILITY_READ);
+    String storedScopes = PublicApiKeyPolicy.toStoredScopes(capabilities);
+    assertTrue(storedScopes.startsWith(PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + " "));
+    assertEquals(capabilities, PublicApiKeyPolicy.capabilitiesForScopes(storedScopes));
+  }
+
+  @Test
+  public void publicApiKeyStorageKeepsOwnerOrganizationPrivateAndRecoverable() {
+    String marker = PublicApiKeyPolicy.ownerOrganizationMarker("ORG-123");
+    assertEquals("ORG-123", PublicApiKeyPolicy.ownerOrganizationId(
+        "neo:public-api-key neo:read " + marker));
+    assertEquals("ORG-123", PublicApiKeyPolicy.ownerOrganizationId(marker));
+  }
+
+  @Test(expected = PublicApiKeyPolicy.InvalidCapabilityException.class)
+  public void publicApiKeyRejectsUnknownAndWildcardCapabilities() {
+    PublicApiKeyPolicy.normalizeCapabilities(new String[] { "neo:*" });
+  }
 
   /** Empty requested scopes mean caller is requesting the client default scope set. */
   @Test
@@ -98,7 +190,6 @@ public class OAuth2ClientPolicyTest {
         "role",
         Collections.singleton("neo:read"),
         Collections.singleton("neo:*"),
-        "neo:*",
         300000);
 
     assertEquals("neo:read", codeData.scopes);

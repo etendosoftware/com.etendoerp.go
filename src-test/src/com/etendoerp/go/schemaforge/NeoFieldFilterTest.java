@@ -53,6 +53,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -572,6 +573,155 @@ class NeoFieldFilterTest {
   }
 
   @Nested
+  @DisplayName("validateClientWriteRequest")
+  class ValidateClientWriteRequest {
+    @Test
+    @DisplayName("rejects a client value for a curated read-only field")
+    void rejectsReadOnlyField() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name", "documentNo"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, writable);
+
+      JSONObject body = new JSONObject()
+          .put("name", "Changed")
+          .put("documentNo", "SO-9999");
+
+      ReadOnlyFieldRejectedException exception = assertThrows(
+          ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "PATCH"));
+      assertEquals("documentNo", exception.getFieldName());
+    }
+
+    @Test
+    @DisplayName("rejects an API alias while naming the key the REST client sent")
+    void rejectsReadOnlyApiAlias() throws Exception {
+      Map<String, String> apiKeyToProp = new HashMap<>();
+      apiKeyToProp.put("documentNumber", "documentNo");
+      NeoFieldFilter filter = activeFilterWithMappings(
+          new HashSet<>(Set.of("id", "documentNo")), Set.of("id"), apiKeyToProp,
+          Collections.emptyMap());
+
+      ReadOnlyFieldRejectedException exception = assertThrows(
+          ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(
+              new JSONObject().put("documentNumber", "SO-9999"), "PATCH"));
+      assertEquals("documentNumber", exception.getFieldName());
+    }
+
+    @Test
+    @DisplayName("does not reject a server-owned tenant field before the ownership filter strips it")
+    void keepsServerOwnedFieldsForTheOwnershipFilter() throws Exception {
+      NeoFieldFilter filter = activeFilter(
+          new HashSet<>(Set.of("id", "client", "organization")), Set.of("id"));
+
+      filter.validateClientWriteRequest(new JSONObject()
+          .put("client", "other-client")
+          .put("organization", "other-org"), "PATCH");
+    }
+
+    @Test
+    @DisplayName("POST: does not reject a field already exempted via rejectableOnCreateFields "
+        + "(entity has a NeoHandler that may legitimately supply it — IMP-28/ETP-5537)")
+    void allowsCreateExemptedFieldOnPost() throws Exception {
+      // Simulates an entity with a Java_Qualifier (e.g. assets/AssetsHandler): "currency" is
+      // included + read-only, but NOT in rejectableOnCreateFields because the entity has a
+      // handler (see NeoFieldFilter#forEntity / processFieldMappings entityHasHandler branch).
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "currency")), Set.of("id"), Collections.emptySet());
+
+      filter.validateClientWriteRequest(new JSONObject().put("currency", "102"), "POST");
+      // No exception -> the create-time value is accepted, deferring to filterCreateRequest's
+      // already-established policy instead of pre-empting it.
+    }
+
+    @Test
+    @DisplayName("PUT/PATCH: still rejects the same field once the record already exists")
+    void rejectsCreateExemptedFieldOnUpdate() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "currency")), Set.of("id"), Collections.emptySet());
+
+      JSONObject body = new JSONObject().put("currency", "102");
+      assertThrows(ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "PUT"));
+      assertThrows(ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "PATCH"));
+    }
+
+    @Test
+    @DisplayName("POST: still rejects a field that is genuinely unwritable on create "
+        + "(present in rejectableOnCreateFields)")
+    void rejectsGenuinelyUnwritableFieldOnPost() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "salePrice")), Set.of("id"), Set.of("salePrice"));
+
+      JSONObject body = new JSONObject().put("salePrice", "10.00");
+      ReadOnlyFieldRejectedException exception = assertThrows(
+          ReadOnlyFieldRejectedException.class,
+          () -> filter.validateClientWriteRequest(body, "POST"));
+      assertEquals("salePrice", exception.getFieldName());
+    }
+  }
+
+  @Nested
+  @DisplayName("findClientReadOnlyFields (ETP-5556)")
+  class FindClientReadOnlyFields {
+    @Test
+    @DisplayName("lists every read-only field, skipping writable, metadata and server-owned keys")
+    void listsEveryReadOnlyField() throws Exception {
+      NeoFieldFilter filter = activeFilter(
+          new HashSet<>(Set.of("id", "orderedQuantity", "lineNetAmount", "grossAmount",
+              "organization")),
+          Set.of("id", "orderedQuantity"));
+
+      JSONObject body = new JSONObject()
+          .put("orderedQuantity", "3")
+          .put("lineNetAmount", "30.00")
+          .put("grossAmount", "36.30")
+          .put("organization", "other-org")
+          .put("recordTime", 1L)
+          .put("_identifier", "Line 10");
+
+      List<String> readOnly = filter.findClientReadOnlyFields(body, "PATCH");
+      assertEquals(Set.of("lineNetAmount", "grossAmount"), new HashSet<>(readOnly));
+      assertEquals(2, readOnly.size());
+    }
+
+    @Test
+    @DisplayName("reads the fields inside a data wrapper")
+    void readsDataWrapper() throws Exception {
+      NeoFieldFilter filter = activeFilter(
+          new HashSet<>(Set.of("id", "lineNetAmount")), Set.of("id"));
+
+      JSONObject body = new JSONObject()
+          .put("data", new JSONObject().put("lineNetAmount", "30.00"));
+
+      assertEquals(List.of("lineNetAmount"), filter.findClientReadOnlyFields(body, "PUT"));
+    }
+
+    @Test
+    @DisplayName("honors the create-time exemption on POST only")
+    void honorsCreateExemption() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          new HashSet<>(Set.of("id", "currency")), Set.of("id"), Collections.emptySet());
+      JSONObject body = new JSONObject().put("currency", "102");
+
+      assertTrue(filter.findClientReadOnlyFields(body, "POST").isEmpty());
+      assertEquals(List.of("currency"), filter.findClientReadOnlyFields(body, "PATCH"));
+    }
+
+    @Test
+    @DisplayName("returns an empty list for an inactive filter")
+    void emptyWhenInactive() throws Exception {
+      NeoFieldFilter filter = createFilter(
+          new HashSet<>(Set.of("id", "lineNetAmount")), Set.of("id"), Collections.emptySet(),
+          Collections.emptyMap(), Collections.emptyMap(), false);
+
+      assertTrue(filter.findClientReadOnlyFields(
+          new JSONObject().put("lineNetAmount", "30.00"), "PATCH").isEmpty());
+    }
+  }
+
+  @Nested
   @DisplayName("emittableResponseKeys (IMP-18)")
   class EmittableResponseKeys {
     @Test
@@ -1020,6 +1170,92 @@ class NeoFieldFilterTest {
           apiKeyMap.get("account$_identifier"),
           "apiKeyMap must map qualifier variant to DAL variant");
       assertEquals(1, apiKeyMap.size());
+    }
+  }
+
+  private static void invokeIncludeRequestedExtraProperties(Set<String> included,
+      Map<String, String> queryParams) throws Exception {
+    Method m = NeoFieldFilter.class.getDeclaredMethod("includeRequestedExtraProperties",
+        Set.class, Map.class);
+    m.setAccessible(true);
+    m.invoke(null, included, queryParams);
+  }
+
+  /**
+   * ETP-5432 #6/#7 — {@code includeRequestedExtraProperties} allowlists whatever the caller
+   * explicitly asked for via the classic {@code _extraProperties} datasource parameter, so
+   * {@link NeoFieldFilter#filterGetResponse} does not silently strip it. Before this fix a
+   * dotted extra property like {@code invoice.salesTransaction} produced the joined response key
+   * {@code invoice$salesTransaction} (per {@code DataToJsonConverter#replaceDots}), which starts
+   * with the FK property name rather than {@code _}/{@code $} — {@code isMetadataKey} never
+   * recognized it, so it fell through the allowlist exactly like an unrequested field, making a
+   * caller-requested value silently and permanently absent.
+   */
+  @Nested
+  @DisplayName("includeRequestedExtraProperties (ETP-5432 #6/#7)")
+  class IncludeRequestedExtraProperties {
+
+    @Test
+    @DisplayName("no-op when queryParams is null")
+    void noOpWhenQueryParamsNull() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      invokeIncludeRequestedExtraProperties(included, null);
+      assertEquals(Set.of("id"), included);
+    }
+
+    @Test
+    @DisplayName("no-op when queryParams carries no _extraProperties key")
+    void noOpWhenParameterAbsent() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      invokeIncludeRequestedExtraProperties(included, Map.of("_startRow", "0"));
+      assertEquals(Set.of("id"), included);
+    }
+
+    @Test
+    @DisplayName("no-op when _extraProperties is blank")
+    void noOpWhenParameterBlank() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "   "));
+      assertEquals(Set.of("id"), included);
+    }
+
+    @Test
+    @DisplayName("converts a dotted extra property to the $-joined response key")
+    void convertsDottedPropertyToJoinedKey() throws Exception {
+      Set<String> included = new HashSet<>();
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "invoice.salesTransaction"));
+      assertEquals(Set.of("invoice$salesTransaction"), included,
+          "a dotted DAL path must be converted the same way DataToJsonConverter joins it");
+    }
+
+    @Test
+    @DisplayName("a non-dotted extra property is added verbatim")
+    void nonDottedPropertyAddedVerbatim() throws Exception {
+      Set<String> included = new HashSet<>();
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "customField"));
+      assertEquals(Set.of("customField"), included);
+    }
+
+    @Test
+    @DisplayName("splits and trims a comma-separated list, ignoring empty entries")
+    void splitsCommaSeparatedListAndTrims() throws Exception {
+      Set<String> included = new HashSet<>();
+      invokeIncludeRequestedExtraProperties(included, Map.of(
+          JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER,
+          " invoice.salesTransaction , customField ,, thirdOne"));
+      assertEquals(Set.of("invoice$salesTransaction", "customField", "thirdOne"), included);
+    }
+
+    @Test
+    @DisplayName("adds to an already-populated included set without removing existing entries")
+    void addsToExistingIncludedSet() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      invokeIncludeRequestedExtraProperties(included,
+          Map.of(JsonConstants.ADDITIONAL_PROPERTIES_PARAMETER, "customField"));
+      assertEquals(Set.of("id", "name", "customField"), included);
     }
   }
 

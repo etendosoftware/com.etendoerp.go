@@ -223,7 +223,7 @@ public class TransactionalEmailService {
     if (!resolution.isReady()) {
       return observedResponse(startedAtNanos, command, null,
           ResponseOutcome.of(resolution.getHttpStatus(), resolution.getStatus(),
-              normalizedContract, resolution.getMessage(), null));
+              normalizedContract, resolution.getMessage(), resolution.getExtra()));
     }
 
     EmailProviderRequest providerRequest = resolution.getProviderRequest();

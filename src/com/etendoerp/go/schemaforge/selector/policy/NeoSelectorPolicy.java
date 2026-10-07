@@ -16,14 +16,15 @@
  */
 package com.etendoerp.go.schemaforge.selector.policy;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.openbravo.model.ad.datamodel.Column;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
-import java.util.List;
 
 /**
  * Selector policy facade for business-specific selector behavior.
@@ -72,6 +73,40 @@ public final class NeoSelectorPolicy {
    */
   public static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
     return AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(entity, columnName);
+  }
+
+  /**
+   * Resolve every virtual column a wrapper entity exposes from its backing table.
+   *
+   * <p>ETP-5368. Wider than {@link #resolveVirtualSelectorColumn}, which answers only for the FK
+   * columns that have a selector to query: this one is what a schema builder needs, since an agent
+   * cannot send a field it was never told exists.
+   *
+   * @param entity source Schema Forge entity
+   * @return the backing columns, in declaration order; empty when no wrapper policy applies
+   */
+  public static List<Column> resolveVirtualColumns(SFEntity entity) {
+    return AddressVirtualSelectorPolicy.resolveVirtualColumns(entity);
+  }
+
+  /**
+   * Whether the entity exposes virtual columns from a backing table.
+   *
+   * @param entity source Schema Forge entity
+   * @return {@code true} when a wrapper policy applies to this entity
+   */
+  public static boolean hasVirtualColumns(SFEntity entity) {
+    return AddressVirtualSelectorPolicy.isAddressWrapper(entity);
+  }
+
+  /**
+   * The entity's own fields that a wrapper handler resolves server-side, by published field name.
+   *
+   * @param entity source Schema Forge entity
+   * @return the field names; empty when no wrapper policy applies
+   */
+  public static Set<String> serverResolvedFieldNames(SFEntity entity) {
+    return AddressVirtualSelectorPolicy.serverResolvedFieldNames(entity);
   }
 
   /**

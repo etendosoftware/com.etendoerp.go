@@ -29,6 +29,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -42,20 +43,44 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
- * Schema/field-metadata building for MCP discovery (neo_schema and related tools).
+ * Schema/field-metadata building for MCP discovery (etendo_schema and related tools).
  *
  * <p>Extracted from {@link McpToolRouterSupport} (ETP-4510, Sonar S1448 — "too many
  * methods") — this class owns AD_Column → JSON field mapping: type/selector inference,
  * visibility, defaults, business-critical flags, button/process metadata, and the
- * per-entity field metadata load (visibility + businessCritical) used by neo_schema.</p>
+ * per-entity field metadata load (visibility + businessCritical) used by etendo_schema.</p>
  */
 final class McpSchemaFieldBuilder {
 
   private McpSchemaFieldBuilder() {
   }
+
+  /**
+   * Guidance for the wrapper's virtual fields, keyed by upper-cased DB column name (ETP-5368).
+   *
+   * <p>Each entry describes a choice, which is precisely what a column definition has no room for:
+   * region and regionName are the same answer for two kinds of country and the handler keeps them
+   * mutually exclusive, and the region selector cannot resolve anything without the country.
+   */
+  private static final Map<String, String> VIRTUAL_FIELD_PROMPTS = Map.of(
+      "C_COUNTRY_ID",
+      "The country of the address. Also the argument the region selector needs: call etendo_selectors "
+          + "for 'region' with recordContext {\"country\": \"<this id>\"}, since province names "
+          + "exist only relative to a country.",
+      "C_REGION_ID",
+      "The province, as an ID ONLY — resolve it with etendo_selectors, passing the country in "
+          + "recordContext. A province NAME sent here is refused, not resolved; send it in "
+          + "regionName instead. Mutually exclusive with regionName.",
+      "REGIONNAME",
+      "The province BY NAME, and the simpler option: it works for every country. For one that "
+          + "models provinces (Spain, the United States) the server resolves the name against the "
+          + "country in this same payload and stores the real link; for one that does not "
+          + "(Argentina, and most others) it is stored as free text. A name that matches nothing "
+          + "is refused rather than silently dropped. Mutually exclusive with region.");
 
   static final String KEY_DEFAULT_EXPRESSION = "defaultExpression";
   static final String KEY_DEFAULT_SOURCE = "defaultSource";
@@ -74,7 +99,6 @@ final class McpSchemaFieldBuilder {
   static final String KEY_INVOKABLE = "invokable";
   static final String KEY_NOT_INVOKABLE_REASON = "notInvokableReason";
   /** AD column of the accounting trigger, present on every accountable document. */
-  private static final String COLUMN_POSTED = "Posted";
   private static final String EM_PREFIX = "EM_";
 
   static String mapColumnType(String refId) {
@@ -172,6 +196,7 @@ final class McpSchemaFieldBuilder {
     Map<String, String> visibilityByColumnId = new HashMap<>();
     Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
     Map<String, Boolean> readOnlyByColumnId = new HashMap<>();
+    java.util.Set<String> excludedColumnIds = new java.util.HashSet<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(
         SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
@@ -192,21 +217,55 @@ final class McpSchemaFieldBuilder {
       }
       businessCriticalByColumnId.put(colId, view.isBusinessCritical());
       readOnlyByColumnId.put(colId, view.isReadOnly());
+      // IMP-39: the fields the spec deliberately excluded. Resolved through the same view as every
+      // other curated signal, so an ISINCLUDED='N' row whose VISIBILITY is NULL is caught too -
+      // roughly half the excluded rows in a typical instance are in exactly that state.
+      if (!view.isIncluded()) {
+        excludedColumnIds.add(colId);
+      }
     }
-    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId);
+    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
+        excludedColumnIds);
   }
 
   static final class FieldMetadata {
     final Map<String, String> visibilityByColumnId;
     final Map<String, Boolean> businessCriticalByColumnId;
     final Map<String, Boolean> readOnlyByColumnId;
+    /**
+     * AD_Column ids the spec deliberately excluded — a {@code ETGO_SF_FIELD} row that exists and
+     * carries {@code ISINCLUDED = 'N'}.
+     *
+     * <p><b>Excluded, not "not included".</b> The distinction is the whole design: a column with
+     * no {@code ETGO_SF_FIELD} row at all is <em>uncurated</em>, and absence of curation is not a
+     * decision to hide — the same principle {@code addInvokability} already applies to buttons.
+     * There are 1043 such columns across the curated entities of a typical instance (a column
+     * added to AD after the last {@code push-to-neo}, a table the spec never walked in full), and
+     * treating that silence as exclusion would remove them from the surface on no one's authority.
+     * It also makes the handler-backed entities — dashboards, reports, reconciliation views, which
+     * have no field rows whatsoever — fall out correctly with no special case: nothing is
+     * excluded, so nothing changes for them.</p>
+     */
+    final java.util.Set<String> excludedColumnIds;
 
     FieldMetadata(Map<String, String> visibilityByColumnId,
         Map<String, Boolean> businessCriticalByColumnId,
-        Map<String, Boolean> readOnlyByColumnId) {
+        Map<String, Boolean> readOnlyByColumnId,
+        java.util.Set<String> excludedColumnIds) {
       this.visibilityByColumnId = visibilityByColumnId;
       this.businessCriticalByColumnId = businessCriticalByColumnId;
       this.readOnlyByColumnId = readOnlyByColumnId;
+      this.excludedColumnIds = excludedColumnIds;
+    }
+
+    /**
+     * Whether {@code col} may be named on the agent surface of this entity.
+     *
+     * @param col the AD column
+     * @return {@code false} only when the spec carries a row for it saying it is excluded
+     */
+    boolean exposes(Column col) {
+      return !excludedColumnIds.contains((String) col.getId());
     }
   }
 
@@ -233,7 +292,7 @@ final class McpSchemaFieldBuilder {
    * Requirements are aggregated across all processes (a field required by any process is
    * reported); an unconditional rule wins over a conditional one for the same field.
    *
-   * <p>{@code neo_schema} uses this to proactively signal {@code userRequired} to the agent, so it
+   * <p>{@code etendo_schema} uses this to proactively signal {@code userRequired} to the agent, so it
    * does not have to discover the requirement by hitting the runtime process gate
    * ({@code NeoProcessPreconditionValidator}) — the two layers share this single declaration.</p>
    */
@@ -324,7 +383,7 @@ final class McpSchemaFieldBuilder {
    * Loads clean, localized {@code {label, description}} pairs for the tab's fields, keyed by
    * upper-cased DB column name. The label comes from {@code AD_Field.name} and the one-line
    * description from {@code AD_Field.description} — both translated into {@code langCode} via
-   * {@code ADFieldTrl} when a translation exists — so {@code neo_schema} surfaces the same
+   * {@code ADFieldTrl} when a translation exists — so {@code etendo_schema} surfaces the same
    * functional label the Etendo UI shows instead of the raw {@code AD_Column} name
    * (e.g. "SII Description" rather than "EM_Aeatsii_Descripcion_Sii"). (IMP-1, ref §7.1)
    *
@@ -441,18 +500,131 @@ final class McpSchemaFieldBuilder {
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
       Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
+    return buildSchemaFieldsArray(adTab, dalEntity,
+        new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
+            java.util.Set.of()),
+        promptByColumnId, systemColumns, selectorRefs);
+  }
+
+  /**
+   * Builds the {@code etendo_schema} field array for an entity, naming only the fields the spec
+   * exposes.
+   *
+   * <p><b>IMP-39 — {@code discarded} now means absent, not annotated.</b> This loop used to walk
+   * every active AD column of the table and hang the curated {@code visibility} on the result, so
+   * a field the spec had excluded was still published, merely labelled. That is what let the three
+   * write/read/filter tools disagree about whether {@code orderReference} exists, and it is a
+   * quarter of the surface: on a typical instance 1162 of 4659 curated fields across 150 exposed
+   * entities carry {@code ISINCLUDED = 'N'}.</p>
+   *
+   * <p><b>Two exemptions, both deliberate.</b> A column with no {@code ETGO_SF_FIELD} row is
+   * published, because absence of curation is not a decision to exclude — see
+   * {@link FieldMetadata#excludedColumnIds}. And a
+   * {@code type:"button"} column is always published, because <b>IMP-21</b> settled that question
+   * the other way on measured evidence: an excluded action stays in the catalogue carrying
+   * {@code invokable:false} and a machine-readable {@code notInvokableReason}, since knowing an
+   * action exists but is out of scope is useful, where being told it is callable when it is not is
+   * not. Removing buttons here would silently revert that.</p>
+   *
+   * @param adTab         the tab whose table supplies the columns
+   * @param dalEntity     the DAL entity, for property-name resolution; may be {@code null}
+   * @param fieldMetadata the curated field metadata, including which columns the spec exposes
+   * @param promptByColumnId  agent prompts keyed by AD_Column id
+   * @param systemColumns system/audit columns never published
+   * @param selectorRefs  AD_Reference ids treated as selectors
+   * @return the field array
+   * @throws JSONException if the array cannot be assembled
+   */
+  static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
+      FieldMetadata fieldMetadata, Map<String, String> promptByColumnId,
+      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
+      throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (shouldIncludeSchemaColumn(col, systemColumns)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            businessCriticalByColumnId, readOnlyByColumnId, promptByColumnId, selectorRefs));
+      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata)) {
+        fieldsArray.put(buildSchemaField(col, adTab, dalEntity,
+            fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
+            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
   }
 
-  private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns) {
-    return col.isActive() && !systemColumns.contains(col.getDBColumnName().toUpperCase());
+  /**
+   * Builds the descriptors for the columns an entity exposes from a table other than its own.
+   *
+   * <p><b>ETP-5368.</b> {@code locationAddress} is backed by {@code C_BPartner_Location}, but the
+   * street, city, postal code, country and province a caller actually fills live in
+   * {@code C_Location}; {@code ContactsLocationAddressHandler} accepts them in the payload and
+   * writes both rows in one transaction. {@link #buildSchemaFieldsArray} walks the tab's own table,
+   * so it emitted none of them: {@code etendo_schema} on that entity answered with the phone, the fax
+   * and two booleans, and an agent could only reach the address by guessing field names it had no
+   * way to read anywhere. The names are not guessed here either — each column is resolved to its
+   * DAL property, which is what the handler reads.
+   *
+   * <p>Visibility is declared {@code editable} rather than looked up, because these columns have no
+   * {@code ETGO_SF_FIELD} row to look it up in, and an absent visibility is not neutral:
+   * {@link #isAgentSuppliable} treats it as "not the agent's to send", which would have published
+   * the fields in the full dump and then dropped every one of them from {@code view:"create"} —
+   * the projection an agent reads immediately before writing.
+   *
+   * @param sfEntity     the Schema Forge entity whose wrapper policy is consulted
+   * @param adTab        the wrapper's own tab, for the structural read-only check
+   * @param selectorRefs AD_Reference ids treated as selectors
+   * @return the virtual field descriptors, in declaration order; empty when the entity has none
+   * @throws JSONException if a descriptor cannot be assembled
+   */
+  /**
+   * Appends one field array onto another, in order. A no-op when {@code extra} is empty.
+   *
+   * @param fieldsArray the array to extend, mutated in place
+   * @param extra       the descriptors to append
+   */
+  static void appendVirtualFields(JSONArray fieldsArray, JSONArray extra) {
+    if (fieldsArray == null || extra == null) {
+      return;
+    }
+    for (int i = 0; i < extra.length(); i++) {
+      fieldsArray.put(extra.opt(i));
+    }
+  }
+
+  static JSONArray buildVirtualFieldsArray(SFEntity sfEntity, Tab adTab,
+      java.util.Set<String> selectorRefs) throws JSONException {
+    JSONArray virtualFields = new JSONArray();
+    List<Column> columns = NeoSelectorPolicy.resolveVirtualColumns(sfEntity);
+    if (columns.isEmpty()) {
+      return virtualFields;
+    }
+    Map<String, String> editable = new HashMap<>();
+    Map<String, String> promptByColumnId = new HashMap<>();
+    for (Column col : columns) {
+      editable.put((String) col.getId(), VISIBILITY_EDITABLE);
+      String prompt = VIRTUAL_FIELD_PROMPTS.get(col.getDBColumnName().toUpperCase());
+      if (prompt != null) {
+        promptByColumnId.put((String) col.getId(), prompt);
+      }
+    }
+    // Every declared column comes from the same backing table, so the DAL entity is resolved once.
+    Entity backingEntity = ModelProvider.getInstance()
+        .getEntityByTableName(columns.get(0).getTable().getDBTableName());
+    for (Column col : columns) {
+      JSONObject field = buildSchemaField(col, adTab, backingEntity, editable,
+          new HashMap<>(), new HashMap<>(), promptByColumnId, selectorRefs);
+      // Says where the value really lands, so a reader who checks the entity's table against this
+      // list does not conclude the schema is lying to them.
+      field.put("backingTable", col.getTable().getDBTableName());
+      virtualFields.put(field);
+    }
+    return virtualFields;
+  }
+
+  private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
+      FieldMetadata fieldMetadata) {
+    if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
+      return false;
+    }
+    return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);
   }
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
@@ -504,7 +676,7 @@ final class McpSchemaFieldBuilder {
     addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
-      isBusinessCritical = isBusinessCritical || isCriticalAction(fieldObj, dbColName);
+      isBusinessCritical = isBusinessCritical || McpSchemaActionFields.isCriticalAction(fieldObj, dbColName);
     }
     fieldObj.put("businessCritical", isBusinessCritical);
     return fieldObj;
@@ -522,10 +694,10 @@ final class McpSchemaFieldBuilder {
    *
    * <p><b>IMP-21 — {@code invokeVia} is now a claim, not a decoration.</b> It used to be written
    * unconditionally, so the sales-invoice catalog advertised all 22 buttons as callable via
-   * {@code neo_action} even though 17 were curated {@code visibility:"discarded"} and one
-   * ({@code CreateFrom}) resolves no process at all — there is nothing for {@code neo_action} to
+   * {@code etendo_action} even though 17 were curated {@code visibility:"discarded"} and one
+   * ({@code CreateFrom}) resolves no process at all — there is nothing for {@code etendo_action} to
    * run. An agent had no way to tell the 22 apart. Now a button carries {@code
-   * invokeVia:"neo_action"} only when it really is invokable, and otherwise says so explicitly
+   * invokeVia:"etendo_action"} only when it really is invokable, and otherwise says so explicitly
    * with {@code invokable:false} plus a machine-readable {@code notInvokableReason}. The button
    * still appears in the catalog — knowing an action exists but is out of scope is useful; being
    * told it is callable when it is not is not.</p>
@@ -540,7 +712,7 @@ final class McpSchemaFieldBuilder {
       boolean hiddenInTab) throws JSONException {
     fieldObj.put("triggerValue", "Y");
     fieldObj.put("action", col.getDBColumnName());
-    addActionValues(fieldObj, col);
+    McpSchemaActionFields.addActionValues(fieldObj, col);
     // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
     Process classicProcess = col.getProcess();
     org.openbravo.client.application.Process obuiappProcess = col.getOBUIAPPProcess();
@@ -560,37 +732,7 @@ final class McpSchemaFieldBuilder {
       fieldObj.put("processId", classicProcess.getId());
     }
     applyActionLabelFallback(fieldObj, col, processName);
-    addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
-  }
-
-  /**
-   * Declares whether {@code neo_action} can actually run this button (IMP-21).
-   *
-   * <p>Three independent blockers, reported in the order an agent would care about. A curated
-   * {@code discarded} means the action was deliberately kept out of this window's agent surface.
-   * {@code hidden} means AD itself never shows the button in this tab, so it is not a user-facing
-   * action at all — see {@link #isHiddenButtonField}. A missing process means AD has nothing wired
-   * behind the column. An uncurated button (no {@code visibility} row at all) that AD does display
-   * and that has a process is treated as invokable — that is the pre-IMP-21 behaviour and the only
-   * safe default, since absence of curation is not a decision.</p>
-   */
-  private static void addInvokability(JSONObject fieldObj, String visibility, boolean hasProcess,
-      boolean hiddenInTab) throws JSONException {
-    String blocker = null;
-    if (VISIBILITY_DISCARDED.equals(visibility)) {
-      blocker = "discarded: this action is not part of the curated agent surface for this window";
-    } else if (hiddenInTab) {
-      blocker = "hidden: AD does not display this button in the tab, so it is an internal flag "
-          + "rather than a user-facing action";
-    } else if (!hasProcess) {
-      blocker = "no process: the AD button column has no process wired behind it";
-    }
-    if (blocker == null) {
-      fieldObj.put(KEY_INVOKE_VIA, "neo_action");
-      return;
-    }
-    fieldObj.put(KEY_INVOKABLE, false);
-    fieldObj.put(KEY_NOT_INVOKABLE_REASON, blocker);
+    McpSchemaActionFields.addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
   }
 
   /**
@@ -683,68 +825,6 @@ final class McpSchemaFieldBuilder {
     return rest.isEmpty() ? null : rest;
   }
 
-  /**
-   * Derives {@code businessCritical} for an action that curation left unflagged (IMP-21).
-   *
-   * <p>{@code ETGO_SF_FIELD.isBusinessCritical} has no producer for buttons: it is {@code N} on
-   * every button column in the instance, so the flag was emitted {@code false} on all 22
-   * sales-invoice actions and never discriminated anywhere. {@code false} is not a neutral
-   * default — it reads as "nobody needs to think before firing this", which is the opposite of
-   * true for the two actions that change a document's legal and accounting state.</p>
-   *
-   * <p>Both signals below are structural properties of core AD, not per-window judgement (which
-   * belongs in {@code decisions.json} — see {@link #addActionValues}): a button bound to the
-   * shared {@code docAction} list drives the document state machine, and {@code Posted} is the
-   * accounting trigger present on every accountable document. Curation still wins — this only
-   * fills the gap, it never clears a flag someone set.</p>
-   */
-  private static boolean isCriticalAction(JSONObject fieldObj, String dbColName) {
-    return fieldObj.has(McpConstants.KEY_ACTION_PARAMETER)
-        || COLUMN_POSTED.equalsIgnoreCase(dbColName);
-  }
-
-  /**
-   * Emit the discrete values a list-backed button accepts, plus the parameter name they
-   * travel under (ETP-4285).
-   *
-   * <p>A button column whose {@code AD_Reference_Value_ID} points at a list reference (e.g.
-   * {@code C_Order.DocAction} → "Order_Document Action") has a closed value set. Without it an
-   * agent sees the button but cannot know that {@code CO} books the document, nor that the
-   * chosen value must be sent as {@code parameters.docAction}. Buttons with no reference value
-   * — most process buttons ({@code Processing}, {@code CopyFrom}, {@code Calculate_Promotions}
-   * …) — are left untouched.</p>
-   *
-   * <p>The emitted list is the full <em>active</em> AD list, which is deliberately broader than
-   * what is legal for a given document in a given state: AD does not model the state machine.
-   * Which value applies when is per-window judgement and travels in the field's
-   * {@code agentPrompt} (see {@code docs/decisions-reference.md}), not in this generic layer.</p>
-   *
-   * <p>Sorted by value because {@link NeoSelectorService#getListLabels} returns an unordered
-   * map — a stable schema is easier to diff, cache and assert on.</p>
-   *
-   * @param fieldObj the field object being built, mutated in place
-   * @param col      the button AD column
-   */
-  private static void addActionValues(JSONObject fieldObj, Column col) throws JSONException {
-    org.openbravo.model.ad.domain.Reference listRef = col.getReferenceSearchKey();
-    if (listRef == null) {
-      return;
-    }
-    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
-    if (labels == null || labels.isEmpty()) {
-      return;
-    }
-    JSONArray values = new JSONArray();
-    for (String value : new TreeSet<>(labels.keySet())) {
-      JSONObject entry = new JSONObject();
-      entry.put("value", value);
-      entry.put("label", labels.get(value));
-      values.put(entry);
-    }
-    fieldObj.put(McpConstants.KEY_ACTION_VALUES, values);
-    fieldObj.put(McpConstants.KEY_ACTION_PARAMETER, McpConstants.PARAM_DOC_ACTION);
-  }
-
   private static String resolvePropertyName(Entity dalEntity, String dbColName) {
     if (dalEntity == null) {
       return dbColName;
@@ -776,10 +856,10 @@ final class McpSchemaFieldBuilder {
     if (isLegacyZeroFkSentinel) {
       // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
       // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
-      // baked into this structural schema; report shape/format only and point to neo_defaults.
+      // baked into this structural schema; report shape/format only and point to etendo_defaults.
       fieldObj.put(KEY_DEFAULT_SOURCE, "server");
       fieldObj.put("defaultFormat", "32-char hex ID (FK)");
-      fieldObj.put("defaultHint", "Resolved per-tenant at request time — call neo_defaults to get the value");
+      fieldObj.put("defaultHint", "Resolved per-tenant at request time — call etendo_defaults to get the value");
       return;
     }
     fieldObj.put(KEY_DEFAULT_EXPRESSION, defaultExpr);
@@ -797,8 +877,8 @@ final class McpSchemaFieldBuilder {
   }
 
   /**
-   * Flags {@code userRequired} — "the agent MUST supply this in neo_create", exactly as the
-   * {@code neo_schema} hint promises.
+   * Flags {@code userRequired} — "the agent MUST supply this in etendo_create", exactly as the
+   * {@code etendo_schema} hint promises.
    *
    * <p>Being mandatory in AD is necessary but <b>not</b> sufficient: a mandatory column that carries
    * a default is filled by the session, the server or the declaring module, so demanding it from the
@@ -858,12 +938,17 @@ final class McpSchemaFieldBuilder {
   private static final Map<String, WritableVia> WRITABLE_VIA_BY_COMPUTATION_FUNCTION =
       buildWritableViaMap();
 
+  private static final String PRODUCT_SPEC = "product";
+
   private static Map<String, WritableVia> buildWritableViaMap() {
     Map<String, WritableVia> map = new HashMap<>();
-    map.put("etgo_product_sale_price", new WritableVia("product", "price",
+    map.put("etgo_product_sale_price", new WritableVia(PRODUCT_SPEC, "price",
         "Set on the sale price list (M_ProductPrice where issopricelist='Y')."));
-    map.put("etgo_product_purchase_price", new WritableVia("product", "price",
+    map.put("etgo_product_purchase_price", new WritableVia(PRODUCT_SPEC, "price",
         "Set on the purchase price list (M_ProductPrice where issopricelist='N')."));
+    map.put("etgo_product_cost", new WritableVia(PRODUCT_SPEC, "costing",
+        "Record a standard cost line on the product (M_Costing); average costs are "
+            + "calculated by the costing engine and cannot be written."));
     map.put("etgo_product_stock", new WritableVia("physical-inventory", "inventoryLine",
         "Create a physical-inventory/inventory header, add this line with the counted "
             + "quantity, then process the document — stock is never written directly."));

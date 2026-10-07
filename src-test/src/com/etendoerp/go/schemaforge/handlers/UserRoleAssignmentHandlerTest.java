@@ -54,6 +54,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
@@ -61,7 +62,6 @@ import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
-import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
@@ -119,6 +119,17 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 public class UserRoleAssignmentHandlerTest {
 
   private static final String USER_ID = "user-001";
+  private static final String CLIENT_ID = "client-001";
+  /** A shape-valid (32-hex) id, distinct from {@link #USER_ID}, for {@link #ROLE_ID_PATTERN}
+   *  splicing tests — {@code USER_ID} itself is not hex-shaped and must never satisfy that
+   *  check. */
+  private static final String OWNER_ID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  /** Shape-valid {@code AD_Role_ID}s for the ETP-5188 "Rol" filter tests. */
+  private static final String ROLE_ID_A = "0123456789ABCDEF0123456789ABCDEF";
+  private static final String ROLE_ID_B = "fedcba9876543210fedcba9876543210";
+  /** The contact-only exclusion every user list read carries (ETP-5411). */
+  private static final String CONTACT_EXCLUSION =
+      "exists (select 1 from ETGO_Invitation i where i.user = e)";
 
   /**
    * ETP-4830 — bundles the three collaborators {@link
@@ -420,61 +431,98 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ─── handle(): GET list pre-hook — exclude contact-only users (ETP-5019) ─────
+  // ─── readPredicates(): user list restrictions (ETP-5019/ETP-5411/ETP-5188/ETP-5568) ───
 
-  @Test
-  public void handleInjectsUsernameNotBlankPredicateOnListGet() {
-    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    Map<String, String> queryParams = new HashMap<>();
-    NeoContext ctx = NeoContext.builder()
+  private static NeoContext listGetContext(Map<String, String> queryParams, OBContext obContext) {
+    return NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .queryParams(queryParams)
+        .obContext(obContext)
         .build();
-
-    assertNull(handler.handle(ctx));
-
-    assertEquals("e.username is not null and e.username <> ''",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
   @Test
-  public void handleContactExclusionPredicateFiltersOnUsernameNotRoleCount() {
-    // Regression guard (ETP-5019): a real user can legitimately have zero AD_User_Roles rows
-    // (not yet assigned any role) but always has a non-blank username — see the handler's own
-    // javadoc for excludeContactOnlyUsers. The injected predicate must never reference roles or
-    // AD_User_Roles, only username presence, or it would wrongly hide legitimate
+  public void readPredicatesExcludeContactOnlyUsers() {
+    // ETP-5411: username-based filtering was superseded — a classic-backend Contact can now
+    // get a non-blank username too. The new signal is an ETGO_CONTACT_EXCLUSIONITATION row pointing at the
+    // user. No ObContext/client is set on this NeoContext, so no owner clause is added.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+
+    assertEquals(List.of(CONTACT_EXCLUSION),
+        handler.readPredicates(listGetContext(new HashMap<>(), null)));
+  }
+
+  @Test
+  public void contactExclusionPredicateFiltersOnInvitationNotRoleCount() {
+    // Regression guard (ETP-5019, still true under ETP-5411): a real user can legitimately have
+    // zero AD_User_Roles rows (not yet assigned any role) — see the handler's own javadoc for
+    // buildContactOnlyExclusion. The predicate must never reference roles or AD_User_Roles,
+    // only Invitation existence (plus the owner literal), or it would wrongly hide legitimate
     // not-yet-assigned real users.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    Map<String, String> queryParams = new HashMap<>();
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .queryParams(queryParams)
-        .build();
 
-    assertNull(handler.handle(ctx));
+    String predicate = handler.readPredicates(listGetContext(new HashMap<>(), null)).get(0);
 
-    String predicate = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
-    assertTrue(predicate.contains("username"));
+    assertTrue(predicate.contains("Invitation"));
     assertFalse(predicate.toLowerCase().contains("role"));
   }
 
   @Test
-  public void handleAndsExistingNeoWherePredicateWithContactExclusion() {
+  public void handleWritesNoQueryParamOnListGet() {
+    // ETP-5568: the list restrictions used to be injected into the query params as _neoWhere,
+    // the same key a caller could send on the query string. handle() must leave them alone.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     Map<String, String> queryParams = new HashMap<>();
-    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM, "e.active = true");
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .queryParams(queryParams)
-        .build();
+    queryParams.put("RoleIds", ROLE_ID_A);
 
-    assertNull(handler.handle(ctx));
+    assertNull(handler.handle(listGetContext(queryParams, null)));
 
-    assertEquals("(e.active = true) and (e.username is not null and e.username <> '')",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+    assertEquals(Map.of("RoleIds", ROLE_ID_A), queryParams);
+  }
+
+  @Test
+  public void readPredicatesIncludeOwnerLiteralWhenOwnerResolved() {
+    // ETP-5411: the tenant owner never gets an Invitation row (self-service onboarding, not
+    // CompanyInvitationService), so it needs its own literal clause or it would wrongly
+    // disappear from the Users list.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    List<String> predicates;
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.findOwnerUserId(CLIENT_ID)).thenReturn(OWNER_ID);
+
+      predicates = handler.readPredicates(listGetContext(new HashMap<>(), obContext));
+    }
+
+    assertEquals(List.of(
+        "e.id = '" + OWNER_ID + "' or exists (select 1 from ETGO_Invitation i where i.user = e)"),
+        predicates);
+  }
+
+  @Test
+  public void readPredicatesOmitOwnerLiteralWhenOwnerIdFailsShapeCheck() {
+    // Fail-closed: an unexpectedly-shaped id from OwnerSupport must never reach the HQL string
+    // unvalidated (same defense the RoleIds splicing relies on).
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    List<String> predicates;
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.findOwnerUserId(CLIENT_ID))
+          .thenReturn("not-a-valid-id; drop table");
+
+      predicates = handler.readPredicates(listGetContext(new HashMap<>(), obContext));
+    }
+
+    assertEquals(List.of(CONTACT_EXCLUSION), predicates);
   }
 
   @Test
@@ -494,37 +542,85 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
-  public void handleToleratesNullQueryParamsOnListGet() {
+  public void readPredicatesTolerateNullQueryParams() {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("GET")
-        .build();
 
-    assertNull(handler.handle(ctx));
+    assertEquals(List.of(CONTACT_EXCLUSION), handler.readPredicates(listGetContext(null, null)));
   }
 
   @Test
-  public void handleContactFilterAndAfterHandleBootstrapHidingCoexistOnListGetFlow()
-      throws Exception {
-    // Regression guard (ETP-5019): the new pre-hook contact-only filter (query params, handle())
-    // and the pre-existing bootstrap-user hiding (response body, afterHandle()) act on different
-    // phases of the same list GET and must not interfere with each other.
+  public void readPredicatesAddRoleFilterForValidRoleIdsOnly() {
+    // ETP-5188: RoleIds is request input spliced into HQL, so only 32-hex ids survive.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("RoleIds", ROLE_ID_A + ", x') or (1=1 ," + ROLE_ID_B);
+
+    List<String> predicates = handler.readPredicates(listGetContext(queryParams, null));
+
+    String inList = "'" + ROLE_ID_A + "','" + ROLE_ID_B + "'";
+    assertEquals(List.of(CONTACT_EXCLUSION,
+        "((e.defaultRole.id in (" + inList + ")) or "
+            + "(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+            + "ri.active = true and ri.inheritFrom.id in (" + inList + "))))"),
+        predicates);
+  }
+
+  @Test
+  public void readPredicatesAddNoRoleFilterWithoutAdminClauseWhenNoClient() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("NoRole", "true");
+
+    List<String> predicates = handler.readPredicates(listGetContext(queryParams, null));
+
+    assertEquals(List.of(CONTACT_EXCLUSION,
+        "(not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+            + "ri.active = true))"),
+        predicates);
+  }
+
+  @Test
+  public void readPredicatesNegateTheWholeRoleFilter() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("NoRole", "TRUE");
+    queryParams.put("RoleFilterNegate", "true");
+
+    List<String> predicates = handler.readPredicates(listGetContext(queryParams, null));
+
+    assertEquals(2, predicates.size());
+    assertTrue(predicates.get(1).startsWith("not ((not exists"));
+  }
+
+  @Test
+  public void readPredicatesIgnoreNegateWithoutARoleFilter() {
+    // Negating an empty filter would otherwise match every user.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("RoleIds", "not-an-id");
+    queryParams.put("RoleFilterNegate", "true");
+
+    assertEquals(List.of(CONTACT_EXCLUSION), handler.readPredicates(listGetContext(queryParams, null)));
+  }
+
+  @Test
+  public void contactPredicateAndAfterHandleBootstrapHidingCoexistOnListGetFlow()
+      throws Exception {
+    // Regression guard (ETP-5019): the contact-only read predicate (the query itself) and the
+    // pre-existing bootstrap-user hiding (response body, afterHandle()) act on different
+    // phases of the same list GET and must not interfere with each other.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject body = buildListResponseBody("0", "100", "real-user-1");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
-        .queryParams(queryParams)
+        .queryParams(new HashMap<>())
         .previousResult(NeoResponse.ok(body))
         .build();
 
-    assertNull(handler.handle(ctx));
+    assertEquals(List.of(CONTACT_EXCLUSION), handler.readPredicates(ctx));
     assertNull(handler.afterHandle(ctx));
 
-    assertEquals("e.username is not null and e.username <> ''",
-        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
     JSONObject inner = body.getJSONObject("response");
     assertEquals(1, inner.getJSONArray("data").length());
     assertEquals("real-user-1", inner.getJSONArray("data").getJSONObject(0).getString("id"));
@@ -2654,6 +2750,212 @@ public class UserRoleAssignmentHandlerTest {
       when(obDal.get(User.class, USER_ID)).thenThrow(new RuntimeException("DB unavailable"));
 
       assertNull(handler.afterHandle(ctx));
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ─── afterHandle: ETP-5277 patchUserDefaultsOntoRow (defaultRole/Client/Organization/
+  // Warehouse patched onto the create response after ensurePersonalRoleForNewlyCreatedUser) ────
+
+  /**
+   * ETP-5277: the create response must carry the FINAL, already-persisted values for all 4
+   * fields (plus their {@code $_identifier} companions) — not whatever the incoming create
+   * payload/response happened to carry before {@code ensurePersonalRoleForNewlyCreatedUser} ran.
+   * The row is seeded here with the exact shape of the leak the ticket reported (the creating
+   * admin's own session-derived role/client/org/warehouse already present on the row) to prove
+   * the patch OVERWRITES them with the real values read back off {@code user}, rather than
+   * merely filling in absent fields.
+   */
+  @Test
+  public void ensurePersonalRoleForNewlyCreatedUserPatchesAllFourDefaultFieldsWithFinalValues()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "leaked@example.com", "Leaked User");
+    JSONObject recordJson = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    // Simulate the ETP-5277 leak: the create response briefly carries the CREATING admin's own
+    // session-derived values for all 4 fields before this patch runs.
+    recordJson.put("defaultRole", "LEAKED-ADMIN-ROLE-ID");
+    recordJson.put("defaultClient", "LEAKED-ADMIN-CLIENT-ID");
+    recordJson.put("defaultOrganization", "LEAKED-ADMIN-ORG-ID");
+    recordJson.put("defaultWarehouse", "LEAKED-ADMIN-WAREHOUSE-ID");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-1");
+    when(personalRole.getIdentifier()).thenReturn("Personal Role");
+    Client finalClient = mock(Client.class);
+    when(finalClient.getId()).thenReturn("client-final-1");
+    when(finalClient.getIdentifier()).thenReturn("Final Client");
+    Organization finalOrg = mock(Organization.class);
+    when(finalOrg.getId()).thenReturn("org-final-1");
+    when(finalOrg.getIdentifier()).thenReturn("Final Org");
+    Warehouse finalWarehouse = mock(Warehouse.class);
+    when(finalWarehouse.getId()).thenReturn("wh-final-1");
+    when(finalWarehouse.getIdentifier()).thenReturn("Final Warehouse");
+    when(createdUser.getDefaultRole()).thenReturn(personalRole);
+    when(createdUser.getDefaultClient()).thenReturn(finalClient);
+    when(createdUser.getDefaultOrganization()).thenReturn(finalOrg);
+    when(createdUser.getDefaultWarehouse()).thenReturn(finalWarehouse);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.createFreshPersonalRole(createdUser)).thenReturn(personalRole));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject patchedRow =
+          body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("personal-role-1", patchedRow.getString("defaultRole"));
+      assertEquals("Personal Role", patchedRow.getString("defaultRole$_identifier"));
+      assertEquals("client-final-1", patchedRow.getString("defaultClient"));
+      assertEquals("Final Client", patchedRow.getString("defaultClient$_identifier"));
+      assertEquals("org-final-1", patchedRow.getString("defaultOrganization"));
+      assertEquals("Final Org", patchedRow.getString("defaultOrganization$_identifier"));
+      assertEquals("wh-final-1", patchedRow.getString("defaultWarehouse"));
+      assertEquals("Final Warehouse", patchedRow.getString("defaultWarehouse$_identifier"));
+    }
+  }
+
+  /**
+   * ETP-5277 edge case: a newly-created user with no active warehouse yet resolved (a
+   * legitimately null {@code defaultWarehouse}) must have that field OMITTED from the patched
+   * row entirely — never forced to {@code JSONObject.NULL} — since the frontend's defaults-merge
+   * treats "absent" and "explicitly null" differently (see {@code patchUserDefaultsOntoRow}'s own
+   * javadoc). The other 3 fields must still be patched normally, proving this is a per-field skip,
+   * not an all-or-nothing abort.
+   */
+  @Test
+  public void ensurePersonalRoleForNewlyCreatedUserOmitsNullDefaultReferenceInsteadOfWritingJsonNull()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "no-warehouse@example.com",
+        "No Warehouse");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-2");
+    when(personalRole.getIdentifier()).thenReturn("Personal Role 2");
+    Client finalClient = mock(Client.class);
+    when(finalClient.getId()).thenReturn("client-final-2");
+    when(finalClient.getIdentifier()).thenReturn("Final Client 2");
+    Organization finalOrg = mock(Organization.class);
+    when(finalOrg.getId()).thenReturn("org-final-2");
+    when(finalOrg.getIdentifier()).thenReturn("Final Org 2");
+    when(createdUser.getDefaultRole()).thenReturn(personalRole);
+    when(createdUser.getDefaultClient()).thenReturn(finalClient);
+    when(createdUser.getDefaultOrganization()).thenReturn(finalOrg);
+    // No active warehouse resolved yet — the legitimately-null case this test targets.
+    when(createdUser.getDefaultWarehouse()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.createFreshPersonalRole(createdUser)).thenReturn(personalRole));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject patchedRow =
+          body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("personal-role-2", patchedRow.getString("defaultRole"));
+      assertEquals("client-final-2", patchedRow.getString("defaultClient"));
+      assertEquals("org-final-2", patchedRow.getString("defaultOrganization"));
+      assertFalse("A null defaultWarehouse reference must be omitted entirely, never written as "
+          + "JSONObject.NULL", patchedRow.has("defaultWarehouse"));
+      assertFalse(patchedRow.has("defaultWarehouse$_identifier"));
+    }
+  }
+
+  /**
+   * ETP-5277 best-effort contract: a failure while patching the 4 default-* fields onto the
+   * create response (isolated in {@code patchUserDefaultsOntoRowSafely}, mirroring {@code
+   * attachInvitationStatusToRowSafely}'s own established pattern) must be logged and swallowed —
+   * it must NEVER prevent the personal-role assignment itself (already fully persisted by the
+   * time the patch runs) from completing, nor block the invitation that follows. Simulated here
+   * by making the re-read {@code user.getDefaultRole()} reference blow up on {@code getId()} —
+   * distinct from the {@code personalRole} local variable used for the role assignment itself,
+   * so only the PATCH step is exercised, not the earlier role-composition step.
+   */
+  @Test
+  public void ensurePersonalRoleForNewlyCreatedUserSwallowsRowPatchFailureAndStillCompletesRoleAssignment()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "patch-fails@example.com",
+        "Patch Fails");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-ok");
+    // The row-patch step re-reads user.getDefaultRole() independently of the local `personalRole`
+    // variable used for the actual assignment below — stubbing THIS to blow up isolates the
+    // failure to patchUserDefaultsOntoRow without touching the role-composition/sync steps.
+    Role brokenRoleReadBack = mock(Role.class);
+    when(brokenRoleReadBack.getId()).thenThrow(new RuntimeException("identifier lookup blew up"));
+    when(createdUser.getDefaultRole()).thenReturn(brokenRoleReadBack);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.createFreshPersonalRole(createdUser)).thenReturn(personalRole));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      // The personal-role assignment itself must have completed in full, despite the row-patch
+      // failure that happens right after it.
+      verify(createdUser).setDefaultRole(personalRole);
+      verify(obDal).save(createdUser);
+      verify(obDal).flush();
+      syncMock.verify(
+          () -> UserRoleSyncSupport.syncSingleActiveUserRole(createdUser, personalRole));
+      // The invitation (the next step after ensurePersonalRoleForNewlyCreatedUser returns) must
+      // still have been attempted — the failure must not propagate and abort the caller.
+      assertEquals(1, invitationServiceMock.constructed().size());
+      // The row must not carry a partial/garbage write from the failed patch attempt.
+      JSONObject patchedRow =
+          body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(patchedRow.has("defaultRole"));
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }

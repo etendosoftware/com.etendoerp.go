@@ -31,6 +31,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.RejectReason;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * NeoHandler that creates a new {@link RejectReason} (table {@code C_Reject_Reason})
  * from the React reject-quotation flow when the user clicks "+ Crear razón" in
@@ -59,6 +61,22 @@ public class CreateRejectReasonHandler implements NeoHandler {
   private static final String ERR_NAME_REQUIRED = "Name is required";
   private static final String KEY_RESPONSE = "response";
   private static final int NAME_MAX_LENGTH = 60;
+
+  /**
+   * The action as {@code etendo_schema(view:"actions")} publishes it (ETP-5535), declared by
+   * {@link SalesQuotationHeaderHandler#actionContracts()}. Only for discovery: the body is still
+   * read by {@link #handle}, so the React modal's request is accepted exactly as before.
+   */
+  static final NeoActionContract CONTRACT = NeoActionContract.write(ACTION_NAME,
+      "Creates an active rejection reason in the current organization and returns its id, to "
+          + "pass as rejectReason to rejectQuotation. A name longer than " + NAME_MAX_LENGTH
+          + " characters is truncated; duplicate names are allowed.",
+      NeoActionContract.Param.required("name", NeoActionContract.TYPE_STRING,
+          "The reason's name."),
+      NeoActionContract.Param.optional("description", NeoActionContract.TYPE_STRING,
+          "Optional longer description."))
+      .withIdDescription("The id of any quotation: it only routes the request, the new reason "
+          + "is not linked to it.");
 
   /**
    * Entry point for ACTION requests. Returns {@code null} for any other

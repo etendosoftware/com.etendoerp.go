@@ -4,7 +4,8 @@
 
 The `POST /sws/go/onboarding` endpoint streams NDJSON progress events while
 setting up a newly registered client. The core method is
-`EtendoGoJwtServlet.ensureOnboardingDataset`, which runs the steps below in
+`OnboardingProvisioningChain.ensureOnboardingDataset` (moved out of `EtendoGoJwtServlet` by
+ETP-5389 so it runs without HTTP; the servlet keeps a thin delegate), which runs the steps below in
 order (reconcile model, ETP-4428: every step is idempotent/self-guarding, so
 the full chain runs unconditionally on every call, repairing whatever a prior
 partial failure left missing). Each step either completes or emits an
@@ -14,10 +15,47 @@ transactional email best-effort. Email delivery failure is audited by the
 transactional email safety store and does not roll back the already committed
 environment.
 
+Client resolution never uses the company name (ETP-5548). The classic path
+creates the client under a **provisioning name** (`ProvisioningClientName`,
+`PEND-<32 hex>`: the checkout `requestId` without hyphens for a paid attempt,
+the account id for the free first environment; 37 characters like the pool's
+`POOL-<id>`, so every name the chain derives still fits its 60-character
+column) and looks it up by that name, so a retry of the
+same attempt resumes its own half-built client (ETP-4428 reconcile model) and
+nothing else. The company name may match any other environment — another
+account's, or this account's demo, which is never converted. Only after every
+step that names something after the client, and in the final transaction,
+`applyRequestedClientName` renames the client and every name derived from it
+(admin role, trees, ledger, chart of accounts, calendar — the same rewrite a
+pooled claim does) to the company name; a failure rolls the rename back, so the
+client keeps the provisioning name for the retry. A client under a provisioning
+name is never listed by `/environments`, and a requested company name of that
+exact shape is refused (400). The organization is created with the company name
+directly; a free retry that resumes the attempt under a different company name
+renames it too (its legal name only while it still equals the old name).
+The admin username is the account email, then `<email>+<company slug>`, then
+`<email>+<company slug>2`, `…3` while the previous one is taken by any user,
+active or not — two environments of one account whose names reduce to the same
+slug ("Acme", "Acme!") would otherwise fail `@DuplicateClientUser@` after
+payment, and on the pool path burn a pooled tenant per attempt.
+
+One rule is enforced on the name itself: an account cannot have two
+**productive** environments with the same company name (case and blanks
+ignored) — refused before checkout (409 `CLIENT_NAME_IN_USE`) and again at
+onboarding with the same non-retryable code. A later onboarding call for that
+purchase is refused with 409 `PROVISIONING_RETRY_NOT_ALLOWED` (not
+`PROVISIONING_ALREADY_IN_PROGRESS`, which is reserved for a run still in flight).
+
+When no client exists and `InitialClientSetup` creates one, onboarding uses the
+exact `AD_Client_ID` that setup stores in the request session for all later
+provisioning and paid-upgrade side effects; a successful setup that does not
+return that ID fails closed before provisioning continues.
+
 **Do not hardcode the step count in prose** — the list below is the source of
 truth; keep it (and this list ONLY) in sync with
-`EtendoGoJwtServlet.ensureOnboardingDataset` whenever a step is added,
-removed, or reordered.
+`OnboardingProvisioningChain.ensureOnboardingDataset` whenever a step is added,
+removed, or reordered — and bump `OnboardingProvisioningChain.CHAIN_REVISION` in the same change
+(see "Tenant pool" below: it retires pooled tenants built by the previous chain).
 
 ## Step Sequence
 
@@ -174,7 +212,34 @@ for the original ticket analysis.
 
 ### `OnboardingPeriodControlService`
 Step 3. Opens the initial fiscal calendar / period control for the new
-client/org so documents can be posted from day one.
+client/org so documents can be posted from day one. The chain opens every period
+through the month the tenant is **built** and leaves later periods never-opened.
+
+**Demo trial window (ETP-5575).** A demo needs more: its trial lasts
+`etendo.go.demo.trial.days` / `ETGO_DEMO_TRIAL_DAYS` (default 15), so a signup at
+the end of a month could not post the next month, and a pooled tenant kept the
+window of its build month. `openDemoTrialWindow` widens it to the whole trial:
+every never-opened period whose start is on or before `ETGO_DemoTrialStartedAt` +
+trial days is opened.
+
+- **Where.** `EtendoGoJwtServlet.openDemoTrialPeriodsBestEffort`, right after the
+  onboarding commit and before `completeCommittedOnboarding`, for every non-paid
+  onboarding — pooled and classic alike. Paid (productive) onboardings are not
+  affected.
+- **Best effort.** It runs in its own transaction with the commit inside the try:
+  any failure rolls back only this step, the tenant keeps the chain's window, and
+  the onboarding still succeeds. Log markers: `ETP-5575 demo period window
+  started|done|failed for client <id>` — a `started` without `done`/`failed`
+  means the step never finished.
+- **Open-only.** Only `N` (never opened) control rows are flipped to open; rows a
+  user closed (`C`) or closed permanently (`P`) are never touched. Every control
+  row of the period is considered, including the duplicated copy `AD_ORG_READY`
+  inserts, because posting needs any open row but costing reads any non-open row
+  as closed. `C_Period.OpenClose` is then recomputed from the controls.
+- **No year creation.** If the trial end falls beyond the calendar's last period,
+  what exists is opened and a WARN is logged (follow-up: ETP-5586).
+- **Existing demos** were widened through October 2026 by the corrective data-fix
+  `R44-demo-periods-open-through-oct-2026` (etendo_schema_forge).
 
 ### `OnboardingSequenceGeneratorService`
 Generates `AD_SEQUENCE` records for all document types that require a number
@@ -207,10 +272,11 @@ form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
 
 ### `OnboardingCostingScheduleService`
-Step 8 (ETP-5190). **Non-fatal**, like every step in this chain: it always
-returns `true` and swallows errors (logs + `done` "skipped"). Creates one
-`AD_Process_Request` per client running core's `CostingBackground` process every
-5 minutes, plus a post-commit `activateSchedule(clientId)` companion called
+Step 8 (ETP-5190; cadence lowered to 30 s by ETP-5370). **Non-fatal**, like
+every step in this chain: it always returns `true` and swallows errors (logs +
+`done` "skipped"). Creates one `AD_Process_Request` per client running core's
+`CostingBackground` process every **30 seconds**, plus a post-commit
+`activateSchedule(clientId)` companion called
 right after `commitDalChanges` (not inside this chain) because the Quartz
 scheduler needs a committed row. **This is the only schedule onboarding still
 creates** — ETP-5275 removed the PSD2 bank-statement one.
@@ -237,16 +303,49 @@ Three things worth knowing before touching it:
   resolves what to cost with `ad_isorgincluded(o.id, :orgId, :clientId)` bound to
   the request's own client and organization. A System request would match only
   org `'0'` and silently cost nothing.
-- **The trigger fields are `timing='S'` + `frequency='2'` + `MINUTELY_INTERVAL=5`.**
-  `S2` is the key core's `TriggerProvider` maps to `repeatMinutelyForever`; it
-  reads the *minutely* interval, not the secondly one. Core's F&B demo client has
-  shipped exactly this shape since 2013.
+- **The trigger fields are `timing='S'` + `frequency='1'` + `SECONDLY_INTERVAL=30`.**
+  `S1` is the key core's `TriggerProvider` maps to `repeatSecondlyForever`; it
+  reads the *secondly* interval, so `MINUTELY_INTERVAL` is left unset (the
+  scheduler switches on `frequency` and reads only the matching column, so a
+  leftover minutely value is inert but makes the row match no hand-made one).
+  This shape is not invented: GOClient has been running exactly it since
+  2026-04-08, configured by hand in Classic's Process Request window and dumped
+  into `referencedata/sampledata/GOClient/AD_PROCESS_REQUEST.xml`. ETP-5370
+  lowered it from the previous `frequency='2'` + `MINUTELY_INTERVAL=5`;
+  `StoredColumnQueueScheduleStartup` deliberately still uses the 5-minute shape
+  for the queue drain — different process, cadence not in scope.
 
-**Preventive only — the corrective half was declined.** Tenants onboarded
-before this step have no costing schedule and calculate no costs until someone
-adds the Process Request by hand in Classic. That was an explicit call on
-ETP-5190 (new tenants are enough), not a pending task: there is deliberately no
-`cli/src/data-fixes/` twin, unlike steps 9 and 10.
+**Both fronts exist now — and the corrective one is a webhook, not a `.sql`.**
+ETP-5190 shipped the preventive half alone; ETP-5245 added
+`cli/src/data-fixes/sql/20260910T120000Z__R36-costing-background-schedule.sql`,
+which CREATES the missing request for already-onboarded tenants — **retired by ETP-5370**, since it
+hardcoded the 5-minute cadence and every tenant now has a schedule.
+
+ETP-5370's corrective half — realigning the cadence of requests that **already
+exist** — could not be another `.sql`, and this is the part worth remembering:
+**an `UPDATE` on `AD_PROCESS_REQUEST` does not change what a running instance
+executes.** `OBScheduler.initialize()` reads that table exactly once, at Quartz
+startup, and `DefaultJob.execute` rebuilds its bundle from Quartz's own
+`JobDataMap` — it never re-reads the row. Deactivating or even DELETING the row
+does not stop the job either (see the PSD2 schedule-removal data-fix, which
+records the resulting FK-violation noise). Production does not restart Tomcat,
+so the correction has to run inside the live JVM.
+
+It therefore lives in `OnboardingCostingScheduleService#realignCadence(String)`, and it is
+triggered TWO ways. The primary one is `CostingCadenceStartup`, an application initializer that
+sweeps every tenant on boot — **shipping this module is itself a restart**, so the release that
+changes the cadence for new tenants is the same event that realigns the existing ones, with nobody
+doing anything. It is **one-shot per tenant**: each migrated client is marked in
+`ETGO_DATA_FIX_HISTORY` (`fix_id='__costing-cadence-30s__'`) and skipped from the next boot on, so
+later restarts cost two queries and write nothing — and a frequency a user picks for themselves in
+the future is never silently reset. The secondary one is the `SFCostingCadence` webhook (NEO bridge, `costingcadence`),
+kept as the escape hatch for correcting a single tenant without waiting for a release.
+It enforces the invariant new tenants are born with: **exactly one active `SCH`
+`CostingBackground` request per client, at 30 s**, re-arming the surviving
+trigger via `OBScheduler.reschedule(...)` — always, even when the row already
+reads 30 s, because the row is not evidence about the live trigger. Redundant
+requests are unscheduled and marked `UNS` + inactive, never deleted; `COM` rows
+are execution history and are ignored.
 
 ### `OnboardingAcctdimCentrallyMaintainedService`
 Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
@@ -353,6 +452,195 @@ On error:
 
 The final event always carries `"success": true|false`.
 
+The optional `sampleData` step (see below) reports its failure as `"status":"warning"`, never
+`"error"`: the tenant is already committed by then, so the final event is still a success.
+
+## Optional sample data (ETP-5426)
+
+The signup's Company step offers an **"Include sample data to explore the system"** checkbox,
+**unticked by default**. When ticked, the new tenant is born with GOClient's demo content — the same
+data the GOAdmin user sees: 5 business partners, the 4 sample products with prices and the
+"Beverages" category, the 3 template financial accounts, the secondary warehouse, and the full
+completed document chain (9 orders, 9 invoices, 9 shipments/receipts, 8 payments), physical
+inventory, goods movements, stock, costing, matching and 3 fixed assets with their amortization.
+
+**Request.** `POST /sws/go/onboarding` accepts `"includeSampleData": true` (absent means `false`). It
+is honoured only when `OnboardingSampleDataService.isEligible` accepts the request: the user opted
+in, it is a **demo** environment (never a paid one), and the tenant is **Spain / EUR** — the data's
+taxes and tax ids are Spanish. Any other request is provisioned without sample data, whatever it
+sent. The frontend only shows the checkbox for ES/EUR (`isSampleDataOffered` in
+`etendo-go-core`). The choice is persisted in the onboarding draft (see below).
+
+**When it runs.** In `EtendoGoJwtServlet#importSampleDataBestEffort`, **after** the onboarding
+commit (`commitDalChanges("onboarding")` and `completeCommittedOnboarding`) and **before**
+`OnboardingCostingScheduleService.activateSchedule`. Two consequences, both deliberate:
+
+- It is independent of how the tenant was built. A tenant claimed from the pool and a classic one
+  both reach this point with the base dataset committed, so the pool chain is untouched and
+  `CHAIN_REVISION` does not move.
+- It is **best effort**. It runs in its own transaction: on any failure it is rolled back —
+  discarding only the sample data — and reported as a `sampleData` `warning`. The success card
+  then says the environment is ready without sample data, and stays up a few seconds longer so the
+  notice can be read. `DataImportService` rolls the whole session back on error, which is exactly
+  why this import can never share the onboarding transaction.
+
+**What is imported.** A second pass of `OnboardingDatasetNormalizer` over the **same**
+`referencedata/sampledata/GOClient` files, with `OnboardingDatasetProfile.SAMPLE_DATA`
+(`OnboardingSampleDataDefinition` holds the table lists). The source files are not modified and
+nothing is copied: it takes the transactional tables whole and, from the tables shared with the
+base pass, only the `OnboardingDemoMasterData` rows — exactly the rows the base pass drops.
+References from sample rows to base rows carry GOClient ids and resolve through the
+`AD_REF_DATA_LOADED` mapping the base import wrote for the tenant.
+
+**How it differs from GOClient.**
+
+| Aspect | GOClient | Tenant with sample data |
+|---|---|---|
+| Accounting | 128 `FACT_ACCT` entries, documents `POSTED='Y'` | Imported with no `FACT_ACCT` and `POSTED` rewritten to `'N'` (`'D'` kept). The system-wide `AcctServerProcess` (scheduled at client `0`, it posts pending documents of every client) then posts them on its next cycle — about 90 s after the signup on the local instance — so the tenant ends up with entries generated by the real posting engine from its own accounts, not copied from GOClient. Accepted as the intended outcome (ETP-5426); where that process is not scheduled, the documents simply stay pending |
+| Contact user on orders/invoices/shipments/assets | GOAdmin / GOuser | Empty (`AD_USER_ID` stripped; those users do not exist in a tenant) |
+| Partner identifier (`EM_Etgo_Identifier`) | Empty on 4 of 5 partners | The next numbers of the tenant's own identifier sequence, in `VALUE` order, as if a user had created them (the partner that has one keeps it). The import gives them a stand-in first: the column's transactional sequence generator, run per insert inside the import's single flush, handed the same number to all four |
+| Organization | 4 partners, 3 products, the warehouse and its locator at org `0` | Every row at the tenant's business org. A partner at `0` fails the import: `EM_Etgo_Identifier` is generated from a transactional sequence onboarding only creates for the business org |
+| Per-entity posting accounts | GOClient's `*_ACCT` rows | Provisioned by `OnboardingAccountingWiringService#provisionSampleDataPostingAccounts` from the tenant's defaults (`A_ASSET_ACCT` is imported: the wiring has no asset statement) |
+| Document sequences | Still at 1000000 / 10000000 despite documents up to 1000010 | Moved past the highest imported number, so the first real document never repeats a sample number |
+
+**Idempotent.** A tenant whose `AD_REF_DATA_LOADED` already maps any GOClient business partner is
+left untouched (`Outcome.ALREADY_PRESENT`).
+
+**"First steps" is unaffected.** Its progress is a persisted list of ids the user ticks by hand, not
+derived from the tenant's data, so every step still shows as pending.
+
+**Verifying by hand needs a Tomcat restart**: the table lists are Java, loaded once per JVM, while the
+XML files are re-read on every provisioning.
+
+## Tenant pool (ETP-5389)
+
+Near-instant onboarding: a background process keeps a small pool of tenants already built by the
+full chain above, and `POST /sws/go/onboarding` hands one of them to the signup instead of building
+one. **Off by default** — with flag `onboarding-tenant-pool` off (see
+`feature-flags-and-tenant-upgrade.md`) onboarding is exactly the classic path.
+
+### Configuration
+
+| Setting | Property / env | Default |
+|---|---|---|
+| switch | flag `onboarding-tenant-pool` (`etendo.go.flags.onboarding-tenant-pool` / `ETGO_FLAG_ONBOARDING_TENANT_POOL`, or ConfigCat) | off |
+| pool size (READY tenants kept) | `etendo.go.onboarding.pool.size` / `ETGO_ONBOARDING_POOL_SIZE` | 3 (clamped 0–20) |
+| max age of a READY tenant | `etendo.go.onboarding.pool.maxAgeHours` / `ETGO_ONBOARDING_POOL_MAX_AGE_HOURS` | 168 |
+| provisioning lease | `etendo.go.onboarding.pool.leaseMinutes` / `ETGO_ONBOARDING_POOL_LEASE_MINUTES` | 60 |
+
+The switch reuses the module's OpenFeature flag stack (booleans only); the numbers are plain
+`GoRuntimeProperties`, like every other numeric runtime knob. All in `TenantPoolConfig`.
+
+### One chain, two callers
+
+The chain lives in `com.etendoerp.go.rest.OnboardingProvisioningChain` and reports through an
+`OnboardingProgressSink`: the endpoint passes `NdjsonOnboardingProgressSink` (the NDJSON wire
+format, unchanged), the filler `LoggingOnboardingProgressSink`. The servlet builds the chain per
+call over its own service fields, so the classic path produces the same tenant as before the
+extraction and a pooled tenant is built by the very same code.
+
+### `ETGO_TENANT_POOL`
+
+One row per pooled tenant, System client. `POOL_CLIENT_ID` (the tenant), `STATUS`,
+`PROVISIONING_VERSION`, `CLAIMED_AT`, `ERROR_MESSAGE`.
+
+| Status | Meaning |
+|---|---|
+| `PROVISIONING` | the filler is building it (committed before the build starts) |
+| `READY` | claimable |
+| `CLAIMED` | handed to a signup — committed together with the onboarding |
+| `FAILED` | provisioning or personalization failed; `POOL_CLIENT_ID` may point at a half-built client left for manual cleanup |
+| `STALE` | built by another `PROVISIONING_VERSION`, or older than the max age; never claimed |
+
+`PROVISIONING_VERSION` = `OnboardingProvisioningChain.CHAIN_REVISION` + `@` + the data-fix
+baseline cutoff (`OnboardingBaselineService.provisionedThrough()`). A deploy that changes either
+retires every pooled tenant built before it, so a signup never gets a tenant missing a newer step.
+
+### The filler
+
+`TenantPoolFillProcess` (`AD_Process` "Tenant Pool Filler", background, `PREVENTCONCURRENT='Y'`),
+scheduled for the System client every 5 minutes by `TenantPoolScheduleStartup` — unconditionally:
+the process reads the flag on every run and does nothing while it is off, so flipping the flag
+needs no restart. One run (`TenantPoolFiller`):
+
+1. `READY` rows of another version or past the max age → `STALE`; `PROVISIONING` rows past the
+   lease (a JVM died mid-build) → `FAILED`.
+2. deficit = size − `READY` (current version) − `PROVISIONING`.
+3. For each missing slot, one at a time: insert `PROVISIONING` + commit, build the tenant
+   (`TenantPoolProvisioner`), then `READY` + commit, or rollback + `FAILED` + commit. **Stops at
+   the first failure**, so a systematic problem costs one failed tenant per run; the next run
+   starts again normally.
+
+Never two at once: a static in-JVM guard answers a concurrent call with "skipped", and
+`PREVENTCONCURRENT` covers several scheduler nodes.
+
+A pooled tenant is built EUR / ES / es_ES under the placeholder name `POOL-<pool row id>` (client,
+organization, and the admin username lowercased), with a random, unstored admin password, no
+address, tax id or full name — and its admin user **inactive**, so nothing can log into it before a
+claim. Its costing schedule row is created by the chain but only activated in Quartz at claim time
+(the servlet's post-commit `activateSchedule`); after a restart `OBScheduler.initialize()` does pick
+it up, running `CostingBackground` for an empty tenant.
+
+### The claim
+
+`PooledTenantClaimService.claim`, first thing in `executeOnboardingProvisioning`. It answers
+`null` — classic path, transparently — when the flag is off, the request is not EUR/ES/es_ES, the
+name starts with `POOL-`, the pool is empty, or taking/personalizing the tenant fails. The servlet
+does not attempt a claim when the attempt left a half-built classic client to resume (found by its
+provisioning name, see Overview). The company name plays no part: it may match another client.
+A personalization failure rolls back, marks the row `FAILED` and falls back.
+
+The row is taken with `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`, **inside
+the onboarding transaction**: concurrent signups never get the same tenant (a locked row is
+skipped, not waited for), and a failure anywhere later rolls the claim back and the tenant is
+`READY` again. The claim then applies only:
+
+- `AD_Client` name / value / description, `AD_Org` name / value / `SocialName` ← company name;
+- the names the build derived from the placeholder — `AD_Role` "POOL-… Admin" (name and
+  description), the client's 17 `AD_Tree` names/descriptions, the ledger (`C_AcctSchema`), the
+  chart of accounts (`C_Element` name/description) and the fiscal calendar — with `POOL-<id>`
+  replaced by the company name (`PooledTenantClaimService.renamePlaceholderDerivedNames`, ETP-5548;
+  native SQL scoped by `AD_Client_ID`, inside the claim transaction);
+- admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
+  description, email, password hash, **active**;
+- the signup address onto the pooled fiscal location's street line.
+
+After it, the servlet runs its existing calls: owner marking (`resolveAdminContextData`), the paid
+upgrade side effects (mark productive, revert forced test mode), `orgInfo` (tax id) and
+`warehouseAddress` (re-copies the fiscal address) — the only chain steps that consume signup
+data — then data transfer, `markDemoReady` (the trial clock starts at the claim, not at pool time),
+commit, the demo trial window (ETP-5575: re-evaluates the periods of a pooled demo built in an
+earlier month, see `OnboardingPeriodControlService`), the `environment-ready` email and costing
+activation. The stream skips the `organization`
+and `dataset`…`baseline` steps.
+
+### Performance observability (ETP-5500)
+
+The server writes structured performance entries at `INFO` level with the `[ONBOARDING-PERF]`
+marker. Each entry includes a request-scoped `correlationId`, a phase, the `pool` or `classic`
+mode, elapsed milliseconds, and only non-secret tenant identifiers. The pool claim emits separate
+timings for the row claim, tenant personalization, and the complete claim. The servlet emits
+tenant selection and residual onboarding time through commit. These entries make pool and classic
+runs directly comparable without changing the NDJSON response or the provisioning transaction.
+
+### Where `POOL-…` stays visible after a claim
+
+Until ETP-5548 the claim renamed only the client, organization and admin user, so a claimed tenant
+showed "POOL-… Admin" as its role (account menu, roles screens) and kept the placeholder in its
+ledger, chart of accounts, calendar and trees. The claim now rewrites all of them (see the list
+above). A scan of every text column of a `READY` pooled tenant finds the placeholder only in those
+tables plus `AD_Client`, `AD_Org` and the admin `AD_User`, which the claim sets directly.
+
+What still carries it: the `ETGO_TENANT_POOL` row itself and the server log lines of the build.
+Tenants claimed before ETP-5548 keep the placeholder in those derived names until the schema_forge
+data-fix `R45-pool-claim-placeholder-names` (`cli/src/data-fixes/sql/`) rewrites them: same tables
+and lengths as the claim, matched on the exact `POOL-<pool row id>` of a `CLAIMED` row whose client
+is already renamed, so `READY` tenants keep their placeholder.
+
+A pooled tenant is also a real client before it is claimed: instance-wide sweeps
+(`CostingCadenceStartup`, usage aggregation, the corrective data-fix runner) see it like any other
+tenant.
+
 ## Transactional Email Behavior
 
 The onboarding flow participates in the local-account transactional auth email
@@ -414,8 +702,11 @@ Endpoints (session-token auth, same Bearer model as `/me`):
 - `POST /sws/go/onboarding/draft` — body `{ "draft": { "step", "form" } }` saves;
   `{ "draft": null }` clears. Only whitelisted wizard form fields are persisted
   (`fullName`, `businessType`, `clientName`, `currency`, `language`,
-  `countryCode`, `fiscalIdType`, `fiscalIdValue`, `address`, `sector`) and the
-  serialized draft is capped at 4000 chars (400 otherwise).
+  `countryCode`, `fiscalIdType`, `fiscalIdValue`, `address`, `sector`,
+  `includeSampleData`) and the serialized draft is capped at 4000 chars (400
+  otherwise). Every field is kept only as a string, except `includeSampleData`
+  (ETP-5426), which is kept only as a boolean — a checkbox value dropped here
+  would silently lose the choice across a logout.
 
 The draft is cleared automatically (best-effort, non-blocking) by
 `POST /sws/go/onboarding` right after the environment commit succeeds, so a
@@ -433,6 +724,21 @@ user through the initial setup tasks. Its progress is persisted server-side in
 `ETGO_ACCOUNT.FIRST_STEPS` (nullable `VARCHAR(1000)` JSON blob:
 `{ "v": 1, "seen": true, "completed": ["company-data", "products"] }`), so the
 checklist keeps its state across logins and devices.
+
+**Who sees it at all (owner gate, ETP-5395).** The paragraph above and the plan
+gate below both describe what a viewer of this window sees — but as of ETP-5395
+only the tenant's onboarding Owner (`AD_User.EM_ETGO_Is_Owner`, ETP-4830, §7
+item 10 of `docs/neo-headless.md`) is a viewer at all. `SFWindowAccessMap`
+exposes this per-user, not per-role, as `capabilities.isOwner` (§8b of
+`docs/neo-headless.md`); the frontend (`etendo_schema_forge`) hides the menu
+entry for a non-owner and redirects away from `/first-steps` even on a direct
+URL hit, in both directions live (no reload needed if ownership changes
+mid-session). This backend endpoint pair (`GET`/`POST
+/sws/go/onboarding/first-steps`) itself performs no owner check — the gate is
+enforced entirely client-side, on top of the existing per-account auth these
+endpoints already require. See `etendo_schema_forge`'s
+`docs/functionalidad/02-capacidades-y-flujos.md` (capability CAP-ROL-05) for
+the full frontend mechanism.
 
 ### Which steps a tenant is shown (plan gate)
 
@@ -695,15 +1001,20 @@ digits are not in that class at all.
 
 ## Which tenant an onboarding endpoint writes to
 
-Applies to every account-authenticated onboarding endpoint — `/onboarding/first-steps`,
-`/onboarding/company-data` and `/onboarding/draft`.
+Applies to every account-authenticated onboarding endpoint that is scoped to a tenant — today
+`/onboarding/company-data`. `/onboarding/first-steps` and `/onboarding/draft` are stored on the
+account itself and do not resolve a tenant.
 
 The onboarding endpoints authenticate an **account**, and an account can own several
-environments — so the account alone does not say which tenant to write to. The token the app
-sends from inside an environment is the NEO session JWT (the branch
-`findActiveAccountByBearerToken` resolves through the `user` claim), and it carries the
-session's own `client` and `organization` claims. Those scope the request.
+environments — so the account alone does not say which tenant to write to. `resolveTenantSession`
+takes the tenant from the credential, never from the request params or body:
 
-`resolveTenantSession` then re-checks the claimed client against the account that owns it, so a
-token can never name a client its account does not own. A pure account-session token, which has
-no environment behind it, is answered `400`.
+| Credential | Tenant source |
+|---|---|
+| `__Host-go_session` cookie (ADR-0001, what the SPA sends) | the session record's selected environment (`ctxClientId` / `ctxOrgId`, set by the environment-select flow); any bearer on the same request is ignored |
+| Legacy `Authorization: Bearer` NEO session JWT (the branch `findActiveAccountByBearerToken` resolves through the `user` claim) | the JWT's own `client` and `organization` claims |
+
+Both paths then run the same checks. No client (a cookie session with no environment selected
+yet, or a pure account-session token) is answered `400`. The client is re-checked against the
+account that owns it (`clientBelongsToAccountEmail`), so neither a token nor a session can name a
+client its account does not own — `403` otherwise. A blank organization defaults to `"0"`.

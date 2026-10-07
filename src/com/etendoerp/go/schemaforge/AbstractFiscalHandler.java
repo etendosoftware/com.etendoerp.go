@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -39,7 +40,9 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
+import org.openbravo.module.taxreportlauncher.TaxReport;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 abstract class AbstractFiscalHandler {
@@ -67,8 +70,174 @@ abstract class AbstractFiscalHandler {
     this.declHandler = new FiscalDeclCrudHandler(servlet);
   }
 
+  /**
+   * Exposes the shared {@link FiscalDeclCrudHandler} delegate to subclasses that need one of its
+   * declaration lookups (e.g. {@link #guardNotAlreadySubmitted}'s ETP-5438 use of {@link
+   * FiscalDeclCrudHandler#findLatestDeclarationStatus}) without instantiating a second one.
+   */
+  protected FiscalDeclCrudHandler declHandler() {
+    return declHandler;
+  }
+
+  /**
+   * Thrown by {@link #guardNotAlreadySubmitted} — every {@code dispatch()} override that calls it
+   * must catch this specifically (before its own generic {@code catch (Exception e)}) and turn it
+   * into a clean {@code 409} instead of letting it bubble up wrapped as a generic {@code 500}. See
+   * {@link Fiscal303BoxesHandler#dispatch}/{@link Fiscal349BoxesHandler#dispatch} for the exact
+   * catch-and-409 pattern (identical in both). Package-private (not private) so both handlers'
+   * test classes can assert on it directly — inherited nested types are reachable by simple name
+   * from subclass code, and by {@code SubClass.AlreadySubmittedException} from outside it (JLS
+   * 8.5), so this does not need to be duplicated per subclass.
+   */
+  static final class AlreadySubmittedException extends RuntimeException {
+    AlreadySubmittedException(String message) {
+      super(message);
+    }
+  }
+
+  /**
+   * ETP-5438 defense in depth, shared by every fiscal model's generate handler — rejects a
+   * {@code generate} (file generation) call once the LATEST declaration for this {@code
+   * (org, year, period, model)} natural key is already in {@link
+   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Generar fichero <N>"
+   * once {@code isSubmitted} (every {@code FmModel<N>Page.jsx}), but the NEO generate entities
+   * are otherwise unaware of any declaration's status at all — they compute purely from
+   * {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw call (or a future
+   * frontend regression) would silently regenerate an already-presented declaration, with no
+   * server-side guard, unlike the PUT path {@link FiscalDeclCrudHandler#rejectRepresentation}
+   * already covers.
+   *
+   * <p>The pure-read entities ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) are
+   * deliberately NOT gated: they serve a submitted declaration from its persisted snapshot (see
+   * {@link #snapshotOrCompute}), or compute it live for a legacy declaration presented before
+   * snapshots existed.
+   *
+   * <p>Gates on the MOST RECENT declaration (highest {@code DECL_SEQ}) for the natural key, not
+   * just any match — see {@link FiscalDeclCrudHandler#findLatestDeclarationStatus}'s own javadoc
+   * for why: a period can legitimately have more than one declaration (the rectificativa flow),
+   * and an older, already-submitted one must not block a fresh draft for the same period.
+   *
+   * <p>No-op (returns normally) when no declaration exists yet for the natural key — a first-time
+   * compute before any declaration row was ever created is not "already submitted" by definition.
+   *
+   * @param model the {@code ETGO_Fiscal_Decl.model} value for the calling handler (e.g. {@code
+   *              "303"}, {@code "349"}) — passed explicitly rather than derived from {@link
+   *              #getModelKey()}, which returns the URL segment ({@code "fiscal303"}/{@code
+   *              "fiscal349"}), not the bare model code the declaration table stores.
+   */
+  protected void guardNotAlreadySubmitted(String orgId, int year, String period, String model) {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String status = declHandler().findLatestDeclarationStatus(clientId, declarationOrgId(), model,
+        year, period);
+    if (status != null && FiscalDeclCrudHandler.SUBMITTED_STATUSES.contains(status)) {
+      throw new AlreadySubmittedException(
+          "This declaration was already submitted (status: " + status + ") for org=" + orgId
+              + " year=" + year + " period=" + period + " model=" + model);
+    }
+  }
+
+  /**
+   * The organization declarations are STORED under — the raw session org, exactly what
+   * {@link FiscalDeclCrudHandler} writes on POST and filters by on GET. Deliberately NOT the
+   * {@code orgId} {@link #dispatch} receives: that one comes from {@link #resolveEffectiveOrg},
+   * which maps a {@code *} (org {@code "0"}) session to the first leaf org so the COMPUTATION has
+   * real invoice data, but a declaration created from that same session is stored under
+   * {@code "0"}. Looking declarations up with the effective org would never find them (ETP-5438
+   * review W1: the snapshot was missed and the generate guard let a submitted declaration
+   * through). Declaration lookups use this; computations keep the effective org.
+   */
+  protected String declarationOrgId() {
+    return OBContext.getOBContext().getCurrentOrganization().getId();
+  }
+
+  /**
+   * What this model freezes as a submission snapshot, and how it computes its live payload
+   * (ETP-5438). Assigned by each subclass constructor; see {@link FiscalSnapshotSupport}.
+   * Package-private and non-final so tests can install a double.
+   */
+  FiscalSnapshotSupport snapshotSupport;
+
+  /**
+   * The bare {@code ETGO_Fiscal_Decl.model} code this handler serves ({@code "303"},
+   * {@code "349"}) — not the URL segment {@link #getModelKey()} returns.
+   */
+  protected String getDeclModel() {
+    return snapshotSupport.declModel();
+  }
+
+  /**
+   * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
+   * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) for a declaration that is
+   * not served from a snapshot. {@link #computeSubmittedSnapshot} derives the snapshot from it.
+   * Passes {@code this} to the support so a Mockito spy of the handler stays in the call chain.
+   */
+  @SuppressWarnings("java:S112")
+  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
+    return snapshotSupport.computeLivePayload(this, orgId, year, period);
+  }
+
+  /**
+   * ETP-5438 — the submission snapshot: {@link #computeLivePayload}'s payload reduced to its
+   * fixed-size figures by {@link FiscalSnapshotSupport#toSnapshot} — see there for what is kept,
+   * why, and the known 349 size limit.
+   */
+  @SuppressWarnings("java:S112")
+  final JSONObject computeSubmittedSnapshot(String orgId, int year, String period)
+      throws Exception {
+    return snapshotSupport.toSnapshot(computeLivePayload(orgId, year, period));
+  }
+
+  /**
+   * ETP-5438 — the payload the read endpoint serves: the persisted submission snapshot when the
+   * latest declaration for the natural key is submitted and has one, otherwise a live
+   * {@link #computeLivePayload}. A submitted declaration WITHOUT a snapshot (a legacy one,
+   * presented before snapshots existed) deliberately keeps the live compute — no data-fix for
+   * those, product decision. Drafts/ready declarations always compute live.
+   */
+  @SuppressWarnings("java:S112")
+  protected JSONObject snapshotOrCompute(String orgId, int year, String period) throws Exception {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    // Lookup on the org the declaration is stored with; the compute keeps the effective org.
+    JSONObject snapshot = declHandler().snapshots.findLatestSubmittedSnapshot(clientId, declarationOrgId(),
+        getDeclModel(), year, period);
+    return snapshot != null ? snapshot : computeLivePayload(orgId, year, period);
+  }
+
+  /**
+   * Wires every handler's {@link FiscalDeclCrudHandler} to compute a submission snapshot through
+   * the handler that owns the declaration's model (ETP-5438). Needed because every declaration
+   * PUT — Modelo 303 and Modelo 349 alike — arrives through {@code /fiscal303/declarations}, so
+   * the CRUD handler must be able to reach the OTHER model's compute too. The org is resolved
+   * exactly like the read endpoint resolves it ({@link #resolveEffectiveOrg}), so the snapshot
+   * matches what that read returns.
+   */
+  static void linkSubmittedSnapshotProviders(AbstractFiscalHandler... handlers) {
+    java.util.Map<String, AbstractFiscalHandler> byModel = new HashMap<>();
+    for (AbstractFiscalHandler h : handlers) {
+      byModel.put(h.getDeclModel(), h);
+    }
+    FiscalSubmittedSnapshotSupport.SnapshotProvider provider = (model, year, period) -> {
+      AbstractFiscalHandler owner = byModel.get(model);
+      return owner != null
+          ? owner.computeSubmittedSnapshot(owner.resolveEffectiveOrg(), year, period)
+          : null;
+    };
+    for (AbstractFiscalHandler h : handlers) {
+      h.declHandler().snapshots.setProvider(provider);
+    }
+  }
+
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
+    // ETP-5546: single entry point for every /fiscal303 and /fiscal349 sub-route
+    // (declarations, incidents, boxes, submit, modified, ...) — gate here once instead of
+    // per-entity. "Modelos Fiscales" access is the role's grant on the Tax Report window
+    // (ETP-5116 proxy); the method is tiered against IsReadWrite so a read-only grant still
+    // denies POST /fiscal303/submit.
+    if (!NeoAccessHelper.hasWindowAccess(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, method)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "Access denied");
+      return;
+    }
     if (DECLARATIONS.equals(entityName) || INCIDENTS.equals(entityName)) {
       delegateToDeclHandler(entityName, method, request, response);
       return;
@@ -209,6 +378,55 @@ abstract class AbstractFiscalHandler {
   protected abstract String getModelKey();
 
   /**
+   * Functional shape for the per-model work {@link #runDispatch} wraps — one {@code dispatch()}
+   * override's whole if/else entity chain, as a lambda.
+   */
+  @FunctionalInterface
+  protected interface DispatchBody {
+    /**
+     * Runs one {@code dispatch()} override's entity if/else chain. Declares the generic
+     * {@code Exception} deliberately (SonarQube java:S112 reviewed, not a shortcut): the lambda
+     * bodies it wraps call into siblings that each throw a different checked type (JSON parsing,
+     * I/O on the response writer, DAL/report lookups), and {@link #runDispatch} exists precisely
+     * to funnel every one of them into the single {@link FiscalHandlerException} translation —
+     * narrowing this to a specific type would defeat that purpose.
+     *
+     * @throws Exception whatever checked exception the wrapped {@code dispatch()} entity chain
+     *                    raises — {@link #runDispatch} is the single place that translates it.
+     */
+    @SuppressWarnings("java:S112")
+    void run() throws Exception;
+  }
+
+  /**
+   * Runs {@code body} (a {@code dispatch()} override's entity if/else chain), translating any
+   * {@link AlreadySubmittedException} into a clean 409 and any other exception into a
+   * {@link FiscalHandlerException} — the exact try/catch chain every {@code dispatch()} override
+   * needs. Hoisted here (ETP-5438, SonarQube java:S1192) once {@link Fiscal303BoxesHandler#dispatch}
+   * and {@link Fiscal349BoxesHandler#dispatch} both needed the identical chain: CPD flagged it as a
+   * duplicated block spanning the catch clauses plus the two model-fixed wrapper methods
+   * immediately below them (both subclasses' {@code guardNotAlreadySubmitted(orgId, year, period)}
+   * and {@code getModelKey()} — CPD normalizes literals, so the two differ only by the AEAT model
+   * code/URL segment and still matched as one duplicate).
+   */
+  protected void runDispatch(HttpServletResponse response, DispatchBody body)
+      throws FiscalHandlerException {
+    try {
+      body.run();
+    } catch (AlreadySubmittedException e) {
+      try {
+        servlet.sendError(response, HttpServletResponse.SC_CONFLICT, e.getMessage());
+      } catch (Exception ioEx) {
+        throw new FiscalHandlerException(ioEx);
+      }
+    } catch (FiscalHandlerException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new FiscalHandlerException(e);
+    }
+  }
+
+  /**
    * Replaces the persisted AEAT validation rows ({@code ETGO_Fiscal_Decl_Incident}) for a
    * declaration: deletes every existing row for it, then inserts one row per entry in
    * {@code errors} (severity {@code block}) followed by one row per entry in {@code warnings}
@@ -315,6 +533,24 @@ abstract class AbstractFiscalHandler {
       throw new OBException("No AcctSchema found for client=" + clientId);
     }
     return list.get(0);
+  }
+
+  /**
+   * Org-scoped (falls back to org {@code "0"}) {@code TaxReport} searchKey lookup, shared by
+   * every fiscal model's {@code TaxReport} resolution — hoisted here (SonarQube java:S1192/
+   * duplicated-block) from {@link Fiscal303BoxesHandler#resolveTaxReport} and {@code
+   * Fiscal349BoxesHandler#resolveTaxReport349}, which previously each carried their own
+   * byte-identical private copy. Returns {@code null} (never throws) so callers can fall through
+   * to a different searchKey on an empty result instead of failing outright.
+   */
+  protected TaxReport findTaxReport(String orgId, String searchKey) {
+    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
+    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
+    crit.setMaxResults(1);
+    List<TaxReport> list = crit.list();
+    return list.isEmpty() ? null : list.get(0);
   }
 
   @SuppressWarnings("unchecked")

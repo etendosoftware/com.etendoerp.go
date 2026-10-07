@@ -43,20 +43,21 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Support Chat REST API servlet.
  *
  * Mapped to /sws/support/* via AD_MODEL_OBJECT_MAPPING.
  *
- * Endpoints (all require Bearer JWT from Etendo's standard /sws/login):
+ * Endpoints (all require the `__Host-` cookie session, or a Bearer JWT as fallback):
  *   GET  /sws/support/conversations                          — List conversations for the user
  *   POST /sws/support/conversations                          — Start a new conversation
  *   GET  /sws/support/conversations/:id/messages             — Load message history
@@ -78,7 +79,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final Logger log = LogManager.getLogger(SupportConversationsServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json";
-  private static final String HEADER_AUTHORIZATION = "Authorization";
+  private static final EnvironmentRequestAuthenticator AUTHENTICATOR =
+      new EnvironmentRequestAuthenticator();
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
   private static final String FIELD_MESSAGES    = "messages";
@@ -345,7 +347,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       // AI reply
       String locale = body.optString("locale", "es");
       String userEmail = SupportIntegrationClient.getUserEmail(userId);
-      SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail);
+      String environment = SupportIntegrationClient.resolveEnvironment(request.getServerName());
+      SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail, ctx.clientId,
+          environment);
       String aiReplyText = SupportIntegrationClient.sendToAdk(userId, conv.getId(), firstMessage, attachments);
       if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
@@ -698,37 +702,23 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     OBContext.setOBContext(previous);
   }
 
+  /**
+   * ETP-5455 — the shared environment pipeline under {@link SurfacePolicy#NEO_AUXILIARY}: support
+   * is exactly what a commercially blocked customer still needs, so no access check applies, and
+   * the cookie / Bearer / kill-switch rules are the ones every other environment surface uses.
+   * {@code identify} rather than {@code authenticate} because this servlet installs its own
+   * per-operation tenant context from the identity ({@code setTenantContext}).
+   */
   private AuthContext authenticate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String authHeader = request.getHeader(HEADER_AUTHORIZATION);
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
+    EnvironmentAuthOutcome outcome = AUTHENTICATOR.identify(request, SurfacePolicy.NEO_AUXILIARY);
+    if (!outcome.isAuthenticated()) {
+      log.warn("Support chat: refused ({}): {}", outcome.getHttpStatus(), outcome.getMessage());
+      writeError(response, outcome.getHttpStatus(), outcome.getMessage());
       return null;
     }
-    String token = authHeader.substring(7).trim();
-    try {
-      DecodedJWT jwt = SecureWebServicesUtils.decodeToken(token);
-      String userId = jwt.getClaim("user").asString();
-      if (userId == null || userId.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid token: missing user claim");
-        return null;
-      }
-      String roleId = jwt.getClaim("role").asString();
-      if (roleId == null || roleId.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid token: missing role claim");
-        return null;
-      }
-      String clientId = jwt.getClaim("client").asString();
-      String orgId = jwt.getClaim("organization").asString();
-      return new AuthContext(userId, roleId,
-          clientId == null || clientId.isEmpty() ? SYSTEM_USER_ID : clientId,
-          orgId == null || orgId.isEmpty() ? SYSTEM_USER_ID : orgId);
-    } catch (Exception e) {
-      log.warn("Support chat: invalid JWT token", e);
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return null;
-    }
+    return new AuthContext(outcome.getUserId(), outcome.getRoleId(), outcome.getClientId(),
+        outcome.getOrgId());
   }
 
   // --- Internal webhook endpoints (ticket linking / human takeover) ---

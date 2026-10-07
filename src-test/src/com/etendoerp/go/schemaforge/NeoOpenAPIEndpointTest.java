@@ -65,6 +65,8 @@ import io.swagger.v3.oas.models.tags.Tag;
 /**
  * Unit tests for {@link NeoOpenAPIEndpoint}.
  * Uses JUnit 5 (Jupiter) and Mockito.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoOpenAPIEndpoint
  */
 class NeoOpenAPIEndpointTest {
 
@@ -97,8 +99,10 @@ class NeoOpenAPIEndpointTest {
     }
 
     @Test
-    @DisplayName("Returns true for EtendoGo tag (case-insensitive)")
+    @DisplayName("Returns true for the Etendo tag and the legacy EtendoGo flow name (case-insensitive)")
     void etendoGoTagIsValid() {
+      assertTrue(endpoint.isValid("Etendo"));
+      assertTrue(endpoint.isValid("etendo"));
       assertTrue(endpoint.isValid("EtendoGo"));
       assertTrue(endpoint.isValid("etendogo"));
       assertTrue(endpoint.isValid("ETENDOGO"));
@@ -110,6 +114,23 @@ class NeoOpenAPIEndpointTest {
       assertFalse(endpoint.isValid("SomeOtherTag"));
       assertFalse(endpoint.isValid(""));
     }
+  }
+
+  @Test
+  @DisplayName("Registers the public API key lifecycle contract")
+  void registersPublicApiKeyPaths() throws Exception {
+    OpenAPI openAPI = new OpenAPI();
+    openAPI.setPaths(new Paths());
+    invokePrivate(endpoint, "addPublicApiKeyPaths", new Class<?>[] { OpenAPI.class }, openAPI);
+
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys").getGet());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys").getPost());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}").getPut());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}").getDelete());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}/rotate").getPost());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}/revoke-tokens").getPost());
+    assertTrue(openAPI.getPaths().get("/oauth2/api-keys/{id}/rotate").getPost()
+        .getDescription().contains("once"));
   }
 
   // -------------------------------------------------------------------------
@@ -151,9 +172,12 @@ class NeoOpenAPIEndpointTest {
       assertNotNull(pathItem.getGet(), "Process should have GET (describe)");
       assertNotNull(pathItem.getPost(), "Process should have POST (execute)");
 
-      // Verify tags
+      // Verify tags: named and described without the former NEO / Etendo Go wording (ETP-5602)
       assertTrue(openAPI.getTags().stream()
-          .anyMatch(t -> "EtendoGo".equals(t.getName())));
+          .anyMatch(t -> "Etendo".equals(t.getName())
+              && "Etendo API endpoints".equals(t.getDescription())));
+      assertFalse(openAPI.getTags().stream()
+          .anyMatch(t -> t.getDescription() != null && t.getDescription().contains("NEO")));
     }
   }
 
@@ -358,9 +382,9 @@ class NeoOpenAPIEndpointTest {
         endpoint.add(openAPI);
       }
 
-      // Only discovery endpoints should be present
-      assertTrue(openAPI.getPaths().size() <= 2,
-          "No spec-specific paths should be registered for null-name spec");
+      assertTrue(openAPI.getPaths().keySet().stream()
+          .noneMatch(path -> path.startsWith("/sws/neo/null")),
+          "No paths should be registered for a spec with a null name");
     }
   }
 
@@ -438,7 +462,7 @@ class NeoOpenAPIEndpointTest {
       assertNotNull(openAPI.getPaths(), "Paths should be initialized");
       assertNotNull(openAPI.getTags(), "Tags should be initialized");
       assertTrue(openAPI.getTags().stream()
-          .anyMatch(t -> "EtendoGo".equals(t.getName())));
+          .anyMatch(t -> "Etendo".equals(t.getName())));
     }
   }
 
@@ -511,7 +535,7 @@ class NeoOpenAPIEndpointTest {
   class HelperMethods {
 
     @Test
-    @DisplayName("createOperation sets summary, description, and EtendoGo tag")
+    @DisplayName("createOperation sets summary, description, and Etendo tag")
     void createOperationSetsFields() throws Exception {
       Operation op = (Operation) invokePrivate(endpoint, "createOperation",
           new Class<?>[] { String.class, String.class },
@@ -520,7 +544,7 @@ class NeoOpenAPIEndpointTest {
       assertEquals("My summary", op.getSummary());
       assertEquals("My description", op.getDescription());
       assertNotNull(op.getTags());
-      assertTrue(op.getTags().contains("EtendoGo"));
+      assertTrue(op.getTags().contains("Etendo"));
     }
 
     @Test
@@ -839,7 +863,7 @@ class NeoOpenAPIEndpointTest {
 
       // Tags should still have been added before the exception
       assertTrue(openAPI.getTags().stream()
-          .anyMatch(t -> "EtendoGo".equals(t.getName())));
+          .anyMatch(t -> "Etendo".equals(t.getName())));
     }
   }
 

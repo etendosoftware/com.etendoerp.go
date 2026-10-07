@@ -1127,6 +1127,146 @@ public class ChartOfAccountsHandlerTest {
     }
   }
 
+  // ── afterHandle() DEFAULTS — injectCodePrefix ETP-5399 tree-based resolution ──
+
+  /**
+   * ETP-5399 regression: before this fix, {@code injectCodePrefix} did
+   * {@code parentCode.substring(0, 4)} on the parent's raw {@code Value} with no digit check,
+   * so choosing the letter-suffixed Account-level node {@code "430A"} (4 characters) as the
+   * parent emitted {@code codePrefix: "430A"} verbatim — one tree level too shallow, per the
+   * ticket's own root-cause write-up. With a real Breakdown-level child ({@code "4300A"})
+   * present, the corrected tree-based resolution must land on that child instead.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandleResolvesLetterSuffixedParentToRealBreakdownChildNotItsOwnLetterCode()
+      throws Exception {
+    JSONObject body = new JSONObject().put("defaults", new JSONObject());
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    OBContext obCtxInstance = mock(OBContext.class);
+    Client clientMock = mock(Client.class);
+    when(clientMock.getId()).thenReturn("TEST_CLIENT");
+    when(obCtxInstance.getCurrentClient()).thenReturn(clientMock);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("parentAccountId", "430A-ID");
+    when(ctx.getQueryParams()).thenReturn(queryParams);
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getObContext()).thenReturn(obCtxInstance);
+
+    ElementValue parentEV = mock(ElementValue.class);
+    when(parentEV.getSearchKey()).thenReturn("430A"); // the letter-suffixed raw code
+
+    OBDal dalMock = mock(OBDal.class);
+    when(dalMock.get(any(Class.class), any())).thenReturn(parentEV);
+
+    Session sessionMock = mock(Session.class);
+    when(dalMock.getSession()).thenReturn(sessionMock);
+
+    NativeQuery<Object> treeQry = mock(NativeQuery.class);
+    NativeQuery<Object> nodeQry = mock(NativeQuery.class);
+    NativeQuery<Object> evQry = mock(NativeQuery.class);
+
+    when(treeQry.list()).thenReturn(Collections.singletonList("TREE-ID"));
+    java.util.List<Object> nodeRows = new java.util.ArrayList<>();
+    nodeRows.add(new Object[]{"4300A-ID", "430A-ID"}); // 4300A's parent is 430A
+    when(nodeQry.list()).thenReturn(nodeRows);
+    java.util.List<Object> evRows = new java.util.ArrayList<>();
+    evRows.add(new Object[]{"430A-ID", "430A", "Clientes a largo plazo", "C"});
+    evRows.add(new Object[]{"4300A-ID", "4300A", "Clientes (euros) a largo plazo", "D"});
+    when(evQry.list()).thenReturn(evRows);
+
+    when(sessionMock.createNativeQuery(anyString()))
+        .thenReturn(treeQry)
+        .thenReturn(nodeQry)
+        .thenReturn(evQry);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject defaults = result.getBody().getJSONObject("defaults");
+      assertEquals("4300", defaults.getString("codePrefix"));
+      assertFalse("codePrefix must never be the shallower Account-level letter code",
+          "430A".equals(defaults.getString("codePrefix")));
+      JSONArray insertionChildren = defaults.getJSONArray("insertionChildren");
+      assertEquals(1, insertionChildren.length());
+      assertEquals("4300A", insertionChildren.getJSONObject(0).getString("value"));
+    }
+  }
+
+  /**
+   * A letter-suffixed parent with no existing children remains the structural insertion
+   * candidate, but it cannot supply a valid numeric posting prefix.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandleKeepsInsertionCandidateButOmitsInvalidLetterSuffixedCodePrefix()
+      throws Exception {
+    JSONObject body = new JSONObject().put("defaults", new JSONObject());
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    OBContext obCtxInstance = mock(OBContext.class);
+    Client clientMock = mock(Client.class);
+    when(clientMock.getId()).thenReturn("TEST_CLIENT");
+    when(obCtxInstance.getCurrentClient()).thenReturn(clientMock);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("parentAccountId", "999X-ID");
+    when(ctx.getQueryParams()).thenReturn(queryParams);
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getObContext()).thenReturn(obCtxInstance);
+
+    ElementValue parentEV = mock(ElementValue.class);
+    when(parentEV.getSearchKey()).thenReturn("999X");
+
+    OBDal dalMock = mock(OBDal.class);
+    when(dalMock.get(any(Class.class), any())).thenReturn(parentEV);
+
+    Session sessionMock = mock(Session.class);
+    when(dalMock.getSession()).thenReturn(sessionMock);
+
+    NativeQuery<Object> treeQry = mock(NativeQuery.class);
+    NativeQuery<Object> nodeQry = mock(NativeQuery.class);
+    NativeQuery<Object> evQry = mock(NativeQuery.class);
+
+    when(treeQry.list()).thenReturn(Collections.singletonList("TREE-ID"));
+    when(nodeQry.list()).thenReturn(Collections.emptyList()); // no children anywhere
+    java.util.List<Object> evRows = new java.util.ArrayList<>();
+    evRows.add(new Object[]{"999X-ID", "999X", "Brand new family", "C"});
+    when(evQry.list()).thenReturn(evRows);
+
+    when(sessionMock.createNativeQuery(anyString()))
+        .thenReturn(treeQry)
+        .thenReturn(nodeQry)
+        .thenReturn(evQry);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject defaults = result.getBody().getJSONObject("defaults");
+      assertFalse(defaults.has("codePrefix"));
+      JSONArray insertionChildren = defaults.getJSONArray("insertionChildren");
+      assertEquals(1, insertionChildren.length());
+      assertEquals("999X", insertionChildren.getJSONObject(0).getString("value"));
+    }
+  }
+
   // ── afterHandle() CRUD GET list — loadTreeData with populated node rows ────
 
   @SuppressWarnings("unchecked")
@@ -1196,6 +1336,92 @@ public class ChartOfAccountsHandlerTest {
       NeoResponse result = handler.afterHandle(ctx);
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * ETP-5399: the per-row {@code insertionChildren} field is resolved from the row's DIRECT
+   * PARENT, not the row's own id — every GET list row is a leaf, and a leaf's direct parent is
+   * always the Breakdown-level grouping node. Fixture: {@code LEAF1 -> 4300A-ID (D) -> 430A-ID
+   * (C, root)}, mirroring the real {@code 430A -> 4300A -> 43001000} family. Confirms
+   * {@code insertionChildren} lands on {@code "4300A"} (correct) while the legacy
+   * {@code parentCode4} field is left untouched and still shows the old, one-level-too-shallow
+   * {@code "430A"} — proving both fields coexist per the backward-compatibility decision.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandleInjectsCorrectedInsertionChildrenAlongsideLegacyParentCode4ForLetterFamily()
+      throws Exception {
+    JSONArray dataArray = new JSONArray().put(new JSONObject().put("id", "LEAF1"));
+    JSONObject responseJson = new JSONObject().put("data", dataArray).put("totalRows", 1);
+    JSONObject body = new JSONObject().put("response", responseJson);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    OBContext obCtxInstance = mock(OBContext.class);
+    Client clientMock = mock(Client.class);
+    when(clientMock.getId()).thenReturn("TEST_CLIENT");
+    when(obCtxInstance.getCurrentClient()).thenReturn(clientMock);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn(null);
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getObContext()).thenReturn(obCtxInstance);
+
+    OBDal dalMock = mock(OBDal.class);
+    OBQuery<ElementValue> summaryQry = mock(OBQuery.class);
+    when(dalMock.createQuery(any(Class.class), anyString())).thenReturn(summaryQry);
+    when(summaryQry.setNamedParameter(anyString(), any())).thenReturn(summaryQry);
+    when(summaryQry.list()).thenReturn(Collections.emptyList());
+
+    Session sessionMock = mock(Session.class);
+    when(dalMock.getSession()).thenReturn(sessionMock);
+
+    NativeQuery<Object> treeQry = mock(NativeQuery.class);
+    NativeQuery<Object> nodeQry = mock(NativeQuery.class);
+    NativeQuery<Object> evQry = mock(NativeQuery.class);
+    NativeQuery<Object> yearQry = mock(NativeQuery.class);
+
+    when(treeQry.list()).thenReturn(Collections.singletonList("TREE-ID"));
+
+    java.util.List<Object> nodeRowsList = new java.util.ArrayList<>();
+    nodeRowsList.add(new Object[]{"LEAF1", "4300A-ID"});     // leaf's direct parent: 4300A (D)
+    nodeRowsList.add(new Object[]{"4300A-ID", "430A-ID"});   // 4300A's parent: 430A (C)
+    nodeRowsList.add(new Object[]{"430A-ID", "0"});          // 430A is a root
+    when(nodeQry.list()).thenReturn(nodeRowsList);
+
+    java.util.List<Object> evRowsList = new java.util.ArrayList<>();
+    evRowsList.add(new Object[]{"LEAF1", "43001000", "Clientes (euros) a largo plazo", "S"});
+    evRowsList.add(new Object[]{"4300A-ID", "4300A", "Clientes (euros) a largo plazo", "D"});
+    evRowsList.add(new Object[]{"430A-ID", "430A", "Clientes a largo plazo", "C"});
+    when(evQry.list()).thenReturn(evRowsList);
+
+    when(yearQry.list()).thenReturn(Collections.emptyList());
+
+    when(sessionMock.createNativeQuery(anyString()))
+        .thenReturn(treeQry)
+        .thenReturn(nodeQry)
+        .thenReturn(evQry)
+        .thenReturn(yearQry);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+
+      JSONObject leafEntry = result.getBody().getJSONObject("response").getJSONArray("data")
+          .getJSONObject(0);
+      assertEquals("430A", leafEntry.getString("parentCode4")); // legacy field, unchanged
+      JSONArray insertionChildren = leafEntry.getJSONArray("insertionChildren");
+      assertEquals(1, insertionChildren.length());
+      assertEquals("4300A", insertionChildren.getJSONObject(0).getString("value"));
+      assertEquals("4300A-ID", insertionChildren.getJSONObject(0).getString("id"));
     }
   }
 

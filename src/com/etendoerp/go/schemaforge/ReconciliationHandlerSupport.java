@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.docTypeToIsReceipt;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -156,10 +157,14 @@ final class ReconciliationHandlerSupport {
     String dateTo = qp != null ? qp.get(ReconciliationHandler.PARAM_DATE_TO) : null;
     try {
       OBContext.setAdminMode(true);
-      if (ReconciliationHandler.KIND_INVOICES.equalsIgnoreCase(kind)) {
-        return handler.buildInvoiceCandidates(accountId, lineId, docType, dateFrom, dateTo);
-      }
-      return handler.buildCandidates(accountId, lineId, docType, dateFrom, dateTo);
+      // ETP-5472: the reconciled head of a partial group lists the candidates of its pending
+      // remainder — the line reconcileGroup will actually match — and says so via remainderLineId.
+      String targetLineId =
+          ReconciliationLineTargetSupport.candidateLineId(handler, accountId, lineId);
+      NeoResponse listed = ReconciliationHandler.KIND_INVOICES.equalsIgnoreCase(kind)
+          ? handler.buildInvoiceCandidates(accountId, targetLineId, docType, dateFrom, dateTo)
+          : handler.buildCandidates(accountId, targetLineId, docType, dateFrom, dateTo);
+      return ReconciliationLineTargetSupport.withRedirect(listed, lineId, targetLineId);
     } catch (Exception e) {
       log.error("Error building candidates for account {}", accountId, e);
       return internalError();
@@ -225,8 +230,21 @@ final class ReconciliationHandlerSupport {
   /**
    * Shared dispatch envelope for the mutating POST actions: rejects an empty body, runs the action
    * in admin mode, maps a business {@link OBException} to 400 (+rollback) and any other failure to
-   * 500 (+rollback), and always restores the previous OBContext mode. Identical to the per-action
-   * wrappers this replaced.
+   * 500 (+rollback), and always restores the previous OBContext mode.
+   *
+   * <p><b>A returned error rolls back too (ETP-5472).</b> A {@code NeoResponse.error} returned by
+   * the action does not roll anything back on its own — the request filter commits whatever the
+   * session holds — so a write made before a later guard refused the request used to be persisted
+   * for good: {@code reconcileGroup} with invoices and an unknown operation id answered 400 and kept
+   * the invoice payment and its movement. Any returned status &gt;= 400 is therefore rolled back
+   * here. None of the routed actions persists something on purpose alongside an error:
+   * {@code removeOperation} / {@code reactivateSelected} report partial failures inside a 200,
+   * {@code applySuggestions} reports rejected groups inside a 201, and the actions that already
+   * rolled back themselves ({@code compose}, {@code reconcileDifference},
+   * {@code applyInlineDifference}, {@code matchAndProcessBatch}) are unaffected — a second
+   * {@code rollbackAndClose} finds the pool closed and does nothing. Work Core already committed
+   * mid-flow ({@code SessionHandler#commitAndStart} in its removal utilities) stays committed, as
+   * before.
    */
   private static NeoResponse runPostAction(ReconciliationHandler handler, NeoContext context,
       String action) {
@@ -237,7 +255,13 @@ final class ReconciliationHandlerSupport {
     }
     try {
       OBContext.setAdminMode(true);
-      return callHandlerAction(handler, action, body);
+      NeoResponse response = callHandlerAction(handler, action, body);
+      if (response != null && response.getHttpStatus() >= HttpServletResponse.SC_BAD_REQUEST) {
+        log.debug("{} refused with {}; rolling back its pending writes", action,
+            response.getHttpStatus());
+        handler.doRollbackAndClose();
+      }
+      return response;
     } catch (OBException e) {
       log.warn("{} business error: {}", action, e.getMessage());
       handler.doRollbackAndClose();
@@ -850,5 +874,44 @@ final class ReconciliationHandlerSupport {
         && rec.getId().equals(t.getReconciliation().getId()) && seenIds.add(t.getId())) {
       out.add(t);
     }
+  }
+
+  /**
+   * Whether matching {@code operationIds} against {@code line} will make Core's
+   * {@code APRM_MatchingUtility} clone the line into a reconciled portion plus a new pending
+   * remainder. Two independent triggers:
+   * <ul>
+   *   <li>More than one operation: Core's list overload chains through them one at a time,
+   *       reassigning the working line to each split's remainder — with N &gt; 1 operations at
+   *       least one split always happens, even when their amounts sum exactly to the line
+   *       (e.g. line=150 matched to 100 + 50 still splits once, on the first operation).</li>
+   *   <li>Exactly one operation whose amount does not exactly equal the line amount: a single
+   *       partial invoice/transaction match (e.g. line=100 matched to a 53.24 invoice) also
+   *       causes a split — this is the case a plain {@code operationIds.size() > 1} check used
+   *       to miss, leaving the pending remainder as an ungrouped, seemingly-separate line.</li>
+   * </ul>
+   * An empty {@code operationIds} (e.g. an invoice selection that settled nothing) never splits.
+   *
+   * <p>Moved out of {@link ReconciliationHandler} (java:S1448); {@code loadTransaction} is still
+   * called back through {@code handler}, so test spies that stub it keep intercepting it.</p>
+   *
+   * @param handler      the handler whose {@code loadTransaction} seam resolves the operation
+   * @param line         the statement line about to be matched
+   * @param operationIds the transaction ids about to be matched against it (pre-existing and/or
+   *                     invoice-derived)
+   * @return {@code true} if Core is expected to split {@code line} for this match
+   */
+  static boolean willSplitLine(ReconciliationHandler handler, FIN_BankStatementLine line,
+      List<String> operationIds) {
+    if (operationIds.isEmpty()) {
+      return false;
+    }
+    if (operationIds.size() > 1) {
+      return true;
+    }
+    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    FIN_FinaccTransaction trx = handler.loadTransaction(operationIds.get(0));
+    BigDecimal opAmount = trx == null ? BigDecimal.ZERO : signedAmount(trx);
+    return lineAmount.abs().compareTo(opAmount.abs()) != 0;
   }
 }

@@ -36,9 +36,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -59,7 +56,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.currency.Currency;
@@ -81,7 +77,10 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *   <li>{@code enrichInvoiceSubtype}</li>
  *   <li>{@code enrichDocTypeLocked}</li>
  *   <li>{@code completeInvoiceIfNeeded} (ETP-4388 — Verifactu/ProcessInvoiceHook dispatch fix)</li>
+ *   <li>{@code isStandardInvoiceDocType} (ETP-5576 — follow-up eligibility, fails closed)</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandler
  */
 public class AbstractInvoiceHeaderHandlerTest {
 
@@ -1233,367 +1232,6 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
-  // ── validateLineQtyBeforeComplete — guard conditions ─────────────────────────
-
-  /**
-   * When the context is a GET (not PATCH/PUT/ACTION with CO), the method returns null immediately.
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_nonCompleteAction_returnsNull() {
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("GET")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-1")
-        .build();
-    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-  }
-
-  /**
-   * PATCH with documentAction=CO but empty recordId returns null (nothing to check).
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_completeActionButNoRecordId_returnsNull() throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .requestBody(body)
-        .build();
-    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-  }
-
-  /**
-   * PATCH with documentAction=CO, invoice has no lines linked to shipment lines
-   * (SQL returns no rows) — returns null (no over-invoice risk).
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_completeActionNoLinkedLines_returnsNull()
-      throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-no-lines")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false); // no rows
-
-      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-    }
-  }
-
-  /**
-   * PATCH with documentAction=CO, invoice line qty <= pending — no error (guard passes).
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_completeActionLineQtyWithinPending_returnsNull()
-      throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-ok")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoInvoiceSupport> supportMock =
-             Mockito.mockStatic(NeoInvoiceSupport.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      // One invoice line linked to inout-1/line-1, draftQty=3
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-1");
-      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("3"));
-      when(rs.getString(3)).thenReturn("inout-1");
-      when(rs.getString(4)).thenReturn("R-2024-001");
-
-      // pending=5 >= draftQty=3 → no error
-      Map<String, BigDecimal> pendingMap = new HashMap<>();
-      pendingMap.put("line-1", new BigDecimal("5"));
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-1"), eq(false)))
-          .thenReturn(pendingMap);
-
-      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-    }
-  }
-
-  /**
-   * PATCH with documentAction=CO, invoice line qty exceeds pending — returns 400.
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_completeActionOverInvoiced_returns400()
-      throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-over")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoInvoiceSupport> supportMock =
-             Mockito.mockStatic(NeoInvoiceSupport.class);
-         MockedStatic<OBMessageUtils> msgMock =
-             Mockito.mockStatic(OBMessageUtils.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      // draftQty=10 > pending=3 → over-invoiced
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-2");
-      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("10"));
-      when(rs.getString(3)).thenReturn("inout-2");
-      when(rs.getString(4)).thenReturn("R-2024-002");
-
-      Map<String, BigDecimal> pendingMap = new HashMap<>();
-      pendingMap.put("line-2", new BigDecimal("3"));
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-2"), eq(false)))
-          .thenReturn(pendingMap);
-
-      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
-          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
-
-      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
-
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-    }
-  }
-
-  /**
-   * PUT with documentAction=CO also triggers the over-invoice guard (both PATCH and PUT are valid).
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_putWithCompleteAction_alsoChecksGuard()
-      throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PUT")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-put-over")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoInvoiceSupport> supportMock =
-             Mockito.mockStatic(NeoInvoiceSupport.class);
-         MockedStatic<OBMessageUtils> msgMock =
-             Mockito.mockStatic(OBMessageUtils.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-3");
-      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"));
-      when(rs.getString(3)).thenReturn("inout-3");
-      when(rs.getString(4)).thenReturn("R-PUT");
-
-      Map<String, BigDecimal> pendingMap = new HashMap<>();
-      pendingMap.put("line-3", new BigDecimal("2")); // 5 > 2 → error
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-3"), eq(false)))
-          .thenReturn(pendingMap);
-
-      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
-          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
-
-      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
-
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-    }
-  }
-
-  /**
-   * ACTION endpoint with fieldName=documentAction and fieldValues.documentAction=CO
-   * also triggers the guard.
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_actionEndpointWithCoFieldValue_triggersGuard()
-      throws Exception {
-    JSONObject fieldValues = new JSONObject().put("documentAction", "CO");
-    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST")
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("documentAction")
-        .recordId("inv-action")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false); // no linked lines → passes guard
-
-      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-    }
-  }
-
-  /**
-   * ACTION endpoint with fieldName=documentAction and docAction=RE (not CO)
-   * does not trigger the guard.
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_actionEndpointNonCoAction_returnsNull()
-      throws Exception {
-    JSONObject fieldValues = new JSONObject().put("documentAction", "RE");
-    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST")
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("documentAction")
-        .recordId("inv-re")
-        .requestBody(body)
-        .build();
-    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-  }
-
-  /**
-   * ACTION endpoint with mismatched fieldName does not trigger the guard.
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_actionEndpointWrongFieldName_returnsNull()
-      throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST")
-        .endpointType(NeoEndpointType.ACTION)
-        .fieldName("someOtherAction")
-        .recordId("inv-other")
-        .requestBody(body)
-        .build();
-    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-  }
-
-  /**
-   * When the invoice lines SQL throws an unexpected exception the method catches it
-   * and returns null (fail-open so completion is not blocked by a technical error).
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_sqlException_returnsNull() throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-sql-err")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      when(dal.getConnection()).thenThrow(new RuntimeException("connection lost"));
-
-      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-    }
-  }
-
-  /**
-   * When draftQty is zero or negative the line is skipped, and no error is returned.
-   */
-  @Test
-  public void validateLineQtyBeforeComplete_zeroOrNegativeDraftQty_lineSkipped()
-      throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-zero-qty")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoInvoiceSupport> supportMock =
-             Mockito.mockStatic(NeoInvoiceSupport.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      // draftQty=0 → should be skipped regardless of pending
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-zero");
-      when(rs.getBigDecimal(2)).thenReturn(BigDecimal.ZERO);
-      when(rs.getString(3)).thenReturn("inout-z");
-      when(rs.getString(4)).thenReturn("R-ZERO");
-
-      // Even if pending is also zero, no error should be triggered
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-z"), eq(false)))
-          .thenReturn(Collections.emptyMap());
-
-      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
-    }
-  }
-
   // ── completeInvoiceIfNeeded — ETP-4388 ───────────────────────────────────────
 
   /**
@@ -1786,7 +1424,7 @@ public class AbstractInvoiceHeaderHandlerTest {
   /**
    * The ACTION endpoint (POST /action/documentAction with fieldValues.documentAction=CO — the
    * shape sent by the draft-mode confirm button) also triggers completion, using the same
-   * detection as {@code validateLineQtyBeforeComplete}.
+   * completion-request detection as the CRUD shape.
    */
   @Test
   public void completeInvoiceIfNeeded_actionEndpointFieldValuesShape_triggersCompletion()
@@ -3221,7 +2859,8 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   @Test
   public void autoCreateOrUpdateFromContext_patchWithRecordId_resolvesAndDelegates() {
-    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").recordId("inv-patch").build();
+    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-patch").build();
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -3247,7 +2886,8 @@ public class AbstractInvoiceHeaderHandlerTest {
     NeoResponse prevResult = new NeoResponse(201, respBody);
 
     NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").recordId(null).previousResult(prevResult).build();
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).recordId(null)
+        .previousResult(prevResult).build();
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -3266,7 +2906,8 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   @Test
   public void autoCreateOrUpdateFromContext_putResolvesViaRecordId() {
-    NeoContext ctx = NeoContext.builder().httpMethod("PUT").recordId("inv-put").build();
+    NeoContext ctx = NeoContext.builder().httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-put").build();
 
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -3280,6 +2921,306 @@ public class AbstractInvoiceHeaderHandlerTest {
       callAutoCreateOrUpdate(ctx);
 
       verify(dal).get(Invoice.class, "inv-put");
+    }
+  }
+
+  // ── ETP-5547: rate-doc sync must not touch posted invoices / action POSTs ────
+
+  private static final String ETP5547_ORG_CURRENCY = "eur-5547";
+  private static final String ETP5547_DOC_CURRENCY = "usd-5547";
+  private static final String ETP5547_ORG = "org-5547";
+  private static final String ETP5547_INVOICE = "inv-5547";
+  private static final String ETP5547_CLONE = "inv-5547-clone";
+  private static final String POSTED = "Y";
+  private static final String NOT_POSTED = "N";
+
+  /**
+   * Stubs {@code OBDal.get(Invoice, id)} with a foreign- or org-currency invoice that has an
+   * exchange-rate override and a grand total, i.e. one the sync WOULD write for if nothing
+   * stopped it. Everything the String overload reads before reaching
+   * {@link ConversionRateDocumentSync} is stubbed, so a missing guard shows up as an interaction
+   * on the (statically mocked) sync class rather than as an NPE.
+   */
+  private static Invoice stubSyncableInvoice(OBDal dal, MockedStatic<OBCurrencyUtils> curMock,
+      String invoiceId, String currencyId, String posted, boolean processed) {
+    Invoice invoice = mock(Invoice.class);
+    Currency currency = mock(Currency.class);
+    Organization org = mock(Organization.class);
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    when(dal.get(Invoice.class, invoiceId)).thenReturn(invoice);
+    when(dal.getSession()).thenReturn(session);
+    when(invoice.getId()).thenReturn(invoiceId);
+    when(invoice.getCurrency()).thenReturn(currency);
+    when(currency.getId()).thenReturn(currencyId);
+    when(invoice.getOrganization()).thenReturn(org);
+    when(org.getId()).thenReturn(ETP5547_ORG);
+    when(invoice.getPosted()).thenReturn(posted);
+    when(invoice.isProcessed()).thenReturn(processed);
+    when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.16"));
+    when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("29.39"));
+    curMock.when(() -> OBCurrencyUtils.getOrgCurrency(ETP5547_ORG)).thenReturn(ETP5547_ORG_CURRENCY);
+    return invoice;
+  }
+
+  private static void stubAdminMode(MockedStatic<OBContext> ctxMock) {
+    ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+    ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+  }
+
+  private static NeoResponse createdResponse(String newId) throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", newId));
+    return new NeoResponse(201, new JSONObject().put("response", new JSONObject().put("data", data)));
+  }
+
+  /**
+   * The root cause of ETP-5547: a posted invoice's rate row is immutable (Core's
+   * {@code c_conversion_rate_document_trg} raises {@code @20501@}), and the failed UPDATE aborted
+   * the whole request transaction. The sync must not even try.
+   */
+  @Test
+  public void testAutoCreateOrUpdateSkipsSyncWhenInvoiceIsPosted() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, POSTED, true);
+
+      callAutoCreateOrUpdate(ETP5547_INVOICE);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  /** Same rule on the org-currency branch: a posted invoice's stale row is not deleted either. */
+  @Test
+  public void testAutoCreateOrUpdateSkipsDeleteWhenPostedInvoiceIsInOrgCurrency() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_ORG_CURRENCY, POSTED, true);
+
+      callAutoCreateOrUpdate(ETP5547_INVOICE);
+
+      syncMock.verifyNoInteractions();
+    }
+  }
+
+  /** Control: the posted guard must not swallow the normal case of an unposted invoice. */
+  @Test
+  public void testAutoCreateOrUpdateStillSyncsWhenInvoiceIsNotPosted() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, false);
+
+      callAutoCreateOrUpdate(ETP5547_INVOICE);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * Confirming a payment ({@code POST /action/registerPayment}) on a processed invoice changes
+   * neither its rate nor its total, yet used to rewrite the invoice's rate row — which is how the
+   * confirmed payment was lost when that write failed.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsRegisterPaymentAction() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("registerPayment")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // Not posted on purpose: isolates the endpoint gate from the posted guard.
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, true);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  /**
+   * Cloning ({@code POST /action/cloneRecord}) must not re-sync the SOURCE invoice (the record
+   * the action is posted to) nor the clone whose id the action returns.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsCloneRecordAction() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("cloneRecord")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject())
+        .previousResult(createdResponse(ETP5547_CLONE)).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, true);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).get(Invoice.class, ETP5547_CLONE);
+    }
+  }
+
+  /** Non-CRUD, non-ACTION write requests (callouts, selectors…) never edit the rate. */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsCalloutEndpoint() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CALLOUT).recordId(ETP5547_INVOICE).build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      callAutoCreateOrUpdate(ctx);
+
+      Mockito.verify(dal, Mockito.never()).get(eq(Invoice.class), anyString());
+      syncMock.verifyNoInteractions();
+    }
+  }
+
+  /** Control: a CRUD PATCH — where the rate and currency are actually edited — still syncs. */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSyncsOnCrudPatch() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD).recordId(ETP5547_INVOICE)
+        .requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, false);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * Positive ACTION branch 1: the "Complete" document action recalculates the total-discount
+   * line right before completing, which moves the grand total — the rate row must follow. By the
+   * time afterHandle runs the invoice is already processed, so this also proves the Complete
+   * branch does not depend on the draft check.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSyncsOnCompleteDocumentAction() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("fieldValues", new JSONObject().put("documentAction", "CO"));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("documentAction")
+        .recordId(ETP5547_INVOICE).requestBody(body).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, true);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * Positive ACTION branch 2: an action on a still-draft invoice (e.g. the generic AD process
+   * that creates lines from an order) adds or reprices lines, which moves the grand total — the
+   * rate row must follow.
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSyncsOnActionForDraftInvoice() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("createLinesFromOrder")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice =
+          stubSyncableInvoice(dal, curMock, ETP5547_INVOICE, ETP5547_DOC_CURRENCY, NOT_POSTED, false);
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verify(() -> ConversionRateDocumentSync.upsert(eq(invoice),
+          eq(ETP5547_ORG_CURRENCY), any(BigDecimal.class), any(BigDecimal.class)));
+    }
+  }
+
+  /**
+   * The draft check behind a non-Complete ACTION cannot read the invoice (lookup throws): the
+   * request must neither fail nor sync — "unknown" is treated as "not a draft".
+   */
+  @Test
+  public void testAutoCreateOrUpdateFromContextSkipsActionWhenDraftLookupFails() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("createLinesFromOrder")
+        .recordId(ETP5547_INVOICE).requestBody(new JSONObject()).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<ConversionRateDocumentSync> syncMock =
+             Mockito.mockStatic(ConversionRateDocumentSync.class)) {
+      stubAdminMode(ctxMock);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, ETP5547_INVOICE)).thenThrow(new IllegalStateException("DB down"));
+
+      callAutoCreateOrUpdate(ctx);
+
+      syncMock.verifyNoInteractions();
+      Mockito.verify(dal, Mockito.never()).getConnection();
     }
   }
 
@@ -3343,10 +3284,21 @@ public class AbstractInvoiceHeaderHandlerTest {
     assertEquals("2026-07-05", updates.getString("accountingDate"));
   }
 
-  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+  // ── ETP-5273: mirrorAccountingDateOnCreate (independent date, POST-only default) ─────
+  //
+  // ETP-4531 originally mirrored accountingDate from invoiceDate on every CRUD write
+  // (POST/PUT/PATCH), unconditionally overwriting whatever was already there — the tests
+  // below used to assert exactly that. ETP-5273 reintroduces accountingDate as an
+  // independent, user-editable field for invoices: it must default from invoiceDate ONLY
+  // when the invoice is first created and the caller did not already supply a value, and
+  // must NEVER be touched again afterwards — a PUT/PATCH must leave whatever value the
+  // record (or the user's own edit) already carries untouched, even if invoiceDate also
+  // changed in the same request. That forward sync on update is instead the job of the
+  // classic Etendo callout executed server-side by NeoCalloutService (see
+  // AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout).
 
   @Test
-  public void mirrorAccountingDate_postCrud_copiesInvoiceDateIntoAccountingDate()
+  public void mirrorAccountingDateOnCreate_postCrudNoExplicitValue_copiesInvoiceDate()
       throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
@@ -3355,13 +3307,34 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+  public void mirrorAccountingDateOnCreate_postCrudExplicitValue_doesNotOverwrite()
+      throws Exception {
+    // The user (or an import) explicitly set accountingDate independently of invoiceDate on
+    // create — the default must not clobber it.
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-01").put("accountingDate", "2026-06-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-06-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDateOnCreate_putCrud_doesNotTouchAccountingDate()
+      throws Exception {
+    // ETP-5273: unlike the old unified-date mirror, PUT is a no-op — an update must never
+    // re-derive accountingDate from invoiceDate, even when invoiceDate itself changed.
     JSONObject body = new JSONObject()
         .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
     NeoContext ctx = NeoContext.builder()
@@ -3370,13 +3343,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-10", body.getString("accountingDate"));
+    assertEquals("2026-01-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
+  public void mirrorAccountingDateOnCreate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
@@ -3384,13 +3357,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+  public void mirrorAccountingDateOnCreate_getMethod_doesNotMutateBody() throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -3398,26 +3371,27 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
 
   /**
-   * Regression test for the live-reproduced bug: editing just the date on an EXISTING invoice
-   * and saving through the real React UI sends a {@code PATCH} with a SPARSE body containing
-   * only the changed field ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against
-   * {@code selected} and sends only what changed — never a full record, and never a {@code PUT}).
-   * The original {@code mirrorAccountingDate()} checked only {@code POST}/{@code PUT}, so this
-   * exact request shape silently never mirrored {@code accountingDate} on update — reproduced
-   * against invoice {@code 0BC614E563FC4E7EB63B6FCF9788730B}: DateInvoiced updated to
-   * 2026-07-15 but DateAcct stayed at the stale create-time value of 2026-07-17.
+   * ETP-5273 regression guard for the bug the ORIGINAL unified-date mirror had at ETP-4531:
+   * editing just the date on an EXISTING invoice through the real React UI sends a
+   * {@code PATCH} with a SPARSE body containing only the changed field
+   * ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against {@code selected} and
+   * sends only what changed — never a full record, and never a {@code PUT}). That old mirror
+   * checked only {@code POST}/{@code PUT}, so this exact request shape silently never mirrored
+   * {@code accountingDate} on update. Under the current, independent-field design that same
+   * PATCH must simply leave {@code accountingDate} alone — there is nothing to mirror on
+   * update anymore, so the sparse body must stay exactly as sent.
    */
   @Test
-  public void mirrorAccountingDate_patchCrudSparseBody_copiesInvoiceDateIntoAccountingDate()
+  public void mirrorAccountingDateOnCreate_patchCrudSparseBody_doesNotAddAccountingDate()
       throws Exception {
     // Sparse body: exactly what useEntity.js's buildPatchPayload sends for a date-only edit —
-    // no other header fields, unlike the multi-field bodies the original POST/PUT tests used.
+    // no other header fields.
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-15");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -3425,14 +3399,17 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-15", body.getString("accountingDate"));
+    assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
-    // Mirrors the real DB state before the fix: accountingDate present but stale from create.
+  public void mirrorAccountingDateOnCreate_patchCrud_doesNotTouchExistingAccountingDate()
+      throws Exception {
+    // A PATCH changing invoiceDate on an existing invoice must never re-derive
+    // accountingDate — CP-2: an independently-edited accounting date must survive an
+    // unrelated document-date change untouched by this mirror.
     JSONObject body = new JSONObject()
         .put("invoiceDate", "2026-07-15").put("accountingDate", "2026-07-17");
     NeoContext ctx = NeoContext.builder()
@@ -3441,13 +3418,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-15", body.getString("accountingDate"));
+    assertEquals("2026-07-17", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
+  public void mirrorAccountingDateOnCreate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
       throws Exception {
     // A PATCH that doesn't touch invoiceDate at all (e.g. only businessPartner changed) must
     // stay a no-op — mirroring must not fabricate an accountingDate out of nowhere.
@@ -3458,8 +3435,55 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
+  }
+
+  // ── isStandardInvoiceDocType (ETP-5576): gates a WRITE, so it fails CLOSED ──
+
+  @Test
+  public void isStandardInvoiceDocType_blankId_isFalseWithoutLookup() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      TestHandler docTypeHandler = new TestHandler();
+
+      assertFalse(docTypeHandler.isStandardInvoiceDocType(null));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType(""));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("   "));
+      dalMock.verifyNoInteractions();
+    }
+  }
+
+  /** Unlike resolveSubtype (fails OPEN to FAC), an unknown or unreadable doc type is not FAC. */
+  @Test
+  public void isStandardInvoiceDocType_unknownOrFailingLookup_isFalse() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-missing")).thenReturn(null);
+      when(dal.get(DocumentType.class, "dt-error")).thenThrow(new RuntimeException("DB error"));
+      TestHandler docTypeHandler = new TestHandler();
+
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-missing"));
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-error"));
+    }
+  }
+
+  @Test
+  public void isStandardInvoiceDocType_followsTheHandlerClassification() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType rectificativa = mock(DocumentType.class);
+      when(rectificativa.getDocumentCategory()).thenReturn("ARC");
+      DocumentType standard = mock(DocumentType.class);
+      when(standard.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(rectificativa);
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(standard);
+      TestHandler docTypeHandler = new TestHandler();
+
+      assertFalse(docTypeHandler.isStandardInvoiceDocType("dt-arc"));
+      assertTrue(docTypeHandler.isStandardInvoiceDocType("dt-ari"));
+    }
   }
 }

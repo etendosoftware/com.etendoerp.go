@@ -179,6 +179,29 @@ SELECT COALESCE(NEW.c_order_id, OLD.c_order_id) FROM dual
 > `public.dual` on PostgreSQL, so the clause costs nothing. This is how ETP-5216 shipped a
 > dependency that generated no trigger.
 
+> **Gotcha — a self-dependency on the column's OWN host table is easy to forget, and nothing
+> flags its absence (ETP-5432).** `EM_ETGO_Tbai_Status` (on `C_Invoice`) had `AD_COLUMN_COMP_
+> DEPENDENCY` rows watching `TBAI_Config` (the fan-out in Pattern 3 below, ETP-5216) and
+> `TBAI_SyncInvoice` (Pattern 1 above) — but **none watching `C_Invoice` itself**. The computation
+> function's own eligibility logic reads the invoice row's own `DateInvoiced`/`DocStatus`, yet
+> nothing enqueued the column when a `C_Invoice` row was inserted or those columns changed — only
+> a `tbai_config` save or a sync attempt ever dirtied it. A brand-new invoice therefore kept the
+> column `NULL` (never computed at all) until one of those two, unrelated events happened to fire —
+> confirmed live via `SELECT tgname FROM pg_trigger WHERE tgrelid='c_invoice'::regclass`, which
+> returned no `ad_scd_*` trigger for this column while `tbai_config`/`tbai_syncinvoice` both had
+> one. `NULL` is indistinguishable from "not computed yet" to a consumer, which for this column
+> collapsed into the same UI state as "not sent" — see the functional repo's
+> `docs/generated-custom-windows/sales-invoice.md`, "Missing recompute dependency on `C_Invoice`
+> itself (ETP-5432, item #5)" for the consumer-side symptom and its client-side defense-in-depth
+> fallback. **Fix:** a 4th `AD_COLUMN_COMP_DEPENDENCY` row, `SOURCE_TABLE_ID` = `C_Invoice`
+> (`318`), `INSERT_EVENT='Y'`, `UPDATE_EVENT='Y'`, watching `DateInvoiced`/`DocStatus`
+> (`AD_COMPDEP_WATCHED_COL`), same `TARGET_ID_RESOLVER_SQL` shape as Pattern 1 above
+> (`SELECT COALESCE(NEW.c_invoice_id, OLD.c_invoice_id) FROM dual`). **The rule this generalizes
+> to:** if a computation function reads ANY column of the row it is stored on, that table must be
+> one of the watched sources too — a dependency list built only from the OTHER tables a function
+> reads is incomplete, and `sf-validate-pipeline`/the build-time validator (§12) does not catch
+> this, because "no dependency on your own table" is a legal (if usually wrong) configuration.
+
 **Pattern 2 — reparenting** (the FK *can* be reassigned on update — a line moved to another order).
 A single update is then a **two-target** event: the *old* parent's aggregate is now stale (a child
 left) and the *new* parent's is stale (a child arrived). Both must recompute:
@@ -304,7 +327,7 @@ One `AD_COLUMN_COMP_DEPENDENCY` row per source table you must react to:
 |-------|---------|-------|
 | `Source_Table_ID` | `C_OrderLine` | The table whose changes trigger a refresh |
 | `Insert_Event` / `Update_Event` / `Delete_Event` | Y / Y / Y | Which events fire |
-| `Target_ID_Resolver_SQL` | `SELECT COALESCE(NEW.c_order_id, OLD.c_order_id)` | Maps source row → target id(s); must never return NULL |
+| `Target_ID_Resolver_SQL` | `SELECT COALESCE(NEW.c_order_id, OLD.c_order_id) FROM dual` | Maps source row → target id(s); must never return NULL. `FROM dual` is mandatory (see §5) |
 | `SeqNo` | 10 | Row ordering within the column's dependency set |
 
 Exactly **one** of `Target_ID_Resolver_SQL` / `Target_Link_Column_ID` must be set (rule V11).

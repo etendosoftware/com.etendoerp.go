@@ -27,7 +27,6 @@ import static com.etendoerp.go.schemaforge.ReconciliationSupport.formatDate;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.isOnDraftStatement;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.readOperationIds;
-import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -48,6 +47,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
 import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
@@ -305,13 +305,21 @@ public class ReconciliationHandler implements NeoHandler {
           + "       CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END AS txn_amount,"
           + "       ft.fin_payment_id           AS txn_payment_id,"
           + "       fp.isreceipt                AS txn_payment_isreceipt,"
-          + "       COALESCE(ft.em_etgo_auto_created, 'N') AS txn_auto_created"
+          + "       COALESCE(ft.em_etgo_auto_created, 'N') AS txn_auto_created,"
+          // Stored foreign-currency trio of the transaction (Core fills it when the payment
+          // currency differs from the account currency) — see BankStatementsSupport.buildLineTxns.
+          + "       ft.foreign_amount           AS txn_foreign_amount,"
+          + "       ft.foreign_convert_rate     AS txn_foreign_rate,"
+          + "       tfcur.iso_code              AS txn_foreign_currency,"
+          + "       tacur.iso_code              AS txn_currency"
           + "  FROM fin_bankstatementline bsl"
           + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + "  LEFT JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
           + "  LEFT JOIN fin_reconciliation rec ON rec.fin_reconciliation_id = ft.fin_reconciliation_id"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
+          + "  LEFT JOIN c_currency tfcur ON tfcur.c_currency_id = ft.foreign_currency_id"
+          + "  LEFT JOIN c_currency tacur ON tacur.c_currency_id = ft.c_currency_id"
           + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
           + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
           + " WHERE bsl.isactive = 'Y'"
@@ -366,7 +374,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND ft.processed = 'Y'"
           + "   AND ft.fin_financial_account_id = ?"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
-          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)";
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate < CAST(? AS date) + 1)";
 
   private static final String CANDIDATES_ORDER =
       " ORDER BY ft.statementdate ASC, ft.line ASC";
@@ -398,14 +406,29 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND inv.ad_client_id = ?"
           + "   AND inv.ad_org_id = ANY (?)"
           + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced >= ?)"
-          + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced <= ?)"
+          + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced < CAST(? AS date) + 1)"
           + " GROUP BY ps.fin_payment_schedule_id, inv.c_invoice_id, inv.documentno,"
           + "          inv.dateinvoiced, bp.name, inv.c_currency_id, cur.iso_code"
           + " HAVING SUM(psd.amount) > 0"
           + " ORDER BY inv.dateinvoiced ASC, inv.documentno ASC";
 
+  /**
+   * The actions an agent can run through {@code etendo_action} (ETP-5468) — see
+   * {@link ReconciliationAgentActions}. Declaring them also makes {@link #servesActions()} true.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return ReconciliationAgentActions.CONTRACTS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    // ETP-5468: purely additive. Only etendo_action produces an ACTION context for this spec; the
+    // SPA's ?action= calls arrive as report-spec requests with no endpoint type and never enter
+    // this branch, so their routing below is untouched.
+    if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      return ReconciliationAgentActions.dispatch(this, context);
+    }
     Map<String, String> qp = context.getQueryParams();
     String action = qp != null ? qp.get(PARAM_ACTION) : null;
     // "<method> <action>" → its route. A single map lookup instead of one branch per action keeps
@@ -435,7 +458,7 @@ public class ReconciliationHandler implements NeoHandler {
       sql.append(" AND bsl.datetrx >= ?");
     }
     if (StringUtils.isNotBlank(dateTo)) {
-      sql.append(" AND bsl.datetrx <= ?");
+      sql.append(" AND bsl.datetrx < CAST(? AS date) + 1");
     }
     if (StringUtils.isNotBlank(q)) {
       // Search the SAME unified description (standard + C43) shown in the column.
@@ -858,6 +881,13 @@ public class ReconciliationHandler implements NeoHandler {
    * {@link ReconciliationDifferenceSupport}'s header javadoc). The helper therefore rolls back
    * explicitly before returning that 400, the same way {@link ReconciliationFlowSupport#compose}
    * does when Core rejects the reconciliation.
+   *
+   * <p><b>ETP-5472.</b> {@code runPostAction} now rolls back every returned error, so no refusal
+   * here can leave a payment behind; the client-supplied operation ids are still checked before
+   * any invoice is paid, so the common mistake is refused without writing at all. The requested
+   * line goes through {@link ReconciliationLineTargetSupport#resolveForMatch} (partial-group head
+   * redirected to its remainder, stuck line freed, draft-held line refused), and the 201 reports
+   * {@code partial}, {@code pendingAmount} and {@code remainderLineId}.
    */
   NeoResponse reconcileGroup(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
@@ -890,33 +920,41 @@ public class ReconciliationHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           MSG_LINE_NOT_IN_ACCOUNT);
     }
-    if (line.getFinancialAccountTransaction() != null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ALREADY_RECONCILED);
+    // ETP-5472: the reconciled head of a partial group is redirected to its pending remainder, a
+    // line stuck on a movement with no reconciliation at all is freed (its movement is kept), a
+    // line whose movement sits in a draft reconciliation is refused (409, the draft is never
+    // discarded here), a fully reconciled line is refused with the 409 as before. See
+    // ReconciliationLineTargetSupport.
+    ReconciliationLineTargetSupport.Target target =
+        ReconciliationLineTargetSupport.resolveForMatch(this, line, MSG_LINE_ALREADY_RECONCILED);
+    if (target.error() != null) {
+      return target.error();
     }
+    line = target.line();
     // ETP-5121: a statement returned to Borrador is not reconcilable. Deliberately AFTER the
     // already-reconciled check - a reconciled line of a reactivated statement is a real state
     // (reactivating a statement does not undo its reconciliations) and deserves that more specific
-    // answer. Everything above is read-only, so this rejection cannot flush a half-built write.
+    // answer. The only write above is the stuck-line heal, which runs its own draft-statement check
+    // first, so this rejection cannot follow a write.
     if (isOnDraftStatement(line)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ON_DRAFT_STATEMENT);
     }
+    // ETP-5472: the client-supplied operations are checked BEFORE any invoice is paid, so an
+    // unknown, foreign or already-reconciled id is refused before a payment exists. Only the
+    // per-operation half: the sum/sign check below needs the invoice transactions.
+    NeoResponse refError = ReconciliationFlowSupport.validateOperationRefs(
+        operationIds, accountId, this::loadTransaction);
+    if (refError != null) {
+      return refError;
+    }
 
-    // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
-    // transaction ids join operationIds so the standard reconcile below matches them to the line.
-    // paymentMethodId is the single method chosen in the reconciliation modal, applied to every
-    // invoice payment created here — an already-existing transaction (operationIds) keeps its own.
-    if (hasInvoices) {
-      String paymentMethodId = body.optString("paymentMethodId", null);
-      // ETP-4797: opt-in, off by default. Writes off the shortfall when the line settles the
-      // invoice for less than its outstanding amount, so the invoice is fully paid instead of
-      // keeping a residual balance. The UI only offers it for a single selected invoice.
-      boolean writeoffDifference = body.optBoolean("writeoffDifference", false);
-      NeoResponse payError = ReconciliationWriteoffSupport.payInvoices(
-          account, line, invoiceSpecs, operationIds, TOLERANCE, paymentMethodId,
-          writeoffDifference);
-      if (payError != null) {
-        return payError;
-      }
+    // Pay each selected unpaid invoice; the new transaction ids join operationIds so the standard
+    // reconcile below matches them to the line (method choice and ETP-4797 write-off: see
+    // payInvoicesFromBody).
+    NeoResponse payError = ReconciliationWriteoffSupport.payInvoicesFromBody(
+        account, line, invoiceSpecs, body, operationIds, TOLERANCE);
+    if (payError != null) {
+      return payError;
     }
 
     NeoResponse opError = ReconciliationFlowSupport.validateOperations(
@@ -944,10 +982,15 @@ public class ReconciliationHandler implements NeoHandler {
    * matching. Lets a whole automatch batch ({@link #applySuggestions}) share ONE
    * {@code FIN_Reconciliation} header across every accepted group, instead of a document per
    * statement line.
+   *
+   * <p>ETP-5468: only an EMPTY draft is adopted. A draft that already holds transactions was built
+   * outside this request (Classic buttons, the pre-ETP-4951 "Reactivar") and nobody confirmed its
+   * matches; adopting it would process them along with the batch. A fresh draft is used instead —
+   * see {@link ReconciliationDraftGuard}.</p>
    */
   FIN_Reconciliation getOrCreateDraftReconciliation(FIN_FinancialAccount account) {
     FIN_Reconciliation draft = TransactionsDao.getLastReconciliation(account, "N");
-    return draft != null ? draft : addNewDraftReconciliation(account);
+    return ReconciliationDraftGuard.isReusable(draft) ? draft : addNewDraftReconciliation(account);
   }
 
   /**
@@ -962,10 +1005,11 @@ public class ReconciliationHandler implements NeoHandler {
     // Grouping (option B): tag the original line with a fresh match-group id BEFORE the match so
     // the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The UI re-groups
     // the resulting sub-lines by this id. Only needed when the match will actually split the
-    // line — see willSplitLine. If the line already carries a group id (we're reconciling the
-    // pending remainder of an EXISTING partial group), reuse it so the new match stays in the same
-    // group instead of fragmenting into a fresh one (ETP-4502 iteration 5).
-    if (willSplitLine(line, operationIds)
+    // line — see ReconciliationHandlerSupport.willSplitLine. If the line already carries a group
+    // id (we're reconciling the pending remainder of an EXISTING partial group), reuse it so the
+    // new match stays in the same group instead of fragmenting into a fresh one (ETP-4502
+    // iteration 5).
+    if (ReconciliationHandlerSupport.willSplitLine(this, line, operationIds)
         && StringUtils.isBlank(ReactivationSupport.readMatchGroupId(line))) {
       tagMatchGroup(line);
     }
@@ -1135,7 +1179,8 @@ public class ReconciliationHandler implements NeoHandler {
    * <ol>
    *   <li>validate inputs + load account/line + ownership check;</li>
    *   <li>resolve the line's transaction and its reconciliation (409 when the line is not
-   *       reconciled);</li>
+   *       reconciled; a transaction with NO reconciliation is a stuck line, freed and answered as
+   *       a success via {@link ReconciliationLineTargetSupport#reactivateStuckLine}, ETP-5472);</li>
    *   <li>accounting-period guard via
    *       {@link Utilities#checkPeriod(String, String, String, java.util.Date)} on the
    *       reconciliation's accounting date (409 when the period is closed);</li>
@@ -1176,8 +1221,10 @@ public class ReconciliationHandler implements NeoHandler {
     }
     FIN_Reconciliation rec = trx.getReconciliation();
     if (rec == null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "Statement line transaction is not linked to a reconciliation");
+      // ETP-5472: a line linked to a movement that has no reconciliation is listed as pending but
+      // used to be refused here (409) and by reconcileGroup alike — stuck for good. There is nothing
+      // to undo, so the line is just freed and the call succeeds; the movement is kept.
+      return ReconciliationLineTargetSupport.reactivateStuckLine(this, account, line);
     }
 
     // Accounting-period guard: refuse to undo into a closed period. checkPeriod throws an
@@ -1367,7 +1414,9 @@ public class ReconciliationHandler implements NeoHandler {
    * next removal keyed off. Instead:
    * <ol>
    *   <li>process the account's draft reconciliations first (Etendo only lets you reactivate the
-   *       latest completed one — ordering pre-step);</li>
+   *       latest completed one — ordering pre-step). ETP-5468: refused with a 400 when a draft other
+   *       than {@code rec} already holds transactions — see
+   *       {@link ReconciliationDraftGuard#requireNoForeignDraft};</li>
    *   <li>{@link ReconciliationRemovalUtil#reactivateAndRemoveReconciliation(FIN_Reconciliation)} —
    *       one {@code processReconciliation("R")} pass returns EVERY transaction to its
    *       pre-reconciliation "not cleared" state by direction (inflow → {@code RDNC}, outflow →
@@ -1388,6 +1437,10 @@ public class ReconciliationHandler implements NeoHandler {
   void undoReconciliation(FIN_FinancialAccount account, FIN_Reconciliation rec,
       List<FIN_FinaccTransaction> matched) throws Exception {
     List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
+    // ETP-5468: processing the drafts is only safe for empty ones (and for `rec` itself, which is
+    // removed right after). A draft holding someone else's unconfirmed matches is refused, never
+    // silently finalized. Throws before any write.
+    ReconciliationDraftGuard.requireNoForeignDraft(drafts, rec);
     ReconciliationRemovalUtil.processAllReconciliationInDraft(drafts);
     ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(rec);
     for (FIN_FinaccTransaction t : matched) {
@@ -1631,39 +1684,6 @@ public class ReconciliationHandler implements NeoHandler {
     OBDal.getInstance().rollbackAndClose();
   }
 
-  /**
-   * Whether matching {@code operationIds} against {@code line} will make Core's
-   * {@code APRM_MatchingUtility} clone the line into a reconciled portion plus a new pending
-   * remainder. Two independent triggers:
-   * <ul>
-   *   <li>More than one operation: Core's list overload chains through them one at a time,
-   *       reassigning the working line to each split's remainder — with N &gt; 1 operations at
-   *       least one split always happens, even when their amounts sum exactly to the line
-   *       (e.g. line=150 matched to 100 + 50 still splits once, on the first operation).</li>
-   *   <li>Exactly one operation whose amount does not exactly equal the line amount: a single
-   *       partial invoice/transaction match (e.g. line=100 matched to a 53.24 invoice) also
-   *       causes a split — this is the case a plain {@code operationIds.size() > 1} check used
-   *       to miss, leaving the pending remainder as an ungrouped, seemingly-separate line.</li>
-   * </ul>
-   * An empty {@code operationIds} (e.g. an invoice selection that settled nothing) never splits.
-   *
-   * @param line         the statement line about to be matched
-   * @param operationIds the transaction ids about to be matched against it (pre-existing and/or
-   *                     invoice-derived)
-   * @return {@code true} if Core is expected to split {@code line} for this match
-   */
-  boolean willSplitLine(FIN_BankStatementLine line, List<String> operationIds) {
-    if (operationIds.isEmpty()) {
-      return false;
-    }
-    if (operationIds.size() > 1) {
-      return true;
-    }
-    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    FIN_FinaccTransaction trx = loadTransaction(operationIds.get(0));
-    BigDecimal opAmount = trx == null ? BigDecimal.ZERO : signedAmount(trx);
-    return lineAmount.abs().compareTo(opAmount.abs()) != 0;
-  }
 
   /**
    * Tags the bank-statement line with a fresh match-group id on the

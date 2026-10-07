@@ -23,7 +23,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -31,29 +31,21 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
-import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
-import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
-import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.utils.SIIUtils;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Abstract base class for AP and AR invoice header handlers.
@@ -92,6 +84,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
+  /** {@code C_Invoice.Posted} value of a posted (booked) invoice. */
+  private static final String POSTED_YES = "Y";
   private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
   static final String FIELD_AEATSII_IS_AUTHORIZATION = "aeatsiiIsauthorization";
   static final String FIELD_AEATSII_AUTHORIZATION_NO = "aeatsiiAuthorizationno";
@@ -175,6 +169,57 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return the subclass's injected {@link TotalDiscountService}
    */
   protected abstract TotalDiscountService getTotalDiscountService();
+
+  // ---------------------------------------------------------------------------
+  // Follow-up document: goods shipment / goods receipt for the pending quantities (ETP-5576)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Follow-up documents of this invoice entity (ETP-5576): the generic, identity-free
+   * {@link FollowUpSupport}, fed by {@link #followUpFlows()}. Subclasses plug
+   * {@code followUp.actionHandler()} into their dispatch chain and call
+   * {@code followUp.annotate(dataArr)} on GET.
+   */
+  protected final FollowUpSupport followUp = new FollowUpSupport(this::followUpFlows);
+
+  /**
+   * The follow-ups this invoice entity offers, in the order the UI should offer them — the ONE
+   * binding point. Default: none. The sales handler registers the goods shipment, the purchase
+   * handler the goods receipt — each an {@link InvoicePendingResolver} with
+   * {@link #isStandardInvoiceDocType} as its eligibility classifier, composed with the shared
+   * {@link InOutFollowUpCreator} — one {@link FollowUpFlow} line each.
+   */
+  protected List<FollowUpFlow> followUpFlows() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * {@code true} when {@code docTypeId} is a standard invoice (FAC) for THIS handler's own
+   * {@link #classifyDocType} — the rule behind {@code arInvoiceSubtype}/{@code apInvoiceSubtype},
+   * so credit notes, returns and rectificatives never qualify.
+   *
+   * <p><b>Fails CLOSED</b>, unlike {@link #resolveSubtype}, which fails open to {@code FAC} for
+   * the display annotation and is left as it is: this predicate gates a WRITE (creating a
+   * follow-up document), so a blank id, an unknown id or a lookup error answers {@code false}
+   * (ETP-5576 review W5). An error is logged, never swallowed silently.
+   */
+  protected boolean isStandardInvoiceDocType(String docTypeId) {
+    if (StringUtils.isBlank(docTypeId)) {
+      return false;
+    }
+    try {
+      DocumentType dt = OBDal.getInstance().get(DocumentType.class, docTypeId);
+      if (dt == null) {
+        log.warn("Document type {} not found; not eligible for a follow-up document", docTypeId);
+        return false;
+      }
+      return SUBTYPE_FAC.equals(classifyDocType(dt));
+    } catch (Exception e) {
+      log.error("Could not classify document type {}; not eligible for a follow-up document",
+          docTypeId, e);
+      return false;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Validation
@@ -263,7 +308,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Captures and strips {@code originInvoice}/{@code originInvoices} from the raw request body
    * BEFORE the generic field filter runs, so {@link #persistOriginInvoice} can still use them
    * later in {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the
-   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)}
+   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDateOnCreate(...)}
    * call.
    *
    * <p>Neither field is a decisions.json/contract field, so
@@ -795,45 +840,22 @@ public abstract class AbstractInvoiceHeaderHandler {
   // Completion (documentAction=CO) — routes through the ProcessInvoiceHook chain
   // ---------------------------------------------------------------------------
 
-  /** AD_Process_ID for {@code C_Invoice.DocAction}, used internally by {@link ProcessInvoiceUtil}. */
-  private static final String COMPLETE_PROCESS_ID_INVOICE = "111";
-
   /**
-   * Runs the real core invoice-completion process ({@link ProcessInvoiceUtil#process}) when the
-   * request is a completion action (documentAction=CO), short-circuiting NEO's default dispatch.
+   * Runs the real core invoice-completion process when the request is a completion action
+   * (documentAction=CO), short-circuiting NEO's default dispatch.
    *
-   * <p>For {@code C_Invoice.DocAction} (AD_Process 111, a raw DB procedure with no
-   * {@code JavaClassName}), NEO's generic dispatch runs {@code C_Invoice_Post0} directly via
-   * {@code CallProcess} and never touches {@link ProcessInvoiceUtil} or the
-   * {@code ProcessInvoiceHook} CDI extension point — so hooks such as the Verifactu (and TBAI)
-   * billing-registration hooks never fire when an invoice is completed through NEO, even though
-   * they fire correctly from the classic UI. This method restores that behavior for NEO.
-   *
-   * <p><b>Must be obtained through Weld.</b> {@link ProcessInvoiceUtil} is a plain class with an
-   * {@code @Inject @Any Instance<ProcessInvoiceHook> hooks} field; that field is only populated
-   * when the instance itself is CDI-managed. Calling {@code new ProcessInvoiceUtil()} would leave
-   * {@code hooks} empty and silently skip every hook — reproducing the exact bug this method
-   * fixes, just moved one layer down. {@link WeldUtils#getInstanceFromStaticBeanManager} returns
-   * a fully Weld-managed reference, so {@code hooks} is populated correctly.
+   * <p>This is the header-handler entry point; the completion itself lives in
+   * {@link InvoiceCompletionService}, which is shared with the handlers that auto-generate
+   * invoices from orders, shipments, receipts, returns and quotations (ETP-5381). See that class
+   * for the full rationale — why {@code ProcessInvoiceUtil} must be resolved through Weld, and the
+   * session-lifecycle consequences of its internal commit.
    *
    * <p>Call this AFTER {@link #validateLineQtyBeforeComplete(NeoContext)} AND AFTER
    * {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete} in {@code handle()}, so
    * (1) pre-completion validation can still block the request before the real process runs, and
    * (2) the total-discount line already reflects the final set of product lines before it is
-   * read/posted by {@link ProcessInvoiceUtil#process}. Calling this BEFORE the discount
-   * recalculation would complete the document with a stale or missing discount line.
-   *
-   * <p><b>Session-lifecycle note (deliberate divergence):</b> unlike every other handler in this
-   * module — which only {@code .flush()} the DAL session and leave the final commit to the
-   * request-scoped {@code DalThreadCleaner} — {@link ProcessInvoiceUtil#process} internally calls
-   * {@code OBDal.getInstance().commitAndClose()} (success) / {@code .rollbackAndClose()} (error),
-   * fully closing the current Hibernate session mid-request. This mirrors classic UI behavior
-   * (the method is shared with the classic completion path) and is required for its internal
-   * {@code ProcessInstance}/{@code CallProcess} bookkeeping. It is safe here because the very next
-   * statement performs a DAL read ({@code OBDal.getInstance().get(Process.class, ...)}), which
-   * transparently reopens the session — the same characteristic already relied upon by
-   * {@code GlJournalHeaderHandler#completeJournal} via {@code FIN_AddPaymentFromJournal}. Do not
-   * remove or reorder that read without re-verifying this assumption.
+   * read/posted by the completion process. Calling this BEFORE the discount recalculation would
+   * complete the document with a stale or missing discount line (ETP-4388).
    *
    * @param context the current NeoContext
    * @return a {@link NeoResponse} translating the completion result, or {@code null} if this is
@@ -843,207 +865,46 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
     }
-    String invoiceId = context.getRecordId();
-    if (StringUtils.isBlank(invoiceId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Missing invoice record id for completion");
-    }
-    try {
-      VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(context.getObContext());
-      // Plain DalConnectionProvider, not wrapped in a RequestContext/pushRequestContextVars scope
-      // (the pattern used elsewhere in NeoProcessService.java for classic-code invocations):
-      // neither the Verifactu nor the TBAI ProcessInvoiceHook reads RequestContext today, so this
-      // is a non-issue in practice. Revisit if a future hook needs request-scoped context.
-      ConnectionProvider conn = new DalConnectionProvider(false);
-      // ETP-4783: In Go, the Classic ETVFAC_C_INVOICE_SET_VERIFACTU callout is never triggered.
-      // Copy DocType Verifactu fields to the invoice before completing so GenerateRFAfterProcessingHook
-      // finds em_etvfac_inv_type / em_etvfac_verifac_desc populated (only for AR invoices; AP skipped
-      // by the hook anyway). Also ensures em_etsg_date_operation is set when null.
-      populateVerifactuFieldsFromDocType(invoiceId);
-      ProcessInvoiceUtil processInvoiceUtil =
-          WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
-      // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
-      // ProcessInvoiceUtil calls .isEmpty() on the date strings unconditionally, so they must be
-      // non-null. Empty strings are the correct null-safe default for a normal "CO" completion.
-      OBError result = processInvoiceUtil.process(invoiceId, "CO", "", "", "", vars, conn);
-      Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID_INVOICE);
-      if (process == null) {
-        log.error("[INVOICE-COMPLETE] Process record {} not found", COMPLETE_PROCESS_ID_INVOICE);
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Completion process configuration missing");
-      }
-      return NeoProcessService.translateClassicResult(result, process);
-    } catch (Exception e) {
-      log.error("[INVOICE-COMPLETE] Completion failed for invoice {}: {}",
-          invoiceId, e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Invoice completion failed: " + e.getMessage());
-    }
+    return InvoiceCompletionService.completeInvoice(context.getRecordId(), context.getObContext());
   }
 
   // ---------------------------------------------------------------------------
-  // Pre-completion Verifactu field population
+  // Pre-completion invoice line quantity validation — REMOVED (ETP-5381)
   // ---------------------------------------------------------------------------
-
-  /**
-   * ETP-4783: Copies Verifactu fields from the invoice's DocType to the invoice record itself
-   * before the completion hook chain runs, replicating the behaviour of the Classic callout
-   * {@code ETVFAC_C_INVOICE_SET_VERIFACTU} which Go never fires.
-   *
-   * <p>Only touches AR sales invoices where {@code em_etvfac_inv_type} is currently null.
-   * Uses native SQL so the Go module compiles even when the Verifactu module is absent.
-   * After the UPDATE the invoice is evicted from the Hibernate first-level cache so that
-   * {@link ProcessInvoiceUtil} (called immediately after) reads the fresh DB values.
-   *
-   * <p>Fields populated (strictly from DocType — no fallback derivation):
-   * <ul>
-   *   <li>{@code em_etvfac_inv_type} — invoice type (e.g. F1, R1) — must be set on the DocType</li>
-   *   <li>{@code em_etvfac_verifac_desc} — operation description — must be set on the DocType</li>
-   *   <li>{@code em_etvfac_reverseinvtype} — rectification method I/S (DocType, for R-types)</li>
-   *   <li>{@code em_etsg_date_operation} — defaults to {@code dateinvoiced} when null</li>
-   * </ul>
-   *
-   * <p><b>Developer responsibility:</b> any DocType added to Go for AR invoices MUST have
-   * {@code em_etvfac_inv_type} and {@code em_etvfac_verifac_desc} configured in its sampledata
-   * (and {@code em_etvfac_reverseinvtype} for R-types). No automatic derivation is performed —
-   * if those fields are absent the Verifactu hook will reject the invoice at completion.
-   *
-   * @param invoiceId the ID of the invoice being completed
-   */
-  @SuppressWarnings("java:S2077")
-  private static void populateVerifactuFieldsFromDocType(String invoiceId) {
-    String sql =
-        "UPDATE c_invoice i"
-        + "   SET em_etvfac_inv_type       = COALESCE(i.em_etvfac_inv_type,       dt.em_etvfac_inv_type),"
-        + "       em_etvfac_verifac_desc   = COALESCE(i.em_etvfac_verifac_desc,   dt.em_etvfac_verifac_desc),"
-        + "       em_etvfac_reverseinvtype = COALESCE(i.em_etvfac_reverseinvtype, dt.em_etvfac_reverseinvtype),"
-        + "       em_etsg_date_operation   = COALESCE(i.em_etsg_date_operation,   i.dateinvoiced)"
-        + "  FROM c_doctype dt"
-        + " WHERE i.c_invoice_id   = ?"
-        + "   AND dt.c_doctype_id  = i.c_doctypetarget_id"
-        + "   AND i.issotrx        = 'Y'"
-        + "   AND (i.em_etvfac_inv_type IS NULL OR i.em_etsg_date_operation IS NULL)";
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, invoiceId);
-        int rows = ps.executeUpdate();
-        if (rows > 0) {
-          // Evict from Hibernate first-level cache so ProcessInvoiceUtil sees the updated values
-          Invoice inv = OBDal.getInstance().getSession().get(Invoice.class, invoiceId);
-          if (inv != null) {
-            OBDal.getInstance().getSession().evict(inv);
-          }
-          log.debug("[INVOICE-COMPLETE] Populated Verifactu DocType fields for invoice {}", invoiceId);
-        }
-      }
-    } catch (Exception e) {
-      // Non-fatal: log and continue — if Verifactu is not installed the columns don't exist,
-      // and the hook itself will skip processing (shouldSkipSendingToVerifactu returns true).
-      log.debug("[INVOICE-COMPLETE] Could not populate Verifactu fields for invoice {}: {}",
-          invoiceId, e.getMessage());
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Pre-completion invoice line quantity validation
-  // ---------------------------------------------------------------------------
+  //
+  // `validateLineQtyBeforeComplete` and `checkInoutEntryForOverInvoicing` used to cap each invoice
+  // line at the pending quantity of the shipment/receipt line it pointed at, rejecting completion
+  // with ETGO_InvoiceLineAlreadyInvoiced. It is gone, deliberately. Do not reinstate it.
+  //
+  // WHY: the shipment must not constrain what the invoice may say. The commitment is the ORDER.
+  // The guard measured the invoice against the wrong document, and did so even when that document
+  // had delivered nothing: `NeoInvoiceSupport.queryPendingQtyPerLine` takes its ceiling from
+  // `ABS(sil.movementqty)` under `WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'` — no docstatus
+  // filter on the shipment at all (every docstatus clause in that query filters INVOICES). So a
+  // DRAFT shipment capped the invoice.
+  //
+  // The reported case: order for 15, shipment created from it and edited down to 10 but left in
+  // draft, invoice created from the ORDER, reactivated and set to 12. Completion was refused with
+  // "quantity to invoice (12) exceeds pending quantity (10). It may already be invoiced in another
+  // document." Both halves of that sentence were false — 15 were pending on the order, and no other
+  // invoice existed. `InvoiceLineLinker` had attached the invoice line to the draft shipment line
+  // (its query matches on C_OrderLine_ID and does not look at the shipment's status either), which
+  // is what handed the guard the wrong ceiling.
+  //
+  // WHAT STILL PROTECTS THIS: the core, in C_INVOICE_POST — for every invoice line carrying a
+  // C_OrderLine_ID it computes `ABS(ol.qtyordered) - ABS(ol.qtyinvoiced + qty)` and raises
+  // @QtyInvoicedHigherOrdered@ when it goes negative. That is the ceiling that belongs here, it is
+  // measured against the order, and it is Classic's own behaviour.
+  //
+  // KNOWN GAP, accepted: an invoice line with no C_OrderLine_ID (invoiced straight from a shipment
+  // that has no order behind it) now has no quantity ceiling at all, because the core check is
+  // conditional on that column. Flagged rather than papered over.
+  //
+  // `NeoInvoiceSupport.computePendingQtyPerLine` itself stays — the billing-status badge and the
+  // "no lines left to invoice" check at creation time still use it.
 
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
-
-  /**
-   * Blocks invoice completion when any invoice line would over-invoice a shipment or receipt line.
-   * For each invoice line with {@code m_inoutline_id}, computes the pending (uninvoiced) quantity
-   * on the referenced shipment/receipt line (excluding other drafts) and rejects if the draft
-   * quantity exceeds what is still available.
-   *
-   * <p>Call at the top of {@code handle()} in both AR and AP invoice header subclasses, after the
-   * exchange-rate check.
-   *
-   * @param context the current NeoContext
-   * @return a NeoResponse error to block completion, or {@code null} to proceed
-   */
-  @SuppressWarnings("java:S2077")
-  static NeoResponse validateLineQtyBeforeComplete(NeoContext context) {
-    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
-      return null;
-    }
-    String invoiceId = context.getRecordId();
-    if (invoiceId == null || invoiceId.isEmpty()) {
-      return null;
-    }
-    OBContext.setAdminMode(true);
-    try {
-      Map<String, String> docNoByInout = new LinkedHashMap<>();
-      Map<String, Map<String, BigDecimal>> linesByInout = new LinkedHashMap<>();
-
-      String sql =
-          "SELECT il.m_inoutline_id, ABS(il.qtyinvoiced), io.m_inout_id, io.documentno "
-          + "FROM c_invoiceline il "
-          + "JOIN m_inoutline iol ON iol.m_inoutline_id = il.m_inoutline_id "
-          + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
-          + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' AND il.m_inoutline_id IS NOT NULL";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, invoiceId);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String lineId = rs.getString(1);
-            BigDecimal qty = rs.getBigDecimal(2);
-            String inoutId = rs.getString(3);
-            String docNo = rs.getString(4);
-            docNoByInout.put(inoutId, docNo);
-            linesByInout.computeIfAbsent(inoutId, k -> new LinkedHashMap<>()).put(lineId, qty);
-          }
-        }
-      }
-      if (linesByInout.isEmpty()) {
-        return null;
-      }
-      for (Map.Entry<String, Map<String, BigDecimal>> inoutEntry : linesByInout.entrySet()) {
-        NeoResponse error = checkInoutEntryForOverInvoicing(
-            inoutEntry.getKey(), inoutEntry.getValue(), docNoByInout, invoiceId);
-        if (error != null) {
-          return error;
-        }
-      }
-      return null;
-    } catch (Exception e) {
-      log.error("Error validating invoice lines before complete for invoice {}", invoiceId, e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  private static NeoResponse checkInoutEntryForOverInvoicing(String inoutId,
-      Map<String, BigDecimal> draftLines, Map<String, String> docNoByInout,
-      String invoiceId) throws Exception {
-    Map<String, BigDecimal> pendingMap = NeoInvoiceSupport.computePendingQtyPerLine(inoutId, false);
-    for (Map.Entry<String, BigDecimal> lineEntry : draftLines.entrySet()) {
-      String lineId = lineEntry.getKey();
-      BigDecimal draftQty = lineEntry.getValue();
-      if (draftQty == null || draftQty.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-      BigDecimal pendingQty = pendingMap.getOrDefault(lineId, BigDecimal.ZERO);
-      if (pendingQty.compareTo(draftQty) < 0) {
-        String docNo = docNoByInout.get(inoutId);
-        String template = OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced");
-        String msg = template
-            .replace("@docNo@", docNo)
-            .replace("@invoiced@", draftQty.toPlainString())
-            .replace("@pending@", pendingQty.toPlainString());
-        log.warn("Blocking invoice completion id={}: {}", invoiceId, msg);
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", msg);
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-      }
-    }
-    return null;
-  }
 
   // ---------------------------------------------------------------------------
   // Currency / exchange-rate hooks (ETP-4029)
@@ -1150,23 +1011,22 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Unified date (ETP-4531)
+  // Unified date (ETP-4531) / re-revert to independent accounting date (ETP-5273)
   // ---------------------------------------------------------------------------
   //
-  // The mirrorAccountingDate(NeoContext, String, String) logic itself lives in
-  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler — see
-  // NeoHandlerUtils#mirrorAccountingDate. Call sites here invoke it with
-  // ("invoiceDate", "accountingDate").
+  // The mirrorAccountingDateOnCreate(NeoContext, String, String) logic itself lives in
+  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler, GoodsReceiptHeaderHandler and
+  // GoodsShipmentHeaderHandler — see NeoHandlerUtils#mirrorAccountingDateOnCreate. Call sites
+  // here invoke it with ("invoiceDate", "accountingDate").
 
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
    * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
    * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
    *
-   * <p>{@code accountingDate} cascades from {@code invoiceDate} via the classic Etendo callout
-   * ({@code SE_Invoice_AccountingDate}) are intentionally left untouched — ETP-4531 now requires
-   * the single visible date to be mirrored into {@code accountingDate} on save, so that cascade
-   * is exactly the behavior wanted.
+   * <p>Note that {@code accountingDate} is deliberately NOT guarded here — see the comment at the
+   * call site for why matching Classic's one-way {@code DateInvoiced -> DateAcct} cascade is the
+   * intended behaviour (ETP-5273).
    *
    * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
    * — each subclass's {@code afterCallout()} override should just delegate here.
@@ -1178,6 +1038,14 @@ public abstract class AbstractInvoiceHeaderHandler {
         return null;
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      // ETP-5273: accountingDate is deliberately NOT guarded here. Classic propagates
+      // DateInvoiced -> DateAcct one way (SE_Invoice_AccountingDate, reached through
+      // SifInvoiceOperationDateCallout on C_Invoice.DateInvoiced), and this window must
+      // match that. The reverse cascade needs no guard either: the callout registered on
+      // DateAcct is SE_Invoice_TaxDate, which writes Taxdate only and never touches
+      // DateInvoiced. Independent editing is preserved by restricting the server-side
+      // mirror to creation (NeoHandlerUtils#mirrorAccountingDateOnCreate), not by
+      // stripping the cascade.
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
@@ -1186,7 +1054,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       InvoiceCalloutHelper.applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
       InvoiceCalloutHelper.realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
-      log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
+      log.warn("[ETP-4029/ETP-5273/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
   }
@@ -1204,6 +1072,12 @@ public abstract class AbstractInvoiceHeaderHandler {
    * conversion-rate row left over from an earlier foreign-currency state is deleted instead
    * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
    *
+   * <p>ETP-5547: only runs for the requests {@link #shouldSyncConversionRateDocument(NeoContext)}
+   * accepts. Action POSTs on a processed invoice ({@code registerPayment}, {@code cloneRecord},
+   * SII/TBAI, post/unpost…) change neither the invoice's rate nor its total, and used to rewrite
+   * the SOURCE invoice's rate row anyway — on a posted invoice that UPDATE was rejected by Core
+   * and aborted the whole request transaction.
+   *
    * <p>Call unconditionally at the top of each subclass's {@code afterHandle()}, alongside
    * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
    *
@@ -1214,16 +1088,77 @@ public abstract class AbstractInvoiceHeaderHandler {
    * the line's own record ID, not the invoice's) must resolve the parent invoice ID themselves
    * and call the {@code String}-based overload directly instead.
    *
-   * @param context the current NeoContext; only {@code getHttpMethod()}/{@code getRecordId()}/
+   * @param context the current NeoContext; only {@code getHttpMethod()}/{@code getEndpointType()}/
+   *                {@code getFieldName()}/{@code getRequestBody()}/{@code getRecordId()}/
    *                {@code getPreviousResult()} are used
    */
   protected static void autoCreateOrUpdateConversionRateDocument(NeoContext context) {
-    String method = context.getHttpMethod();
-    if (!"PATCH".equals(method) && !"PUT".equals(method) && !"POST".equals(method)) {
+    if (!shouldSyncConversionRateDocument(context)) {
       return;
     }
     String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
     autoCreateOrUpdateConversionRateDocument(invoiceId);
+  }
+
+  /**
+   * Decides whether a header request may have changed the invoice's rate or grand total, and so
+   * whether the {@code C_Conversion_Rate_Document} row must be re-synced (ETP-5547).
+   *
+   * <ul>
+   *   <li>Non-write methods (GET, DELETE) → never.</li>
+   *   <li>{@link NeoEndpointType#CRUD} POST/PUT/PATCH → always: this is where the rate, the
+   *       currency and the header fields are edited.</li>
+   *   <li>{@link NeoEndpointType#ACTION} → only the "Complete" document action (it recalculates
+   *       the total-discount line right before completing, see
+   *       {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete}) and actions run on
+   *       a still-draft invoice (the generic AD processes {@code createLinesFrom*},
+   *       {@code copyFrom}, {@code calculatePromotions}, {@code explode}… add or reprice lines,
+   *       which moves the grand total). Every custom action on a processed invoice
+   *       ({@code registerPayment}, {@code cloneRecord}, {@code aeatsiiSend},
+   *       {@code tbaiXmlgenerator}, {@code createShipment}, {@code post}/{@code unpost},
+   *       {@code currencyOptions}) leaves both untouched and is skipped.</li>
+   *   <li>Any other endpoint type (SELECTOR, CALLOUT, DEFAULTS…) → never.</li>
+   * </ul>
+   *
+   * @param context the current NeoContext
+   * @return {@code true} when the rate row must be re-synced for this request
+   */
+  static boolean shouldSyncConversionRateDocument(NeoContext context) {
+    if (context == null || !NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return false;
+    }
+    NeoEndpointType endpointType = context.getEndpointType();
+    if (NeoEndpointType.CRUD.equals(endpointType)) {
+      return true;
+    }
+    if (!NeoEndpointType.ACTION.equals(endpointType)) {
+      return false;
+    }
+    return InvoiceCalloutHelper.isInvoiceCompleteAction(context)
+        || isDraftInvoice(context.getRecordId());
+  }
+
+  /**
+   * {@code true} when the invoice exists and is not processed yet. Never throws: it runs from
+   * {@code afterHandle()} outside the sync's own try/catch, so a failed read (e.g. on a transaction
+   * the action already aborted) answers "not a draft" — skip the sync — instead of failing the
+   * post-hook.
+   */
+  private static boolean isDraftInvoice(String invoiceId) {
+    if (StringUtils.isBlank(invoiceId)) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      return invoice != null && !Boolean.TRUE.equals(invoice.isProcessed());
+    } catch (Exception e) {
+      log.debug("[ETP-5547] Could not read invoice {} to decide the rate-doc sync: {}",
+          invoiceId, e.getMessage());
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
@@ -1232,6 +1167,13 @@ public abstract class AbstractInvoiceHeaderHandler {
    * and no-op conditions as {@link #autoCreateOrUpdateConversionRateDocument(NeoContext)} — this
    * is the shared core both overloads (and {@link InvoiceLineHandler}) funnel into, so there is
    * exactly one upsert implementation for {@code C_Conversion_Rate_Document}.
+   *
+   * <p>ETP-5547: no-op when the invoice is posted ({@code Posted = 'Y'}). Core's
+   * {@code c_conversion_rate_document_trg} rejects any INSERT/UPDATE/DELETE of the rate row of a
+   * posted invoice with {@code @20501@} — the rate a document was booked with is immutable — so
+   * there is nothing this method may legitimately do there. The write itself also runs under a
+   * savepoint ({@link ConversionRateDocumentSync}), so any other failure is contained instead of
+   * aborting the caller's transaction.
    *
    * @param invoiceId the invoice's primary key, already resolved by the caller; no-op if blank
    */
@@ -1261,6 +1203,12 @@ public abstract class AbstractInvoiceHeaderHandler {
         // C_Conversion_Rate_Document table via raw JDBC, so there's no cascade-refresh/duplicate-
         // insert risk (the ETP-4015 symptom that motivated the heavier clear()+reload there).
         OBDal.getInstance().getSession().refresh(invoice);
+        if (POSTED_YES.equals(invoice.getPosted())) {
+          // ETP-5547: a posted invoice's rate row is immutable (Core trigger, @20501@).
+          log.debug("[ETP-5547] Skipping C_Conversion_Rate_Document sync for posted invoice {}",
+              invoiceId);
+          return;
+        }
         String orgId = invoice.getOrganization().getId();
         String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
         if (orgCurrencyId == null) {

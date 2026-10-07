@@ -68,6 +68,9 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
+import com.etendoerp.go.auth.AuthScheme;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.SurfacePolicy;
 
 /**
  * Unit tests for {@link SurveyConfigServlet}.
@@ -177,7 +180,7 @@ class SurveyConfigServletTest {
   }
 
   private void authenticated() throws Exception {
-    neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(null);
+    neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(null));
   }
 
   /** Authenticates the request AND returns a real (mocked) {@link OBContext} carrying
@@ -196,7 +199,7 @@ class SurveyConfigServletTest {
     when(ctx.getCurrentClient()).thenReturn(contextClient);
     when(ctx.getCurrentOrganization()).thenReturn(contextOrganization);
     when(ctx.getUser()).thenReturn(contextUser);
-    neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(ctx);
+    neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any())).thenReturn(authenticatedOutcome(ctx));
   }
 
   private static HttpServletRequest requestWithBody(String pathInfo, String body) throws Exception {
@@ -233,8 +236,8 @@ class SurveyConfigServletTest {
     @Test
     @DisplayName("returns 401 when JWT authentication throws OBException")
     void authFailureOBException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new OBException("bad token"));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "bad token"));
 
       servlet.doGet(request, response);
 
@@ -245,13 +248,26 @@ class SurveyConfigServletTest {
     @Test
     @DisplayName("returns 401 when JWT authentication throws a generic Exception")
     void authFailureGenericException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new RuntimeException("unexpected"));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED,
+              "Invalid or expired token"));
 
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
       assertTrue(getResponseBody().contains("Invalid or expired token"));
+    }
+
+    @Test
+    @DisplayName("ETP-5455: GET authenticates through the shared pipeline under NEO_AUXILIARY")
+    void getAsksForTheAuxiliaryPolicy() throws Exception {
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "refused"));
+
+      servlet.doGet(request, response);
+
+      neoSupportMock.verify(
+          () -> NeoServletSupport.authenticate(request, SurfacePolicy.NEO_AUXILIARY));
     }
   }
 
@@ -476,8 +492,8 @@ class SurveyConfigServletTest {
     @DisplayName("returns 401 when JWT authentication throws OBException")
     void authFailureOBException() throws Exception {
       HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new OBException("bad token"));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "bad token"));
 
       servlet.doPost(req, response);
 
@@ -489,13 +505,41 @@ class SurveyConfigServletTest {
     @DisplayName("returns 401 when JWT authentication throws a generic Exception")
     void authFailureGenericException() throws Exception {
       HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new RuntimeException("unexpected"));
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED,
+              "Invalid or expired token"));
 
       servlet.doPost(req, response);
 
       verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
       assertTrue(getResponseBody().contains("Invalid or expired token"));
+    }
+
+    @Test
+    @DisplayName("ETP-5455: POST authenticates through the shared pipeline under NEO_AUXILIARY")
+    void postAsksForTheAuxiliaryPolicy() throws Exception {
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.UNAUTHENTICATED, "refused"));
+
+      servlet.doPost(req, response);
+
+      neoSupportMock.verify(
+          () -> NeoServletSupport.authenticate(req, SurfacePolicy.NEO_AUXILIARY));
+    }
+
+    @Test
+    @DisplayName("ETP-5455: a cookie POST without its CSRF proof answers 403, not 401")
+    void postWithoutCsrfAnswers403() throws Exception {
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+      neoSupportMock.when(() -> NeoServletSupport.authenticate(any(), any()))
+          .thenReturn(refusedOutcome(EnvironmentAuthOutcome.Status.CSRF_REJECTED,
+              "CSRF validation failed"));
+
+      servlet.doPost(req, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_FORBIDDEN);
+      assertTrue(getResponseBody().contains("CSRF validation failed"));
     }
   }
 
@@ -823,5 +867,16 @@ class SurveyConfigServletTest {
   private String runAndGetBody() throws Exception {
     servlet.doGet(request, response);
     return getResponseBody();
+  }
+
+  /** ETP-5455 — an outcome the shared pipeline would hand back for an authenticated request. */
+  private static EnvironmentAuthOutcome authenticatedOutcome(OBContext ctx) {
+    return EnvironmentAuthOutcome.authenticated(AuthScheme.COOKIE, ctx, "user-1", "role-1",
+        "client-1", "org-1");
+  }
+
+  private static EnvironmentAuthOutcome refusedOutcome(EnvironmentAuthOutcome.Status status,
+      String message) {
+    return EnvironmentAuthOutcome.refused(status, message, AuthScheme.COOKIE);
   }
 }

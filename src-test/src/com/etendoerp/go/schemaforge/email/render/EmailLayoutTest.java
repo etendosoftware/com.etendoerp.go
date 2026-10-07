@@ -28,6 +28,8 @@ import org.junit.Test;
 /**
  * Unit tests for {@link EmailLayout}, the single place in the module allowed to emit email markup
  * (ETP-5003).
+ *
+ * @covers com.etendoerp.go.schemaforge.email.render.EmailLayout
  */
 public class EmailLayoutTest {
 
@@ -57,7 +59,7 @@ public class EmailLayoutTest {
 
   @Test
   public void pinsTheLogoToProductionRegardlessOfEnvironment() {
-    assertEquals("https://go.etendo.cloud/favicon.png", EmailLayout.LOGO_URL);
+    assertEquals("https://app.etendo.ai/favicon.png", EmailLayout.LOGO_URL);
   }
 
   @Test
@@ -113,10 +115,10 @@ public class EmailLayoutTest {
   @Test
   public void rendersNotesAndSignature() {
     String html = EmailLayout.render(
-        minimal().note("Válido 7 días.").signature("Saludos, Equipo de Etendo Go").build());
+        minimal().note("Válido 7 días.").signature("Saludos, Equipo de Etendo").build());
 
     assertTrue(html.contains("Válido 7 días."));
-    assertTrue(html.contains("Saludos, Equipo de Etendo Go"));
+    assertTrue(html.contains("Saludos, Equipo de Etendo"));
   }
 
   @Test
@@ -126,7 +128,7 @@ public class EmailLayoutTest {
         .cta("Aceptar invitación", "https://go.etendo.cloud/invite?token=abc")
         .linkFallbackText("Si el botón no funciona, copia el enlace:")
         .note("Válido 7 días.")
-        .signature("Saludos, Equipo de Etendo Go")
+        .signature("Saludos, Equipo de Etendo")
         .build());
 
     // Gmail clips around 102KB. A layout that ever approaches it has grown a bug, not a feature.

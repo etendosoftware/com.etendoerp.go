@@ -38,6 +38,7 @@ import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -75,6 +76,14 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *       when the bypass check above already failed).</li>
  * </ol>
  *
+ * <p>{@code capabilities.isOwner} (ETP-5395, backed by {@code AD_User.EM_ETGO_Is_Owner} —
+ * ETP-4830) is resolved identically in BOTH branches above via {@link
+ * com.etendoerp.go.schemaforge.util.OwnerSupport#isOwner(String)}, off the current user
+ * captured before admin mode the same way the current role is — ownership is orthogonal to
+ * admin status, so a client-admin who happens to also be the tenant owner still gets {@code
+ * isOwner: true}, and one who is not still gets {@code isOwner: false}. Used by the frontend to
+ * gate "Primeros pasos" (First Steps onboarding) to the owner only.</p>
+ *
  * <p>{@code capabilities.isAdminOrClientAdmin} (ETP-4513) is the proactive signal the frontend
  * uses to decide whether to show admin-only settings entries — e.g. the "Configuración &gt;
  * Roles" menu item, backed by {@code SFRolesOverview} — up front, instead of showing them to
@@ -98,6 +107,12 @@ public class SFWindowAccessMap extends BaseWebhookService {
   /** JSON key used for the admin/client-admin capability (ETP-4513). */
   private static final String IS_ADMIN_OR_CLIENT_ADMIN = "isAdminOrClientAdmin";
 
+  /** Public API credentials are available to every authenticated active role. */
+  private static final String PUBLIC_API_KEY_MANAGEMENT = "publicApiKeyManagement";
+
+  /** JSON key used for the tenant-owner capability (ETP-5395, backed by ETP-4830's owner flag). */
+  private static final String IS_OWNER = "isOwner";
+
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
 
@@ -120,9 +135,16 @@ public class SFWindowAccessMap extends BaseWebhookService {
       return;
     }
 
+    // Same reasoning applies to the current user: ownership must be resolved against the user
+    // actually making this request, never against whatever the ambient OBContext exposes once
+    // admin mode is active. Mirrors UserRoleAssignmentHandler's identical defensive accessor.
+    OBContext currentContext = OBContext.getOBContext();
+    String currentUserId = currentContext != null && currentContext.getUser() != null
+        ? currentContext.getUser().getId() : null;
+
     OBContext.setAdminMode();
     try {
-      JSONObject result = buildAccessMap(currentRole);
+      JSONObject result = buildAccessMap(currentRole, currentUserId);
       responseVars.put("result", result.toString());
     } catch (Exception e) {
       log.error("Error in SFWindowAccessMap", e);
@@ -150,10 +172,16 @@ public class SFWindowAccessMap extends BaseWebhookService {
   /**
    * Builds the {@code windowAccess}/{@code capabilities} result for {@code role}, branching on
    * the admin/client-admin bypass first (see class javadoc for the full resolution order).
+   *
+   * @param role the role resolved for this request (see {@link #get(Map, Map)})
+   * @param userId the user resolved for this request, used only for the {@code isOwner}
+   *     capability (ETP-5395) — ownership is orthogonal to admin status, so it is resolved the
+   *     same way in both branches below rather than only for the non-bypass role
    */
-  private JSONObject buildAccessMap(Role role) throws JSONException {
+  private JSONObject buildAccessMap(Role role, String userId) throws JSONException {
     JSONObject windowAccess = new JSONObject();
     JSONObject capabilities = new JSONObject();
+    boolean isOwner = OwnerSupport.isOwner(userId);
 
     if (NeoAccessHelper.isAdminOrClientAdmin(role)) {
       Set<String> windowIds = new LinkedHashSet<>(resolveActiveEtendoGoWindowIds());
@@ -163,10 +191,14 @@ public class SFWindowAccessMap extends BaseWebhookService {
       }
       capabilities.put(SHOW_ACCOUNTING_FIELDS, true);
       capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, true);
+      capabilities.put(PUBLIC_API_KEY_MANAGEMENT, true);
+      capabilities.put(IS_OWNER, isOwner);
     } else {
       populateWindowAccessForRole(role, windowAccess);
       capabilities.put(SHOW_ACCOUNTING_FIELDS, resolveShowAccountingFields(role));
       capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, false);
+      capabilities.put(PUBLIC_API_KEY_MANAGEMENT, true);
+      capabilities.put(IS_OWNER, isOwner);
     }
 
     JSONObject result = new JSONObject();

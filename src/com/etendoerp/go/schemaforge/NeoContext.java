@@ -41,8 +41,24 @@ public class NeoContext {
   private final SFEntity sfEntity;
   private final OBContext obContext;
   private NeoResponse previousResult;
+  /**
+   * IMP-45: set by the create-path callout cascade when a callout resolved a different value for
+   * a field the caller had sent, and was held back by ETP-4784's protected-fields rule. Mutable
+   * and off the builder on purpose — it is produced deep inside the create, after the context was
+   * built, and it is a diagnostic: nothing downstream branches on it.
+   */
+  private JSONObject supersededDefaults;
   private final NeoEndpointType endpointType;
   private final String fieldName;
+  /**
+   * ETP-5284 — {@code true} when this context was built by the MCP layer rather than by the REST
+   * dispatcher. The two paths hand a handler its {@link #getRequestBody() request body} under
+   * different field-naming conventions (REST uses the window's field names, MCP its own tool
+   * names), so a handler that injects a value has to know which spelling the caller will
+   * understand. Nothing else should branch on this: it marks a naming difference, not a
+   * capability one.
+   */
+  private final boolean mcpOrigin;
 
   private NeoContext(Builder builder) {
     this.specName = builder.specName;
@@ -57,6 +73,16 @@ public class NeoContext {
     this.previousResult = builder.previousResult;
     this.endpointType = builder.endpointType;
     this.fieldName = builder.fieldName;
+    this.mcpOrigin = builder.mcpOrigin;
+  }
+
+  /**
+   * Whether this context was built by the MCP layer. See {@link #mcpOrigin}.
+   *
+   * @return {@code true} for an MCP-originated call, {@code false} for a REST one
+   */
+  public boolean isMcpOrigin() {
+    return mcpOrigin;
   }
 
   public String getSpecName() {
@@ -73,6 +99,36 @@ public class NeoContext {
 
   public String getRecordId() {
     return recordId;
+  }
+
+  /**
+   * ETP-5009: the id core will read this request by, resolved the way
+   * {@code NeoCrudHandler#buildDalParams} hands it to core — the path id when there is one (it is
+   * authoritative, ETP-5195), otherwise the query-string {@code id}. So
+   * {@code GET /sws/neo/{spec}/{entity}?id=X} is a read by id too, not a list read.
+   *
+   * @return the id to read by, or {@code null} when the request names none
+   */
+  public String getReadId() {
+    if (recordId != null) {
+      return recordId;
+    }
+    return queryParams != null ? queryParams.get("id") : null;
+  }
+
+  /**
+   * ETP-5009: whether this request is a {@code GET} by id (path or query-string {@code id}, see
+   * {@link #getReadId}). The single definition shared by the list read predicates and by the
+   * handlers that post-filter a single-record read; a blank id is a list read.
+   *
+   * @return {@code true} for a {@code GET} naming a non-blank id
+   */
+  public boolean isReadById() {
+    if (!"GET".equals(httpMethod)) {
+      return false;
+    }
+    String readId = getReadId();
+    return readId != null && !readId.trim().isEmpty();
   }
 
   public JSONObject getRequestBody() {
@@ -101,6 +157,21 @@ public class NeoContext {
 
   public void setPreviousResult(NeoResponse previousResult) {
     this.previousResult = previousResult;
+  }
+
+  /**
+   * @return the IMP-45 callout-vs-caller divergences recorded during this create, or {@code null}
+   *     when the cascade recorded none
+   */
+  public JSONObject getSupersededDefaults() {
+    return supersededDefaults;
+  }
+
+  /**
+   * @param supersededDefaults the divergences recorded by the create-path callout cascade
+   */
+  public void setSupersededDefaults(JSONObject supersededDefaults) {
+    this.supersededDefaults = supersededDefaults;
   }
 
   public NeoEndpointType getEndpointType() {
@@ -142,6 +213,19 @@ public class NeoContext {
     private NeoResponse previousResult;
     private NeoEndpointType endpointType;
     private String fieldName;
+    private boolean mcpOrigin;
+
+    /**
+     * Marks this context as MCP-originated and returns this builder. Defaults to {@code false},
+     * so the REST dispatcher needs no change.
+     *
+     * @param mcpOrigin {@code true} when the MCP layer is building the context
+     * @return this builder
+     */
+    public Builder mcpOrigin(boolean mcpOrigin) {
+      this.mcpOrigin = mcpOrigin;
+      return this;
+    }
 
     /**
      * Sets the spec name and returns this builder.

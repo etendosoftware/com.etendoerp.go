@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -78,7 +79,7 @@ public class NeoDefaultsCascadeHelperTest {
         JSONObject.class, JSONObject.class, JSONObject.class,
         Set.class, Tab.class,
         NeoDefaultsService.CalloutCascadeResult.class,
-        Set.class, Set.class);
+        Set.class, Set.class, Set.class);
   }
 
   private static Method wouldClearExistingValueMethod() throws Exception {
@@ -91,13 +92,13 @@ public class NeoDefaultsCascadeHelperTest {
 
   private static Method shouldKeepExistingValueMethod() throws Exception {
     return getPrivateMethod("shouldKeepExistingValue",
-        JSONObject.class, String.class, Set.class);
+        JSONObject.class, String.class, Set.class, Set.class);
   }
 
   private static Method mergeCalloutCombosMethod() throws Exception {
     return getPrivateMethod("mergeCalloutCombos",
         JSONObject.class, JSONObject.class, JSONObject.class,
-        NeoDefaultsService.CalloutCascadeResult.class, Set.class);
+        NeoDefaultsService.CalloutCascadeResult.class, Set.class, Set.class);
   }
 
   private static Method propagateIdentifierMethod() throws Exception {
@@ -146,7 +147,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     return mergeCalloutUpdatesMethod().invoke(null,
         calloutBody, formState, defaults, seqFields,
-        null, result, nextPending, protectedFields);
+        null, result, nextPending, protectedFields, Collections.emptySet());
   }
 
   private static Tab mockTabWithTable(String tableId) {
@@ -304,7 +305,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       mergeCalloutUpdatesMethod().invoke(null,
           calloutBody, formState, defaults, new HashSet<>(),
-          null, result, new HashSet<>(), protectedFields);
+          null, result, new HashSet<>(), protectedFields, Collections.emptySet());
 
       assertEquals("Protected field must not be overwritten",
           "1000001", defaults.get("documentNo"));
@@ -329,7 +330,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       mergeCalloutUpdatesMethod().invoke(null,
           calloutBody, formState, defaults, new HashSet<>(),
-          null, result, new HashSet<>(), protectedFields);
+          null, result, new HashSet<>(), protectedFields, Collections.emptySet());
 
       assertEquals("Protected field with null current should accept update",
           "NEW_VALUE", defaults.get("documentNo"));
@@ -354,7 +355,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       mergeCalloutUpdatesMethod().invoke(null,
           calloutBody, formState, defaults, new HashSet<>(),
-          null, result, new HashSet<>(), protectedFields);
+          null, result, new HashSet<>(), protectedFields, Collections.emptySet());
 
       assertEquals("Protected field with blank string should accept update",
           "NEW_VALUE", defaults.get("documentNo"));
@@ -379,7 +380,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertEquals("VAL1", defaults.get("paymentMethod"));
     assertEquals("VAL1", formState.get("paymentMethod"));
@@ -399,7 +400,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertFalse("Null selected should not be applied",
         defaults.has("paymentMethod"));
@@ -419,7 +420,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertFalse(defaults.has("paymentMethod"));
   }
@@ -432,7 +433,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertEquals(0, defaults.length());
   }
@@ -459,7 +460,7 @@ public class NeoDefaultsCascadeHelperTest {
     protectedFields.add("warehouse");
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        protectedFields);
+        protectedFields, Collections.emptySet());
 
     assertEquals("Protected combo field must keep the user-submitted value",
         "USER_CHOSEN_WAREHOUSE", defaults.get("warehouse"));
@@ -485,7 +486,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertEquals("Unprotected combo field must be updated with the recalculated default",
         "RECALCULATED_DEFAULT", defaults.get("warehouse"));
@@ -560,7 +561,7 @@ public class NeoDefaultsCascadeHelperTest {
     JSONObject defaults = new JSONObject();
     defaults.put("field1", "val");
     assertFalse((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", null));
+        defaults, "field1", null, Collections.emptySet()));
   }
 
   @Test
@@ -570,7 +571,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     protectedFields.add("otherField");
     assertFalse((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", protectedFields));
+        defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -580,7 +581,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     protectedFields.add("field1");
     assertTrue((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", protectedFields));
+        defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -590,7 +591,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     protectedFields.add("field1");
     assertFalse((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", protectedFields));
+        defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -601,7 +602,7 @@ public class NeoDefaultsCascadeHelperTest {
     protectedFields.add("field1");
     assertFalse("Blank string should not count as a kept value",
         (Boolean) shouldKeepExistingValueMethod().invoke(null,
-            defaults, "field1", protectedFields));
+            defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -612,7 +613,7 @@ public class NeoDefaultsCascadeHelperTest {
     protectedFields.add("field1");
     assertTrue("Non-string objects should be kept",
         (Boolean) shouldKeepExistingValueMethod().invoke(null,
-            defaults, "field1", protectedFields));
+            defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   // ===================================================================
@@ -913,6 +914,124 @@ public class NeoDefaultsCascadeHelperTest {
 
       assertEquals("Protected field must keep its original value",
           "ORIGINAL", defaults.get("protectedField"));
+    }
+  }
+
+  /**
+   * Builds the callout stub the three ETP-5350 tests below share: one trigger field whose
+   * callout proposes a value for {@code username}, which is what the core callout
+   * {@code SL_User_Name} really does (it derives a username from first + last name and always
+   * emits it).
+   */
+  private void stubUsernameDerivingCallout(MockedStatic<NeoCalloutService> calloutMock,
+      MockedStatic<ModelProvider> providerMock) throws Exception {
+    NeoCalloutService.CalloutInfo info = new NeoCalloutService.CalloutInfo(
+        "org.openbravo.erpCommon.ad_callouts.SL_User_Name", "inpfirstname", "Firstname");
+    calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("firstName")))
+        .thenReturn(info);
+    calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("username")))
+        .thenReturn(null);
+
+    JSONObject updateEntry = new JSONObject();
+    updateEntry.put("value", "Juan Perez");
+    JSONObject responseUpdates = new JSONObject();
+    responseUpdates.put("username", updateEntry);
+    JSONObject calloutResponseBody = new JSONObject();
+    calloutResponseBody.put("updates", responseUpdates);
+    calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+        .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+    ModelProvider mockProvider = mock(ModelProvider.class);
+    providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+    when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+  }
+
+  /**
+   * ETP-5350 — the defect itself. The body snapshot cannot express "never populate this":
+   * {@code shouldKeepExistingValue} asks whether there is a value worth keeping, and for a
+   * field absent from the body the answer is no. That is CORRECT for a caller snapshot, and
+   * this test pins it so the fix below is not mistaken for a change to this set's meaning.
+   */
+  @Test
+  public void testProtectedFieldAbsentFromBodyIsStillPopulated() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+
+      Tab adTab = mockTabWithTable("100");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("firstName", "Juan");
+
+      Set<String> protectedFields = new HashSet<>();
+      protectedFields.add("username");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
+          ctx, adTab, defaults, new HashSet<>(), protectedFields);
+
+      assertEquals("A caller snapshot cannot protect a field that was never sent",
+          "Juan Perez", defaults.opt("username"));
+    }
+  }
+
+  /**
+   * ETP-5350 — the fix. {@code NeoHandler#protectedCreateCalloutFields} declares fields the
+   * cascade "must not populate or overwrite", so they travel in their own set and are refused
+   * whether or not the body already carries them.
+   *
+   * <p>The live consequence: {@code ContactHandler} declares {@code username} so a contact
+   * keeps {@code AD_User.Username} null, the way Classic leaves it. While the declaration was
+   * folded into the caller snapshot it did nothing, every imported contact got a username
+   * derived from its person name, and the second "Juan Perez" in a tenant collided on
+   * {@code AD_USER_UN_USERNAME}. Two business partners each having a contact of that name is
+   * ordinary data; the username was what should never have been written.
+   */
+  @Test
+  public void testSuppressedFieldIsNeverPopulated() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+
+      Tab adTab = mockTabWithTable("100");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("firstName", "Juan");
+
+      Set<String> suppressed = new HashSet<>();
+      suppressed.add("username");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
+          ctx, adTab, defaults, new HashSet<>(), new HashSet<>(), suppressed);
+
+      assertFalse("A suppressed field must not be populated by the cascade",
+          defaults.has("username"));
+    }
+  }
+
+  /**
+   * ETP-5350 — the "or overwrite" half of the same contract: a suppressed field that DOES
+   * arrive with a value keeps it, so the declaration is not merely a create-time blank-out.
+   */
+  @Test
+  public void testSuppressedFieldIsNeverOverwritten() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+
+      Tab adTab = mockTabWithTable("100");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("firstName", "Juan");
+      defaults.put("username", "jperez");
+
+      Set<String> suppressed = new HashSet<>();
+      suppressed.add("username");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
+          ctx, adTab, defaults, new HashSet<>(), new HashSet<>(), suppressed);
+
+      assertEquals("A suppressed field must keep the value it arrived with",
+          "jperez", defaults.get("username"));
     }
   }
 
@@ -2597,6 +2716,183 @@ public class NeoDefaultsCascadeHelperTest {
   // ===================================================================
   // Private constructor coverage
   // ===================================================================
+
+  // ===================================================================
+  // executeCalloutsForTriggerFields (ETP-5528)
+  // ===================================================================
+
+  /** A callout response body carrying {@code value} for each {@code field, value} pair. */
+  private static NeoResponse calloutUpdates(String... fieldValuePairs) throws Exception {
+    JSONObject updates = new JSONObject();
+    for (int i = 0; i < fieldValuePairs.length; i += 2) {
+      updates.put(fieldValuePairs[i], new JSONObject().put("value", fieldValuePairs[i + 1]));
+    }
+    return NeoResponse.ok(new JSONObject().put("updates", updates));
+  }
+
+  /** A tab whose table resolves to no DAL entity, so no selector aux value is looked up. */
+  private static Tab triggerTab(MockedStatic<ModelProvider> providerMock) {
+    ModelProvider provider = mock(ModelProvider.class);
+    providerMock.when(ModelProvider::getInstance).thenReturn(provider);
+    when(provider.getEntityByTableId(anyString())).thenReturn(null);
+    return mockTabWithTable("260");
+  }
+
+  /**
+   * ETP-5528: only the named trigger fires, even though another field of the form state has a
+   * callout of its own; the callout reads {@code formState} (the full record, with a key the
+   * write body does not carry) while its update lands in {@code body}.
+   */
+  @Test
+  public void testTriggerFieldsFiresOnlyTriggerReadsFormStateWritesBody() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      NeoCalloutService.CalloutInfo info = new NeoCalloutService.CalloutInfo(
+          "org.openbravo.erpCommon.ad_callouts.SL_Order_Amt", "inpdiscount", "Discount");
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("discount")))
+          .thenReturn(info);
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("product")))
+          .thenReturn(info);
+
+      List<String> firedFields = new ArrayList<>();
+      List<Boolean> formStateHadPriceList = new ArrayList<>();
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any())).thenAnswer(inv -> {
+        JSONObject request = inv.getArgument(1);
+        firedFields.add(request.getString("field"));
+        formStateHadPriceList.add(request.getJSONObject("formState").has("priceList"));
+        return calloutUpdates("unitPrice", "17.1");
+      });
+
+      JSONObject formState = new JSONObject()
+          .put("discount", "5").put("product", "P1").put("priceList", "PL1")
+          .put("unitPrice", "18");
+      JSONObject body = new JSONObject().put("discount", "5").put("unitPrice", "18");
+
+      NeoDefaultsService.CalloutCascadeResult result =
+          NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(mock(NeoContext.class),
+              triggerTab(providerMock), formState, body, Collections.singletonList("discount"),
+              new HashSet<>());
+
+      assertEquals("Only the trigger field's callout may run", Arrays.asList("discount"),
+          firedFields);
+      assertEquals("The callout must read the form state, not the sparse body",
+          Arrays.asList(Boolean.TRUE), formStateHadPriceList);
+      assertEquals("The callout's update must land in the body", "17.1", body.get("unitPrice"));
+      assertFalse("Form-state-only keys must not leak into the body", body.has("priceList"));
+      assertEquals(1, result.updatedFieldCount());
+    }
+  }
+
+  /** ETP-5528: a protected field keeps the caller's value; an unprotected update still lands. */
+  @Test
+  public void testTriggerFieldsProtectedFieldKeepsCallerValue() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("discount")))
+          .thenReturn(new NeoCalloutService.CalloutInfo(
+              "org.openbravo.erpCommon.ad_callouts.SL_Order_Amt", "inpdiscount", "Discount"));
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(calloutUpdates("unitPrice", "17.1", "lineNetAmount", "171"));
+
+      JSONObject formState = new JSONObject().put("discount", "5").put("unitPrice", "20");
+      JSONObject body = new JSONObject().put("discount", "5").put("unitPrice", "20");
+
+      NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(mock(NeoContext.class),
+          triggerTab(providerMock), formState, body, Collections.singletonList("discount"),
+          new HashSet<>(Arrays.asList("discount", "unitPrice")));
+
+      assertEquals("A protected field must keep the caller's value", "20", body.get("unitPrice"));
+      assertEquals("An unprotected update must still land", "171", body.get("lineNetAmount"));
+    }
+  }
+
+  /**
+   * ETP-5528: every guard of the entry point is a no-op — no callout runs, the body is untouched
+   * and the result is empty.
+   */
+  @Test
+  public void testTriggerFieldsNoOpCases() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("discount")))
+          .thenReturn(new NeoCalloutService.CalloutInfo(
+              "org.openbravo.erpCommon.ad_callouts.SL_Order_Amt", "inpdiscount", "Discount"));
+      // "description" has no callout: resolveCallout falls back to the static mock's null.
+
+      NeoContext ctx = mock(NeoContext.class);
+      Tab tab = mock(Tab.class);
+      JSONObject formState = new JSONObject().put("discount", "5").put("description", "x");
+      List<String> discount = Collections.singletonList("discount");
+
+      Object[][] cases = {
+          {"null ctx", null, tab, formState, discount},
+          {"null tab", ctx, null, formState, discount},
+          {"null formState", ctx, tab, null, discount},
+          {"null body", ctx, tab, formState, discount},
+          {"null triggers", ctx, tab, formState, null},
+          {"empty triggers", ctx, tab, formState, Collections.<String>emptyList()},
+          {"trigger without callout", ctx, tab, formState,
+              Collections.singletonList("description")},
+          {"trigger absent from formState", ctx, tab, new JSONObject(), discount},
+      };
+      for (Object[] c : cases) {
+        JSONObject body = "null body".equals(c[0]) ? null : new JSONObject().put("discount", "5");
+        @SuppressWarnings("unchecked")
+        NeoDefaultsService.CalloutCascadeResult result =
+            NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields((NeoContext) c[1],
+                (Tab) c[2], (JSONObject) c[3], body, (List<String>) c[4], new HashSet<>());
+        assertNotNull(c[0] + ": result must never be null", result);
+        assertEquals(c[0] + ": nothing may be updated", 0, result.updatedFieldCount());
+        if (body != null) {
+          assertEquals(c[0] + ": body must be untouched", 1, body.length());
+        }
+      }
+      calloutMock.verify(() -> NeoCalloutService.executeCallout(any(), any()), never());
+    }
+  }
+
+  /**
+   * ETP-5528: a suppressed field the body does not carry is NOT populated by the re-fire — which a
+   * protected field cannot achieve, since protection only keeps a value already in the body — and
+   * its prior value stays in the form state. The same callout without the suppressed set does
+   * populate it, so the difference is the suppression and nothing else. This is what keeps the
+   * sales line's {@code standardPrice} undiscounted when {@code SL_Order_Amt} publishes the
+   * discounted {@code inppricestd}.
+   */
+  @Test
+  public void testTriggerFieldsSuppressedFieldIsNotPopulated() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("discount")))
+          .thenReturn(new NeoCalloutService.CalloutInfo(
+              "org.openbravo.erpCommon.ad_callouts.SL_Order_Amt", "inpdiscount", "Discount"));
+      calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(calloutUpdates("unitPrice", "17.1", "standardPrice", "17.1"));
+      Tab tab = triggerTab(providerMock);
+
+      JSONObject suppressedState = new JSONObject().put("discount", "5").put("standardPrice", "18");
+      JSONObject suppressedBody = new JSONObject().put("discount", "5");
+      NeoDefaultsService.CalloutCascadeResult result =
+          NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(mock(NeoContext.class), tab,
+              suppressedState, suppressedBody, Collections.singletonList("discount"),
+              new HashSet<>(), Collections.singleton("standardPrice"));
+
+      assertFalse("A suppressed field absent from the body must not be populated",
+          suppressedBody.has("standardPrice"));
+      assertEquals("A suppressed field keeps its prior value in the form state", "18",
+          suppressedState.get("standardPrice"));
+      assertEquals("An unsuppressed update must still land", "17.1",
+          suppressedBody.get("unitPrice"));
+      assertEquals("Only the unsuppressed update is reported", 1, result.updatedFieldCount());
+
+      JSONObject plainState = new JSONObject().put("discount", "5").put("standardPrice", "18");
+      JSONObject plainBody = new JSONObject().put("discount", "5");
+      NeoDefaultsCascadeHelper.executeCalloutsForTriggerFields(mock(NeoContext.class), tab,
+          plainState, plainBody, Collections.singletonList("discount"), new HashSet<>());
+
+      assertEquals("Without suppression the same callout populates the field", "17.1",
+          plainBody.get("standardPrice"));
+    }
+  }
 
   @Test
   public void testPrivateConstructor() throws Exception {

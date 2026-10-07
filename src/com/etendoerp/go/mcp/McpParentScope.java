@@ -37,6 +37,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 
 /**
  * Answers, for one SchemaForge entity: is this a child record, which field links it to its parent,
@@ -69,7 +70,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * <p>{@code McpWriteRequestSupport#resolveParentFK} walks the columns, takes the first with
  * {@code isLinkToParentColumn()} and assigns {@code parentId} to it <b>without checking it points
  * at the real parent</b>. In the 17 mismatched entities that first column is the wrong one: a
- * {@code neo_create} on {@code product/stock} passing a product id writes it into the
+ * {@code etendo_create} on {@code product/stock} passing a product id writes it into the
  * "referenced inventory" foreign key. It does not fail — it stores wrong data, which is why nobody
  * noticed. Both names exist on the same entity ({@code product} and {@code referencedInventory}),
  * so the write lands in the neighbouring field. Routing that resolution through this class corrects
@@ -84,9 +85,20 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * 5. anything else                  -&gt; UNRESOLVABLE: not publishable until declared
  * </pre>
  *
- * <p>Step 5 is what keeps the gate from having a permissive default. An entity whose parent cannot
- * be identified is not served with the check skipped — it is withheld, and {@code neo_discover}
- * says why, the same way a report spec with no contract is withheld today.</p>
+ * <p>Step 5 is what keeps the gate from having a permissive default. What "not publishable" means
+ * in practice, verb by verb:</p>
+ * <ul>
+ *   <li><b>create</b> ({@code etendo_create}, {@code etendo_batch}) — refused with
+ *       {@code parent_unresolvable}, with or without {@code parentId}, by
+ *       {@code McpWriteRequestSupport#requireApplicableParent} (ETP-5558). Letting it through is
+ *       what attached a {@code payment-out} line to an unrelated collection: the mandatory-defaults
+ *       pass fills the unmappable link on its own.</li>
+ *   <li><b>discovery</b> — {@code etendo_discover} and {@code etendo_schema} still list the entity, with
+ *       {@code configError} and {@code parentProblem} saying why.</li>
+ *   <li><b>read, update, delete</b> — served, without a parent gate (there is no field to gate
+ *       on). None of them runs the defaults pass, so none can choose a parent for the caller.</li>
+ * </ul>
+ * <p>It is therefore withheld where it can do damage, not hidden from the catalogue.</p>
  *
  * <h2>The one place {@code MCP_CONFIG} is read on this path</h2>
  * <p>This class is the single consumer of the column for parent purposes, and it is also what
@@ -118,7 +130,7 @@ final class McpParentScope {
      * rather than merely undiscovered.
      */
     UNPARENTED,
-    /** A child whose link field cannot be identified: not publishable. */
+    /** A child whose link field cannot be identified: not publishable — creates are refused. */
     UNRESOLVABLE
   }
 
@@ -136,15 +148,23 @@ final class McpParentScope {
     private final Set<String> optionalVerbs;
     private final String reason;
     private final String problem;
+    private final String agentProblem;
 
     private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
         String reason, String problem) {
+      this(kind, parentField, parentEntity, optionalVerbs, reason, problem, problem);
+    }
+
+    @SuppressWarnings("java:S107") // one value object; the extra field is the agent-facing text
+    private Scope(Kind kind, String parentField, String parentEntity, Set<String> optionalVerbs,
+        String reason, String problem, String agentProblem) {
       this.kind = kind;
       this.parentField = parentField;
       this.parentEntity = parentEntity;
       this.optionalVerbs = optionalVerbs;
       this.reason = reason;
       this.problem = problem;
+      this.agentProblem = agentProblem;
     }
 
     Kind getKind() {
@@ -175,6 +195,17 @@ final class McpParentScope {
     }
 
     /**
+     * The problem as an agent may read it: {@link #getProblem()} without the remedy addressed to
+     * whoever configures the entity ("Set MCP_CONFIG parent.field …"), which the agent cannot act
+     * on (ETP-5558). {@code configError} and the log keep the full text.
+     *
+     * @return the agent-facing problem, or {@code null} when the entity can be served
+     */
+    String getAgentProblem() {
+      return agentProblem;
+    }
+
+    /**
      * @return {@code true} when the entity may be served
      */
     boolean isPublishable() {
@@ -192,7 +223,7 @@ final class McpParentScope {
     }
 
     /**
-     * The verbs the parent key is required on, for {@code neo_discover} and {@code neo_schema}.
+     * The verbs the parent key is required on, for {@code etendo_discover} and {@code etendo_schema}.
      *
      * @return the required verbs in declaration order, empty when the gate does not apply
      */
@@ -210,7 +241,7 @@ final class McpParentScope {
     }
 
     /**
-     * This scope as the block {@code neo_discover} and {@code neo_schema} publish.
+     * This scope as the block {@code etendo_discover} and {@code etendo_schema} publish.
      *
      * <p>Emitting it is what keeps the gate from being pure friction: an agent that can read
      * {@code parentField} and {@code parentRequiredFor} makes the correct call on the first try
@@ -282,7 +313,8 @@ final class McpParentScope {
       // whose configuration cannot be trusted must not be served on the strength of the parts that
       // happened to parse. Reporting it through the scope is what keeps callers to one question
       // ("may I serve this, and how?") instead of two.
-      return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), null, resolved.describeProblems());
+      return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), null, resolved.describeProblems(),
+          "its MCP configuration is invalid");
     }
     return resolveChild(entity, tab, resolved.section(McpParentSection.NAME).orElse(null));
   }
@@ -322,7 +354,7 @@ final class McpParentScope {
     Resolution r = new Resolution(entity, tab, parentTabOf(tab), entityOf(tab), config);
 
     if (r.dalEntity == null) {
-      return unresolvable(tab, "its table has no DAL entity", r.optional, r.reason);
+      return unresolvable(r, "its table has no DAL entity");
     }
     Scope unparented = unparentedScope(r);
     if (unparented != null) {
@@ -363,11 +395,13 @@ final class McpParentScope {
     }
     List<String> writes = advertisedWrites(r.entity);
     if (!writes.isEmpty()) {
+      String agentProblem = "entity '" + r.entity.getName() + "' has no link to its parent, so a "
+          + "record written to it would be an orphan";
       return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), r.reason,
           "MCP_CONFIG declares mode '" + McpParentSection.MODE_UNPARENTED + "' but entity '"
               + r.entity.getName() + "' advertises " + writes + ". A record whose parent cannot be "
               + "named cannot be written without creating an orphan — either turn those methods "
-              + "off or declare a parent.field");
+              + "off or declare a parent.field", agentProblem);
     }
     return new Scope(Kind.UNPARENTED, null, parentEntityName(r.entity, r.parentTab, r.config),
         Set.of(), r.reason, null);
@@ -380,19 +414,10 @@ final class McpParentScope {
    * @return the advertised write methods, empty for a read-only entity
    */
   private static List<String> advertisedWrites(SFEntity entity) {
-    List<String> writes = new ArrayList<>();
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      writes.add("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      writes.add("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      writes.add("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      writes.add("DELETE");
-    }
+    // ETP-5558: what the MCP advertises, not the raw flags — an unparented entity whose writes
+    // MCP_CONFIG.verbs hides has nothing to write, and must not be reclassified UNRESOLVABLE.
+    List<String> writes = new ArrayList<>(McpMethodPolicy.enabledMethods(entity));
+    writes.remove(NeoMethodPolicy.METHOD_GET);
     return writes;
   }
 
@@ -408,9 +433,8 @@ final class McpParentScope {
     boolean declared = McpParentSection.isSameRecord(r.config);
     boolean actual = r.parentTab != null && sameTable(r.tab, r.parentTab);
     if (declared && !actual) {
-      return unresolvable(r.tab,
-          "MCP_CONFIG declares mode 'sameRecord' but this tab's table differs from its parent's",
-          r.optional, r.reason);
+      return unresolvable(r,
+          "MCP_CONFIG declares mode 'sameRecord' but this tab's table differs from its parent's");
     }
     if (!actual) {
       return null;
@@ -423,12 +447,12 @@ final class McpParentScope {
   private static Scope declaredScope(Resolution r, String declared) {
     Property property = resolveProperty(r.dalEntity, declared);
     if (property == null) {
-      return unresolvable(r.tab, "MCP_CONFIG parent.field '" + declared
-          + "' matches no property or column of " + r.dalEntity.getName(), r.optional, r.reason);
+      return unresolvable(r, "MCP_CONFIG parent.field '" + declared
+          + "' matches no property or column of " + r.dalEntity.getName());
     }
     if (property.isPrimitive() || property.getTargetEntity() == null) {
-      return unresolvable(r.tab, "MCP_CONFIG parent.field '" + declared
-          + "' is not a foreign key — filtering by parent needs a reference", r.optional, r.reason);
+      return unresolvable(r, "MCP_CONFIG parent.field '" + declared
+          + "' is not a foreign key — filtering by parent needs a reference");
     }
     // Deliberately not an error when it disagrees with the SEQNO parent: the 17 mismatched
     // entities are exactly the case where the declaration is meant to override the heuristic.
@@ -449,13 +473,13 @@ final class McpParentScope {
    */
   private static Scope heuristicScope(Resolution r) {
     if (r.parentTab == null) {
-      return unresolvable(r.tab, "its parent tab could not be resolved", r.optional, r.reason);
+      return unresolvable(r, "its parent tab could not be resolved");
     }
     List<Property> candidates = parentLinkProperties(r.tab, r.dalEntity);
     if (candidates.isEmpty()) {
-      return unresolvable(r.tab, "it declares no active parent-link column. Set MCP_CONFIG "
-          + "parent.field to the property that links it to '"
-          + r.parentTab.getTable().getDBTableName() + "'", r.optional, r.reason);
+      return unresolvable(r, "it declares no active parent-link column",
+          "Set MCP_CONFIG parent.field to the property that links it to '"
+              + r.parentTab.getTable().getDBTableName() + "'");
     }
     for (Property candidate : candidates) {
       if (targetsTableOf(candidate, r.parentTab)) {
@@ -467,15 +491,32 @@ final class McpParentScope {
     for (Property candidate : candidates) {
       names.add(candidate.getName());
     }
-    return unresolvable(r.tab, "none of its parent-link fields " + names + " points at the parent tab "
-        + "table '" + r.parentTab.getTable().getDBTableName() + "'. Set MCP_CONFIG parent.field to "
-        + "the correct one", r.optional, r.reason);
+    return unresolvable(r, "none of its parent-link fields " + names + " points at the parent tab "
+        + "table '" + r.parentTab.getTable().getDBTableName() + "'",
+        "Set MCP_CONFIG parent.field to the correct one");
   }
 
-  private static Scope unresolvable(Tab tab, String why, Set<String> optional, String reason) {
-    String problem = "cannot determine the parent of tab '" + tab.getName() + "': " + why;
+  /**
+   * An unresolvable scope that still names its parent entity when the parent tab is known.
+   *
+   * <p>Only the link column is missing — the parent tab usually is not — and the
+   * {@code parent_unresolvable} refusal needs the parent's name to point the agent at a call it can
+   * make as is (ETP-5558). Looked up exactly as a resolved scope looks it up.</p>
+   */
+  private static Scope unresolvable(Resolution r, String why) {
+    return unresolvable(r, why, null);
+  }
+
+  /**
+   * @param remedy what whoever configures the entity should do about it, or {@code null}. Part of
+   *               the problem {@code configError} and the log show; left out of the agent's text
+   */
+  private static Scope unresolvable(Resolution r, String why, String remedy) {
+    String agentProblem = "cannot determine the parent of tab '" + r.tab.getName() + "': " + why;
+    String problem = remedy == null ? agentProblem : agentProblem + ". " + remedy;
     log.warn("Parent scope unresolvable — {}", problem);
-    return new Scope(Kind.UNRESOLVABLE, null, null, optional, reason, problem);
+    return new Scope(Kind.UNRESOLVABLE, null, parentEntityName(r.entity, r.parentTab, r.config),
+        r.optional, r.reason, problem, agentProblem);
   }
 
   // -- model helpers --------------------------------------------------------
@@ -583,6 +624,32 @@ final class McpParentScope {
     return null;
   }
 
+  /** The key a broken configuration is reported under, by every tool that describes an entity. */
+  static final String KEY_CONFIG_ERROR = "configError";
+
+  /**
+   * Report an unusable {@code MCP_CONFIG} on any entity, header or child (ETP-5558).
+   *
+   * <p>{@link #publishInto} covers children only: the scope of a header entity is {@code NOT_CHILD}
+   * before the configuration is ever read. Since {@code MCP_CONFIG.verbs} fails closed — an unusable
+   * configuration hides every MCP write — a header in that state lost its writes with nothing
+   * saying why. This names the problem wherever the configuration is unusable; it adds nothing when
+   * {@link #publishInto} already reported one.</p>
+   *
+   * @param target the response object to decorate
+   * @param entity the entity being described
+   * @throws JSONException if the key cannot be written
+   */
+  static void publishConfigError(JSONObject target, SFEntity entity) throws JSONException {
+    if (target.has(KEY_CONFIG_ERROR) || entity == null) {
+      return;
+    }
+    McpEntityConfig.Resolved resolved = McpEntityConfig.forEntity(entity);
+    if (!resolved.isUsable()) {
+      target.put(KEY_CONFIG_ERROR, resolved.describeProblems());
+    }
+  }
+
   /**
    * The refusal an agent gets when it omits a required parent key.
    *
@@ -613,7 +680,7 @@ final class McpParentScope {
    * Copy a scope's descriptor onto a response object, so every tool that describes an entity
    * describes it identically.
    *
-   * <p>{@code neo_discover} and {@code neo_schema} both need this block, and an agent that reads
+   * <p>{@code etendo_discover} and {@code etendo_schema} both need this block, and an agent that reads
    * {@code parentField} from one and then calls the other must find the same key spelled the same
    * way. Duplicating the merge loop in each caller is how those two drift apart, so the loop lives
    * here and the callers pass their own target.</p>
@@ -628,7 +695,7 @@ final class McpParentScope {
    */
   static void publishInto(JSONObject target, Scope scope) throws JSONException {
     if (!scope.isPublishable()) {
-      target.put("configError", scope.getProblem());
+      target.put(KEY_CONFIG_ERROR, scope.getProblem());
     }
     Optional<JSONObject> parentInfo = scope.describe();
     if (parentInfo.isEmpty()) {

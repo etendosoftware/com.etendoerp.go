@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -57,21 +58,30 @@ import org.junit.Test;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * Unit tests for private utility methods in {@link NeoAttachmentsHelper}.
+ * Unit tests for {@link NeoAttachmentsHelper}.
  *
- * <p>These tests focus on deterministic helpers (file-name sanitization,
- * content-disposition formatting, date formatting and temp-file cleanup)
- * to keep coverage fast and independent from DAL/CDI infrastructure.</p>
+ * <p>Covers the deterministic helpers (file-name sanitization, content-disposition
+ * formatting, date formatting, temp-file cleanup) and the endpoint handlers. The
+ * handlers run without a live DAL/CDI container: {@code OBDal}, {@code ModelProvider},
+ * {@code OBContext} and {@code WeldUtils} are replaced with Mockito static mocks.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
  */
 public class NeoAttachmentsHelperTest {
 
@@ -376,6 +386,85 @@ public class NeoAttachmentsHelperTest {
     }
   }
 
+  /**
+   * ETP-5526 — the count endpoint validates its inputs exactly like the list, before any DB access.
+   */
+  @Test
+  public void handleCountRejectsBlankInputs() throws Exception {
+    String[][] cases = { { " ", "REC1" }, { "C_Order", null }, { null, "" } };
+    for (String[] c : cases) {
+      NeoResponse response = NeoAttachmentsHelper.handleCount(c[0], c[1]);
+      assertEquals(c[0] + "/" + c[1], 400, response.getHttpStatus());
+      assertEquals("tableName and recordId are required", errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5526 — an unknown table maps to 404, like the list.
+   */
+  @Test
+  public void handleCountReturnsNotFoundWhenTableCannotBeResolved() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubUnknownTableLookup(dal);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleCount("C_Order", "REC1");
+
+      assertEquals(404, response.getHttpStatus());
+      assertEquals("Unknown table: C_Order", errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5526 — any other failure while counting maps to a generic 500.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleCountReturnsInternalErrorOnUnexpectedFailure() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableLookup(dal, "TABLE1");
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    when(criteria.count()).thenThrow(new RuntimeException("db down"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleCount("C_Order", "REC1");
+
+      assertEquals(500, response.getHttpStatus());
+      assertEquals("Internal error counting attachments", errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5526 — success returns {count: N} from a COUNT query (the attachments are never
+   * loaded) with the organization filter off, as the list does, so N equals the list length.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleCountReturnsCountWithoutLoadingAttachments() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    stubTableLookup(dal, "TABLE1");
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    when(criteria.count()).thenReturn(3);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleCount("C_Order", "REC1");
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(3, response.getBody().getInt("count"));
+      verify(criteria).setFilterOnReadableOrganization(false);
+      verify(criteria).count();
+      verify(criteria, never()).list();
+    }
+  }
+
   private static Attachment stubAttachment(String id, String name) {
     Attachment attachment = mock(Attachment.class);
     when(attachment.getId()).thenReturn(id);
@@ -603,6 +692,223 @@ public class NeoAttachmentsHelperTest {
     }
   }
 
+  /**
+   * Verifies deletes of attachments belonging to any table OTHER than a fiscal declaration are
+   * completely unaffected by the ETP-5432 guard — the very first check
+   * ({@code table.getDBTableName()} mismatch) short-circuits before any DAL lookup of a
+   * declaration happens at all.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentOfNonFiscalDeclTable() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_Invoice");
+    when(attachment.getTable()).thenReturn(table);
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * Verifies deletes of an attachment with no owning table at all (never wired to any AD_Table)
+   * are unaffected — {@code table == null} short-circuits the guard the same way a table
+   * mismatch does.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWithNoTable() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    when(attachment.getTable()).thenReturn(null);
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * ETP-5432: verifies the delete is REJECTED (409) when the attachment belongs to a fiscal
+   * declaration whose {@code declarationStatus} is anything other than draft — the live scenario
+   * the guard was written for (a justificante of an already-presented declaration).
+   */
+  @Test
+  public void handleDeleteRejectsAttachmentOfNonDraftFiscalDecl() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("presented");
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(409, response.getHttpStatus());
+      assertEquals(
+          "Cannot delete an attachment of a fiscal declaration that is not in draft status: DECL1",
+          errorMessage(response));
+    }
+  }
+
+  /**
+   * ETP-5432: verifies the delete PROCEEDS when the owning fiscal declaration is still a draft —
+   * the guard must not block the ordinary case of removing a justificante before presentation.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentOfDraftFiscalDecl() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS))
+        .thenReturn(FiscalDeclCrudHandler.DEFAULT_STATUS);
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * ETP-5432 edge case: the owning declaration record id is blank (should not normally happen,
+   * but {@code Attachment.getRecord()} is a free-text AD_Record_ID) — the guard must not attempt
+   * a DAL lookup with a blank id and must let the delete proceed.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWhenRecordIdIsBlank() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn(" ");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+      verify(dal, never()).get(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), any());
+    }
+  }
+
+  /**
+   * ETP-5432 edge case: the owning declaration record no longer exists (already deleted) — the
+   * guard has nothing left to enforce, so the attachment delete must still proceed.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWhenOwningDeclNotFound() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(null);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
+
+  /**
+   * ETP-5432 edge case: the owning declaration exists but has no {@code declarationStatus} value
+   * at all (blank) — the guard's {@code StringUtils.isNotBlank(statusStr)} check must treat a
+   * blank status the same as "no status recorded" and let the delete proceed, rather than
+   * defaulting to "not draft" and blocking a perfectly deletable attachment.
+   */
+  @Test
+  public void handleDeleteAllowsAttachmentWhenDeclStatusIsBlank() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Attachment attachment = mock(Attachment.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    when(attachment.getTable()).thenReturn(table);
+    when(attachment.getRecord()).thenReturn("DECL1");
+    when(dal.get(Attachment.class, "ATT1")).thenReturn(attachment);
+
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(null);
+    when(dal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "DECL1")).thenReturn(decl);
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleDelete("ATT1");
+
+      assertEquals(204, response.getHttpStatus());
+      verify(aim).delete(attachment);
+    }
+  }
 
   /**
    * Verifies main-lookup validation for blank table/record identifiers.
@@ -1097,6 +1403,178 @@ public class NeoAttachmentsHelperTest {
       assertEquals(400, response.getHttpStatus());
       assertTrue(errorMessage(response).contains("Could not resolve a standard tab"));
       verify(dal, times(2)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * ETP-5309 repro: uploading against a record that does not exist (the SPA's unsaved
+   * literal id {@code "new"}) answers a clean 404 before the core is reached, instead of
+   * the core's raw OBSecurityException surfacing as a 500.
+   */
+  @Test
+  public void handleUploadReturnsNotFoundWhenOwningRecordDoesNotExist() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    Part part = mock(Part.class);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+
+    when(request.getContentType()).thenReturn("multipart/form-data");
+    when(request.getPart("file")).thenReturn(part);
+    when(request.getParameter("tabId")).thenReturn("TAB1");
+    when(part.getSubmittedFileName()).thenReturn("order-1.pdf");
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
+    when(entity.getName()).thenReturn("Order");
+    when(dal.get("Order", "new")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "new", request, false);
+
+      assertEquals(404, response.getHttpStatus());
+      assertEquals("Record 'new' does not exist in table 'C_Order'. Save it before attaching files.",
+          errorMessage(response));
+      contextMock.verify(() -> OBContext.setAdminMode(true));
+      contextMock.verify(OBContext::restorePreviousMode);
+      weldMock.verifyNoInteractions();
+      // The check runs before the payload is materialized: no temp file is ever written.
+      verify(part, never()).getInputStream();
+    }
+  }
+
+  /** A minimal valid PDF payload, so {@link NeoAttachmentPolicy#validateContent} accepts it. */
+  private static Part stubPdfPart(String fileName) throws Exception {
+    Part part = mock(Part.class);
+    when(part.getSubmittedFileName()).thenReturn(fileName);
+    when(part.getInputStream()).thenAnswer(inv -> new ByteArrayInputStream(
+        "%PDF-1.4\n%%EOF\n".getBytes(StandardCharsets.US_ASCII)));
+    return part;
+  }
+
+  private static HttpServletRequest stubUploadRequest(Part part) throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getContentType()).thenReturn("multipart/form-data");
+    when(request.getPart("file")).thenReturn(part);
+    when(request.getParameter("tabId")).thenReturn("TAB1");
+    return request;
+  }
+
+  private static void stubCurrentOrganization(MockedStatic<OBContext> contextMock, String orgId) {
+    OBContext context = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(context.getCurrentOrganization()).thenReturn(org);
+    contextMock.when(OBContext::getOBContext).thenReturn(context);
+  }
+
+  /**
+   * ETP-5309: when the owning record exists, the existence check lets the upload through to
+   * the core — looked up by the table's DAL entity, in admin mode, which is then restored.
+   */
+  @Test
+  public void handleUploadReachesCoreWhenOwningRecordExists() throws Exception {
+    Part part = stubPdfPart("etp5309-existing-" + System.nanoTime() + ".pdf");
+    HttpServletRequest request = stubUploadRequest(part);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
+    when(entity.getName()).thenReturn("Order");
+    when(dal.get("Order", "REC1")).thenReturn(mock(BaseOBObject.class));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      stubCurrentOrganization(contextMock, "ORG1");
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
+
+      assertEquals(201, response.getHttpStatus());
+      verify(dal).get("Order", "REC1");
+      verify(aim).upload(any(), eq("TAB1"), eq("REC1"), eq("ORG1"), any(File.class));
+      contextMock.verify(() -> OBContext.setAdminMode(true));
+      contextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * ETP-5309: a table with no DAL entity is not checked — exactly as the core skips it — so
+   * the upload proceeds without a lookup and without touching admin mode.
+   */
+  @Test
+  public void handleUploadSkipsRecordCheckWhenTableHasNoEntity() throws Exception {
+    Part part = stubPdfPart("etp5309-noentity-" + System.nanoTime() + ".pdf");
+    HttpServletRequest request = stubUploadRequest(part);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      stubCurrentOrganization(contextMock, "ORG1");
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
+
+      assertEquals(201, response.getHttpStatus());
+      verify(dal, never()).get(anyString(), any());
+      verify(aim).upload(any(), eq("TAB1"), eq("REC1"), eq("ORG1"), any(File.class));
+      contextMock.verify(() -> OBContext.setAdminMode(true), never());
+    }
+  }
+
+  /**
+   * ETP-5309: admin mode entered for the existence lookup is restored even when the lookup
+   * throws; the failure surfaces as the handler's 500 and nothing reaches the core.
+   */
+  @Test
+  public void handleUploadRestoresAdminModeWhenRecordLookupThrows() throws Exception {
+    Part part = stubPdfPart("etp5309-throws-" + System.nanoTime() + ".pdf");
+    HttpServletRequest request = stubUploadRequest(part);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
+    when(entity.getName()).thenReturn("Order");
+    when(dal.get("Order", "REC1")).thenThrow(new OBException("lookup failed"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
+
+      assertEquals(500, response.getHttpStatus());
+      assertEquals("lookup failed", errorMessage(response));
+      contextMock.verify(() -> OBContext.setAdminMode(true));
+      contextMock.verify(OBContext::restorePreviousMode);
+      verify(dal).rollbackAndClose();
+      verify(part, never()).getInputStream();
+      weldMock.verifyNoInteractions();
     }
   }
 

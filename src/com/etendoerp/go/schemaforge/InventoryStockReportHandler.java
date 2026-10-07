@@ -47,6 +47,8 @@ public class InventoryStockReportHandler implements NeoHandler {
 
   private static final String PARAM_PRODUCT_ID = "M_Product_ID";
   private static final String PARAM_WAREHOUSE_ID = "M_Warehouse_ID";
+  private static final String PARAM_CATEGORY_ID = "M_Product_Category_ID";
+  private static final String PARAM_INCLUDE_ZERO_STOCK = "includeZeroStock";
 
   /**
    * {@code AD_Window_ID} of the brand-new pseudo-{@code AD_Window} ("Informes de inventario" /
@@ -79,12 +81,22 @@ public class InventoryStockReportHandler implements NeoHandler {
                 + "Default: every product."),
         NeoReportParam.optional(PARAM_WAREHOUSE_ID, NeoReportParam.TYPE_STRING,
             "Restrict to these warehouses: one M_Warehouse id, or several separated by commas. "
-                + "Default: every warehouse in the session's organization tree.")));
+                + "Default: every warehouse in the session's organization tree."),
+        NeoReportParam.optional(PARAM_CATEGORY_ID, NeoReportParam.TYPE_STRING,
+            "Restrict to these product categories: one M_Product_Category id, or several "
+                + "separated by commas. Default: every category."),
+        NeoReportParam.optional(PARAM_INCLUDE_ZERO_STOCK, NeoReportParam.TYPE_BOOLEAN,
+            "Include products whose on-hand quantity is zero. Default: false.")));
+  }
+
+  @Override
+  public boolean isAccessibleForCurrentRole() {
+    return NeoAccessHelper.hasWindowAccess(INVENTORY_STOCK_REPORT_WINDOW_ID);
   }
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (!NeoAccessHelper.hasWindowAccess(INVENTORY_STOCK_REPORT_WINDOW_ID)) {
+    if (!isAccessibleForCurrentRole()) {
       return NeoResponse.error(403, "Access denied");
     }
 
@@ -97,11 +109,16 @@ public class InventoryStockReportHandler implements NeoHandler {
 
       List<String> productIds = parseIds(body.optString(PARAM_PRODUCT_ID, ""));
       List<String> warehouseIds = parseIds(body.optString(PARAM_WAREHOUSE_ID, ""));
-      List<String> categoryIds = parseIds(body.optString("M_Product_Category_ID", ""));
-      boolean includeZeroStock = body.optBoolean("includeZeroStock", false);
+      List<String> categoryIds = parseIds(body.optString(PARAM_CATEGORY_ID, ""));
+      boolean includeZeroStock = body.optBoolean(PARAM_INCLUDE_ZERO_STOCK, false);
 
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      // ETP-5419 — c_uom.name is only the base (English) name; c_uom_trl carries
+      // the session-language translation, same pattern as TaxReportHandler's
+      // c_country_trl join and FinancialAccountTransactionsHandler's
+      // ad_ref_list_trl join.
+      String language = OBContext.getOBContext().getLanguage().getLanguage();
       Set<String> orgTree = OBContext.getOBContext()
           .getOrganizationStructureProvider(clientId)
           .getNaturalTree(orgId);
@@ -114,18 +131,29 @@ public class InventoryStockReportHandler implements NeoHandler {
       // '0' is Etendo's "*" organization — shared master data visible to every org —
       // so both products and warehouses stay visible when they carry it, exactly like
       // the org-tree check everywhere else in this handler.
+      //
+      // ETP-5492 — includeZeroStock must only surface a zero-stock pair that ACTUALLY
+      // had movement history, not every product×warehouse combination the CROSS JOIN
+      // produces. m_storage_detail's own presence isn't a safe "had movement" proxy
+      // (it's a derived/current-state table, not a ledger — see the EXISTS below),
+      // so this checks m_transaction directly, the same table the Product window's
+      // sidebar already reads to decide "Sin movimientos de stock" vs "Disponible 0"
+      // (ProductSidebar.jsx's /transactions call, entity M_Transaction). Scoped here
+      // additionally by warehouse (via m_locator), which that sidebar does not do —
+      // this report is per-warehouse, the sidebar isn't.
       StringBuilder sql = new StringBuilder("SELECT "
           + "wh.name AS warehouse, "
           + "COALESCE(pc.name, '') AS category_name, "
           + "p.value AS product_search_key, "
           + "p.name AS product_name, "
-          + "COALESCE(uom.name, '') AS uom_name, "
+          + "COALESCE(uomt.name, uom.name, '') AS uom_name, "
           + "COALESCE(SUM(sd.qtyonhand), 0) AS qty_on_hand, "
           + "COALESCE(cost.cost, 0) AS unit_cost, "
           + "COALESCE(SUM(sd.qtyonhand), 0) * COALESCE(cost.cost, 0) AS total_valuation "
           + "FROM m_product p "
           + "CROSS JOIN m_warehouse wh "
           + "LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id "
+          + "LEFT JOIN c_uom_trl uomt ON uomt.c_uom_id = uom.c_uom_id AND uomt.ad_language = :lang "
           + "LEFT JOIN m_product_category pc ON pc.m_product_category_id = p.m_product_category_id "
           + "LEFT JOIN m_locator l ON l.m_warehouse_id = wh.m_warehouse_id "
           + "LEFT JOIN m_storage_detail sd ON sd.m_locator_id = l.m_locator_id "
@@ -153,14 +181,29 @@ public class InventoryStockReportHandler implements NeoHandler {
       appendOptionalFilters(sql, productIds, warehouseIds, categoryIds);
 
       sql.append(
-          "GROUP BY wh.name, pc.name, p.value, p.name, uom.name, cost.cost "
-          + "HAVING (:includeZeroStock = true OR COALESCE(SUM(sd.qtyonhand), 0) <> 0) "
+          // ETP-5492: p.m_product_id and wh.m_warehouse_id are added here solely so the
+          // correlated EXISTS below is legal — Postgres only exempts a table's ungrouped
+          // columns from GROUP BY when its DECLARED PRIMARY KEY is itself grouped by, and
+          // p.value/wh.name are business keys, not the PK, so referencing p.m_product_id/
+          // wh.m_warehouse_id inside EXISTS without them here is rejected at query time
+          // ("subquery uses ungrouped column"). Both are 1:1 with p.value/wh.name already,
+          // so this changes nothing about which rows get grouped together.
+          "GROUP BY wh.name, wh.m_warehouse_id, pc.name, p.value, p.name, p.m_product_id, "
+          + "uom.name, uomt.name, cost.cost "
+          + "HAVING (COALESCE(SUM(sd.qtyonhand), 0) <> 0 "
+          + "  OR (:includeZeroStock = true AND EXISTS ( "
+          + "    SELECT 1 FROM m_transaction t "
+          + "    JOIN m_locator tl ON tl.m_locator_id = t.m_locator_id "
+          + "    WHERE t.m_product_id = p.m_product_id "
+          + "      AND tl.m_warehouse_id = wh.m_warehouse_id "
+          + "  ))) "
           + "ORDER BY wh.name, p.value, p.name");
 
       NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql.toString());
       query.setParameter("clientId", clientId);
       query.setParameterList("orgIds", orgTree);
       query.setParameter("includeZeroStock", includeZeroStock);
+      query.setParameter("lang", language);
       bindOptionalParameters(query, productIds, warehouseIds, categoryIds);
 
       List<Object[]> rows = query.list();

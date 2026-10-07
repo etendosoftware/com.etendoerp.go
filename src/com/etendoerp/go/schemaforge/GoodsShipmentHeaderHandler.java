@@ -267,8 +267,11 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    *       {@link #enrichLinkedOrder} (i.e. {@code shipmentRec.linkedOrders[0]}), which this
    *       method reads rather than re-querying;</li>
    *   <li>otherwise, the Business Partner's own configured price list;</li>
-   *   <li>otherwise, neither field is added — the frontend picker already falls back to the
-   *       system default price list on its own.</li>
+   *   <li>otherwise, the client's own DEFAULT sales price list — matching what Etendo Classic
+   *       falls back to when a Business Partner has none configured (ETP-5410 follow-up: this
+   *       tier used to be missing, leaving the field empty — this modal's own picker never
+   *       fills it in on its own, since {@code CreateInvoiceConfirmModal} always disables the
+   *       generic fallback here).</li>
    * </ol>
    * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
    * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
@@ -281,7 +284,10 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       if (applyPriceListFromLinkedOrder(shipmentRec)) {
         return;
       }
-      applyPriceListFromBusinessPartner(shipmentRec, shipmentId);
+      if (applyPriceListFromBusinessPartner(shipmentRec, shipmentId)) {
+        return;
+      }
+      applyClientDefaultPriceList(shipmentRec);
     } catch (Exception e) {
       log.warn("Could not resolve price list for shipment {}: {}", shipmentId, e.getMessage());
     }
@@ -307,15 +313,35 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     return true;
   }
 
-  private void applyPriceListFromBusinessPartner(JSONObject shipmentRec, String shipmentId)
+  private boolean applyPriceListFromBusinessPartner(JSONObject shipmentRec, String shipmentId)
       throws JSONException {
     try {
       OBContext.setAdminMode(true);
       ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, shipmentId);
       if (shipment == null || shipment.getBusinessPartner() == null) {
-        return;
+        return false;
       }
       PriceList priceList = shipment.getBusinessPartner().getPriceList();
+      if (priceList != null) {
+        shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
+        return true;
+      }
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Tier-3 fallback of {@link #enrichResolvedPriceList}: the client's own DEFAULT sales price
+   * list, reusing {@code MultiDocumentInvoiceSupport}'s lookup rather than a second copy of the
+   * same Criteria query.
+   */
+  private void applyClientDefaultPriceList(JSONObject shipmentRec) throws JSONException {
+    try {
+      OBContext.setAdminMode(true);
+      PriceList priceList = MultiDocumentInvoiceSupport.findDefaultPriceList(true);
       if (priceList != null) {
         shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
         shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
@@ -325,25 +351,25 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Injects {@code linkedInvoices}: every invoice linked to one of this shipment's lines, through
+   * {@link InOutInvoiceLinks#linkedInvoiceIdsSql} — the invoice line's {@code M_InOutLine_ID}
+   * (invoice created FROM this shipment, or this shipment created from the invoice), the
+   * {@code M_MatchSI} match table (read since ETP-5576: a second partial shipment of an invoice
+   * line can only be linked there), and the pre-existing shared {@code C_OrderLine_ID} arm.
+   */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedInvoices(JSONObject shipmentRec, String shipmentId) {
-    // Covers both flows with a single scan:
-    // - invoice created FROM this shipment: c_invoiceline.m_inoutline_id = shipment line
-    // - shipment created FROM invoice (via order): shared c_orderline_id
     String sql =
         "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code " +
-        "FROM m_inoutline sil " +
-        "JOIN c_invoiceline il ON (" +
-        "  il.m_inoutline_id = sil.m_inoutline_id " +
-        "  OR (sil.c_orderline_id IS NOT NULL AND il.c_orderline_id = sil.c_orderline_id)" +
-        ") " +
-        "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
+        "FROM (" + InOutInvoiceLinks.linkedInvoiceIdsSql(InOutInvoiceLinks.MatchTable.SALES) + ") lk " +
+        "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id " +
         "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id " +
-        "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y' " +
-        "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
+        "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, shipmentId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, shipmentId, InOutInvoiceLinks.LINKED_INVOICES_PARAMS);
       JSONArray invoices = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

@@ -63,6 +63,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
+  private static final String FIELD_RESOLVED_PRICE_LIST_ID = "resolvedPriceListId";
+  private static final String FIELD_RESOLVED_PRICE_LIST_IDENTIFIER = "resolvedPriceList$_identifier";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -289,21 +291,23 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       + "GROUP BY iol.m_inout_id";
   }
 
+  /**
+   * Injects {@code linkedInvoices}: every invoice linked to one of this receipt's lines, through
+   * {@link InOutInvoiceLinks#linkedInvoiceIdsSql} — the invoice line's {@code M_InOutLine_ID},
+   * the {@code M_MatchInv} match table (read since ETP-5576: a second partial receipt of an
+   * invoice line can only be linked there) and the pre-existing shared {@code C_OrderLine_ID} arm.
+   */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedInvoices(JSONObject rec, String receiptId) {
     String sql =
         "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code "
-        + "FROM m_inoutline ril "
-        + "JOIN c_invoiceline il ON ("
-        + "  il.m_inoutline_id = ril.m_inoutline_id "
-        + "  OR (ril.c_orderline_id IS NOT NULL AND il.c_orderline_id = ril.c_orderline_id)"
-        + ") "
-        + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+        + "FROM (" + InOutInvoiceLinks.linkedInvoiceIdsSql(InOutInvoiceLinks.MatchTable.PURCHASE) + ") lk "
+        + "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id "
         + "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id "
-        + "WHERE ril.m_inout_id = ? AND ril.isactive = 'Y' "
-        + "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO','CL')";
+        + "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO','CL')";
     try (PreparedStatement ps = OBDal.getReadOnlyInstance().getConnection().prepareStatement(sql)) {
-      ps.setString(1, receiptId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, receiptId, InOutInvoiceLinks.LINKED_INVOICES_PARAMS);
       JSONArray invoices = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -433,9 +437,11 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
    *   <li>otherwise, the Business Partner's own configured PURCHASE price list
    *       ({@code BusinessPartner#getPurchasePricelist()} — never {@code getPriceList()},
    *       which is the sales tariff);</li>
-   *   <li>otherwise, neither field is added — the frontend picker leaves the tariff empty
-   *       and blocks confirm, matching {@code createFromReceiptNoPo}'s own hard failure
-   *       when no purchase price list can be resolved at all.</li>
+   *   <li>otherwise, the client's own DEFAULT purchase price list — matching what Etendo
+   *       Classic falls back to when a Business Partner has none configured (ETP-5410
+   *       follow-up: this tier used to be missing, leaving the field empty — this modal's own
+   *       picker never fills it in on its own, since {@code CreateInvoiceConfirmModal} always
+   *       disables the generic fallback here).</li>
    * </ol>
    * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
    * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
@@ -448,7 +454,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       if (applyPriceListFromLinkedOrder(rec)) {
         return;
       }
-      applyPriceListFromBusinessPartner(rec, receiptId);
+      if (applyPriceListFromBusinessPartner(rec, receiptId)) {
+        return;
+      }
+      applyClientDefaultPriceList(rec);
     } catch (Exception e) {
       log.warn("Could not resolve price list for receipt {}: {}", receiptId, e.getMessage());
     }
@@ -469,23 +478,43 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     Object rawPriceListName = firstOrder.opt("priceList$_identifier");
     Object priceListName = (rawPriceListName == null || JSONObject.NULL.equals(rawPriceListName))
         ? JSONObject.NULL : rawPriceListName.toString();
-    rec.put("resolvedPriceListId", priceListId);
-    rec.put("resolvedPriceList$_identifier", priceListName);
+    rec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceListId);
+    rec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceListName);
     return true;
   }
 
-  private void applyPriceListFromBusinessPartner(JSONObject rec, String receiptId)
+  private boolean applyPriceListFromBusinessPartner(JSONObject rec, String receiptId)
       throws JSONException {
     try {
       OBContext.setAdminMode(true);
       ShipmentInOut receipt = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, receiptId);
       if (receipt == null || receipt.getBusinessPartner() == null) {
-        return;
+        return false;
       }
       PriceList priceList = receipt.getBusinessPartner().getPurchasePricelist();
       if (priceList != null) {
-        rec.put("resolvedPriceListId", priceList.getId());
-        rec.put("resolvedPriceList$_identifier", priceList.getName());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
+        return true;
+      }
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Tier-3 fallback of {@link #enrichResolvedPriceList}: the client's own DEFAULT purchase
+   * price list, reusing {@code MultiDocumentInvoiceSupport}'s lookup rather than a second copy
+   * of the same Criteria query.
+   */
+  private void applyClientDefaultPriceList(JSONObject rec) throws JSONException {
+    try {
+      OBContext.setAdminMode(true);
+      PriceList priceList = MultiDocumentInvoiceSupport.findDefaultPriceList(false);
+      if (priceList != null) {
+        rec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
       }
     } finally {
       OBContext.restorePreviousMode();

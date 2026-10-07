@@ -100,17 +100,28 @@ class PaymentRegistrationServiceTest {
   private Session session;
 
   private MockedStatic<OBDal> obDalMock;
+  /**
+   * ETP-5558: request ids now go through {@link TenantOwnership}; tenancy is covered by
+   * {@code PaymentOwnershipTest}, so here every row is visible.
+   */
+  private MockedStatic<TenantOwnership> tenantMock;
   private MockedStatic<OBContext> obContextMock;
 
   @BeforeEach
   @SuppressWarnings("unchecked")
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
+    tenantMock = mockStatic(TenantOwnership.class, org.mockito.Answers.CALLS_REAL_METHODS);
+    tenantMock.when(() -> TenantOwnership.isVisibleToCurrentTenant(
+        org.mockito.ArgumentMatchers.any())).thenReturn(true);
     obContextMock = mockStatic(OBContext.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
     when(obDal.getSession()).thenReturn(session);
+    // ETP-5558: invoicePayments checks the URL's invoice is the caller's before listing; a test
+    // that needs "not found" stubs null explicitly, which overrides this.
+    when(obDal.get(Invoice.class, "inv-1")).thenReturn(mock(Invoice.class));
 
     // paymentListItem (exercised by every handleListPayments test with a non-empty result)
     // calls PisPaymentService.linkedPisPayment for the "viaPis" badge — stub it here once
@@ -131,8 +142,15 @@ class PaymentRegistrationServiceTest {
     when(creditCriteria.list()).thenReturn(Collections.emptyList());
   }
 
+  /** ETP-5558: the installment must be the invoice's own to be paid through it. */
+  private static void linkToInvoice(FIN_PaymentSchedule schedule, Invoice invoice) {
+    when(invoice.getId()).thenReturn("inv-1");
+    when(schedule.getInvoice()).thenReturn(invoice);
+  }
+
   @AfterEach
   void tearDown() {
+    tenantMock.close();
     obDalMock.close();
     obContextMock.close();
   }
@@ -182,6 +200,7 @@ class PaymentRegistrationServiceTest {
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
         "inv-1", "sched-1", "not-a-number", "2026-01-15", "acc-1", true);
@@ -200,6 +219,7 @@ class PaymentRegistrationServiceTest {
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
         "inv-1", "sched-1", "100.00", "not-a-date", "acc-1", true);
@@ -218,6 +238,7 @@ class PaymentRegistrationServiceTest {
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(null);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
@@ -250,6 +271,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
@@ -279,6 +301,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // Mock the OBCriteria for findPendingPSDs - returns empty list
@@ -319,6 +342,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // findPendingPSDs returns one PSD
@@ -367,6 +391,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // Empty PSDs so we stop at that check (after currency passes)
@@ -402,6 +427,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     // Empty PSDs to stop at that validation
@@ -437,6 +463,7 @@ class PaymentRegistrationServiceTest {
 
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(schedule);
+    linkToInvoice(schedule, invoice);
     when(obDal.get(FIN_FinancialAccount.class, "acc-1")).thenReturn(account);
 
     OBCriteria<FIN_PaymentScheduleDetail> psdCriteria = mock(OBCriteria.class);
@@ -664,25 +691,23 @@ class PaymentRegistrationServiceTest {
     when(accountCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(accountCriteria);
     when(accountCriteria.list()).thenReturn(Arrays.asList(validAccount, invalidAccount));
 
-    // Payment method criteria - first call returns a method, second call returns empty
-    OBCriteria<FinAccPaymentMethod> methodCritValid = mock(OBCriteria.class);
-    OBCriteria<FinAccPaymentMethod> methodCritInvalid = mock(OBCriteria.class);
+    // ETP-5434: handleListAccounts now issues a SINGLE grouped FinAccPaymentMethod query for all
+    // listed accounts (loadAllowedMethodsByAccount) instead of one query per account, so there is
+    // only one createCriteria(FinAccPaymentMethod.class) call to stub. The row belongs to
+    // validAccount only (via getAccount()), so invalidAccount naturally gets no entry in the
+    // grouping map and is excluded — same outcome the old two-query setup produced.
+    OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
 
     FinAccPaymentMethod finAccMethod = mock(FinAccPaymentMethod.class);
     FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
     when(paymentMethod.getId()).thenReturn("pm-wire");
     when(paymentMethod.getName()).thenReturn("Wire Transfer");
     when(finAccMethod.getPaymentMethod()).thenReturn(paymentMethod);
+    when(finAccMethod.getAccount()).thenReturn(validAccount);
 
-    when(obDal.createCriteria(FinAccPaymentMethod.class))
-        .thenReturn(methodCritValid)
-        .thenReturn(methodCritInvalid);
-
-    when(methodCritValid.add(any(Criterion.class))).thenReturn(methodCritValid);
-    when(methodCritValid.list()).thenReturn(Collections.singletonList(finAccMethod));
-
-    when(methodCritInvalid.add(any(Criterion.class))).thenReturn(methodCritInvalid);
-    when(methodCritInvalid.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
+    when(methodCrit.add(any(Criterion.class))).thenReturn(methodCrit);
+    when(methodCrit.list()).thenReturn(Collections.singletonList(finAccMethod));
 
     NeoResponse response = PaymentRegistrationService.handleListAccounts(context, true);
 
@@ -801,6 +826,9 @@ class PaymentRegistrationServiceTest {
     when(paymentMethod.getId()).thenReturn("pm-cash");
     when(paymentMethod.getName()).thenReturn("Cash");
     when(finAccMethod.getPaymentMethod()).thenReturn(paymentMethod);
+    // ETP-5434: loadAllowedMethodsByAccount groups rows by fapm.getAccount().getId() — an
+    // unstubbed getAccount() returns null and NPEs the grouping.
+    when(finAccMethod.getAccount()).thenReturn(account);
 
     OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
@@ -865,8 +893,10 @@ class PaymentRegistrationServiceTest {
 
     FinAccPaymentMethod fapmA = mock(FinAccPaymentMethod.class);
     when(fapmA.getPaymentMethod()).thenReturn(methodA);
+    when(fapmA.getAccount()).thenReturn(account);
     FinAccPaymentMethod fapmB = mock(FinAccPaymentMethod.class);
     when(fapmB.getPaymentMethod()).thenReturn(methodB);
+    when(fapmB.getAccount()).thenReturn(account);
 
     OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
@@ -883,6 +913,85 @@ class PaymentRegistrationServiceTest {
     assertEquals("pm-B", methodIds.getString(1));
     // defaultPaymentMethod still comes from the first matching row, for backward compat.
     assertEquals("Wire Transfer", item.getString("defaultPaymentMethod"));
+  }
+
+  /**
+   * ETP-5434: pins {@code defaultPaymentMethod} to the {@code addOrderBy} clause
+   * {@link PaymentAccountMethodsLoader#loadAllowedMethodsByAccount} adds (order by payment-method
+   * name ascending), not to link-creation/insertion order. The two links below are created "Zulu"
+   * first, "Alpha" second, but the query result is stubbed the way the real name-ordered query
+   * would return it — Alpha first — so a correct implementation reports "Alpha Cash" as the
+   * default. The {@code verify(...)} on {@code addOrderBy} additionally locks the ORDER BY clause
+   * itself, so removing or changing it fails this test even if a future mock coincidentally kept
+   * insertion order.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListAccountsDefaultPaymentMethodFollowsNameOrderNotInsertionOrder()
+      throws Exception {
+    NeoContext context = NeoContext.builder()
+        .recordId("inv-1")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    Invoice invoice = mock(Invoice.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
+
+    when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
+    when(invoice.getClient()).thenReturn(client);
+    when(client.getId()).thenReturn("client-1");
+    when(invoice.getOrganization()).thenReturn(org);
+    when(org.getId()).thenReturn("org-1");
+    when(obContext.getOrganizationStructureProvider("client-1")).thenReturn(osp);
+    when(osp.getNaturalTree("org-1")).thenReturn(new HashSet<>(Collections.singleton("org-1")));
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn("acc-order");
+    when(account.getName()).thenReturn("Order Test Account");
+    when(account.getCurrency()).thenReturn(null);
+
+    OBCriteria<FIN_FinancialAccount> accountCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(FIN_FinancialAccount.class)).thenReturn(accountCriteria);
+    when(accountCriteria.setFilterOnReadableOrganization(anyBoolean())).thenReturn(accountCriteria);
+    when(accountCriteria.add(any(Criterion.class))).thenReturn(accountCriteria);
+    when(accountCriteria.addOrderBy(anyString(), anyBoolean())).thenReturn(accountCriteria);
+    when(accountCriteria.list()).thenReturn(Collections.singletonList(account));
+
+    // Linked in "Zulu, then Alpha" order — insertion order must NOT drive defaultPaymentMethod.
+    FIN_PaymentMethod zuluMethod = mock(FIN_PaymentMethod.class);
+    when(zuluMethod.getId()).thenReturn("pm-zulu");
+    when(zuluMethod.getName()).thenReturn("Zulu Transfer");
+    FinAccPaymentMethod zuluFapm = mock(FinAccPaymentMethod.class);
+    when(zuluFapm.getPaymentMethod()).thenReturn(zuluMethod);
+    when(zuluFapm.getAccount()).thenReturn(account);
+
+    FIN_PaymentMethod alphaMethod = mock(FIN_PaymentMethod.class);
+    when(alphaMethod.getId()).thenReturn("pm-alpha");
+    when(alphaMethod.getName()).thenReturn("Alpha Cash");
+    FinAccPaymentMethod alphaFapm = mock(FinAccPaymentMethod.class);
+    when(alphaFapm.getPaymentMethod()).thenReturn(alphaMethod);
+    when(alphaFapm.getAccount()).thenReturn(account);
+
+    OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
+    when(methodCrit.add(any(Criterion.class))).thenReturn(methodCrit);
+    when(methodCrit.addOrderBy(anyString(), anyBoolean())).thenReturn(methodCrit);
+    // Stubbed the way the DB would return it under "order by paymentMethod.name asc" — Alpha
+    // before Zulu — regardless of the order the two links were created above.
+    when(methodCrit.list()).thenReturn(Arrays.asList(alphaFapm, zuluFapm));
+
+    NeoResponse response = PaymentRegistrationService.handleListAccounts(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject item = response.getBody().getJSONArray("items").getJSONObject(0);
+    assertEquals("Alpha Cash", item.getString("defaultPaymentMethod"),
+        "defaultPaymentMethod must follow the name-ordered query result, not link creation order");
+
+    verify(methodCrit).addOrderBy(
+        FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD + "." + FIN_PaymentMethod.PROPERTY_NAME, true);
   }
 
   /**
@@ -1072,16 +1181,27 @@ class PaymentRegistrationServiceTest {
         .thenReturn(Arrays.asList(foreignAccount, nullCurrencyAccount));
 
     // Both accounts reach the method lookup now (no early currency return).
-    FinAccPaymentMethod finAccMethod = mock(FinAccPaymentMethod.class);
+    // ETP-5434: the grouped query returns ONE FinAccPaymentMethod row per account — a single
+    // shared row can no longer "belong" to two accounts the way the old per-account query (which
+    // ran the same stubbed criteria twice) made it look like it did. Each account gets its own row,
+    // grouped via getAccount().
     FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
     when(paymentMethod.getId()).thenReturn("pm-cash");
     when(paymentMethod.getName()).thenReturn("Cash");
-    when(finAccMethod.getPaymentMethod()).thenReturn(paymentMethod);
+
+    FinAccPaymentMethod foreignAccountMethod = mock(FinAccPaymentMethod.class);
+    when(foreignAccountMethod.getPaymentMethod()).thenReturn(paymentMethod);
+    when(foreignAccountMethod.getAccount()).thenReturn(foreignAccount);
+
+    FinAccPaymentMethod nullCurrencyAccountMethod = mock(FinAccPaymentMethod.class);
+    when(nullCurrencyAccountMethod.getPaymentMethod()).thenReturn(paymentMethod);
+    when(nullCurrencyAccountMethod.getAccount()).thenReturn(nullCurrencyAccount);
 
     OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
     when(methodCrit.add(any(Criterion.class))).thenReturn(methodCrit);
-    when(methodCrit.list()).thenReturn(Collections.singletonList(finAccMethod));
+    when(methodCrit.list())
+        .thenReturn(Arrays.asList(foreignAccountMethod, nullCurrencyAccountMethod));
 
     NeoResponse response = PaymentRegistrationService.handleListAccounts(context, true);
 
@@ -1146,9 +1266,11 @@ class PaymentRegistrationServiceTest {
     FinAccPaymentMethod fapmA = mock(FinAccPaymentMethod.class);
     when(fapmA.getPaymentMethod()).thenReturn(methodA);
     when(fapmA.isDefault()).thenReturn(Boolean.TRUE);
+    when(fapmA.getAccount()).thenReturn(account);
     FinAccPaymentMethod fapmB = mock(FinAccPaymentMethod.class);
     when(fapmB.getPaymentMethod()).thenReturn(methodB);
     when(fapmB.isDefault()).thenReturn(Boolean.FALSE);
+    when(fapmB.getAccount()).thenReturn(account);
 
     OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
@@ -1220,8 +1342,10 @@ class PaymentRegistrationServiceTest {
     FinAccPaymentMethod fapmA = mock(FinAccPaymentMethod.class);
     when(fapmA.getPaymentMethod()).thenReturn(methodA);
     when(fapmA.isDefault()).thenReturn(Boolean.FALSE);
+    when(fapmA.getAccount()).thenReturn(account);
     FinAccPaymentMethod fapmB = mock(FinAccPaymentMethod.class);
     when(fapmB.getPaymentMethod()).thenReturn(methodB);
+    when(fapmB.getAccount()).thenReturn(account);
 
     OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);
@@ -1894,6 +2018,8 @@ class PaymentRegistrationServiceTest {
     when(transfer.getName()).thenReturn("Transferencia bancaria");
     FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
     when(link.getPaymentMethod()).thenReturn(transfer);
+    // ETP-5434: loadAllowedMethodsByAccount groups by fapm.getAccount().getId().
+    when(link.getAccount()).thenReturn(account);
 
     OBCriteria<FinAccPaymentMethod> methodCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(methodCrit);

@@ -20,11 +20,14 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Collections;
+import java.util.List;
 
 import javax.inject.Inject;
 import javax.inject.Named;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -36,6 +39,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
@@ -54,6 +58,9 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentOutHandler}</li>
  *   <li>{@code Em_Aeatsii_Send} → {@link SiiSendHandler}</li>
  *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
+ *   <li>{@code createGoodsReceipt} → {@link FollowUpActionHandler} with a {@link FollowUpFlow}
+ *       of {@link InvoicePendingResolver} + {@link InOutFollowUpCreator} ({@code PURCHASE}): the
+ *       draft goods receipt for the still-pending quantities (ETP-5576)</li>
  * </ul>
  *
  * <p>Before the Complete action (documentAction=CO), creates the total discount line.
@@ -101,6 +108,25 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     this.postingService = postingService;
   }
 
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5558): the
+   * invoice payment actions and {@code currencyOptions}. Published by the MCP next to the AD
+   * buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts =
+        new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(false));
+    contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
+    return contracts;
+  }
+
+  /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
+  @Override
+  public Set<String> agentExcludedActions() {
+    return PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
@@ -108,7 +134,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
-    NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
@@ -118,10 +144,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (posting != null) {
       return posting;
     }
-    NeoResponse lineQtyError = validateLineQtyBeforeComplete(context);
-    if (lineQtyError != null) {
-      return lineQtyError;
-    }
+    // ETP-5381: the invoice quantity is NOT capped against the receipt any more. The order is the
+    // commitment; a receipt — especially an unconfirmed one — is not. See
+    // AbstractInvoiceHeaderHandler's "removed" note for the full rationale. Over-invoicing relative
+    // to the ORDER is still rejected, by the core, in C_INVOICE_POST (@QtyInvoicedHigherOrdered@).
     // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
     // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
@@ -141,7 +167,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         cloneRecordHandler,
         registerPaymentOutHandler,
         siiSendHandler,
-        tbaiXmlgeneratorHandler);
+        tbaiXmlgeneratorHandler,
+        followUp.actionHandler());
   }
 
   /**
@@ -205,6 +232,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         applyTotalDiscountToRecord(rec);
         enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
       }
+      // ETP-5576: followUp.{available, <key>}, one batch query per flow per page.
+      followUp.annotate(dataArr);
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichLinkedReceipts(rec, context.getRecordId());
@@ -225,6 +254,16 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Override
   protected TotalDiscountService getTotalDiscountService() {
     return totalDiscountService;
+  }
+
+  /** {@inheritDoc} A purchase invoice is followed by a goods receipt (ETP-5576). */
+  @Override
+  protected List<FollowUpFlow> followUpFlows() {
+    return Collections.singletonList(FollowUpFlow.of(FollowUpTarget.GOODS_RECEIPT,
+        new InvoicePendingResolver(InOutTargetBuilder.Direction.PURCHASE,
+            this::isStandardInvoiceDocType),
+        new InOutFollowUpCreator(InOutTargetBuilder.Direction.PURCHASE, InvoiceInOutMapping::map,
+            InvoiceInOutMapping.linker(InOutTargetBuilder.Direction.PURCHASE))));
   }
 
   // ---------------------------------------------------------------------------
@@ -262,23 +301,27 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   // ---------------------------------------------------------------------------
 
 
+  /**
+   * Injects {@code linkedReceipts} into the invoice detail record: every purchase goods movement
+   * linked to one of the invoice's lines, through {@link InOutInvoiceLinks#linkedInOutLineIdsSql}
+   * — the {@code C_InvoiceLine.M_InOutLine_ID} column, the {@code M_MatchInv} match table
+   * (read since ETP-5576, so the second and later partial receipts show up) and the pre-existing
+   * order-line fallback.
+   */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedReceipts(JSONObject rec, String invoiceId) {
     String sql =
         "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, dt.isreturn "
-        + "FROM c_invoiceline il "
-        + "JOIN m_inoutline iol ON ("
-        + "  iol.m_inoutline_id = il.m_inoutline_id "
-        + "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)"
-        + ") "
+        + "FROM (" + InOutInvoiceLinks.linkedInOutLineIdsSql(InOutInvoiceLinks.MatchTable.PURCHASE) + ") lk "
+        + "JOIN m_inoutline iol ON iol.m_inoutline_id = lk.m_inoutline_id "
         + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
         + "JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id "
-        + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
-        + "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') "
+        + "WHERE io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') "
         + "  AND io.issotrx = 'N'";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, invoiceId, InOutInvoiceLinks.LINKED_INOUT_LINES_PARAMS);
       JSONArray receipts = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

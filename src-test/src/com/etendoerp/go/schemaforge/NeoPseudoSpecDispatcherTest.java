@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,9 +35,12 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
+import com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitor;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
+import com.etendoerp.go.schemaforge.webhooks.SFCostingCadence;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFMyReportAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
@@ -117,6 +121,54 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Batch endpoint only supports POST"));
     verify(batchService, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // usage (ETP-5462)
+  // -------------------------------------------------------------------------
+
+  private NeoPseudoSpecDispatcher usageDispatcher(NeoUsageEventEndpoint usageEndpoint) {
+    return new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint,
+        vectorSearchEndpoint, goWebhookBridge, usageEndpoint);
+  }
+
+  @Test
+  public void usagePostWritesTheEndpointResponse() throws Exception {
+    NeoUsageEventEndpoint usageEndpoint = mock(NeoUsageEventEndpoint.class);
+    NeoResponse payload = new NeoResponse(HttpServletResponse.SC_ACCEPTED, new JSONObject());
+    when(usageEndpoint.handle(request)).thenReturn(payload);
+
+    boolean handled = usageDispatcher(usageEndpoint)
+        .handle(pathInfo("usage"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(usageEndpoint).handle(request);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void usageRejectsEveryOtherMethodWithoutCallingTheEndpoint() throws Exception {
+    NeoUsageEventEndpoint usageEndpoint = mock(NeoUsageEventEndpoint.class);
+    NeoPseudoSpecDispatcher usage = usageDispatcher(usageEndpoint);
+
+    for (String method : new String[] { "GET", "PUT", "DELETE", "PATCH" }) {
+      assertTrue(method, usage.handle(pathInfo("usage"), method, request, response));
+    }
+
+    verify(servlet, times(4)).sendError(eq(response),
+        eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), eq("Usage endpoint only supports POST"));
+    verify(usageEndpoint, never()).handle(any());
+    verify(servlet, never()).writeResponse(any(), any());
+  }
+
+  @Test
+  public void theFiveArgConstructorWiresARealUsageEndpoint() throws Exception {
+    // Without the injected endpoint, a non-POST still answers 405: the default one is wired.
+    boolean handled = dispatcher.handle(pathInfo("usage"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Usage endpoint only supports POST"));
   }
 
   // -------------------------------------------------------------------------
@@ -214,6 +266,30 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Windowaccessmap endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  @Test
+  public void myReportAccessGetDispatchesThroughBridgeWithSFMyReportAccess() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("myreportaccess"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFMyReportAccess);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void myReportAccessRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("myreportaccess"), "DELETE", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Myreportaccess endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 
@@ -427,6 +503,63 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Resendinvitation endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // acctprocessmonitor (ETP-5269) — status/history read plus ?Action=trigger
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void acctProcessMonitorGetDispatchesThroughBridgeWithSFAcctProcessMonitor()
+      throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("acctprocessmonitor"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFAcctProcessMonitor);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void acctProcessMonitorRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("acctprocessmonitor"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Acctprocessmonitor endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // costingcadence (ETP-5370) — one-shot costing-schedule cadence remediation
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void costingCadenceGetDispatchesThroughBridgeWithSFCostingCadence() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("costingcadence"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFCostingCadence);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void costingCadenceRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("costingcadence"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Costingcadence endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 }

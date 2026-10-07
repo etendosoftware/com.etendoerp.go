@@ -56,13 +56,13 @@ import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
- * ETP-5184 — regression guard for the {@code neo_batch} NPE on entities carrying a
+ * ETP-5184 — regression guard for the {@code etendo_batch} NPE on entities carrying a
  * {@code Java_Qualifier}.
  *
  * <p><b>Defect guarded.</b> {@code executePostCreate} resolved the entity's {@link NeoHandler}
  * through {@code servlet.lookupHandler(javaQualifier)}. That call sits in the DEFAULT create path,
  * which {@link BatchService#forBatchOnly()} is documented to reach with a {@code null} servlet
- * ("only {@code handleWithHooks} touches the owning servlet"). So every {@code neo_batch} create on
+ * ("only {@code handleWithHooks} touches the owning servlet"). So every {@code etendo_batch} create on
  * an entity with a non-blank {@code Java_Qualifier} died with an NPE on {@code this.servlet} and
  * rolled the whole batch back. The fix resolves the handler through the static
  * {@code NeoServletSupport.lookupHandler} instead.</p>
@@ -75,6 +75,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * dies earlier on {@code this.servlet} (defect present), and
  * {@link #createWithQualifierFailsOnlyAtTheDalWriteNotOnTheServlet()} tells those two apart by
  * name.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
 class NeoCrudHandlerBatchQualifierTest {
 
@@ -264,10 +266,13 @@ class NeoCrudHandlerBatchQualifierTest {
       executePostCreateToTheDalWrite(new NeoCrudHandler(null), context, adTab,
           passThroughFilter(body));
 
-      ArgumentCaptor<Set<String>> protectedFields = ArgumentCaptor.forClass(Set.class);
+      // ETP-5350: the handler's declaration goes to the SUPPRESSED set (sixth argument), not
+      // to the body snapshot. In the snapshot it was inert - that set means "do not overwrite
+      // what is already here", and these fields are by their nature absent from the body.
+      ArgumentCaptor<Set<String>> suppressedFields = ArgumentCaptor.forClass(Set.class);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), any(), any(), protectedFields.capture()));
-      assertTrue(protectedFields.getValue().contains(HANDLER_PROTECTED_FIELD),
+          eq(adTab), any(), any(), any(), suppressedFields.capture()));
+      assertTrue(suppressedFields.getValue().contains(HANDLER_PROTECTED_FIELD),
           "the handler's declared protected field must be honoured by the cascade");
     }
   }
@@ -304,7 +309,7 @@ class NeoCrudHandlerBatchQualifierTest {
       // A missing handler is not an error: the create still runs to the DAL write.
       assertInstanceOf(NullPointerException.class, cause);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), any(), any(), any()));
+          eq(adTab), any(), any(), any(), any()));
     }
   }
 
@@ -350,7 +355,7 @@ class NeoCrudHandlerBatchQualifierTest {
 
       ArgumentCaptor<JSONObject> captured = ArgumentCaptor.forClass(JSONObject.class);
       pipeline.cascade.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(eq(context),
-          eq(adTab), captured.capture(), any(), any()));
+          eq(adTab), captured.capture(), any(), any(), any()));
       assertEquals("PROD-1", captured.getValue().getString("product"));
     }
   }

@@ -36,15 +36,10 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
@@ -57,7 +52,14 @@ import org.openbravo.module.bptaxidkey.ViesService;
 
 class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
-  private static final String OPERATORS = "operators";
+  // Package-private (not private): also read by Fiscal349SnapshotSupport.
+  static final String OPERATORS = "operators";
+  /** Payload key of the per-invoice origin rows (also the snapshot's excluded list). */
+  static final String INVOICES_KEY = "invoices";
+  /** Payload key of the corrective (Tipo Registro 2) detail rows. */
+  static final String RECTIFICATIONS_KEY = "rectifications";
+  /** Row key of an invoice/rectification's partner NIF-IVA. */
+  static final String NIF_IVA_KEY = "nifIva";
   private static final String GENERATE  = "generate";
 
   /** Row key for the operator's tax base amount, as produced by AEAT3492010ReportDao. */
@@ -80,7 +82,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * "registro tipo 2". See {@link #computeOperators} for why these rows are kept out of the
    * regular {@code summary}.
    */
-  private static final String RECTIFICATIVE = "rectificative";
+  static final String RECTIFICATIVE = "rectificative";
 
   /**
    * The whole VIES-validation cluster (gate, network phase, persistence), extracted for the
@@ -90,8 +92,17 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    */
   final Fiscal349ViesSupport viesSupport = new Fiscal349ViesSupport();
 
+  /**
+   * The file-name/contact/org-data resolution cluster used by {@link #handleGenerate} and
+   * {@link #computeOperators}'s {@code contactFallback}/{@code phoneFallback}/{@code orgNif} —
+   * extracted for the same {@code java:S1448} method-count fix, see
+   * {@link Fiscal349GenerateSupport}'s class javadoc.
+   */
+  private final Fiscal349GenerateSupport generateSupport = new Fiscal349GenerateSupport();
+
   Fiscal349BoxesHandler(NeoServlet servlet) {
     super(servlet);
+    this.snapshotSupport = new Fiscal349SnapshotSupport();
   }
 
   @Override
@@ -114,12 +125,17 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
-    try {
+    runDispatch(response, () -> {
       if (OPERATORS.equals(entityName)) {
-        JSONObject result = computeOperators(orgId, year, period);
+        // Deliberately NOT guarded (ETP-5438): operators is a pure read. A submitted declaration
+        // is served from its persisted submission snapshot (never recomputed); a legacy submitted
+        // one without a snapshot, and every draft/ready one, is computed live. Only the
+        // side-effecting generate (file generation) is blocked once submitted.
+        JSONObject result = snapshotOrCompute(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         handleGenerate(orgId, year, period, request, response);
       } else if (VALIDATE_VIES.equals(entityName)) {
         JSONObject result = viesSupport.handleValidateVies(this, orgId, year, period);
@@ -129,19 +145,26 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new Date(sinceMs), response);
       }
-    } catch (FiscalHandlerException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new FiscalHandlerException(e);
-    }
+    });
+  }
+
+  /**
+   * ETP-5438 — thin, model-fixed wrapper around the shared {@link
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, applied to
+   * {@code generate} only (the {@code operators} read stays open for a submitted declaration so
+   * the frontend can render and freeze it on a cold session cache), so callers here
+   * (and {@code Fiscal349BoxesHandlerTest}) don't have to repeat the {@code "349"} literal. The
+   * guard logic itself (and {@code AlreadySubmittedException}) moved to the shared base class —
+   * see its javadoc — once {@code Fiscal303BoxesHandler} needed the identical check.
+   */
+  void guardNotAlreadySubmitted(String orgId, int year, String period) {
+    guardNotAlreadySubmitted(orgId, year, period, "349");
   }
 
   @Override
   protected String getModelKey() {
     return "fiscal349";
   }
-
-  // ── operators ─────────────────────────────────────────────────────
 
   JSONObject computeOperators(String orgId, int year, String period) throws Exception {
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
@@ -200,26 +223,38 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
     JSONObject summary = buildKeyTotals(summaryByKey);
 
-    // Per-invoice AEAT349 key (E/S/A/I), resolved separately for purchase/sales invoices
-    // against their respective tax rate sets, then merged — purch/sales invoice ids never
-    // overlap, so a plain putAll is safe. Lets the frontend split "origin" counts per
-    // operator key instead of aggregating solely by nifIva (ETP-4755).
-    Map<String, String> invoiceKeys = new HashMap<>(
-        resolveInvoiceKeys(purch, taxesPurchase, taxReport.getId()));
-    invoiceKeys.putAll(resolveInvoiceKeys(sales, taxesSales, taxReport.getId()));
+    // Per-invoice AEAT349 keys (E/S/A/I) with the base each key carries, resolved separately for
+    // purchase/sales invoices against their respective tax rate sets, then merged — purch/sales
+    // invoice ids never overlap, so a plain putAll is safe. Lets the frontend split "origin"
+    // counts per operator key instead of aggregating solely by nifIva (ETP-4755). ETP-5597: an
+    // invoice mixing goods and services lines carries BOTH keys — the same per-tax split
+    // getTaxBaseAmountPerBusinessPartner applies to the operator rows — so it backs both rows.
+    Map<String, Map<String, BigDecimal>> invoiceKeyBases = new HashMap<>(
+        resolveInvoiceKeyBases(purch, taxesPurchase, taxReport.getId(), true));
+    invoiceKeyBases.putAll(resolveInvoiceKeyBases(sales, taxesSales, taxReport.getId(), false));
 
-    String    orgNif      = resolveOrgNif(orgId);
-    JSONArray invoicesArr = collectInvoices(purch, sales, invoiceKeys);
+    String    orgNif      = generateSupport.resolveOrgNif(orgId);
+    JSONArray invoicesArr = collectInvoices(purch, sales, invoiceKeyBases);
     JSONArray rectifArr   = collectRectifications(corrPurch, corrSales);
 
     JSONObject root = new JSONObject();
     root.put(OPERATORS, operatorsArr);
     root.put("summary",  summary);
     root.put("rectificativeSummary", buildKeyTotals(rectificativeByKey));
-    root.put("invoices", invoicesArr);
-    root.put("rectifications", rectifArr);
+    root.put(INVOICES_KEY, invoicesArr);
+    root.put(RECTIFICATIONS_KEY, rectifArr);
     root.put("orgNif",   orgNif != null ? orgNif : "");
     root.put("orgName",  org.getName());
+    // ETP-5456 — read-only fallback values for FileGenModal's "Persona de contacto"/"Teléfono de
+    // contacto" fields, so the frontend can tell whether leaving them blank would actually resolve
+    // to something at generation time (and block the modal when it wouldn't). Reuses the EXACT
+    // same resolution {@link Fiscal349GenerateSupport#applyContactParams} already falls back to
+    // server-side — never duplicated, just exposed — so this can never drift from what a blank
+    // field actually does.
+    String contactFallback = Fiscal349GenerateSupport.resolveCurrentUserContactName();
+    String phoneFallback   = generateSupport.resolveOrgPhone(orgId);
+    root.put("contactFallback", contactFallback != null ? contactFallback : "");
+    root.put("phoneFallback",   phoneFallback   != null ? phoneFallback   : "");
     return root;
   }
 
@@ -261,7 +296,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       row.put("date",          dateStr(r[1], sdf));
       row.put("type",          type);
       row.put("party",         str(r[2]));
-      row.put("nifIva",        str(r[3]));
+      row.put(NIF_IVA_KEY,     str(r[3]));
       row.put("originalRef",   str(r[4]));
       row.put("declaredYear",  str(r[5]));
       row.put("declaredPeriod", str(r[6]));
@@ -543,62 +578,119 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return signed;
   }
 
+  /**
+   * The "Facturas origen" rows: one row per (invoice, AEAT349 key).
+   *
+   * <p>ETP-5597: an invoice mixing goods and services lines (e.g. E + S on a sale, A + I on a
+   * purchase) is split by {@code getTaxBaseAmountPerBusinessPartner} into BOTH operator rows, so
+   * it must back both origins too. It therefore produces one row per key, each carrying only the
+   * base of that key's tax lines (the per-key base from the same HQL the DAO uses: halved for a
+   * purchase line with a non-zero tax amount, in the invoice currency).
+   * A single-key invoice keeps exactly the row it always had (one row, the invoice's
+   * {@code summedLineAmount}).
+   *
+   * <p>The rows are origin evidence, not a reconciliation: their bases are NOT guaranteed to add
+   * up to the operator's base (a single-key row shows {@code summedLineAmount}, which is neither
+   * halved nor converted, and no row is currency-converted).
+   *
+   * <p>Every row of a mixed invoice keeps {@code id} = invoice id; {@code (id, key)} is the
+   * unique pair, and the frontend keys rows on it.
+   */
   JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales,
-      Map<String, String> invoiceKeys) throws Exception {
+      Map<String, Map<String, BigDecimal>> invoiceKeyBases) throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
     JSONArray arr = new JSONArray();
     for (Invoice inv : purch) {
-      arr.put(buildInvoiceRow(inv, "Compra", sdf, invoiceKeys));
+      appendInvoiceRows(arr, inv, "Compra", sdf, invoiceKeyBases);
     }
     for (Invoice inv : sales) {
-      arr.put(buildInvoiceRow(inv, "Venta", sdf, invoiceKeys));
+      appendInvoiceRows(arr, inv, "Venta", sdf, invoiceKeyBases);
     }
     return arr;
   }
 
-  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf,
-      Map<String, String> invoiceKeys) throws Exception {
+  /**
+   * Appends the "Facturas origen" row(s) of one invoice: a single row with the invoice-level
+   * {@code summedLineAmount} when it resolves to at most one key, or one row per key with that
+   * key's per-key HQL base when it is mixed — see {@link #collectInvoices} for why those bases are
+   * not a reconciliation of the operator's base.
+   */
+  private void appendInvoiceRows(JSONArray arr, Invoice inv, String type, SimpleDateFormat sdf,
+      Map<String, Map<String, BigDecimal>> invoiceKeyBases) throws Exception {
+    Map<String, BigDecimal> bases = invoiceKeyBases != null ? invoiceKeyBases.get(inv.getId()) : null;
+    if (bases == null || bases.isEmpty()) {
+      arr.put(buildInvoiceRow(inv, type, sdf, null, null));
+      return;
+    }
+    // Only a mixed invoice needs the per-key base; a single-key one keeps its invoice-level base.
+    boolean mixed = bases.size() > 1;
+    for (Map.Entry<String, BigDecimal> e : bases.entrySet()) {
+      arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), mixed ? e.getValue() : null));
+    }
+  }
+
+  /**
+   * One "Facturas origen" row.
+   *
+   * @param key
+   *          AEAT349 key of the row ({@code ""} when unresolved)
+   * @param keyBase
+   *          base of the row's key alone (mixed invoice), or {@code null} to use the invoice's
+   *          summed line amount (single-key invoice)
+   */
+  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf, String key,
+      BigDecimal keyBase) throws Exception {
     BusinessPartner bp   = inv.getBusinessPartner();
-    BigDecimal      base = inv.getSummedLineAmount() != null
-        ? inv.getSummedLineAmount().abs().setScale(2, RoundingMode.HALF_UP)
+    BigDecimal      raw  = keyBase != null ? keyBase : inv.getSummedLineAmount();
+    BigDecimal      base = raw != null
+        ? raw.abs().setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
-    String resolvedKey = invoiceKeys != null ? invoiceKeys.get(inv.getId()) : null;
     JSONObject row = new JSONObject();
+    // ETP-5597: the invoice id gives the frontend a collision-free row key (documentNo is not
+    // unique across AR/AP — same rationale as ETP-5393 in Fiscal303SourcesSupport). A mixed
+    // invoice emits one row per key with the same id; the frontend keys on (id, key).
+    row.put("id",     inv.getId());
     row.put("ref",    inv.getDocumentNo());
     row.put("date",   inv.getInvoiceDate() != null ? sdf.format(inv.getInvoiceDate()) : "");
+    // ETP-5597: feeds the "Fecha contable" column; same key/format/null handling as the 303
+    // sources row (JSONObject.put with null omits the key, so a missing date stays absent).
+    row.put("accountingDate",
+        inv.getAccountingDate() != null ? sdf.format(inv.getAccountingDate()) : null);
     row.put("type",   type);
     row.put("party",  bp != null ? bp.getName() : "");
-    row.put("nifIva", bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
+    row.put(NIF_IVA_KEY, bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
     row.put("base",   base.toString());
-    row.put("key",    resolvedKey != null ? resolvedKey : "");
+    row.put("key",    key != null ? key : "");
     return row;
   }
 
   /**
-   * Resolves the AEAT349 classification key (E/S/A/I) for each invoice in {@code invoices},
-   * mirroring the join {@link org.openbravo.module.aeat349.es.AEAT3492010ReportDao
-   * #getTaxBaseAmountPerBusinessPartner} uses to derive the key per-BusinessPartner, but
-   * grouped per-invoice instead — this method does not need that DAO's amount-summing or
-   * multi-currency conversion, only the classification key.
+   * Resolves, for each invoice in {@code invoices}, every AEAT349 classification key (E/S/A/I)
+   * its tax lines map to, with the taxable base of each key — the same join and the same amount
+   * expression {@link org.openbravo.module.aeat349.es.AEAT3492010ReportDao
+   * #getTaxBaseAmountPerBusinessPartner} uses to build the operator rows, grouped per invoice
+   * instead of per partner (purchases halve the base of a line with a non-zero tax amount, the
+   * DAO's own rule for self-assessed intra-community VAT).
    *
-   * <p>Edge case: an invoice could in principle have lines mapping to more than one key
-   * (the HQL groups by (invoice, key), so a single invoice can produce multiple result rows).
-   * This is a simplification for a rare case: whichever key has the most matching
-   * {@code InvoiceTax} lines for that invoice wins; on an exact tie, the alphabetically first
-   * key wins — the HQL's {@code order by ... trp.tributaryKey.name} guarantees rows for the
-   * same invoice arrive in ascending key order, so "first encountered" is deterministic rather
-   * than depending on undefined DB row-return order. A single invoice almost always maps to
-   * exactly one key in practice for this report.
+   * <p>ETP-5597: this used to keep a single key per invoice (the one with most tax lines), so an
+   * invoice mixing goods and services backed only one of its two operator rows and the other
+   * showed "—" in Origen. Keys come back in ascending order ({@code order by}), so the per-invoice
+   * map is deterministic. Amounts are in the invoice currency (no EUR conversion — the same as
+   * the summed line amount a single-key row shows).
    *
-   * @return a map of invoice id -&gt; AEAT349 key ("E"/"S"/"A"/"I"); never null.
+   * @return invoice id -&gt; (key -&gt; base), keys in ascending order; never null.
    */
-  Map<String, String> resolveInvoiceKeys(Set<Invoice> invoices, Collection<TaxRate> taxRates,
-      String taxReportId) {
+  Map<String, Map<String, BigDecimal>> resolveInvoiceKeyBases(Set<Invoice> invoices,
+      Collection<TaxRate> taxRates, String taxReportId, boolean isPurchase) {
     if (invoices == null || invoices.isEmpty() || taxRates == null || taxRates.isEmpty()) {
       return new HashMap<>();
     }
+    String amountExpr = isPurchase
+        ? "sum(case it.taxAmount when 0 then coalesce(it.taxableAmount, 0)"
+            + " else (coalesce(it.taxableAmount, 0) / 2) end)"
+        : "sum(coalesce(it.taxableAmount, 0))";
     List<Object[]> rows = OBDal.getInstance().getSession()
-        .createQuery("select i.id, trp.tributaryKey.name, count(it.id) "
+        .createQuery("select i.id, trp.tributaryKey.name, " + amountExpr + " "
             + "from InvoiceTax as it, Invoice i, FinancialMgmtTaxRate tr, "
             + "OBTL_Tax_Parameter tp, OBTL_Tax_Report_Parameter trp "
             + "where i.id = it.invoice "
@@ -615,19 +707,25 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         .setParameterList("taxRates", taxRates)
         .list();
 
-    Map<String, String> keyByInvoice   = new HashMap<>();
-    Map<String, Long>   lineCountByInv = new HashMap<>();
+    Map<String, Map<String, BigDecimal>> basesByInvoice = new HashMap<>();
     for (Object[] row : rows) {
-      String invId = (String) row[0];
-      String key   = (String) row[1];
-      Long   count = (Long)   row[2];
-      Long prevCount = lineCountByInv.get(invId);
-      if (prevCount == null || count > prevCount) {
-        lineCountByInv.put(invId, count);
-        keyByInvoice.put(invId, key);
+      String     invId = (String) row[0];
+      String     key   = (String) row[1];
+      if (key == null) {
+        continue;
       }
+      basesByInvoice.computeIfAbsent(invId, k -> new LinkedHashMap<>())
+          .merge(key, toBigDecimal(row[2]), BigDecimal::add);
     }
-    return keyByInvoice;
+    return basesByInvoice;
+  }
+
+  // HQL sum() over a BigDecimal column comes back as BigDecimal; the /2 branch may widen it.
+  private static BigDecimal toBigDecimal(Object value) {
+    if (value instanceof BigDecimal) {
+      return (BigDecimal) value;
+    }
+    return value != null ? new BigDecimal(value.toString()) : BigDecimal.ZERO;
   }
 
   // ── generate ──────────────────────────────────────────────────────
@@ -645,9 +743,10 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
     String yearId    = periods.get(0).getYear().getId();
     String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
-    String filename  = resolveFileName(request, period, year);
+    String filename  = generateSupport.resolveFileName(request, period, year);
 
-    Map<String, String> inputParams = buildGenerateInputParams(request, orgId, filename);
+    Map<String, String> inputParams =
+        generateSupport.buildGenerateInputParams(request, orgId, filename);
 
     OBTL_TaxReport_I report = (OBTL_TaxReport_I)
         Class.forName(taxReport.getJavaClassName()).getDeclaredConstructor().newInstance();
@@ -655,94 +754,6 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     HashMap<String, Object> result = report.generateElectronicFile(
         orgId, taxReport.getId(), acctSchema.getId(), yearId, periodIds, inputParams);
     writeGeneratedFile(result, filename + ".349", response);
-  }
-
-  // FileName: request param wins when provided, else fall back to the locally-computed default.
-  private String resolveFileName(HttpServletRequest request, String period, int year) {
-    String requestedFileName = request.getParameter("fileName");
-    if (requestedFileName != null && !requestedFileName.isEmpty()) {
-      return requestedFileName;
-    }
-    return "349_" + period + "_" + year;
-  }
-
-  // Extracted from handleGenerate to keep its cognitive complexity within budget.
-  private Map<String, String> buildGenerateInputParams(HttpServletRequest request, String orgId,
-      String filename) {
-    Map<String, String> inputParams = new HashMap<>();
-    inputParams.put("FileName", filename);
-
-    // Substitutive/Navarra/Guipuzcoa are checkbox parameters: AEAT3492010Report's generateLine1
-    // calls inputParams.get("Substitutive").equals("Y") — NPE if the key is absent — so all three
-    // must ALWAYS be present in the map, "Y" or "N", mirroring classic's CHECK-type convention
-    // (OBTL_TaxReportLauncher#generateFile always writes CHECK params regardless of value).
-    inputParams.put("Substitutive", "Y".equals(request.getParameter("substitutive")) ? "Y" : "N");
-    inputParams.put("Navarra",      "Y".equals(request.getParameter("navarra"))      ? "Y" : "N");
-    inputParams.put("Guipuzcoa",    "Y".equals(request.getParameter("guipuzcoa"))    ? "Y" : "N");
-
-    applyContactParams(request, orgId, inputParams);
-    applyOptionalTextParams(request, inputParams);
-    return inputParams;
-  }
-
-  // Phone and Contact: AEAT3492010Report checks constantParameters first (TaxReport config),
-  // then falls back to inputParams. Query params override; fall back to AD_OrgInformation /
-  // current user so generation works even without TaxReport pre-configuration.
-  private void applyContactParams(HttpServletRequest request, String orgId,
-      Map<String, String> inputParams) {
-    String phone   = request.getParameter("phone");
-    String contact = request.getParameter("contact");
-    if (phone == null || phone.isEmpty()) {
-      phone = resolveOrgPhone(orgId);
-    }
-    if (contact == null || contact.isEmpty()) {
-      contact = OBContext.getOBContext().getUser().getName();
-    }
-    if (phone   != null && !phone.isEmpty())   inputParams.put("Phone",   phone);
-    if (contact != null && !contact.isEmpty()) inputParams.put("Contact", contact);
-  }
-
-  // FormerStatement/RepresentativeTaxId are TEXT parameters — classic omits empty TEXT
-  // parameters from inputParams entirely (OBTL_TaxReportLauncher#generateFile), so mirror
-  // that here rather than sending an empty string.
-  private void applyOptionalTextParams(HttpServletRequest request, Map<String, String> inputParams) {
-    String formerStatement     = request.getParameter("formerStatement");
-    String representativeTaxId = request.getParameter("representativeTaxId");
-    if (formerStatement != null && !formerStatement.isEmpty()) {
-      inputParams.put("FormerStatement", formerStatement);
-    }
-    if (representativeTaxId != null && !representativeTaxId.isEmpty()) {
-      inputParams.put("RepresentativeTaxId", representativeTaxId);
-    }
-  }
-
-  // ── resolution helpers ────────────────────────────────────────────
-
-  private String resolveOrgNif(String orgId) {
-    OBCriteria<OrganizationInformation> crit =
-        OBDal.getInstance().createCriteria(OrganizationInformation.class);
-    crit.add(Restrictions.in(OrganizationInformation.PROPERTY_ORGANIZATION + ".id",
-        Arrays.asList(orgId, "0")));
-    crit.addOrder(Order.desc(OrganizationInformation.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<OrganizationInformation> list = crit.list();
-    if (list.isEmpty()) return "";
-    String taxId = list.get(0).getTaxID();
-    return taxId != null ? taxId : "";
-  }
-
-  private String resolveOrgPhone(String orgId) {
-    OBCriteria<OrganizationInformation> crit =
-        OBDal.getInstance().createCriteria(OrganizationInformation.class);
-    crit.add(Restrictions.eq(OrganizationInformation.PROPERTY_ORGANIZATION + ".id", orgId));
-    crit.setMaxResults(1);
-    List<OrganizationInformation> list = crit.list();
-    if (list.isEmpty()) return null;
-    // OrganizationInformation has no phone directly; try the org's user contact phone
-    org.openbravo.model.ad.access.User contact = list.get(0).getUserContact();
-    if (contact == null) return null;
-    String phone = contact.getPhone();
-    return phone != null && !phone.isEmpty() ? phone : contact.getAlternativePhone();
   }
 
   TaxReport resolveTaxReport349(String orgId, String periodCode) {
@@ -756,14 +767,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return report;
   }
 
-  private TaxReport findTaxReport(String orgId, String searchKey) {
-    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
-    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<TaxReport> list = crit.list();
-    return list.isEmpty() ? null : list.get(0);
-  }
+  // findTaxReport(orgId, searchKey) moved to AbstractFiscalHandler (SonarQube java:S1192 dedupe
+  // — was byte-identical to Fiscal303BoxesHandler's own copy).
 
 }

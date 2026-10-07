@@ -21,6 +21,7 @@ import java.util.Objects;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
@@ -40,7 +41,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 /**
  * ETP-5195 — webhook that reissues the CALLER'S OWN NEO bearer JWT with their CURRENT
  * {@code AD_User.Default_Ad_Role_ID}, closing the "stale role claim" gap in {@code
- * com.etendoerp.go.schemaforge.NeoAuthenticator#authenticateJwt}: every NEO request rebuilds
+ * com.etendoerp.go.auth.EnvironmentRequestAuthenticator#authenticate}: every NEO request rebuilds
  * {@link OBContext} straight from the incoming token's {@code role} claim, which is whatever
  * role the token was minted with at login and is never re-derived from the DB on later
  * requests. A promote/demote ({@code UserRoleCompositionService#promoteToAdmin}/{@code
@@ -55,13 +56,13 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * {@code /webhooks/*} path, same as every sibling authored after that pattern existed.</p>
  *
  * <p><b>Security — this can only ever reissue the CALLER'S OWN token, never anyone else's.</b>
- * The caller is authenticated by {@code NeoAuthenticator#authenticateJwt} — the exact same
+ * The caller is authenticated by {@code EnvironmentRequestAuthenticator#authenticate} — the exact same
  * signature/expiry validation every other NEO request goes through — BEFORE this webhook is
  * ever reached: {@code NeoServlet#processRequest} runs {@code
  * authenticator.authenticateRequest(...)} first and unconditionally, and a failed validation
  * there writes the {@code 401} itself and returns before the pseudo-spec dispatcher (hence this
  * class) is ever consulted. {@code userId} is read ONLY from {@link OBContext#getOBContext()}'s
- * user — populated by {@code authenticateJwt} from the validated token's own {@code user}
+ * user — populated by {@code EnvironmentRequestAuthenticator#authenticate} from the validated token's own {@code user}
  * claim — and NEVER from a request parameter or body. There is deliberately no parameter that
  * could let a caller name a different target user; doing so would be a privilege-escalation
  * hole.</p>
@@ -98,13 +99,24 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * <p><b>ETP-5195 follow-up — {@code {"unchanged": true}}.</b> When {@link
  * #isSameRoleAsCaller(Role)} finds the caller's OWN current token already embeds the
- * just-resolved role, nothing is minted at all: no {@code token}, no {@code session}, just
- * {@code {"unchanged": true}}. A refresh triggered by a tab-focus/visibility-regain or the
- * background poll (see {@code AuthContext.jsx} in {@code schema_forge_core}) fires far more
- * often than any actual role change, and unconditionally reissuing an equivalent token (new
- * {@code iat}/{@code exp}, nothing else different) forced the frontend to actively detect and
- * ignore that no-op rotation. The frontend's {@code reconcileSessionRefresh} routes this shape
- * through the exact same no-op path as a legacy (token-only, unchanged-identity) response.</p>
+ * just-resolved role, no NEW token is minted: no {@code token}, no {@code session}, just
+ * {@code {"unchanged": true, "roleList": [...]}}. A refresh triggered by a tab-focus/
+ * visibility-regain or the background poll (see {@code AuthContext.jsx} in {@code
+ * schema_forge_core}) fires far more often than any actual role change, and unconditionally
+ * reissuing an equivalent token (new {@code iat}/{@code exp}, nothing else different) forced the
+ * frontend to actively detect and ignore that no-op rotation. The frontend's {@code
+ * reconcileSessionRefresh} routes this shape through the exact same no-op path as a legacy
+ * (token-only, unchanged-identity) response.</p>
+ *
+ * <p><b>ETP-5329 follow-up — {@code roleList} is ALWAYS fresh, even here.</b> {@code
+ * isSameRoleAsCaller} only compares the caller's {@code AD_Role} identity — it says nothing
+ * about the TEMPLATE COMPOSITION applied to that role via {@code AD_Role_Inheritance}, which
+ * {@code UserRoleCompositionService#getAppliedTemplateRoleIds} can change while the personal
+ * role id stays the same (e.g. demoting a user's applied templates). Skipping the token mint
+ * must never also skip recomputing {@code effectiveRoleNames}: {@code roleList} here is always
+ * loaded fresh via {@link EtendoGoJwtSupport#loadRoleListData(String)} — the same cheap DB read
+ * the ordinary session-metadata path already does — so a template-composition change is visible
+ * on the very next refresh instead of only after a full re-login.</p>
  */
 public class SFRefreshToken extends BaseWebhookService {
 
@@ -174,13 +186,21 @@ public class SFRefreshToken extends BaseWebhookService {
       // token unconditionally here reissues a fresh iat/exp every single time, which the
       // frontend then has to actively no-op around (see schema_forge_core's AuthContext.jsx).
       // When the caller's OWN token (the one that authenticated this very request, still
-      // reflected in OBContext) already embeds the SAME role the DB just resolved, nothing
-      // about the session actually changed -- skip minting entirely and say so explicitly,
-      // rather than reissuing a byte-for-byte-equivalent-but-differently-timed token. A caller
-      // whose token is nearing its own expiry simply rides out that instance's configured
-      // SMFSWS_Config token lifetime, same as any session that never triggers a role change.
+      // reflected in OBContext) already embeds the SAME role the DB just resolved, the TOKEN
+      // itself is unchanged -- skip minting entirely rather than reissuing a
+      // byte-for-byte-equivalent-but-differently-timed token. A caller whose token is nearing
+      // its own expiry simply rides out that instance's configured SMFSWS_Config token
+      // lifetime, same as any session that never triggers a role change.
+      //
+      // ETP-5329 follow-up -- "same role id" is NOT "same session data": the role's TEMPLATE
+      // COMPOSITION (AD_Role_Inheritance) can change underneath an unchanged Default_Ad_Role_ID
+      // (e.g. demoting a user's applied templates), which shifts effectiveRoleNames without
+      // touching currentRole.getId() at all. loadRoleListData is a plain DB read, not an
+      // expensive JWT mint, so it is always recomputed here -- even on the "unchanged" path --
+      // rather than being skipped along with the token.
       if (currentRole != null && isSameRoleAsCaller(currentRole)) {
-        responseVars.put(RESPONSE_VAR_RESULT, unchanged().toString());
+        RoleListData roleListData = EtendoGoJwtSupport.loadRoleListData(callerUserId);
+        responseVars.put(RESPONSE_VAR_RESULT, unchanged(roleListData.getRoleArray()).toString());
         return;
       }
       String newToken = SecureWebServicesUtils.generateToken(user, currentRole);
@@ -203,7 +223,7 @@ public class SFRefreshToken extends BaseWebhookService {
 
   /**
    * Reads the caller's user id ONLY from the current {@link OBContext} -- which {@code
-   * NeoAuthenticator#authenticateJwt} populated from the already-validated token's own {@code
+   * EnvironmentRequestAuthenticator#authenticate} populated from the already-validated token's own {@code
    * user} claim before this webhook was ever reached. Never accepts it as a parameter.
    */
   private String resolveCallerUserId() {
@@ -213,13 +233,19 @@ public class SFRefreshToken extends BaseWebhookService {
 
   /**
    * ETP-5195 follow-up — {@code true} when the ROLE embedded in the caller's own current token
-   * (as reflected in {@link OBContext}, populated by {@code NeoAuthenticator#authenticateJwt}
+   * (as reflected in {@link OBContext}, populated by {@code EnvironmentRequestAuthenticator#authenticate}
    * before this webhook is ever reached) already matches the just-resolved {@code
-   * Default_Ad_Role_ID}. Only the role identity is compared — not organization/warehouse — since
-   * {@code Default_Ad_Role_ID} is the single value a promote/demote (the reason this endpoint
-   * exists) ever changes; a same-role token is therefore not stale in any way this refresh cares
-   * about, and minting an equivalent replacement would only reissue a new {@code iat}/{@code
-   * exp} with no other observable difference.
+   * Default_Ad_Role_ID}. Only the role identity is compared — not organization/warehouse — so a
+   * "same role" result means the TOKEN is not stale (minting an equivalent replacement would
+   * only reissue a new {@code iat}/{@code exp} with no other observable difference in the JWT
+   * itself).
+   *
+   * <p>ETP-5329 follow-up — a {@code true} result does NOT mean the caller's {@code roleList}/
+   * {@code effectiveRoleNames} are also unchanged: {@code Default_Ad_Role_ID} is no longer the
+   * only thing a promote/demote can affect now that role TEMPLATE COMPOSITION
+   * ({@code AD_Role_Inheritance}) exists — see the class javadoc's "roleList is ALWAYS fresh"
+   * note. Callers of this method must keep recomputing {@code roleList} regardless of what it
+   * returns.
    */
   private boolean isSameRoleAsCaller(Role currentRole) {
     OBContext callerContext = OBContext.getOBContext();
@@ -270,15 +296,34 @@ public class SFRefreshToken extends BaseWebhookService {
 
   /**
    * ETP-5195 follow-up — carries NO {@code token}/{@code session} at all: the caller's role is
-   * unchanged (see {@link #isSameRoleAsCaller(Role)}), so nothing was minted. The frontend's
+   * unchanged (see {@link #isSameRoleAsCaller(Role)}), so no new token was minted. The frontend's
    * {@code reconcileSessionRefresh} routes this through the same no-op path as a legacy
    * (token-only, unchanged-identity) response — see {@code docs/auth-session-refresh.md} in
    * {@code schema_forge_core}.
+   *
+   * <p>ETP-5329 follow-up — {@code roleList} is included anyway, freshly loaded by the caller
+   * via {@link EtendoGoJwtSupport#loadRoleListData(String)}. A same-role-id token can still be
+   * stale on the effective-role-composition dimension (see this class's javadoc), and that is
+   * cheap to recompute even when nothing else in the response changes.
+   *
+   * @param roleList the freshly-loaded role list (with up-to-date {@code effectiveRoleNames} on
+   *     the caller's default role entry), never {@code null}
    */
-  private JSONObject unchanged() {
+  private JSONObject unchanged(JSONArray roleList) {
     try {
       JSONObject body = new JSONObject();
       body.put(FIELD_UNCHANGED, true);
+      body.put(FIELD_ROLE_LIST, roleList);
+      // ETP-5395 — the role/org this request was authorized with. A cookie session is rebound
+      // server-side when its role is revoked (GoSessionRoleReconciler), so it can differ from what
+      // the client still holds; the client has no token to read it from and needs it here.
+      OBContext context = OBContext.getOBContext();
+      if (context != null && context.getRole() != null) {
+        body.put(FIELD_SELECTED_ROLE_ID, context.getRole().getId());
+      }
+      if (context != null && context.getCurrentOrganization() != null) {
+        body.put(FIELD_SELECTED_ORG_ID, context.getCurrentOrganization().getId());
+      }
       return body;
     } catch (JSONException e) {
       throw new IllegalStateException("Unable to build unchanged result", e);

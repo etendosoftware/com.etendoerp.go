@@ -61,9 +61,11 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * {@code schemaforge} selector-aux path, which the React frontend and the REST
  * {@code /sws/neo/*} endpoints also use. Fixing it there would change behaviour for both, so by
  * decision this compensation sits in the MCP write path and those two callers keep the existing
- * behaviour. Anything that reaches {@code NeoCrudHandler} without passing through
- * {@code McpToolRouter#handleCreate} — including each {@code neo_batch} operation, which
- * {@code BatchService} dispatches straight into the shared create path — is NOT covered.
+ * behaviour. Both MCP write verbs are covered: {@code McpToolRouter#handleCreate} for a single
+ * record, and — since ETP-5415 — each {@code etendo_batch} operation, through the per-operation
+ * preprocessor {@code BatchService} invokes once the op's references are resolved. Anything that
+ * reaches {@code NeoCrudHandler} by another route (the React frontend, REST {@code /sws/neo/*},
+ * REST {@code /sws/neo/batch}) is NOT covered, by the decision above.
  */
 final class McpLinePriceInjector {
 
@@ -101,6 +103,12 @@ final class McpLinePriceInjector {
    * @param dalEntity        the DAL entity being created; used to tell a commercial line from any
    *                         other child record, and to resolve the parent reference
    * @param sfEntity         the SF entity, used to resolve which field points at the parent
+   * @param resolvedParentId the parent record id the caller already resolved, or {@code null}.
+   *                         Takes precedence over the body, and is what makes this work inside a
+   *                         batch: an op linked with {@code parentRef} carries its parent nowhere
+   *                         in the body — the id comes from the earlier operation's result and is
+   *                         injected only later, so without this the parent looked absent and the
+   *                         whole injection abstained, persisting the line at price 0 (ETP-5415)
    * @param agentProvided    field names present in the body as submitted by the agent, BEFORE any
    *                         defaults pass ran — the only reliable witness that the agent chose a
    *                         price itself
@@ -108,11 +116,26 @@ final class McpLinePriceInjector {
    */
   static void injectIfMissing(JSONObject body, Entity dalEntity, SFEntity sfEntity,
       Set<String> agentProvided, Logger log) {
+    injectIfMissing(body, dalEntity, sfEntity, null, agentProvided, log);
+  }
+
+  /**
+   * Overload for a caller that resolved the parent id outside the body.
+   *
+   * <p>Prefer this one whenever the id is at hand. The shorter overload reads the parent from the
+   * body, which is correct only where something already put it there — on the single-create path
+   * the defaults pass does. Inside a batch nothing does, so calling the shorter overload from
+   * there is the bug this parameter exists to prevent.
+   *
+   * @see #injectIfMissing(JSONObject, Entity, SFEntity, Set, Logger)
+   */
+  static void injectIfMissing(JSONObject body, Entity dalEntity, SFEntity sfEntity,
+      String resolvedParentId, Set<String> agentProvided, Logger log) {
     try {
       if (!isEligible(body, dalEntity, agentProvided)) {
         return;
       }
-      BaseOBObject parent = resolveParentDocument(body, dalEntity, sfEntity);
+      BaseOBObject parent = resolveParentDocument(body, dalEntity, sfEntity, resolvedParentId);
       if (parent == null) {
         log.debug("[MCP-LINE-PRICE] No parent document resolved for {} — price left untouched",
             dalEntity.getName());
@@ -192,12 +215,16 @@ final class McpLinePriceInjector {
    * resolves, rather than a second guess at which column points at the parent.
    */
   private static BaseOBObject resolveParentDocument(JSONObject body, Entity dalEntity,
-      SFEntity sfEntity) {
+      SFEntity sfEntity, String resolvedParentId) {
     String parentField = McpParentScope.forEntity(sfEntity).getParentField();
     if (StringUtils.isBlank(parentField) || !dalEntity.hasProperty(parentField)) {
       return null;
     }
-    String parentId = body.optString(parentField, "");
+    // The caller's resolved id wins: inside a batch it is the ONLY place the parent appears, and
+    // on the single-create path it is the same value the body would carry.
+    String parentId = StringUtils.isNotBlank(resolvedParentId)
+        ? resolvedParentId
+        : body.optString(parentField, "");
     if (StringUtils.isBlank(parentId)
         || parentId.startsWith(BatchService.REF_PREFIX)) {
       return null;

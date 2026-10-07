@@ -31,7 +31,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * Handles the {@code neo_widget} MCP tool (gap G4, ETP-4284), extracted from
+ * Handles the {@code etendo_widget} MCP tool (gap G4, ETP-4284), extracted from
  * {@link McpToolRouter} so the router stays within its authorized method budget and
  * the widget-handling logic lives in a single, dedicated collaborator (parity with the
  * generic-service rule for adding MCP tools).
@@ -56,7 +56,7 @@ final class McpWidgetHandler {
    * {@link NeoContext}.
    *
    * @param arguments tool arguments: {@code widget} (enum, required) and optional
-   *                  {@code params} object (e.g. {@code {"range": "30d"}})
+   *                  {@code params} object (e.g. {@code {"range": "last30d"}})
    * @return MCP text content with the widget JSON payload, or error content
    */
   static JSONObject handle(JSONObject arguments) throws Exception {
@@ -103,11 +103,11 @@ final class McpWidgetHandler {
     if (response == null) {
       return McpToolRouter.wrapAsErrorContent("Widget '" + widget + "' returned no response.");
     }
+    // ETP-5306: the JSONObject overloads, so a widget body is sanitised like every other result.
     JSONObject body = response.getBody();
-    String text = body != null ? body.toString(2) : "{}";
     if (response.getHttpStatus() >= 400) {
-      return McpToolRouter.wrapAsErrorContent(text);
+      return McpToolRouter.wrapAsErrorContent(body);
     }
-    return McpToolRouter.wrapAsTextContent(text);
+    return McpToolRouter.wrapAsTextContent(body);
   }
 }

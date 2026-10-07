@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.util.NeoMessageTranslator.extractMessageKeys;
 import static com.etendoerp.go.schemaforge.util.NeoMessageTranslator.safeParseTranslation;
 
 import java.lang.reflect.InvocationTargetException;
@@ -81,6 +82,17 @@ public class NeoProcessService {
   private static final String UI_PATTERN_STANDARD = "S";
 
   public static final String MESSAGE = "message";
+  /**
+   * ETP-5316 — response field carrying the AD_Message search keys behind {@link #MESSAGE},
+   * extracted BEFORE translation. See {@link #translatePInstanceResult}.
+   */
+  public static final String MESSAGE_KEYS = "messageKeys";
+  /**
+   * ETP-5175 — response field carrying the values interpolated by {@link #MESSAGE_KEYS} (a JSON
+   * object), so a client can render a parameterized message in its own locale. Present only when
+   * non-empty; see {@code DocumentPostingService#putMessageIdentity}.
+   */
+  public static final String MESSAGE_PARAMS = "messageParams";
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";
@@ -89,6 +101,10 @@ public class NeoProcessService {
   public static final String ERROR = "error";
   public static final String SUCCESS = "success";
   public static final String PROCESS_ID = "processId";
+  /** Parameter carrying a list-backed button's chosen value (DocAction style). */
+  private static final String PARAM_DOC_ACTION = "docAction";
+  /** Key Classic Java processes read the list-backed button value from. */
+  private static final String PARAM_ACTION = "action";
   private static final String PROCESS_EXECUTION_FAILED_PREFIX = "Process execution failed: ";
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE =
       "Access denied to process for current role";
@@ -458,6 +474,13 @@ public class NeoProcessService {
    * Converts a JSONObject of process parameters into the Map format expected
    * by ProcessBundle. Maps NEO internal keys to classic process conventions:
    * inpRecordId → recordID, inpTabId → tabId.
+   *
+   * <p>Also aliases {@code docAction} to {@code action} when the caller sent a
+   * non-blank {@code docAction} and no {@code action}: the MCP catalog advertises
+   * {@code docAction} for every list-backed button, but Classic Java processes
+   * bound to such a button read the chosen value as {@code action} (e.g.
+   * {@code FIN_BankStatementProcess}: {@code bundle.getParams().get("action")}).
+   * {@code docAction} is kept as well, so nothing that reads it changes.
    */
   @SuppressWarnings("unchecked")
   private static Map<String, Object> buildBundleParams(JSONObject params) throws JSONException {
@@ -476,6 +499,11 @@ public class NeoProcessService {
       } else {
         bundleParams.put(key, value);
       }
+    }
+    String docAction = params.isNull(PARAM_DOC_ACTION)
+        ? null : params.optString(PARAM_DOC_ACTION, null);
+    if (StringUtils.isNotBlank(docAction) && !params.has(PARAM_ACTION)) {
+      bundleParams.put(PARAM_ACTION, docAction);
     }
     return bundleParams;
   }
@@ -886,11 +914,21 @@ public class NeoProcessService {
 
     if (resultCode == 0L) {
       // Error
-      String cleanMsg = errorMsg != null
-          ? safeParseTranslation(errorMsg.replaceFirst("@ERROR=", ""))
-          : "Process failed";
+      String rawMsg = errorMsg != null ? errorMsg.replaceFirst("@ERROR=", "") : null;
       result.put(STATUS, ERROR);
-      result.put(MESSAGE, cleanMsg);
+      result.put(MESSAGE, rawMsg != null ? safeParseTranslation(rawMsg) : "Process failed");
+      // ETP-5316 — also publish the AD_Message search keys the raw message carried, taken from
+      // `rawMsg` BEFORE safeParseTranslation() replaces them with prose. A core document-action
+      // failure arrives as e.g. "@Inline@ 10, 20, 30, @ProductNotNullAndMovementQtyZero@": once
+      // translated, the only thing left to key off is a sentence containing AD line numbers
+      // (numbered in tens, unrelated to the row position the user sees), which is neither
+      // matchable nor actionable. The keys give the client a stable identity for the failure so
+      // it can render its own wording; the translated `message` stays exactly as before, so a
+      // client that ignores this field is unaffected.
+      List<String> messageKeys = extractMessageKeys(rawMsg);
+      if (!messageKeys.isEmpty()) {
+        result.put(MESSAGE_KEYS, new JSONArray(messageKeys));
+      }
       return new NeoResponse(400, result);
     }
 

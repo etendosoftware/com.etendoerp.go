@@ -37,6 +37,7 @@ import com.etendoerp.go.schemaforge.data.Account;
  * <pre>
  *   first environment  -> "user@example.com"
  *   later environments -> "user@example.com+acmeltd"
+ *   same slug again    -> "user@example.com+acmeltd2"   (ETP-5548)
  * </pre>
  *
  * <p>The suffix alphabet is {@code [a-z0-9]} only — the client name is lowercased and stripped of

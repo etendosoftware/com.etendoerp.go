@@ -22,6 +22,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,7 +35,7 @@ import java.util.regex.Pattern;
  * <p>Both callers guard a <b>call site</b>, and a missing call site is invisible to every other
  * kind of test: the unit tests of the thing that should have been called keep passing, and no
  * signature or type changes. {@code McpWriteVerbCoercionCallSiteTest} is the precedent —
- * {@code neo_update} corrupted dates for a release because {@code handleUpdate} never invoked the
+ * {@code etendo_update} corrupted dates for a release because {@code handleUpdate} never invoked the
  * coercer that {@code handleCreate} did. The methods guarded here need an {@code OBContext}, a live
  * DAL and an {@code AD_Tab}, so the call site cannot be asserted behaviourally at all.</p>
  *
@@ -115,6 +117,50 @@ final class McpSourceScanner {
     throw new IllegalStateException("Unbalanced braces while reading " + name);
   }
 
+  /**
+   * The top-level arguments of the first call to {@code callee} at or after {@code from}, each with
+   * all whitespace removed, so {@code op.parentId()} reads the same however the call is wrapped.
+   * Nested calls stay whole inside the argument that holds them, and literals are skipped while
+   * counting, as in {@link #methodBody}.
+   *
+   * @param source a method body from {@link #methodBody}, or an argument returned by this method
+   * @param callee the call as written, e.g. {@code McpFkResolver.resolveFkNames}
+   * @param from   the index to start searching at
+   * @return the arguments in order — a call with none answers one empty string — or an empty list
+   *         when there is no such call
+   * @throws IllegalStateException if the call's parentheses are unbalanced
+   */
+  static List<String> callArguments(String source, String callee, int from) {
+    Matcher call = Pattern.compile(Pattern.quote(callee) + "\\s*\\(").matcher(source);
+    if (!call.find(from)) {
+      return List.of();
+    }
+    List<String> arguments = new ArrayList<>();
+    int start = call.end();
+    int depth = 0;
+    int i = start;
+    while (i < source.length()) {
+      char c = source.charAt(i);
+      if (c == '"' || c == '\'') {
+        i = skipLiteral(source, i);
+        continue;
+      }
+      if (c == '(' || c == '{' || c == '[') {
+        depth++;
+      } else if (c == ')' && depth == 0) {
+        arguments.add(source.substring(start, i).replaceAll("\\s+", ""));
+        return arguments;
+      } else if (c == ')' || c == '}' || c == ']') {
+        depth--;
+      } else if (c == ',' && depth == 0) {
+        arguments.add(source.substring(start, i).replaceAll("\\s+", ""));
+        start = i + 1;
+      }
+      i++;
+    }
+    throw new IllegalStateException("Unbalanced call to " + callee);
+  }
+
   /** Remove block and line comments. */
   static String stripComments(String source) {
     String noBlocks = source.replaceAll("(?s)/\\*.*?\\*/", " ");
@@ -137,6 +183,15 @@ final class McpSourceScanner {
       i++;
     }
     return source.length();
+  }
+
+  /**
+   * The module {@code src} root, for a guard that has to list a package rather than read one file.
+   *
+   * @return the root path as a string
+   */
+  static String srcRootForTests() {
+    return srcRoot().toString();
   }
 
   /**

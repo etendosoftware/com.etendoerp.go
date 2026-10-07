@@ -27,6 +27,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -35,8 +36,10 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * Commercial document line defaults and synthetic callout fields.
  * <p>
  * The class is {@code public} only so the MCP layer can reach the one injection it shares with the
- * REST create path ({@link #injectProductDerivedUomIfMissing}, IMP-15). Every other member stays
- * package-private on purpose — this is a policy helper for {@code NeoCrudHandler}, not an API.
+ * REST create path ({@link #injectProductDerivedUomIfMissing}, IMP-15).
+ * {@link #injectCommercialAmounts} is also public (ETP-5528) so entity customizations can call it
+ * explicitly (T12). Every other member stays package-private on purpose — this is a policy helper
+ * for {@code NeoCrudHandler}, not an API.
  */
 public final class NeoCommercialLinePolicy {
 
@@ -89,8 +92,19 @@ public final class NeoCommercialLinePolicy {
    * {@code LINE_GROSS_AMOUNT = 0}, so the line "Total" column rendered as 0 even though
    * {@code LINENETAMT} and the header totals were correct. Keeping the sequence in one place
    * is what stops the two call sites from drifting apart again.
+   *
+   * <p>ETP-5528: public so an entity customization can call it explicitly (T12). The MCP
+   * {@code etendo_create} pipeline is a separate implementation of the REST one and never reaches this
+   * sequence, so a line an agent created kept {@code LINE_GROSS_AMOUNT = 0} on a net price list —
+   * {@code SL_Order_Amt} publishes {@code grossUnitPrice × qty}, which is 0 there, and the
+   * {@code C_OrderLine} trigger only derives the gross for tax-included lists. The shared MCP path
+   * is deliberately left as it is on {@code develop}; the sales order and sales quotation line
+   * customizations ({@code OrderLineDiscountSupport}) and the sales invoice line customization
+   * ({@code InvoiceLineAmountSupport}) call this on every create.
+   *
+   * @param body the write body, keyed by DAL property name; mutated in place
    */
-  static void injectCommercialAmounts(JSONObject body) {
+  public static void injectCommercialAmounts(JSONObject body) {
     injectLineNetAmountIfMissing(body);
     injectGrossAmountIfMissing(body);
     injectLineGrossAmountIfMissing(body);
@@ -256,7 +270,7 @@ public final class NeoCommercialLinePolicy {
   /**
    * Set {@code uOM} from the line's product unless the caller explicitly chose one.
    * <p>
-   * Public because {@code neo_create} (MCP) runs its own create pipeline rather than
+   * Public because {@code etendo_create} (MCP) runs its own create pipeline rather than
    * {@code NeoCrudHandler#executePostCreate}, and omitting this injection there made an otherwise
    * complete line body fail with a bare DAL 500 (IMP-15).
    *
@@ -302,6 +316,45 @@ public final class NeoCommercialLinePolicy {
       // log tying it back to this injection. That is exactly how ETP-4793 lost an afternoon.
       log.warn("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
     }
+  }
+
+  /**
+   * ETP-5286 — re-derives {@code uOM} from the (possibly just-changed) {@code product} on a
+   * PATCH/PUT update, resolving the entity from its DAL name first.
+   * <p>
+   * {@code uOM} is a "system"-visibility field — readOnly by contract, so
+   * {@code NeoFieldFilter#filterWriteRequest} strips it before {@code NeoCrudHandler#executeUpdate}
+   * calls this — and its only legitimate source is the product, never the client: even though the
+   * frontend callout DOES echo the correct new {@code uOM} back in this same PATCH body (verified
+   * live, ETP-5286 repro), trusting that echoed value would (a) defeat the whole point of the field
+   * being non-writable, and (b) silently keep working only by accident of the frontend never having
+   * a bug in that callout. Deriving it server-side here is what actually fixes AD message 20111
+   * ("La unidad del producto en la ficha y la de la operación en curso son distintas") on
+   * product-change PATCHes, which previously reached {@code C_ORDERLINE_TRG} with the OLD
+   * {@code uOM} still in place.
+   * <p>
+   * {@code userProvidedUom=false} unconditionally: unlike create (where an external caller such as
+   * an OCR import may legitimately pre-select a specific uOM), there is no UI path where a user
+   * picks {@code uOM} independently of {@code product} on an existing line, so nothing here should
+   * ever defer to a client-submitted value.
+   * <p>
+   * Total: delegates entirely to {@link #injectProductDerivedUomIfMissing}, which is a no-op (and
+   * never throws) when {@code filteredBody} carries no {@code product} key — i.e. this PATCH did
+   * not touch the product — or when the product/UOM cannot be resolved.
+   * <p>
+   * Lives here (rather than as a private method on {@code NeoCrudHandler}) so it can be called and
+   * unit-tested directly, without reflection, and to keep {@code NeoCrudHandler} under SonarQube's
+   * method-count limit (java:S1448).
+   *
+   * @param filteredBody  the PATCH/PUT body, already run through {@code filterWriteRequest},
+   *                      mutated in place with the re-derived {@code uOM} when applicable
+   * @param dalEntityName the DAL entity name of the line being updated (e.g. {@code "OrderLine"}),
+   *                      resolved here into the {@link org.openbravo.base.model.Entity} that
+   *                      {@link #injectProductDerivedUomIfMissing} needs
+   */
+  public static void applyDerivedUomOnUpdate(JSONObject filteredBody, String dalEntityName) {
+    injectProductDerivedUomIfMissing(filteredBody,
+        ModelProvider.getInstance().getEntity(dalEntityName, false), false);
   }
 
   /**

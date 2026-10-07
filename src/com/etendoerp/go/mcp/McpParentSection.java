@@ -51,8 +51,8 @@ import org.codehaus.jettison.json.JSONObject;
  * not land — roughly 20 of the ~102 exposed child entities.</p>
  *
  * <h2>{@code field} is a property name, not a DBColumnName</h2>
- * <p>The rest of the MCP speaks in properties: {@code neo_list}'s filters are
- * {@code {"businessPartner": ...}}, {@code neo_create}'s fields likewise, and {@code neo_schema}'s
+ * <p>The rest of the MCP speaks in properties: {@code etendo_list}'s filters are
+ * {@code {"businessPartner": ...}}, {@code etendo_create}'s fields likewise, and {@code etendo_schema}'s
  * descriptors are named the same way. A configuration in physical column names would be the only
  * place that did not, and the refusal message would have to translate between two vocabularies
  * instead of naming the key the agent must actually type. Both forms are accepted — resolution goes

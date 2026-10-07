@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import javax.inject.Named;
@@ -30,6 +32,8 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.PeriodControlLog;
 import org.openbravo.service.db.CallProcess;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * NeoHandler for the {@code periodControl} entity (C_Period records).
@@ -54,6 +58,30 @@ public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
 
   private static final Logger log = LogManager.getLogger(PeriodOpenCloseHandler.class);
   private static final String PROCESS_167_ID = "167";
+
+  /**
+   * The {@code openClose} button as the SPA presses it (ETP-5587): the one parameter its process
+   * dialog collects ({@code processOverrides.openClose} of the {@code open-close-period-control}
+   * decisions), with the three values it offers, read from {@code fieldValues} like the SPA posts
+   * it. Without it the MCP advertised the button's reference list (C/N/O/P) under
+   * {@code docAction}, which this handler never reads.
+   */
+  static final NeoActionContract OPEN_CLOSE = NeoActionContract.write(
+      PeriodOpenCloseSupport.FIELD_OPEN_CLOSE,
+      "Opens or closes this accounting period for every document type at once - the 'Open/Close "
+          + "period' action of the calendar. Posting a document dated in a closed period is "
+          + "refused, so ask the user before closing one. Returns the process message.",
+      NeoActionContract.Param.requiredOptions(PeriodOpenCloseSupport.FIELD_OPEN_CLOSE,
+          "O = open, C = close (can be reopened later), P = close permanently (can never be "
+              + "reopened)",
+          List.of("O", "C", "P")))
+      .withIdDescription("the period id (a periodControl record)")
+      .withFieldValuesBody();
+
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    return Map.of(OPEN_CLOSE.getName(), OPEN_CLOSE);
+  }
 
   @Override
   protected NeoResponse doHandle(String openCloseValue, String recordId) throws Exception {

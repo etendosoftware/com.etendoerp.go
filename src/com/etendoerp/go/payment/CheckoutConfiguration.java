@@ -60,4 +60,5 @@ public final class CheckoutConfiguration {
   public static boolean isConfigured() {
     return !secretKey().trim().isEmpty() && !priceId().trim().isEmpty() && !webhookSecret().trim().isEmpty();
   }
+
 }

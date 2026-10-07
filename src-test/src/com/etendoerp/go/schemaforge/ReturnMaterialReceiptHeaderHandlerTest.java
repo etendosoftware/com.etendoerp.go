@@ -32,6 +32,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionSuccess;
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.mockCompletedInvoice;
+import static com.etendoerp.go.schemaforge.ReturnInvoiceSqlTestSupport.stubReturnInvoiceQueries;
+
+import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks;
+
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -87,6 +93,10 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 public class ReturnMaterialReceiptHeaderHandlerTest {
 
   private ReturnMaterialReceiptHeaderHandler handler;
+
+  /** Message {@code applyBusinessPartnerFinancials} rejects an unusable sales BP with. */
+  private static final String BP_FINANCIALS_MISSING =
+      "Business Partner is missing mandatory Payment Terms or Payment Method";
 
   @Before
   public void setUp() {
@@ -414,11 +424,12 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
   }
 
   @Test
-  public void testHandleCreateReturnInvoiceNoProductLinesReturnsBadRequest() {
+  public void testHandleCreateReturnInvoiceNoProductLinesReturnsBadRequest() throws Exception {
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
       when(receipt.getDocumentStatus()).thenReturn("CO");
@@ -431,15 +442,19 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("No product lines in this receipt", errorMessage(result));
     }
   }
 
   @Test
-  public void testHandleCreateReturnInvoiceNoAriRmDocTypeReturnsInternalError() {
+  public void testHandleCreateReturnInvoiceNoAriRmDocTypeReturnsInternalError() throws Exception {
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // ETP-5381: the P5 duplicate guard runs before the doc-type lookup and propagates DB
+      // failures as OBException → 400, which would mask the 500 this test is about.
+      stubReturnInvoiceQueries(dal, "inv-src-1");
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
@@ -485,6 +500,9 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(mock(Invoice.class));
+      // ETP-5381: without these the P5 guard blows up on a null connection and its OBException
+      // becomes the 400 asserted below — the doc-type lookup would never run.
+      stubReturnInvoiceQueries(dal, "inv-src-1");
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
@@ -520,6 +538,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals(BP_FINANCIALS_MISSING, errorMessage(result));
     }
   }
 
@@ -534,6 +553,9 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(mock(Invoice.class));
+      // ETP-5381: without these the P5 guard blows up on a null connection and its OBException
+      // becomes the 400 asserted below — the doc-type lookup would never run.
+      stubReturnInvoiceQueries(dal, "inv-src-1");
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
@@ -568,6 +590,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals(BP_FINANCIALS_MISSING, errorMessage(result));
     }
   }
 
@@ -577,7 +600,8 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
   @Test
   public void testHandleCreateReturnInvoiceSucceedsWithSourceInvoice() throws Exception {
     // Covers: findSourceInvoice HQL path, buildReturnInvoiceHeader if-branch (sourceInvoice!=null),
-    // linkReversedInvoice, addReturnInvoiceLines, buildAndSaveInvoiceLine, resolveApplicableTax.
+    // linkRectifiedInvoices, addReturnInvoiceLines, buildAndSaveInvoiceLine, resolveApplicableTax,
+    // and (ETP-5381) the completion that now closes the same atomic step.
     try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
@@ -585,6 +609,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
@@ -627,11 +652,14 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
 
       // buildReturnInvoiceHeader — sourceInvoice != null path
       Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-1");
       when(provider.get(eq(Invoice.class))).thenReturn(invoice);
       BusinessPartner bp = mock(BusinessPartner.class);
       when(receipt.getBusinessPartner()).thenReturn(bp);
 
-      // linkReversedInvoice
+      // linkRectifiedInvoices — the rectified invoice exists and is not linked yet
+      when(dal.get(eq(Invoice.class), eq("inv-src-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
       ReversedInvoice revLink = mock(ReversedInvoice.class);
       when(provider.get(eq(ReversedInvoice.class))).thenReturn(revLink);
 
@@ -646,14 +674,340 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
       when(handler.createDraftInvoiceHandler.getSupport()).thenReturn(support);
 
-      NeoContext ctx = NeoContext.builder()
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
+
+        NeoContext ctx = NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").build();
+        NeoResponse result = handler.handle(ctx);
+
+        assertNotNull(result);
+        assertEquals(200, result.getHttpStatus());
+      }
+    }
+  }
+
+  /**
+   * ETP-5381: the payload is built from the invoice re-read AFTER completion, so it must report
+   * the confirmed status. A {@code DR} here would mean the rectificative invoice was left as a
+   * draft — the exact failure the atomic create-and-confirm step exists to prevent.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  @Test
+  public void handleCreateReturnInvoice_reportsConfirmedStatusAndConfirmsOnce() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
+
+      Invoice invoice = mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-2");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-2", "REC-1000002", "CO");
+
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+        assertNotNull(result);
+        assertEquals(200, result.getHttpStatus());
+        JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("ret-inv-2", data.getString("id"));
+        assertEquals("REC-1000002", data.getString("documentNo"));
+        assertEquals("The response must report the confirmed status, not DR",
+            "CO", data.getString("documentStatus"));
+        Mockito.verify(completion.processInvoiceUtil, Mockito.times(1))
+            .process(eq("ret-inv-2"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+        assertNotNull(invoice);
+      }
+    }
+  }
+
+  /**
+   * ETP-5381: no confirmed invoice can be rectified → 400 with the "select an invoice" message,
+   * and no invoice is created. A rectificative invoice with no {@code C_Invoice_Reverse} row
+   * cannot ever be confirmed, so failing before any write is strictly better than a stuck draft.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void handleCreateReturnInvoice_noRectifiableInvoices_returnsBadRequestAndCreatesNothing()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal); // no candidates
+
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+      when(receipt.getDocumentStatus()).thenReturn("CO");
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getProduct()).thenReturn(mock(Product.class));
+      when(receipt.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+      Organization org = mock(Organization.class);
+      when(receipt.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      stubDocTypeLookup(dal, "org-1");
+
+      NeoResponse result = handler.handle(NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("createReturnInvoice").recordId("rec-1").build();
-      NeoResponse result = handler.handle(ctx);
+          .fieldName("createReturnInvoice").recordId("rec-1").build());
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, errorMessage(result));
+      Mockito.verify(provider, Mockito.never()).get(Invoice.class);
+      Mockito.verify(dal, Mockito.never()).save(any());
+    }
+  }
+
+  /**
+   * ETP-5381: an explicit {@code originInvoices} selection wins over the auto-detected candidate.
+   * The SQL fallback offers {@code inv-auto}; the body asks for {@code inv-picked}, and that is
+   * the invoice the {@code C_Invoice_Reverse} link must point at.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  @Test
+  public void handleCreateReturnInvoice_explicitOriginInvoicesWinOverAutoDetection()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-auto");
+
+      mockCreateReturnInvoiceFlow(dal, provider, "ret-inv-3");
+      Invoice picked = mock(Invoice.class);
+      when(dal.get(eq(Invoice.class), eq("inv-picked"))).thenReturn(picked);
+      Invoice auto = mock(Invoice.class);
+      when(dal.get(eq(Invoice.class), eq("inv-auto"))).thenReturn(auto);
+      ReversedInvoice revLink = mock(ReversedInvoice.class);
+      when(provider.get(eq(ReversedInvoice.class))).thenReturn(revLink);
+
+      JSONObject body = new JSONObject().put("originInvoices",
+          new JSONArray().put("inv-picked"));
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-3", "REC-1000003", "CO");
+
+        NeoResponse result = handler.handle(NeoContext.builder()
+            .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+            .fieldName("createReturnInvoice").recordId("rec-1").requestBody(body).build());
+
+        assertNotNull(result);
+        assertEquals(200, result.getHttpStatus());
+        Mockito.verify(revLink).setReversedInvoice(picked);
+        Mockito.verify(revLink, Mockito.never()).setReversedInvoice(auto);
+      }
+    }
+  }
+
+  // ── rectifiableInvoices action (ETP-5381) ─────────────────────────────────
+
+  /**
+   * The {@code rectifiableInvoices} action returns the selectable candidate list with each
+   * chain-detected row flagged, the ids the server would have auto-picked, and whether this
+   * return document already has an invoice — the three pieces the modal needs to preselect a
+   * choice and to disable the button instead of letting the user walk into a 409.
+   */
+  @Test
+  public void handleRectifiableInvoices_returnsCandidatesSuggestionAndHasReturnInvoiceFlag()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, true, java.util.Arrays.asList("inv-new"),
+          java.util.Arrays.asList("inv-new", "inv-old"));
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("rectifiableInvoices").recordId("rec-1").build());
 
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
+      JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(2, invoices.length());
+      assertEquals("inv-new", invoices.getJSONObject(0).getString("id"));
+      assertEquals("DOC-inv-new", invoices.getJSONObject(0).getString("documentNo"));
+      assertTrue("The chain-detected row must carry the preselection flag",
+          invoices.getJSONObject(0).getBoolean("suggested"));
+      assertFalse("A selectable row outside the chain is offered but not suggested",
+          invoices.getJSONObject(1).getBoolean("suggested"));
+      JSONArray suggested = data.getJSONArray("suggestedInvoiceIds");
+      assertEquals("The suggestion must be the same candidate resolveRectifiedInvoiceIds picks",
+          1, suggested.length());
+      assertEquals("inv-new", suggested.getString(0));
+      assertTrue(data.getBoolean("hasReturnInvoice"));
     }
+  }
+
+  /**
+   * ETP-5381: a receipt created by hand has no {@code Canceled_Inoutline_ID} chain, so nothing is
+   * auto-detected — but the action must still hand the modal every invoice the user may pick.
+   * Before the split this returned an empty list and the user simply could not rectify.
+   */
+  @Test
+  public void handleRectifiableInvoices_noChain_stillReturnsSelectableInvoices()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, java.util.Collections.<String>emptyList(),
+          java.util.Arrays.asList("inv-a", "inv-b"));
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("rectifiableInvoices").recordId("rec-1").build());
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(2, data.getJSONArray("invoices").length());
+      assertEquals(0, data.getJSONArray("suggestedInvoiceIds").length());
+      assertFalse(data.getJSONArray("invoices").getJSONObject(0).getBoolean("suggested"));
+    }
+  }
+
+  /**
+   * ETP-5381: a receipt covering two shipments billed on two invoices preselects BOTH — the case
+   * the old singular {@code suggestedInvoiceId} could not express.
+   */
+  @Test
+  public void handleRectifiableInvoices_twoDetectedInvoices_suggestsBoth() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, java.util.Arrays.asList("inv-new", "inv-old"),
+          java.util.Arrays.asList("inv-new", "inv-old", "inv-unrelated"));
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("rectifiableInvoices").recordId("rec-1").build());
+
+      assertNotNull(result);
+      JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray suggested = data.getJSONArray("suggestedInvoiceIds");
+      assertEquals(2, suggested.length());
+      assertEquals("inv-new", suggested.getString(0));
+      assertEquals("inv-old", suggested.getString(1));
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(3, invoices.length());
+      assertTrue(invoices.getJSONObject(0).getBoolean("suggested"));
+      assertTrue(invoices.getJSONObject(1).getBoolean("suggested"));
+      assertFalse(invoices.getJSONObject(2).getBoolean("suggested"));
+    }
+  }
+
+  @Test
+  public void handleRectifiableInvoices_missingRecordIdReturnsBadRequest() {
+    NeoResponse result = handler.handle(NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName("rectifiableInvoices").build());
+    assertNotNull(result);
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+  }
+
+  // ── shared stubs for the createReturnInvoice happy path ───────────────────
+
+  /**
+   * Stubs everything {@code handleCreateReturnInvoice} needs between the receipt lookup and the
+   * completion: a completed receipt with one product line, a matching rectificative doc type, a
+   * source invoice found through the {@code findSourceInvoice} HQL (so the header copies its
+   * financials instead of deriving them from the business partner), the invoice header built via
+   * {@link OBProvider}, and the invoice-line builder.
+   *
+   * @return the invoice mock {@code buildReturnInvoiceHeader} will hand back
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private Invoice mockCreateReturnInvoiceFlow(OBDal dal, OBProvider provider, String invoiceId) {
+    ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+    when(receipt.getDocumentStatus()).thenReturn("CO");
+
+    ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+    when(line.getProduct()).thenReturn(mock(Product.class));
+    when(line.getMovementQuantity()).thenReturn(new BigDecimal("5.00"));
+    ShipmentInOutLine origLine = mock(ShipmentInOutLine.class);
+    when(origLine.getId()).thenReturn("orig-line-1");
+    when(line.getCanceledInoutLine()).thenReturn(origLine);
+    when(receipt.getMaterialMgmtShipmentInOutLineList())
+        .thenReturn(Collections.singletonList(line));
+
+    Organization org = mock(Organization.class);
+    when(receipt.getOrganization()).thenReturn(org);
+    when(org.getId()).thenReturn("org-1");
+    stubDocTypeLookup(dal, "org-1");
+    when(receipt.getBusinessPartner()).thenReturn(mock(BusinessPartner.class));
+
+    // findSourceInvoice HQL → one hit, so buildReturnInvoiceHeader takes the copy-from-source
+    // branch and never reaches applyBusinessPartnerFinancials.
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    Query<Invoice> invoiceQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Invoice.class))).thenReturn(invoiceQuery);
+    when(invoiceQuery.setParameter(anyString(), any())).thenReturn(invoiceQuery);
+    when(invoiceQuery.setMaxResults(anyInt())).thenReturn(invoiceQuery);
+    when(invoiceQuery.list()).thenReturn(Collections.singletonList(mock(Invoice.class)));
+
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getId()).thenReturn(invoiceId);
+    when(provider.get(eq(Invoice.class))).thenReturn(invoice);
+
+    InvoiceLine il = mock(InvoiceLine.class);
+    when(handler.createDraftInvoiceHandler.createShipmentInvoiceLine(
+        any(), any(), any(), anyLong())).thenReturn(il);
+    InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
+    when(handler.createDraftInvoiceHandler.getSupport()).thenReturn(support);
+
+    when(dal.get(eq(Invoice.class), eq("inv-src-1"))).thenReturn(mock(Invoice.class));
+    when(dal.get(eq(Invoice.class), eq("inv-auto"))).thenReturn(mock(Invoice.class));
+    stubNoExistingReversedInvoiceLink(dal);
+    when(provider.get(eq(ReversedInvoice.class))).thenReturn(mock(ReversedInvoice.class));
+    return invoice;
+  }
+
+  /** A rectificative doc type whose organization matches, so the first loop selects it. */
+  @SuppressWarnings("unchecked")
+  private static void stubDocTypeLookup(OBDal dal, String orgId) {
+    DocumentType docType = mock(DocumentType.class);
+    Organization docOrg = mock(Organization.class);
+    when(docType.getOrganization()).thenReturn(docOrg);
+    when(docOrg.getId()).thenReturn(orgId);
+    OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(docType));
+  }
+
+  /** {@code linkRectifiedInvoices}' "is this pair already linked?" probe answers "no". */
+  @SuppressWarnings("unchecked")
+  private static void stubNoExistingReversedInvoiceLink(OBDal dal) {
+    OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.<ReversedInvoice>emptyList());
+  }
+
+  /** Reads the human-readable message out of a {@code NeoResponse.error} payload. */
+  private static String errorMessage(NeoResponse response) {
+    return response.getBody().optJSONObject("error").optString("message", null);
   }
 
   // ── afterHandle() — guard conditions ──────────────────────────────────────
@@ -1087,6 +1441,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      stubReturnInvoiceQueries(dal, "inv-src-1");
 
       ShipmentInOut receipt = mock(ShipmentInOut.class);
       when(dal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
@@ -1126,6 +1481,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals(BP_FINANCIALS_MISSING, errorMessage(result));
     }
   }
 

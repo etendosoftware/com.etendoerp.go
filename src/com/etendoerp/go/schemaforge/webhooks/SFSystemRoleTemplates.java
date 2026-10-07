@@ -17,28 +17,23 @@
 
 package com.etendoerp.go.schemaforge.webhooks;
 
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
-import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.roles.SystemRoleTemplates;
-import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -64,6 +59,21 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * tenant's role usage" ({@code SFRolesOverview}'s job) — there is no client-admin role at system
  * level to report on either, since {@link SystemRoleTemplates}'s own class javadoc explicitly
  * excludes the client-level "Admin" role from the template set.</p>
+ *
+ * <p><b>Opt-in {@code matrix} + {@code reportsMatrix} (ETP-5485).</b> With {@code
+ * ?includeMatrix=true} the response also carries the window × role {@code matrix} and the
+ * Informes {@code reportsMatrix}, with one {@code access} column per template role id. Both are
+ * built by {@link RoleAccessMatrix} — the same builder {@code SFRolesOverview} uses — so the User
+ * window's "Roles del usuario" tab and "Configuración &gt; Roles" always list the same rows
+ * (including the ETP-5071 proxy rows "Modelos Fiscales" / "Documentos no contabilizados", which
+ * that tab was missing while it rebuilt rows on its own from {@code windows[]}). Opt-in because
+ * the other callers of this endpoint (the Users grid role chips, the assign-templates control)
+ * only need {@code roles}, and the matrix costs a category query plus the proxy-access queries
+ * per role. Without the parameter the response is exactly as before.</p>
+ *
+ * <p>The per-role {@code windows[]} deliberately keeps its original window set (every active
+ * {@code SPEC_TYPE = 'W'} window, NOT minus {@code RoleAccessMatrix}'s UI exclusions), so its
+ * consumers see no change; no consumer renders rows from it.</p>
  *
  * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
  * {@link OBContext#setAdminMode()} is entered — the same convention every sibling webhook in this
@@ -91,17 +101,27 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
   /** JSON key for a role's assigned-windows array. */
   private static final String WINDOWS = "windows";
 
-  /** JSON key for a window entry's access tier. */
-  private static final String TIER = "tier";
+  /**
+   * ETP-5402 — JSON key for a role's assigned-reports array (the Informes subsection), parallel
+   * to {@link #WINDOWS}. Part of the DEFAULT response shape, which callers that list or pick
+   * template roles still consume ({@code RoleChipsCell.jsx}, {@code AssignTemplateRolesControl.jsx}
+   * in {@code etendo_schema_forge}), so it stays even though it is no longer the matrix source.
+   *
+   * <p>Since ETP-5485 the User window's "Roles del usuario" tab does NOT read per-role
+   * {@code windows}/{@code reports} for its cells: it requests {@link #INCLUDE_MATRIX_PARAM} and
+   * renders {@link #MATRIX}/{@link #REPORTS_MATRIX}, built by the same {@code RoleAccessMatrix}
+   * as {@code SFRolesOverview}. Keep that in mind before trimming or extending either array.
+   */
+  private static final String REPORTS = "reports";
 
-  /** Access-tier value for a window with full (read+write) access. */
-  private static final String FULL = "full";
+  /** ETP-5485 — query parameter that opts into {@link #MATRIX} + {@link #REPORTS_MATRIX}. */
+  static final String INCLUDE_MATRIX_PARAM = "includeMatrix";
 
-  /** Access-tier value for a window with read-only access. */
-  private static final String READ_ONLY = "read-only";
+  /** ETP-5485 — JSON key for the window × template-role matrix ({@link RoleAccessMatrix}). */
+  private static final String MATRIX = "matrix";
 
-  /** {@code ETGO_SF_SPEC.SPEC_TYPE} value identifying a window/CRUD spec. */
-  private static final String SPEC_TYPE_WINDOW = "W";
+  /** ETP-5485 — JSON key for the Informes × template-role matrix ({@link RoleAccessMatrix}). */
+  private static final String REPORTS_MATRIX = "reportsMatrix";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -116,7 +136,9 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
 
     OBContext.setAdminMode();
     try {
-      JSONObject result = buildSystemRoleTemplatesOverview();
+      boolean includeMatrix = parameter != null
+          && Boolean.parseBoolean(parameter.get(INCLUDE_MATRIX_PARAM));
+      JSONObject result = buildSystemRoleTemplatesOverview(includeMatrix);
       responseVars.put("result", result.toString());
     } catch (Exception e) {
       log.error("Error in SFSystemRoleTemplates", e);
@@ -143,108 +165,63 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
 
   /**
    * Builds the {@code roles} array for the 4 fixed system-level templates, in
-   * {@link SystemRoleTemplates#byName()}'s own Finance/Sales/Purchasing/Inventory order. A
+   * {@link SystemRoleTemplates#byName()}'s own Finance/Sales/Purchasing/Inventory order — plus,
+   * when {@code includeMatrix} (ETP-5485), the shared {@code matrix} / {@code reportsMatrix}. A
    * template whose id no longer resolves to an active {@code Role} (deleted or deactivated —
    * not expected in practice, but not this webhook's job to prevent either) is skipped rather
    * than surfaced as an error, the same "degrade gracefully" convention every sibling webhook in
-   * this package follows.
+   * this package follows; it is then absent from the matrix columns too.
    */
-  private JSONObject buildSystemRoleTemplatesOverview() throws JSONException {
-    Set<String> goWindowIds = resolveActiveEtendoGoWindowIds();
+  private JSONObject buildSystemRoleTemplatesOverview(boolean includeMatrix) throws JSONException {
+    Map<String, Window> allGoWindowsById = RoleAccessMatrix.resolveAllActiveEtendoGoWindowsById();
+    // In-memory filter of the same query result — the matrix rows use the UI window set.
+    Map<String, Window> uiGoWindowsById = RoleAccessMatrix.withoutUiExcluded(allGoWindowsById);
 
     JSONArray roles = new JSONArray();
+    Map<String, Map<String, String>> tierMapsByRoleId = new LinkedHashMap<>();
+    Map<String, Map<String, String>> reportTierMapsByRoleId = new LinkedHashMap<>();
     for (String roleId : SystemRoleTemplates.byName().values()) {
       Role role = OBDal.getInstance().get(Role.class, roleId);
       if (role == null || !Boolean.TRUE.equals(role.isActive())) {
         continue;
       }
-      roles.put(buildRoleJson(role, goWindowIds));
+      // Windows are resolved before reports, as before ETP-5485 — keeps the per-role query order.
+      JSONObject roleJson = buildRoleJson(role, allGoWindowsById);
+      Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(role);
+      roleJson.put(REPORTS, ReportAccessCatalog.reportsJson(reportTiers));
+      roles.put(roleJson);
+      if (includeMatrix) {
+        tierMapsByRoleId.put(role.getId(), RoleAccessMatrix.resolveTierMap(role, uiGoWindowsById));
+        reportTierMapsByRoleId.put(role.getId(), reportTiers);
+      }
     }
 
     JSONObject result = new JSONObject();
     result.put(ROLES, roles);
+    if (includeMatrix) {
+      result.put(MATRIX, RoleAccessMatrix.buildMatrix(uiGoWindowsById, tierMapsByRoleId));
+      result.put(REPORTS_MATRIX, RoleAccessMatrix.buildReportsMatrix(reportTierMapsByRoleId));
+    }
     return result;
   }
 
   /**
-   * Builds a single role's JSON entry: id, name, and its windows array. No {@code userCount},
-   * no {@code isClientAdmin} — see the class javadoc for why.
+   * Builds a single role's JSON entry: id, name and its windows array (the caller adds the
+   * ETP-5402 Informes {@code reports} array). No {@code userCount}, no {@code isClientAdmin} —
+   * see the class javadoc for why.
+   *
+   * <p>{@code windows} is {@code role}'s active {@code AD_Window_Access} rows intersected with
+   * {@code goWindowsById} (the UNEXCLUDED set — see the class javadoc), via the shared {@link
+   * RoleAccessMatrix#windowsJson(Map, Map)}.</p>
    */
-  private JSONObject buildRoleJson(Role role, Set<String> goWindowIds) throws JSONException {
+  private JSONObject buildRoleJson(Role role, Map<String, Window> goWindowsById)
+      throws JSONException {
     JSONObject roleJson = new JSONObject();
     roleJson.put(ID, role.getId());
     roleJson.put(NAME, role.getName());
-    roleJson.put(WINDOWS, buildWindowsJson(role, goWindowIds));
+    Map<String, String> windowTiers = RoleAccessMatrix.resolveWindowTierMap(role,
+        goWindowsById.keySet());
+    roleJson.put(WINDOWS, RoleAccessMatrix.windowsJson(windowTiers, goWindowsById));
     return roleJson;
-  }
-
-  /**
-   * Builds the {@code windows} array for {@code role}: every active {@code AD_Window_Access} row
-   * it has, intersected with {@code goWindowIds} — mirrors {@code SFRolesOverview}'s identical
-   * method. Client/organization filtering is explicitly disabled: these roles live at the system
-   * client ({@code AD_Client_ID = '0'}), which a non-system caller's ambient readable-client set
-   * would otherwise silently filter out.
-   */
-  @SuppressWarnings("unchecked")
-  private JSONArray buildWindowsJson(Role role, Set<String> goWindowIds) throws JSONException {
-    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", role.getId()));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
-
-    List<JSONObject> windowJsons = new ArrayList<>();
-    for (WindowAccess access : (List<WindowAccess>) criteria.list()) {
-      Window window = access.getWindow();
-      if (window == null || !goWindowIds.contains(window.getId())) {
-        continue;
-      }
-      JSONObject windowJson = new JSONObject();
-      windowJson.put(ID, window.getId());
-      windowJson.put(NAME, window.getName());
-      windowJson.put(TIER, Boolean.TRUE.equals(access.isEditableField()) ? FULL : READ_ONLY);
-      windowJsons.add(windowJson);
-    }
-
-    windowJsons.sort((a, b) -> {
-      try {
-        return a.getString(NAME).compareToIgnoreCase(b.getString(NAME));
-      } catch (JSONException e) {
-        return 0;
-      }
-    });
-
-    JSONArray windows = new JSONArray();
-    for (JSONObject windowJson : windowJsons) {
-      windows.put(windowJson);
-    }
-    return windows;
-  }
-
-  /**
-   * Resolves every distinct {@code AD_Window} backing an active, {@code SPEC_TYPE = 'W'}
-   * {@code ETGO_SF_SPEC} — i.e. every window Etendo GO actually exposes today. Mirrors
-   * {@code SFRolesOverview}'s identical method (this is the 3rd copy of this query across
-   * {@code SFRolesOverview}/{@code SFWindowAccessMap}/this class — not yet extracted to a shared
-   * helper, same as the first 2; flagged, not required, per this ticket's own dispatch note).
-   *
-   * @return the distinct window IDs (insertion order)
-   */
-  @SuppressWarnings("unchecked")
-  private Set<String> resolveActiveEtendoGoWindowIds() {
-    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, SPEC_TYPE_WINDOW));
-
-    Set<String> windowIds = new LinkedHashSet<>();
-    for (SFSpec spec : (List<SFSpec>) criteria.list()) {
-      Window window = spec.getADWindow();
-      if (window != null) {
-        windowIds.add(window.getId());
-      }
-    }
-    return windowIds;
   }
 }

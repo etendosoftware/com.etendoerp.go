@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.StaleStateException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,9 +43,11 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.roles.RoleWriteConflicts;
 import com.etendoerp.go.roles.UserRoleCompositionService;
 
 /**
@@ -320,6 +323,50 @@ class SFPromoteUserRoleTest {
 
     assertEquals("boom", responseVars.get("error"));
     assertFalse(responseVars.containsKey("result"));
+  }
+
+  // ── ETP-5278: a write that lost a race is CONCURRENT_MODIFICATION, not a 500 ────────────
+
+  @Test
+  void concurrentWriteFailureBecomesConcurrentModificationAndRollsBack() {
+    Role currentRole = givenClientAdminRole();
+    parameters.put("UserId", "target-1");
+    parameters.put("Mode", "demote");
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> construction =
+            mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
+                when(mockService.demoteFromAdmin(null, currentRole, "target-1"))
+                    .thenThrow(new StaleStateException("Batch update returned unexpected row count")))) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      webhook.get(parameters, responseVars);
+      verify(dal).rollbackAndClose();
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertFalse(result.optBoolean("success", true));
+    assertEquals(RoleWriteConflicts.CODE, result.optString("code"));
+  }
+
+  @Test
+  void domainRejectionIsNotReportedAsConcurrentModification() {
+    Role currentRole = givenClientAdminRole();
+    parameters.put("UserId", "target-1");
+    parameters.put("Mode", "demote");
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> construction =
+            mockConstruction(UserRoleCompositionService.class, (mockService, ctx) ->
+                when(mockService.demoteFromAdmin(null, currentRole, "target-1")).thenThrow(new OBException("rejected")))) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      webhook.get(parameters, responseVars);
+      verify(dal, never()).rollbackAndClose();
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertFalse(result.optBoolean("success", true));
+    assertFalse(result.has("code"));
   }
 
   private static JSONObject resultOf(Map<String, String> responseVars) {

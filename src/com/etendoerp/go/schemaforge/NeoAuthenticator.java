@@ -22,111 +22,58 @@ import java.io.IOException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoLanguage;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Authentication and access-check collaborator for {@link NeoServlet}.
- * Validates JWTs, sets up the {@link OBContext}, and answers per-window
- * and per-process access questions for the current role.
+ *
+ * <p>Authentication itself is the shared {@link EnvironmentRequestAuthenticator} pipeline under
+ * {@link SurfacePolicy#NEO_API} (ETP-5455): this class used to carry its own copy of it — one
+ * branch per credential scheme, each re-implementing the context setup, the commercial access
+ * check and the language — and the copies drifted. What stays here is NEO-specific: how a refusal
+ * is written, and the per-window and per-process access questions for the current role.
  */
 class NeoAuthenticator {
 
   private static final Logger log = LogManager.getLogger(NeoAuthenticator.class);
 
   private final NeoServlet servlet;
+  private final EnvironmentRequestAuthenticator environmentAuthenticator;
 
   NeoAuthenticator(NeoServlet servlet) {
+    this(servlet, new EnvironmentRequestAuthenticator());
+  }
+
+  NeoAuthenticator(NeoServlet servlet, EnvironmentRequestAuthenticator environmentAuthenticator) {
     this.servlet = servlet;
+    this.environmentAuthenticator = environmentAuthenticator;
   }
 
   /**
-   * Verify the request carries a valid JWT and set up the corresponding
-   * {@link OBContext}. On failure writes an HTTP error to {@code response}
-   * and returns {@code false}.
+   * Authenticate the request and set up its {@link OBContext}. On failure writes the HTTP error
+   * to {@code response} and returns {@code false}.
    */
   boolean authenticateRequest(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    try {
-      authenticateJwt(request);
+    EnvironmentAuthOutcome outcome =
+        environmentAuthenticator.authenticate(request, SurfacePolicy.NEO_API);
+    if (outcome.isAuthenticated()) {
       return true;
-    } catch (OBException e) {
-      // OBException messages are safe to expose (we control them)
-      log.warn("Unauthorized NEO request: {}", e.getMessage());
-      servlet.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return false;
-    } catch (Exception e) {
-      // Other exceptions (JWT decode failures, NPEs) don't leak internals.
-      log.warn("Unauthorized NEO request: {}", e.getMessage());
-      servlet.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return false;
     }
-  }
-
-  void authenticateJwt(HttpServletRequest request) throws Exception {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new OBException("Missing or invalid Authorization header");
+    if (outcome.getStatus() == EnvironmentAuthOutcome.Status.PAYMENT_REQUIRED) {
+      log.info("Commercial access denied for NEO request: {}", outcome.getMessage());
+    } else {
+      log.warn("Unauthorized NEO request: {}", outcome.getMessage());
     }
-    String token = authHeader.substring(7);
-    DecodedJWT decodedToken = SecureWebServicesUtils.decodeToken(token);
-
-    String userId = decodedToken.getClaim("user").asString();
-    String roleId = decodedToken.getClaim("role").asString();
-    String orgId = decodedToken.getClaim("organization").asString();
-    String warehouseId = decodedToken.getClaim("warehouse").asString();
-    String clientId = decodedToken.getClaim("client").asString();
-
-    if (StringUtils.isAnyBlank(userId, roleId, orgId, clientId)) {
-      throw new OBException("Invalid token: missing required claims");
-    }
-
-    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
-    if (context.getWarehouse() != null) {
-      String whOrgId = context.getWarehouse().getOrganization().getId();
-      boolean accessible = false;
-      for (String readableOrg : context.getReadableOrganizations()) {
-        if (readableOrg.equals(whOrgId)) {
-          accessible = true;
-          break;
-        }
-      }
-      if (!accessible) {
-        log.warn("JWT warehouse '{}' (org='{}') is not in user '{}' readable orgs — resolving accessible warehouse",
-            warehouseId, whOrgId, userId);
-        String correctedWarehouseId = NeoServletSupport.findAccessibleWarehouse(context);
-        context = SecureWebServicesUtils.createContext(userId, roleId, orgId, correctedWarehouseId, clientId);
-      }
-    }
-    OBContext.setOBContext(context);
-    OBContext.setOBContextInSession(request, context);
-    applyRequestLanguage(request);
-  }
-
-  /**
-   * Apply the UI language requested via the {@code Accept-Language} header to the
-   * current {@link OBContext}, so server-side message translation (AD_Message)
-   * matches the language the user selected in the frontend. Falls back silently
-   * to the context default when the header is absent or not a valid active language.
-   *
-   * <p>Only Etendo language codes ({@code xx_YY}, e.g. {@code es_ES}) are honored;
-   * browser-style values ({@code es-ES,es;q=0.9}) are ignored on purpose so the
-   * explicit app locale wins and nothing else does.
-   */
-  private void applyRequestLanguage(HttpServletRequest request) {
-    // Validation + AD_Language lookup live in the shared NeoLanguage helper so the
-    // same "GO locale of the request" is used by selectors (ETP-4304) and messages
-    // (ETP-4306). Only well-formed, active xx_YY codes are honored; otherwise the
-    // context default stands.
-    NeoLanguage.applyToContext(request.getHeader("Accept-Language"));
+    servlet.sendError(response, outcome.getHttpStatus(), outcome.getMessage());
+    return false;
   }
 
   boolean hasWindowAccess(String windowId) {

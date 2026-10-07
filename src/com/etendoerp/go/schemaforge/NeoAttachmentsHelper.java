@@ -51,7 +51,10 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.core.OBContext;
@@ -101,6 +104,8 @@ public final class NeoAttachmentsHelper {
   private static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
   private static final String CONTENT_DISPOSITION = "Content-Disposition";
   private static final String MAIN_FLAG_COLUMN = "EM_ETGO_ISPREVIEWMAIN";
+  private static final String ERR_FISCAL_DECL_NOT_DRAFT_PREFIX =
+      "Cannot delete an attachment of a fiscal declaration that is not in draft status: ";
 
   private NeoAttachmentsHelper() {
   }
@@ -146,6 +151,46 @@ public final class NeoAttachmentsHelper {
     } catch (Exception e) {
       log.error("Attachments list failed for {}/{}", tableName, recordId, e);
       return NeoResponse.error(500, "Internal error listing attachments");
+    }
+  }
+
+  // ── Count ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Counts the attachments bound to the given record with exactly the same
+   * criteria as {@link #handleList} (table + record, organization filter off),
+   * so the number always equals the length of the list the Attachments tab
+   * would show — including the one marked as "main".
+   *
+   * <p>Runs a {@code COUNT} query instead of loading the entities: the React
+   * Attachments tab loads its full list lazily (ETP-4564) and only needs this
+   * number to show the tab badge as soon as a record opens (ETP-5526).</p>
+   *
+   * @param tableName the AD_Table.name (case-insensitive, e.g. {@code "C_Order"})
+   * @param recordId  the record's primary key (string; all AD IDs are VARCHAR)
+   * @return a NeoResponse wrapping {@code { "count": N }}
+   */
+  public static NeoResponse handleCount(String tableName, String recordId) {
+    if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
+    }
+    try {
+      String tableId = resolveTableId(tableName);
+
+      OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
+      criteria.setFilterOnReadableOrganization(false);
+
+      JSONObject body = new JSONObject();
+      body.put("count", criteria.count());
+      return NeoResponse.ok(body);
+    } catch (OBException e) {
+      log.warn("Attachments count failed: {}", e.getMessage());
+      return NeoResponse.error(404, e.getMessage());
+    } catch (Exception e) {
+      log.error("Attachments count failed for {}/{}", tableName, recordId, e);
+      return NeoResponse.error(500, "Internal error counting attachments");
     }
   }
 
@@ -324,6 +369,13 @@ public final class NeoAttachmentsHelper {
             "Could not resolve a standard tab for table '" + tableName + "'");
       }
 
+      // ETP-5309: an unsaved record (the SPA's literal id "new") used to reach the core,
+      // whose OBSecurityException came back as a raw 500. Answer a clean 404 instead.
+      if (!recordExists(tableId, recordId)) {
+        return NeoResponse.error(404, "Record '" + recordId + "' does not exist in table '"
+            + tableName + "'. Save it before attaching files.");
+      }
+
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
 
       tempFile = materializeTempFile(filePart);
@@ -499,8 +551,16 @@ public final class NeoAttachmentsHelper {
   /**
    * Deletes a single attachment (DB record + file on disk).
    *
+   * <p>ETP-5432: rejects the delete when the attachment belongs to a fiscal declaration
+   * ({@code ETGO_Fiscal_Decl}) that is not in draft status — see
+   * {@link #rejectDeleteOfNonDraftFiscalDeclAttachment}. A frontend-only guard already hides the
+   * delete action for a non-draft declaration's justificante ({@code FmListPage.jsx}), but this
+   * is what actually stops a direct {@code DELETE /sws/neo/attachments/:id} call regardless of
+   * what the client sends. Attachments of every other table are unaffected.</p>
+   *
    * @param attachmentId the C_File_ID
-   * @return 204 No Content on success, 404 if the attachment does not exist
+   * @return 204 No Content on success, 404 if the attachment does not exist, 409 if it belongs
+   *         to a non-draft fiscal declaration
    */
   public static NeoResponse handleDelete(String attachmentId) {
     if (StringUtils.isBlank(attachmentId)) {
@@ -510,6 +570,10 @@ public final class NeoAttachmentsHelper {
       Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
       if (attachment == null) {
         return NeoResponse.error(404, ERR_ATTACHMENT_NOT_FOUND);
+      }
+      NeoResponse guard = rejectDeleteOfNonDraftFiscalDeclAttachment(attachment);
+      if (guard != null) {
+        return guard;
       }
       AttachImplementationManager aim = getAttachManager();
       aim.delete(attachment);
@@ -523,6 +587,43 @@ public final class NeoAttachmentsHelper {
       log.error("Attachment delete failed for id {}", attachmentId, e);
       return NeoResponse.error(500, "Internal error deleting attachment");
     }
+  }
+
+  /**
+   * Guards {@link #handleDelete} against removing a justificante/attachment of a fiscal
+   * declaration ({@code ETGO_Fiscal_Decl}) that is no longer a draft — ETP-5432. Deliberately
+   * narrow: it only inspects the attachment's OWN {@code AD_Table}/{@code AD_Record_ID}, so an
+   * attachment of any other table (goods-receipt, invoice, …) short-circuits on the very first
+   * check and never reaches the DAL lookup that follows. Mirrors the 409 shape already used by
+   * {@link FiscalDeclCrudHandler#handleDeclDelete} for the equivalent declaration-delete guard.
+   *
+   * @param attachment the attachment about to be deleted (never {@code null})
+   * @return a 409 {@link NeoResponse} when the attachment belongs to a non-draft fiscal
+   *         declaration; {@code null} when the delete may proceed (wrong table, unresolvable
+   *         owning record, or the declaration is genuinely a draft)
+   */
+  private static NeoResponse rejectDeleteOfNonDraftFiscalDeclAttachment(Attachment attachment) {
+    Table table = attachment.getTable();
+    if (table == null
+        || !FiscalDeclCrudHandler.ENTITY_FISCAL_DECL.equals(table.getDBTableName())) {
+      return null;
+    }
+    String declId = attachment.getRecord();
+    if (StringUtils.isBlank(declId)) {
+      return null;
+    }
+    BaseOBObject decl = OBDal.getInstance().get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, declId);
+    if (decl == null) {
+      // Owning declaration already gone (or never existed) — nothing left to guard.
+      return null;
+    }
+    Object status = decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS);
+    String statusStr = status != null ? String.valueOf(status) : "";
+    if (StringUtils.isNotBlank(statusStr)
+        && !FiscalDeclCrudHandler.DEFAULT_STATUS.equals(statusStr)) {
+      return NeoResponse.error(409, ERR_FISCAL_DECL_NOT_DRAFT_PREFIX + declId);
+    }
+    return null;
   }
 
   // ── Update description ──────────────────────────────────────────────────────
@@ -591,6 +692,30 @@ public final class NeoAttachmentsHelper {
     String tableId = rows.get(0);
     TABLE_ID_CACHE.put(key, tableId);
     return tableId;
+  }
+
+  /**
+   * Whether the record an attachment would be bound to exists (ETP-5309). Mirrors the
+   * lookup {@link AttachImplementationManager} itself performs in {@code checkReadableAccess}
+   * — by the table's DAL entity, in admin mode — so it only answers existence; readable
+   * access is still enforced by the core on upload. A table with no DAL entity is not
+   * checked here, exactly as the core skips it.
+   *
+   * @param tableId  the AD_Table.id
+   * @param recordId the record's primary key
+   * @return {@code false} only when the table has an entity and no row with that id
+   */
+  static boolean recordExists(String tableId, String recordId) {
+    Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+    if (entity == null) {
+      return true;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(entity.getName(), recordId) != null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**

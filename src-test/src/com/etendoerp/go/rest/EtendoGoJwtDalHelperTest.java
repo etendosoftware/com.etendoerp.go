@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -47,10 +48,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
@@ -60,6 +63,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -426,6 +430,96 @@ class EtendoGoJwtDalHelperTest {
   }
 
   @Nested
+  @DisplayName("findFreeTenantIdsByAccountEmail")
+  class FindFreeTenantIdsByAccountEmail {
+
+    @Mock private OBQuery<User> usersQuery;
+    @Mock private OBQuery<Preference> preferenceQuery;
+
+    @Test
+    @DisplayName("returns an empty set when the account has no environments")
+    void returnsEmptyWhenNoEnvironmentExists() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(Collections.emptyList());
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @DisplayName("returns one distinct free client ID when the account has one free tenant")
+    void returnsUniqueFreeClientId() {
+      Client freeClient = mock(Client.class);
+      when(freeClient.getId()).thenReturn("free-client");
+      User firstEnvironmentUser = mock(User.class);
+      User secondEnvironmentUser = mock(User.class);
+      when(firstEnvironmentUser.getClient()).thenReturn(freeClient);
+      when(secondEnvironmentUser.getClient()).thenReturn(freeClient);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(firstEnvironmentUser, secondEnvironmentUser));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null, null);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("free-client"), result);
+    }
+
+    @Test
+    @DisplayName("preserves multiple distinct free client IDs so callers can reject ambiguity")
+    void returnsEveryDistinctFreeClientIdForAmbiguousOwnership() {
+      Client firstFreeClient = mock(Client.class);
+      Client secondFreeClient = mock(Client.class);
+      when(firstFreeClient.getId()).thenReturn("free-client-1");
+      when(secondFreeClient.getId()).thenReturn("free-client-2");
+      User firstEnvironmentUser = mock(User.class);
+      User secondEnvironmentUser = mock(User.class);
+      when(firstEnvironmentUser.getClient()).thenReturn(firstFreeClient);
+      when(secondEnvironmentUser.getClient()).thenReturn(secondFreeClient);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(firstEnvironmentUser, secondEnvironmentUser));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null, null);
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("free-client-1", "free-client-2"), result);
+    }
+  }
+
+  @Nested
+  @DisplayName("findOnlyFreeTenantIdByAccountEmail")
+  class FindOnlyFreeTenantIdByAccountEmail {
+
+    @Mock private OBQuery<User> usersQuery;
+    @Mock private OBQuery<Preference> preferenceQuery;
+
+    @Test
+    @DisplayName("excludes the new destination when resolving the only free source tenant")
+    void excludesDestinationFromFreeTenantCandidates() {
+      User demoUser = mock(User.class);
+      User targetUser = mock(User.class);
+      Client demoClient = mock(Client.class);
+      Client targetClient = mock(Client.class);
+      when(demoUser.getClient()).thenReturn(demoClient);
+      when(targetUser.getClient()).thenReturn(targetClient);
+      when(demoClient.getId()).thenReturn("demo-client");
+      when(targetClient.getId()).thenReturn("target-client");
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+      when(usersQuery.list()).thenReturn(List.of(demoUser, targetUser));
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+
+      String result = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+          "user@test.com", "target-client");
+
+      assertEquals("demo-client", result);
+      verify(preferenceQuery).setNamedParameter("clientId", "demo-client");
+    }
+  }
+
+  @Nested
   @DisplayName("findNonStarOrganizations")
   class FindNonStarOrganizations {
 
@@ -452,9 +546,38 @@ class EtendoGoJwtDalHelperTest {
   @DisplayName("buildEnvironmentJson")
   class BuildEnvironmentJson {
 
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+    // ETP-5488 wrapped TenantEnvironmentLifecycleService.readPreference in
+    // OBContext.setAdminMode()/restorePreviousMode(); this class has no live session, so the real
+    // static methods NPE. mockStatic() turns both into no-ops — buildEnvironmentJson's admin-mode
+    // plumbing isn't what these tests exercise.
+    private MockedStatic<OBContext> obContextMock;
+    // With the context mocked, the lifecycle reaches its legacy-trial branch, which reads the
+    // Etendo configuration. Loading it here, in a JVM without a configured environment, left the
+    // config provider without a location for the integration tests that run after this class in
+    // the same JVM (OBBaseTest.initializeDisabledTestCases -> Paths.get(null)).
+    private MockedStatic<com.etendoerp.go.common.ConfigPropertyReader> configMock;
+
+    @BeforeEach
+    void isolateOwnerLookup() {
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+      obContextMock = mockStatic(OBContext.class);
+      configMock = mockStatic(com.etendoerp.go.common.ConfigPropertyReader.class);
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.uniqueResult()).thenReturn(null);
+    }
+
+    @AfterEach
+    void restoreOwnerLookup() {
+      ownerSupportMock.close();
+      obContextMock.close();
+      configMock.close();
+    }
+
     @Mock private Client client;
     @Mock private Organization organization;
     @Mock private User environmentUser;
+    @Mock private OBQuery<Preference> preferenceQuery;
 
     @Test
     @DisplayName("builds JSON with all fields when org is non-null")
@@ -513,8 +636,8 @@ class EtendoGoJwtDalHelperTest {
 
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
 
-      // Seven original fields plus the plan badge added by ETP-4686.
-      assertEquals(8, result.length());
+      // Seven original fields plus plan, relationship and demo-association metadata.
+      assertEquals(10, result.length());
     }
 
     @Test
@@ -529,6 +652,21 @@ class EtendoGoJwtDalHelperTest {
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
 
       assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+    }
+
+    @Test
+    @DisplayName("reports a demo without association marker as still usable as a purchase source")
+    void reportsNoAssociationWithoutMarker() throws Exception {
+      when(client.getId()).thenReturn("C-4");
+      when(client.getName()).thenReturn("Client Four");
+      when(environmentUser.getId()).thenReturn("U-4");
+      when(environmentUser.getUsername()).thenReturn("user@four.com");
+      when(environmentUser.getName()).thenReturn("User Four");
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+
+      // ETP-5548: always present, so the purchase picker never has to guess from a missing key.
+      assertFalse(result.getBoolean("associatedWithProductive"));
     }
   }
 

@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * "unconfigured" — which means every section must be registered <i>before</i> the first payload is
  * read, not merely before its own feature runs. A static block inside
  * {@link McpParentSection} would only fire once something touched that class, so a
- * {@code neo_discover} call arriving first would report a perfectly valid {@code parent} section as
+ * {@code etendo_discover} call arriving first would report a perfectly valid {@code parent} section as
  * unknown. Listing the sections here, and having {@code McpEntityConfig} call
  * {@link #ensureRegistered()} before it parses anything, removes that ordering hazard.</p>
  *
@@ -54,6 +54,8 @@ final class McpConfigSections {
     }
     McpEntityConfig.register(McpParentSection.declaration());
     McpEntityConfig.register(McpFieldsSection.declaration());
+    McpEntityConfig.register(McpVerbsSection.declaration());
+    McpEntityConfig.register(McpActionsSection.declaration());
     REGISTERED.set(true);
   }
 

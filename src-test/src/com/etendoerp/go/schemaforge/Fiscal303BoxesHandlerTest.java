@@ -25,9 +25,11 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,9 +49,12 @@ import javax.servlet.http.HttpServletResponse;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -64,6 +69,7 @@ import org.hibernate.criterion.Criterion;
 
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link Fiscal303BoxesHandler}.
@@ -87,10 +93,26 @@ public class Fiscal303BoxesHandlerTest {
   private Fiscal303BoxesHandler handler;
   private FiscalDeclCrudHandler declHandler;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal303 sub-route on the
+   * Tax Report window grant before any routing runs. Default every test to "granted" so this
+   * file's pre-existing {@code handle()} routing tests keep exercising what they were written
+   * for; the denial itself is covered in {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @org.junit.Before
   public void setUp() {
     handler = new Fiscal303BoxesHandler(null);
     declHandler = new FiscalDeclCrudHandler(null);
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @org.junit.After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── BoxGroupConfig ────────────────────────────────────────────────────────
@@ -419,6 +441,34 @@ public class Fiscal303BoxesHandlerTest {
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
   }
 
+  // ── window-access gate (ETP-5546) ─────────────────────────────────────────
+
+  /**
+   * ETP-5546 — a role without the Tax Report window grant gets 403 for GET
+   * {@code /fiscal303/boxes}, the production entity named in the ticket's scope note, before any
+   * routing or computation runs. {@link AbstractFiscalHandlerTest} proves the gate itself
+   * generically via a synthetic stub entity; this proves it on the real production entity.
+   * {@code response.getWriter()} is verified never invoked, since the only way {@code boxes} ever
+   * writes a body is via {@code snapshotOrCompute}/{@code computeBoxes}.
+   *
+   * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
+   */
+  @Test
+  public void testHandleBoxesDeniedAccessReturnsForbiddenWithoutComputing() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+
+    h.handle("boxes", "GET", req, res);
+
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+    verify(res, never()).getWriter();
+  }
+
   // ── no-gaps coverage ─────────────────────────────────────────────────────
 
   /**
@@ -475,7 +525,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -508,7 +558,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "100.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -541,7 +591,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "40.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -575,7 +625,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "0.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -605,7 +655,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "20.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -638,7 +688,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "52.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -668,7 +718,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "14.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -698,7 +748,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "5.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -728,7 +778,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "17.50"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -759,7 +809,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("800.00", "168.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -791,7 +841,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("600.00", "126.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -823,7 +873,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("5000.00", "1050.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -856,7 +906,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("2000.00", "420.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -886,7 +936,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("500.00", "105.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -916,7 +966,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -928,6 +978,11 @@ public class Fiscal303BoxesHandlerTest {
   /**
    * Difference/IntracommunitySales must populate box 59 (base only, taxBox=0).
    * box[93] must mirror box[59] when box[59] > 0.
+   *
+   * <p>Box 59 has no dedicated correction-pair box, so it is computed with
+   * {@link InvoiceType#ALL} in a single pass (mirrors Classic's
+   * {@code AEAT303Report2014#generatePage3}) rather than {@code ONLY_NORMAL} — this
+   * amount already represents normal + corrective invoices combined.
    */
   @Test
   public void testComputeBoxes_intracommunitySales_mapsToBox59andMirror93() {
@@ -957,8 +1012,52 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
+   * ETP — rectificativa/nota-de-crédito regression: a corrective customer intracommunity-sales
+   * invoice must land in box 59, exactly like the already-worked normal-invoice case above.
+   * Before the fix, {@code fillGroupBoxes} was hardcoded to {@code InvoiceType.ONLY_NORMAL} for
+   * this group, so {@code calculateAmountsMap} was never even invoked with {@code ALL} and the
+   * corrective amount was silently dropped (no error, no log). Asserting the call uses
+   * {@code InvoiceType.ALL} — which folds normal + corrective (positive and negative) into one
+   * amount — is the regression guard: a return to {@code ONLY_NORMAL} makes this mock unmatched
+   * and the box empty.
+   */
+  @Test
+  public void testComputeBoxes_intracommunitySales_correctiveInvoiceIncludedInBox59() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("IntracommunitySales")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // Normal invoice: 2000.00. Corrective (negative) invoice: -300.00. ALL combines both.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("1700.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("1700.00", result.boxes.get(59));
+    assertBd("1700.00", result.boxes.get(93));
+    // Never falls back to the old ONLY_NORMAL-only call for this group.
+    verify(helper, never())
+        .calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+  }
+
+  /**
    * Difference/ExportsAndOperations must populate box 60 (base only, taxBox=0).
    * box[94] must mirror box[60] when box[60] > 0.
+   *
+   * <p>Box 60 has no dedicated correction-pair box either, so it is computed with
+   * {@link InvoiceType#ALL} in a single pass, same as box 59 above.
    */
   @Test
   public void testComputeBoxes_exportsAndOps_mapsToBox60andMirror94() {
@@ -985,6 +1084,132 @@ public class Fiscal303BoxesHandlerTest {
 
     assertBd("3600.00", result.boxes.get(60));
     assertBd("3600.00", result.boxes.get(94));
+  }
+
+  /**
+   * ETP — rectificativa/nota-de-crédito regression for box 60 (exports), same shape as the
+   * box 59 regression test above: a corrective invoice must be folded into box 60 via
+   * {@code InvoiceType.ALL}, never dropped by a hardcoded {@code ONLY_NORMAL} call.
+   */
+  @Test
+  public void testComputeBoxes_exportsAndOps_correctiveInvoiceIncludedInBox60() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("ExportsAndOperations")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // Normal invoice: 4000.00. Corrective (negative) invoice: -400.00. ALL combines both.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("3600.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("3600.00", result.boxes.get(60));
+    assertBd("3600.00", result.boxes.get(94));
+    verify(helper, never())
+        .calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+  }
+
+  /**
+   * QA (ETP-5596, Alex/REVIEW suggestion S1) — box 59 AND box 60 populated together in the SAME
+   * {@code computeBoxes()} call. Both boxes are filled by two independent {@code fillGroupBoxes}
+   * calls inside {@code fillAdditionalInfoBoxes}; a regression that makes one call overwrite or
+   * clear the other's entry (e.g. accidentally reusing a mutable map/key) would not be caught by
+   * the box-59-only and box-60-only tests above, since each of those only ever populates one of
+   * the two groups.
+   */
+  @Test
+  public void testComputeBoxes_intracomSalesAndExports_bothBoxesPopulatedTogether() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter box59Param = mock(TaxReportParameter.class);
+    TaxRate box59Rate = mock(TaxRate.class);
+    when(box59Rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("IntracommunitySales")))
+        .thenReturn(box59Param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(box59Param)))
+        .thenReturn(Collections.singletonList(box59Rate));
+
+    TaxReportParameter box60Param = mock(TaxReportParameter.class);
+    TaxRate box60Rate = mock(TaxRate.class);
+    when(box60Rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("ExportsAndOperations")))
+        .thenReturn(box60Param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(box60Param)))
+        .thenReturn(Collections.singletonList(box60Rate));
+
+    // Distinct amounts per call so a cross-contamination bug (box 60 picking up box 59's
+    // amount or vice-versa) is visible rather than coincidentally matching.
+    when(helper.calculateAmountsMap(eq(Collections.singletonList(box59Rate)), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("2300.00", "0.00"));
+    when(helper.calculateAmountsMap(eq(Collections.singletonList(box60Rate)), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("3600.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("2300.00", result.boxes.get(59));
+    assertBd("2300.00", result.boxes.get(93));
+    assertBd("3600.00", result.boxes.get(60));
+    assertBd("3600.00", result.boxes.get(94));
+  }
+
+  /**
+   * QA (ETP-5596, Alex/REVIEW suggestion S2) — a normal intracommunity-sales invoice fully offset
+   * by an exact-opposite corrective (net = 0.00). {@code addToBox} skips zero values ({@code
+   * val.compareTo(BigDecimal.ZERO) == 0}) by design — see {@code
+   * testComputeBoxes_sale0pct_mapsToBox150_box152Absent} for the same documented behavior on box
+   * 152 — so box 59 is correctly OMITTED from the map rather than stored as an explicit zero.
+   * Assert the net-zero case via {@code getOrDefault(59, ZERO)} (what a caller reading the box
+   * value must do), not a bare {@code boxes.get(59)}, which would be {@code null} here and is
+   * NOT a bug.
+   */
+  @Test
+  public void testComputeBoxes_intracommunitySales_zeroNetCorrectiveOmitsBoxNotZero() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("Difference"), eq("IntracommunitySales")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // Normal invoice: 500.00. Corrective (exact opposite): -500.00. ALL nets to exactly 0.00.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("0.00", "0.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("zero-net box 59 must be omitted from the map, not stored as an explicit 0",
+        result.boxes.get(59));
+    assertBd("0.00", result.boxes.getOrDefault(59, BigDecimal.ZERO));
+    // box 93 mirrors box 59 only when box 59 > 0 (see computeSummaryBoxes) — must also be absent.
+    assertNull(result.boxes.get(93));
   }
 
   /**
@@ -1021,7 +1246,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(Collections.singletonList(purchRate));
 
     // Call order: (1) applyPercentageSplit for VAT_SALES_GENERAL, (2) fillGroupBoxes for Normal_Operations
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"))
         .thenReturn(amounts("500.00", "105.00"));
 
@@ -1062,7 +1287,7 @@ public class Fiscal303BoxesHandlerTest {
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(purchParam)))
         .thenReturn(Collections.singletonList(purchRate));
 
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"))
         .thenReturn(amounts("500.00", "105.00"));
 
@@ -1073,6 +1298,438 @@ public class Fiscal303BoxesHandlerTest {
     assertTrue("box[66] must equal box[46]", box46.compareTo(result.boxes.get(66)) == 0);
     assertTrue("box[69] must equal box[46]", box46.compareTo(result.boxes.get(69)) == 0);
     assertTrue("box[71] must equal box[46]", box46.compareTo(result.boxes.get(71)) == 0);
+  }
+
+  // ── computeBoxes — ETP-5393 Bug F (Modificación/Rectificación box pairs) ──────────────────
+  //
+  // Boxes 14/15 ("Modificación bases y cuotas"), 25/26 ("Modificaciones bases y cuotas del
+  // recargo de equivalencia") and 40/41 ("Rectificación de deducciones") always rendered blank
+  // in the Go preview because this handler never computed them at all. The classic engine
+  // (org.openbravo.module.aeat303.es) has always derived them from corrective/credit-memo
+  // invoices only (InvoiceType.ONLY_MEMO_AND_CORRECTIVE) over the union of the TaxRates already
+  // resolved for the "normal" boxes:
+  //   - 14/15: VAT_SALES_GENERAL ∪ VAT_SALES_EU ∪ VAT_SALES_ISP taxRates
+  //     (AEAT303Report2014#generateSalesLines, ~lines 424-513)
+  //   - 25/26: VAT_SALES_EC taxRates
+  //     (AEAT303Report2014#generateSalesLines, ~lines 556-568)
+  //   - 40/41: union of every VAT_PURCHASE group's taxRates (Normal_Operations,
+  //     Investment_Goods, Import_Goods, Import_Investment_Goods, Intracommunity_Goods,
+  //     Intracommunity_Investments) (AEAT303Report2014#generatePurchaseLines, ~lines 618-689)
+
+  /**
+   * Box 14/15 must be populated from the SAME TaxRates already resolved for VAT_SALES_GENERAL
+   * (box 1/3, 4% here), computed with InvoiceType.ONLY_MEMO_AND_CORRECTIVE rather than
+   * ONLY_NORMAL (the InvoiceType used for the base box 1/3 itself).
+   */
+  @Test
+  public void testComputeBoxes_modificacionBasesYCuotas_mapsToBoxes14and15() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("4"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "40.00"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-200.00", "-8.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("-200.00", result.boxes.get(14));
+    assertBd("-8.00",   result.boxes.get(15));
+  }
+
+  /**
+   * Box 25/26 must be populated from the EC (recargo equivalencia) TaxRates, computed with
+   * InvoiceType.ONLY_MEMO_AND_CORRECTIVE, and box 26 (cuota) must roll into the box[27] total
+   * exactly like its sibling accrued-cuota boxes (15, 24, ...) already do.
+   */
+  @Test
+  public void testComputeBoxes_modificacionRecargo_mapsToBoxes25and26_andRollsIntoBox27() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("5.20"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_EC")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("100.00", "5.20"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("50.00", "2.60"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("50.00", result.boxes.get(25));
+    assertBd("2.60",  result.boxes.get(26));
+    // box[24] (5.20% cuota, ONLY_NORMAL) = 5.20; box[26] (mod. recargo cuota, MEMO_AND_CORRECTIVE) = 2.60
+    assertBd("7.80",  result.boxes.get(27));
+  }
+
+  /**
+   * Box 40/41 must be populated from the union of every VAT_PURCHASE group's TaxRates
+   * (here: Normal_Operations only, to keep the mock setup focused), computed with
+   * InvoiceType.ONLY_MEMO_AND_CORRECTIVE, and box 41 (cuota) must roll into box[45].
+   */
+  @Test
+  public void testComputeBoxes_rectificacionDeducciones_mapsToBoxes40and41_andRollsIntoBox45() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_PURCHASE"), eq("Normal_Operations")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "210.00"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-100.00", "-21.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("-100.00", result.boxes.get(40));
+    assertBd("-21.00",  result.boxes.get(41));
+    // box[29] (normal operations cuota, ONLY_NORMAL) = 210.00; box[41] (rectificación, MEMO_AND_CORRECTIVE) = -21.00
+    assertBd("189.00",  result.boxes.get(45));
+  }
+
+  /**
+   * When no sales tax rates exist at all (VAT_SALES_GENERAL/EU/ISP params all null), boxes
+   * 14/15 must simply stay absent — no NPE from calling calculateAmountsMap with an empty
+   * TaxRate union.
+   */
+  @Test
+  public void testComputeBoxes_noSalesTaxRates_box14and15StayAbsent_noNpe() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("box[14] must stay absent when there is no sales activity at all",
+        result.boxes.get(14));
+    assertNull("box[15] must stay absent when there is no sales activity at all",
+        result.boxes.get(15));
+  }
+
+  // ── computeBoxes — regression: base boxes must use ONLY_NORMAL, never ALL ────────────────
+  //
+  // Bug found while validating ETP-5393 Bug F against a real AEAT XML/paper form: the base
+  // box groups (07/09, 04/06, 01/03, 150/152, 165/167, 22/24, 19/21, 156/158, 16/18, 168/170,
+  // 28/29...39) were computed with InvoiceType.ALL (normal + corrective already netted
+  // together), while boxes 14/15, 25/26 and 40/41 SEPARATELY add the corrective-only delta
+  // (InvoiceType.ONLY_MEMO_AND_CORRECTIVE) on top. Summing both into the box[27]/[45]/[46]
+  // totals double-counted the corrective effect. The classic engine (AEAT303Report2014,
+  // every year-override 2015→2026) always computes these same base boxes with
+  // InvoiceType.ONLY_NORMAL. Fix: applyPercentageSplit/fillGroupBoxes now use ONLY_NORMAL.
+
+  /**
+   * VAT_SALES_GENERAL (box 7/9) must invoke calculateAmountsMap with ONLY_NORMAL, and must
+   * NEVER invoke it with ALL — regression guard for the double-counted corrective VAT bug.
+   */
+  @Test
+  public void testComputeBoxes_sale21pct_usesOnlyNormalInvoiceType_notAll() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "210.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("1000.00", result.boxes.get(7));
+    assertBd("210.00",  result.boxes.get(9));
+    verify(helper).calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+    verify(helper, never()).calculateAmountsMap(any(), eq(InvoiceType.ALL));
+  }
+
+  /**
+   * VAT_PURCHASE Normal_Operations (box 28/29, via fillGroupBoxes) must also invoke
+   * calculateAmountsMap with ONLY_NORMAL, never ALL.
+   */
+  @Test
+  public void testComputeBoxes_purchaseNormalOps_usesOnlyNormalInvoiceType_notAll() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_PURCHASE"), eq("Normal_Operations")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("5000.00", "1050.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("5000.00", result.boxes.get(28));
+    assertBd("1050.00", result.boxes.get(29));
+    verify(helper).calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+    verify(helper, never()).calculateAmountsMap(any(), eq(InvoiceType.ALL));
+  }
+
+  /**
+   * With both a normal-only base box (ONLY_NORMAL) and a corrective delta (box 14/15,
+   * ONLY_MEMO_AND_CORRECTIVE) present, box[27] must be their plain SUM — box 9 + box 15 —
+   * and must NOT also subtract/double-apply the corrective delta a second time. Before the
+   * fix, box 9 itself was computed with InvoiceType.ALL (which already nets in the corrective
+   * activity), so summing it with the separately-computed box 15 corrective delta
+   * double-counted the correction. This test pins the correct additive relationship.
+   */
+  @Test
+  public void testComputeBoxes_box27IsPlainSumOfNormalAndCorrective_noDoubleCounting() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // box 9 (normal-only cuota) = 210.00
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "210.00"));
+    // box 15 (corrective-only cuota delta) = -8.00
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-200.00", "-8.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("210.00", result.boxes.get(9));
+    assertBd("-8.00",  result.boxes.get(15));
+    // 210.00 + (-8.00) = 202.00 — plain sum, not a further-adjusted/double-counted value.
+    assertBd("202.00", result.boxes.get(27));
+  }
+
+  // ── computePreOct2024EcDominantRate — regression: dominant-rate selection must also use
+  // ONLY_NORMAL, matching classic AEAT303Report2023#manage005062Percent (total0/05/062Percent-
+  // TaxBaseAmount there are themselves computed from calculateAmountsMap(..., ONLY_NORMAL) in
+  // generateSalesLines). Box 17 is a "which rate dominates" selector over NORMAL-invoice
+  // activity only — a rate with only corrective activity and no normal invoices this period is
+  // correctly excluded from being dominant, exactly like classic.
+
+  /**
+   * {@link Fiscal303BoxesHandler#computePreOct2024EcDominantRate} must invoke
+   * {@code calculateAmountsMap} with {@code ONLY_NORMAL}, never {@code ALL} — regression guard
+   * mirroring the base-box fix applied to {@code applyPercentageSplit}/{@code fillGroupBoxes}.
+   */
+  @Test
+  public void testComputePreOct2024EcDominantRate_usesOnlyNormalInvoiceType_notAll() {
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0.50"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "5.00"));
+
+    BigDecimal dominant =
+        handler.computePreOct2024EcDominantRate(helper, Collections.singletonList(rate));
+
+    assertBd("0.50", dominant);
+    verify(helper).calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+    verify(helper, never()).calculateAmountsMap(any(), eq(InvoiceType.ALL));
+  }
+
+  /**
+   * A rate that only has corrective/credit-memo activity this period (ONLY_NORMAL amounts are
+   * zero for it) must NOT be selected as dominant, even if its raw corrective volume is large —
+   * box 17 only ever ranks NORMAL-invoice bases, exactly like the classic engine. This pins the
+   * ONLY_NORMAL fix's interaction with the "no normal invoices at this rate" edge case.
+   */
+  @Test
+  public void testComputePreOct2024EcDominantRate_rateWithOnlyCorrectiveActivity_neverWins() {
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    TaxRate zeroRate = mock(TaxRate.class);
+    when(zeroRate.getRate()).thenReturn(BigDecimal.ZERO);
+    TaxRate halfRate = mock(TaxRate.class);
+    when(halfRate.getRate()).thenReturn(new BigDecimal("0.50"));
+
+    // 0% rate: no normal invoices this period at all (only a credit memo exists upstream, not
+    // modeled here since ONLY_NORMAL is the only invoice type this method ever asks for) —
+    // ONLY_NORMAL comes back zero.
+    when(helper.calculateAmountsMap(argThat(list -> list != null && list.contains(zeroRate)),
+        eq(InvoiceType.ONLY_NORMAL))).thenReturn(amounts("0.00", "0.00"));
+    // 0.50% rate: small but genuine normal-invoice activity.
+    when(helper.calculateAmountsMap(argThat(list -> list != null && list.contains(halfRate)),
+        eq(InvoiceType.ONLY_NORMAL))).thenReturn(amounts("10.00", "0.05"));
+
+    BigDecimal dominant =
+        handler.computePreOct2024EcDominantRate(helper, Arrays.asList(zeroRate, halfRate));
+
+    assertBd("0.50", dominant);
+  }
+
+  // ── computeBoxes — regression: a rate with ONLY corrective activity (no normal invoices at
+  // all for it this period) must leave its base box absent while the corrective delta box
+  // (14/15/25/26/40/41) still carries the full corrective amount. ────────────────────────────
+
+  /**
+   * VAT_SALES_GENERAL 21% with zero normal-invoice activity this period (only a credit memo
+   * exists at that rate) must leave box[7]/box[9] absent — {@code addToBox} skips zero-valued
+   * writes — while box[14]/box[15] still carry the full corrective delta, and box[27] reflects
+   * only that corrective amount (no base-box contribution to double-count against).
+   */
+  @Test
+  public void testComputeBoxes_onlyCorrectiveActivityAtRate_baseBoxAbsent_correctiveBoxCarriesFull() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // No normal invoices at this rate this period.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("0.00", "0.00"));
+    // Only a credit memo, at -100.00 base / -21.00 cuota.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-100.00", "-21.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("box[7] must stay absent — no normal invoices at this rate", result.boxes.get(7));
+    assertNull("box[9] must stay absent — no normal invoices at this rate", result.boxes.get(9));
+    assertBd("-100.00", result.boxes.get(14));
+    assertBd("-21.00",  result.boxes.get(15));
+    // box[27] = 0 (absent box[9]) + (-21.00) (box[15]) = -21.00 — the corrective amount alone,
+    // not double-counted against a phantom base-box contribution.
+    assertBd("-21.00", result.boxes.get(27));
+  }
+
+  // ── computeBoxes — boundary: a period with ONLY corrective invoices (zero normal invoices
+  // across sales and purchases) must still balance — the totals must reflect only the
+  // corrective deltas, negative values must round-trip correctly, and nothing should NPE. ────
+
+  /**
+   * Sales-side 21% has only a corrective credit memo (net negative), purchase-side 21% has
+   * only a corrective credit memo too (net negative deduction). box[27]/[45]/[46]/[66]/[69]/[71]
+   * must all resolve from the corrective deltas alone, without throwing, and box[46] (a
+   * negative "a compensar" result here) must mirror correctly into 66/69/71.
+   */
+  @Test
+  public void testComputeBoxes_periodWithOnlyCorrectiveInvoices_totalsBalanceWithoutNormalActivity() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter salesParam = mock(TaxReportParameter.class);
+    TaxRate salesRate = mock(TaxRate.class);
+    when(salesRate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(salesParam);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(salesParam)))
+        .thenReturn(Collections.singletonList(salesRate));
+
+    TaxReportParameter purchParam = mock(TaxReportParameter.class);
+    TaxRate purchRate = mock(TaxRate.class);
+    when(purchRate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_PURCHASE"), eq("Normal_Operations")))
+        .thenReturn(purchParam);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(purchParam)))
+        .thenReturn(Collections.singletonList(purchRate));
+
+    // Zero normal-invoice activity everywhere this period.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("0.00", "0.00"));
+    // Sales-side corrective credit memo: -500.00 base / -105.00 cuota (box 14/15).
+    // Purchase-side corrective credit memo: -200.00 base / -42.00 cuota (box 40/41).
+    when(helper.calculateAmountsMap(
+        argThat(list -> list != null && list.contains(salesRate) && !list.contains(purchRate)),
+        eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE))).thenReturn(amounts("-500.00", "-105.00"));
+    when(helper.calculateAmountsMap(
+        argThat(list -> list != null && list.contains(purchRate)),
+        eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE))).thenReturn(amounts("-200.00", "-42.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("box[7]/[9] must stay absent — no normal sales activity", result.boxes.get(7));
+    assertNull(result.boxes.get(9));
+    assertNull("box[28]/[29] must stay absent — no normal purchase activity", result.boxes.get(28));
+    assertNull(result.boxes.get(29));
+    assertBd("-105.00", result.boxes.get(15));
+    assertBd("-42.00",  result.boxes.get(41));
+    assertBd("-105.00", result.boxes.get(27));  // accrued: only box 15 contributes
+    assertBd("-42.00",  result.boxes.get(45));  // deductible: only box 41 contributes
+    assertBd("-63.00",  result.boxes.get(46));  // 27 - 45 = -105 - (-42) = -63
+    assertBd("-63.00",  result.boxes.get(66));
+    assertBd("-63.00",  result.boxes.get(69));
+    assertBd("-63.00",  result.boxes.get(71));
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -1350,6 +2007,311 @@ public class Fiscal303BoxesHandlerTest {
         assertTrue("Message must contain searchKey", e.getMessage().contains("AEAT303_Q_2024"));
       }
     }
+  }
+
+  // ── guardNotAlreadySubmitted (generate only, ETP-5438) ────────────────
+  //
+  // Full-parity follow-up: "en todos los modelos tiene que funcionar de la misma manera" — every
+  // model's generate entity must reject once the latest declaration is already submitted,
+  // exactly like Fiscal349BoxesHandler's own guard (moved to AbstractFiscalHandler and shared,
+  // see its javadoc). The boxes read is intentionally NOT gated (frontend freeze needs it). `submit` (real AEAT telematic filing) is deliberately NOT covered here — it
+  // already has its own narrower `submitted_ack`-only guard in Fiscal303SubmissionSupport.
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedNoDeclarationYetDoesNotThrow() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedReadyDoesNotThrow() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "ready");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
+  public void testGuardNotAlreadySubmittedSubmittedThrows() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
+  public void testGuardNotAlreadySubmittedSubmittedExtThrows() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ext");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1");
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
+  public void testGuardNotAlreadySubmittedSubmittedAckThrows() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1");
+    }
+  }
+
+  /**
+   * Same "latest DECL_SEQ wins" rectificativa-safety guarantee as Fiscal349BoxesHandlerTest's
+   * mirror test — a fresh draft for the same period must never be blocked by an older,
+   * already-submitted declaration for that period.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedGatesOnLatestDeclSeqNotFirstInList() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject newerDraft = declWithSeqAndStatus303(1L, "draft");
+      BaseOBObject olderSubmitted = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Arrays.asList(newerDraft, olderSubmitted));
+
+      handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw — latest (seq 1) is draft
+    }
+  }
+
+  // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
+
+  /**
+   * ETP-5438 — {@code boxes} is a pure read and stays available for a submitted declaration. A
+   * legacy submitted declaration (presented before snapshots existed, so no snapshot) keeps the
+   * live compute — no data-fix for those, product decision. Only {@code generate} is blocked.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesComputesLiveWhenSubmittedWithoutSnapshot() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    Map<Integer, BigDecimal> boxes = new HashMap<>();
+    boxes.put(46, new BigDecimal("123.45"));
+    org.mockito.Mockito.doReturn(new ComputeResult(boxes, Collections.emptyList()))
+        .when(h).computeBoxes("org1", 2026, "T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(servlet, never()).sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    verify(h).computeBoxes("org1", 2026, "T1");
+    org.junit.Assert.assertTrue(body.toString().contains("\"result\":\"123.45\""));
+  }
+
+  /**
+   * ETP-5438 — a submitted declaration WITH a snapshot is served from it, byte for byte, and the
+   * live compute is never reached: an invoice added/removed after submission cannot change it.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesServesSnapshotWithoutComputingWhenSubmitted() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    String snapshot = "{\"boxes\":{\"46\":\"99.00\"},\"summary\":{\"result\":\"99.00\"},\"sources\":[]}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h, never()).computeBoxes(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
+  /**
+   * ETP-5438 — a stale snapshot on a declaration that is no longer submitted (latest DECL_SEQ is
+   * a draft) is ignored: drafts always compute live.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesComputesLiveWhenLatestIsDraft() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(new java.io.StringWriter()));
+    org.mockito.Mockito.doReturn(new ComputeResult(new HashMap<>(), Collections.emptyList()))
+        .when(h).computeBoxes("org1", 2026, "T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject newerDraft = declWithSeqAndStatus303(1L, "draft");
+      BaseOBObject olderSubmitted = declWithSeqAndStatus303(0L, "submitted");
+      when(olderSubmitted.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
+          .thenReturn("{\"boxes\":{}}");
+      when(query.list()).thenReturn(Arrays.asList(newerDraft, olderSubmitted));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h).computeBoxes("org1", 2026, "T1");
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchGenerateReturns409WhenAlreadySubmitted() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("generate", "org1", 2026, "T1", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    // The real generator never ran — no file/response body was ever attempted for it.
+    verify(resp, never()).setHeader(eq("Content-Disposition"), anyString());
+  }
+
+  /**
+   * ETP-5438 review W1 — a {@code *} session (org {@code "0"}): {@code dispatch} receives the
+   * EFFECTIVE leaf org for the computation, but the declaration was stored under {@code "0"}.
+   * The snapshot lookup must query the stored org, or the snapshot is never found and the boxes
+   * are recomputed live.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesLooksSnapshotUpWithSessionOrgNotEffectiveOrg() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    String snapshot = "{\"boxes\":{\"46\":\"12.00\"},\"summary\":{},\"sources\":[]}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1", "0");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "leaf-org", 2026, "T1", mock(HttpServletRequest.class), resp);
+
+      verify(query).setNamedParameter("orgId", "0");
+      verify(query, never()).setNamedParameter("orgId", "leaf-org");
+    }
+    verify(h, never()).computeBoxes(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
+  /** ETP-5438 review W1 — same for the generate guard: a {@code *} session is still blocked. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testGuardNotAlreadySubmittedUsesSessionOrgNotEffectiveOrg() {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1", "0");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      try {
+        handler.guardNotAlreadySubmitted("leaf-org", 2026, "T1");
+        org.junit.Assert.fail("expected AlreadySubmittedException");
+      } catch (AbstractFiscalHandler.AlreadySubmittedException expected) {
+        // blocked, as it must be
+      }
+      verify(query).setNamedParameter("orgId", "0");
+    }
+  }
+
+  // ── test helpers (ETP-5438) ───────────────────────────────────────────
+
+  private static void mockClient303(MockedStatic<OBContext> ctxMock, String clientId) {
+    mockClient303(ctxMock, clientId, "org1");
+  }
+
+  /** Same, with an explicit SESSION org (the org declarations are stored under). */
+  private static void mockClient303(MockedStatic<OBContext> ctxMock, String clientId,
+      String sessionOrgId) {
+    OBContext ctx = mock(OBContext.class);
+    ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(ctx.getCurrentClient()).thenReturn(client);
+    org.openbravo.model.common.enterprise.Organization org =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(org.getId()).thenReturn(sessionOrgId);
+    when(ctx.getCurrentOrganization()).thenReturn(org);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static OBQuery<BaseOBObject> mockDeclQuery303(MockedStatic<OBDal> dalMock) {
+    OBDal obDal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(obDal);
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+        .thenReturn(query);
+    return query;
+  }
+
+  private static BaseOBObject declWithSeqAndStatus303(long declSeq, String status) {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(declSeq);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(status);
+    return decl;
   }
 
   private static void assertBd(String expected, BigDecimal actual) {

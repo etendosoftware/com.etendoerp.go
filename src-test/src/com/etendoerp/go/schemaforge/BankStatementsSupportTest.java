@@ -18,20 +18,35 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Date;
 
+import org.junit.After;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.Mockito;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Unit tests for {@link BankStatementsSupport} — the stateless helpers extracted
- * from {@link BankStatementsHandler}. All pure, no mocks required.
+ * from {@link BankStatementsHandler}. Pure helpers need no mocks; the
+ * {@code buildLineTxns} tests drive a mocked {@link ResultSet} row and the
+ * {@code isBankConnected} tests a mocked financial account.
  */
 public class BankStatementsSupportTest {
 
@@ -210,5 +225,365 @@ public class BankStatementsSupportTest {
   @Test
   public void truncateCutsLongString() {
     assertEquals("abc", BankStatementsSupport.truncate("abcdef", 3));
+  }
+
+  // ── isBankConnected (ETP-5471) ───────────────────────────────────────────
+
+  /**
+   * PSD2 status meaning "connected". Compared by VALUE rather than importing
+   * {@code BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED}, so a change of the constant
+   * on one side only is caught here.
+   */
+  private static final String PSD2_CONNECTED = "CO";
+
+  /** The column's default status, i.e. an ordinary, not bank-connected account. */
+  private static final String PSD2_DISCONNECTED = "DC";
+
+  /** Releases the inline mocks the isBankConnected tests create (shared test-JVM heap). */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
+  }
+
+  private static FIN_FinancialAccount accountWithConnectionStatus(String status) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(status);
+    return account;
+  }
+
+  @Test
+  public void testIsBankConnectedTrueForConnectedStatus() {
+    assertTrue(BankStatementsSupport.isBankConnected(accountWithConnectionStatus(PSD2_CONNECTED)));
+  }
+
+  /** A disconnected account carries a non-null status too — a null check would get this wrong. */
+  @Test
+  public void testIsBankConnectedFalseForDisconnectedStatus() {
+    assertFalse(BankStatementsSupport.isBankConnected(accountWithConnectionStatus(PSD2_DISCONNECTED)));
+  }
+
+  @Test
+  public void testIsBankConnectedFalseForNullStatus() {
+    assertFalse(BankStatementsSupport.isBankConnected(accountWithConnectionStatus(null)));
+  }
+
+  @Test
+  public void testIsBankConnectedFalseForNullAccount() {
+    assertFalse(BankStatementsSupport.isBankConnected(null));
+  }
+
+  // ── buildLineTxns: foreign-currency original (ETP-5450) ──────────────────
+  //
+  // A linked transaction whose stored foreign currency differs from the account currency also
+  // carries its original document amount (foreignAmount/foreignCurrency/foreignRate). `amount`
+  // must stay in the account currency: callers sum it against the statement line.
+
+  /**
+   * Stubs one lines-query row with a linked transaction. Any foreign argument may be {@code null}.
+   */
+  private static ResultSet txnRow(BigDecimal txnAmount, BigDecimal foreignAmount,
+      BigDecimal foreignRate, String foreignIso, String accountIso) throws Exception {
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.getString("fin_finacc_transaction_id")).thenReturn("tx-1");
+    when(rs.getString("txn_documentno")).thenReturn("PAY-1");
+    when(rs.getBigDecimal("txn_amount")).thenReturn(txnAmount);
+    when(rs.getBigDecimal("txn_foreign_amount")).thenReturn(foreignAmount);
+    when(rs.getBigDecimal("txn_foreign_rate")).thenReturn(foreignRate);
+    when(rs.getString("txn_foreign_currency")).thenReturn(foreignIso);
+    when(rs.getString("txn_currency")).thenReturn(accountIso);
+    return rs;
+  }
+
+  private static JSONObject singleTxn(ResultSet rs) throws Exception {
+    JSONArray txns = BankStatementsSupport.buildLineTxns(rs, true);
+    assertEquals(1, txns.length());
+    return txns.getJSONObject(0);
+  }
+
+  private static void assertAmount(String expected, JSONObject t, String key) throws Exception {
+    assertEquals(key + " was " + t.get(key), 0,
+        new BigDecimal(expected).compareTo(new BigDecimal(t.getString(key))));
+  }
+
+  private static void assertNoForeignKeys(JSONObject t) {
+    assertFalse(t.has("foreignAmount"));
+    assertFalse(t.has("foreignCurrency"));
+    assertFalse(t.has("foreignRate"));
+    assertFalse(t.has("currency"));
+  }
+
+  @Test
+  public void buildLineTxnsAddsForeignOriginalAndKeepsAccountAmount() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertEquals("tx-1", t.getString("transactionId"));
+    // amount stays in the account currency (EUR).
+    assertAmount("29.03", t, "amount");
+    assertAmount("42.67", t, "foreignAmount");
+    assertEquals("USD", t.getString("foreignCurrency"));
+    assertEquals("EUR", t.getString("currency"));
+    assertAmount("0.6803", t, "foreignRate");
+  }
+
+  @Test
+  public void buildLineTxnsSignsForeignAmountLikeTheTxnAmount() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("-29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertAmount("-29.03", t, "amount");
+    assertAmount("-42.67", t, "foreignAmount");
+  }
+
+  @Test
+  public void buildLineTxnsForeignWithoutRateOmitsForeignRate() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        null, "USD", "EUR"));
+
+    assertAmount("42.67", t, "foreignAmount");
+    assertEquals("USD", t.getString("foreignCurrency"));
+    assertFalse(t.has("foreignRate"));
+  }
+
+  @Test
+  public void buildLineTxnsSameCurrencyAddsNoForeignKeys() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("29.03"),
+        BigDecimal.ONE, "EUR", "EUR"));
+
+    assertAmount("29.03", t, "amount");
+    assertNoForeignKeys(t);
+  }
+
+  @Test
+  public void buildLineTxnsNullForeignAmountAddsNoForeignKeys() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("29.03"), null,
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertAmount("29.03", t, "amount");
+    assertNoForeignKeys(t);
+  }
+
+  @Test
+  public void buildLineTxnsNullOrBlankForeignCurrencyAddsNoForeignKeys() throws Exception {
+    assertNoForeignKeys(singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), null, "EUR")));
+    assertNoForeignKeys(singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "  ", "EUR")));
+  }
+
+  @Test
+  public void buildLineTxnsNullOrBlankAccountCurrencyAddsNoForeignKeys() throws Exception {
+    // The tacur join found no currency: the pair cannot be described, so no foreign keys.
+    JSONObject nullIso = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", null));
+    assertAmount("29.03", nullIso, "amount");
+    assertNoForeignKeys(nullIso);
+
+    JSONObject blankIso = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "  "));
+    assertAmount("29.03", blankIso, "amount");
+    assertNoForeignKeys(blankIso);
+  }
+
+  @Test
+  public void buildLineTxnsUnmatchedLineIsEmpty() throws Exception {
+    ResultSet rs = txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR");
+
+    assertEquals(0, BankStatementsSupport.buildLineTxns(rs, false).length());
+  }
+
+  // ── buildLineTxns / mergeMatchGroups: QA edge cases (ETP-5450) ───────────
+
+  /** Non-EUR account (USD) with a EUR payment: nothing is EUR-hardcoded. */
+  @Test
+  public void buildLineTxnsNonEurAccountKeepsAccountAmountInUsd() throws Exception {
+    JSONObject t = singleTxn(txnRow(new BigDecimal("1250"), new BigDecimal("500"),
+        new BigDecimal("2.5"), "EUR", "USD"));
+
+    assertAmount("1250", t, "amount");
+    assertAmount("500", t, "foreignAmount");
+    assertEquals("EUR", t.getString("foreignCurrency"));
+    assertEquals("USD", t.getString("currency"));
+    assertAmount("2.5", t, "foreignRate");
+  }
+
+  /** A zero txn amount keeps the foreign amount non-negative (signum 0 is not a payment). */
+  @Test
+  public void buildLineTxnsZeroAmountKeepsForeignAmountNonNegative() throws Exception {
+    JSONObject t = singleTxn(txnRow(BigDecimal.ZERO, new BigDecimal("5.00"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+
+    assertAmount("0", t, "amount");
+    assertAmount("5.00", t, "foreignAmount");
+  }
+
+  /** A null txn amount (no txn columns) is normalised to 0 and does not throw on a foreign row. */
+  @Test
+  public void buildLineTxnsNullAmountForeignDoesNotThrow() throws Exception {
+    JSONObject t = singleTxn(txnRow(null, new BigDecimal("5.00"), null, "USD", "EUR"));
+
+    assertAmount("0", t, "amount");
+    assertAmount("5.00", t, "foreignAmount");
+    assertFalse(t.has("foreignRate"));
+  }
+
+  private static JSONObject subLine(String id, String amount, String pending, boolean matched,
+      JSONObject txn) throws Exception {
+    JSONObject line = new JSONObject();
+    line.put("id", id);
+    line.put("matchGroupId", "G1");
+    line.put("matched", matched);
+    line.put("in", new BigDecimal(amount));
+    line.put("out", BigDecimal.ZERO);
+    line.put("amount", new BigDecimal(amount));
+    line.put("pendingAmount", new BigDecimal(pending));
+    JSONArray txns = new JSONArray();
+    if (txn != null) {
+      txns.put(txn);
+    }
+    line.put("txns", txns);
+    return line;
+  }
+
+  /**
+   * A PARTIAL 1:N group whose sub-lines were matched to a USD document and a EUR document plus a
+   * pending remainder: the merged head keeps each txn's own foreign keys untouched, and its
+   * amount/pendingAmount totals are the account-currency sums of the sub-lines — the foreign
+   * amounts never leak into the line totals the "conciliado" block and the modal rely on.
+   */
+  @Test
+  public void mergeMatchGroupsKeepsPerTxnForeignKeysAndAccountCurrencyTotals() throws Exception {
+    JSONObject usdTxn = singleTxn(txnRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        new BigDecimal("0.6803"), "USD", "EUR"));
+    JSONObject eurTxn = singleTxn(txnRow(new BigDecimal("10.00"), null, null, null, "EUR"));
+
+    JSONArray lines = new JSONArray();
+    lines.put(subLine("L-a", "29.03", "0", true, usdTxn));
+    lines.put(subLine("L-b", "10.00", "0", true, eurTxn));
+    lines.put(subLine("L-rem", "60.97", "60.97", false, null));
+
+    JSONArray merged = BankStatementsSupport.mergeMatchGroups(lines);
+
+    assertEquals(1, merged.length());
+    JSONObject head = merged.getJSONObject(0);
+    assertAmount("100.00", head, "amount");
+    assertAmount("60.97", head, "pendingAmount");
+    assertEquals("PARTIAL", head.getString("reconcileStatus"));
+    assertEquals("L-rem", head.getString("remainderLineId"));
+
+    JSONArray txns = head.getJSONArray("txns");
+    assertEquals(2, txns.length());
+    JSONObject first = txns.getJSONObject(0);
+    assertAmount("29.03", first, "amount");
+    assertAmount("42.67", first, "foreignAmount");
+    assertEquals("USD", first.getString("foreignCurrency"));
+    assertNoForeignKeys(txns.getJSONObject(1));
+  }
+
+  // ── line SQLs select the txn_* foreign aliases (ETP-5450) ────────────────
+  //
+  // buildLineTxns reads txn_foreign_amount / txn_foreign_rate / txn_foreign_currency /
+  // txn_currency from BOTH lines queries (bank-statement window and reconciliation panel). A mocked
+  // ResultSet cannot notice a missing alias, so assert the SQL text itself.
+
+  private static String sqlConstant(Class<?> owner, String name) throws Exception {
+    Field f = owner.getDeclaredField(name);
+    f.setAccessible(true);
+    return ((String) f.get(null)).replaceAll("\\s+", " ");
+  }
+
+  private static void assertSelectsTxnForeignAliases(String sql) {
+    assertTrue(sql, sql.contains("ft.foreign_amount AS txn_foreign_amount"));
+    assertTrue(sql, sql.contains("ft.foreign_convert_rate AS txn_foreign_rate"));
+    assertTrue(sql, sql.contains("tfcur.iso_code AS txn_foreign_currency"));
+    assertTrue(sql, sql.contains("tacur.iso_code AS txn_currency"));
+    assertTrue(sql, sql.contains(
+        "LEFT JOIN c_currency tfcur ON tfcur.c_currency_id = ft.foreign_currency_id"));
+    assertTrue(sql, sql.contains(
+        "LEFT JOIN c_currency tacur ON tacur.c_currency_id = ft.c_currency_id"));
+  }
+
+  @Test
+  public void bankStatementLinesSqlSelectsTxnForeignAliases() throws Exception {
+    assertSelectsTxnForeignAliases(sqlConstant(BankStatementsHandler.class, "LINES_SQL_HEAD"));
+  }
+
+  @Test
+  public void reconciliationPendingLinesSqlSelectsTxnForeignAliases() throws Exception {
+    assertSelectsTxnForeignAliases(sqlConstant(ReconciliationHandler.class, "PENDING_LINES_SQL"));
+  }
+
+  // ── statementDateFromLastLine (ETP-5447) ─────────────────────────────────
+
+  private static final LocalDate LAST_LINE_DAY = LocalDate.of(2026, 8, 29);
+
+  private static Date localInstant(LocalDateTime dateTime) {
+    return Date.from(dateTime.atZone(ZoneId.systemDefault()).toInstant());
+  }
+
+  private static Date serverMidnight(LocalDate day) {
+    return Date.from(day.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  @Test
+  public void testStatementDateFromLastLineReturnsTheFallbackWhenThereIsNoLineDate() {
+    Date today = new Date();
+    assertSame(today, BankStatementsSupport.statementDateFromLastLine(null, today));
+  }
+
+  @Test
+  public void testStatementDateFromLastLineReturnsANullFallbackUnchanged() {
+    assertNull(BankStatementsSupport.statementDateFromLastLine(null, null));
+  }
+
+  /** The time of day is dropped: the statement date is midnight of the line's calendar day. */
+  @Test
+  public void testStatementDateFromLastLineTruncatesToServerMidnightOfThatDay() {
+    Date lineDate = localInstant(LAST_LINE_DAY.atTime(18, 45, 30));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, new Date()));
+  }
+
+  /** A late-evening movement stays on its own day — no UTC shift into the next or previous one. */
+  @Test
+  public void testStatementDateFromLastLineKeepsALateEveningLineOnItsOwnDay() {
+    Date lineDate = localInstant(LAST_LINE_DAY.atTime(23, 59, 59));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, null));
+  }
+
+  @Test
+  public void testStatementDateFromLastLineKeepsAMidnightLineDateAsIs() {
+    Date lineDate = serverMidnight(LAST_LINE_DAY);
+    assertEquals(lineDate, BankStatementsSupport.statementDateFromLastLine(lineDate, null));
+  }
+
+  /** The line date wins over the fallback whenever there is one. */
+  @Test
+  public void testStatementDateFromLastLineIgnoresTheFallbackWhenALineDateExists() {
+    Date fallback = serverMidnight(LocalDate.of(2026, 9, 25));
+    Date lineDate = localInstant(LAST_LINE_DAY.atTime(8, 0));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, fallback));
+  }
+
+  /**
+   * Hibernate can hand back a {@code java.sql.Date}, whose {@code toInstant()} throws — the helper
+   * must accept it and still return a plain {@code java.util.Date} for that calendar day.
+   */
+  @Test
+  public void testStatementDateFromLastLineAcceptsASqlDate() {
+    Date result = BankStatementsSupport.statementDateFromLastLine(
+        java.sql.Date.valueOf(LAST_LINE_DAY), null);
+    assertEquals(serverMidnight(LAST_LINE_DAY), result);
+    assertEquals(Date.class, result.getClass());
+  }
+
+  @Test
+  public void testStatementDateFromLastLineAcceptsASqlTimestamp() {
+    Timestamp lineDate = Timestamp.valueOf(LAST_LINE_DAY.atTime(14, 30));
+    assertEquals(serverMidnight(LAST_LINE_DAY),
+        BankStatementsSupport.statementDateFromLastLine(lineDate, null));
   }
 }

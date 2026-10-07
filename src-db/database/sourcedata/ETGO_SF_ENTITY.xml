@@ -154,6 +154,25 @@
 <!--08E40F2DE08442FABAC3B540DB516036-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--08E40F2DE08442FABAC3B540DB516036--></ETGO_SF_ENTITY>
 
+<!--0936EBAC68D042CEB7EAEAAA8AA28152--><ETGO_SF_ENTITY>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ETGO_SF_ENTITY_ID><![CDATA[0936EBAC68D042CEB7EAEAAA8AA28152]]></ETGO_SF_ENTITY_ID>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <NAME><![CDATA[balance-sheet]]></NAME>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ETGO_SF_SPEC_ID><![CDATA[41A8EB486036483EBBABBF4883C399FA]]></ETGO_SF_SPEC_ID>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISGETBYID><![CDATA[N]]></ISGETBYID>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <JAVA_QUALIFIER><![CDATA[balanceSheetReportHandler]]></JAVA_QUALIFIER>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--0936EBAC68D042CEB7EAEAAA8AA28152--></ETGO_SF_ENTITY>
+
 <!--0A6792F47FE043639447883920FB9DCD--><ETGO_SF_ENTITY>
 <!--0A6792F47FE043639447883920FB9DCD-->  <ETGO_SF_ENTITY_ID><![CDATA[0A6792F47FE043639447883920FB9DCD]]></ETGO_SF_ENTITY_ID>
 <!--0A6792F47FE043639447883920FB9DCD-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -285,6 +304,7 @@
 <!--0D5FAC6A352140EABD483FF77539FAEA-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--0D5FAC6A352140EABD483FF77539FAEA-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--0D5FAC6A352140EABD483FF77539FAEA-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--0D5FAC6A352140EABD483FF77539FAEA-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Payment details are the allocation of collections to this invoice's installments; the UI only reads them and writes them through the invoice payment actions","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--0D5FAC6A352140EABD483FF77539FAEA--></ETGO_SF_ENTITY>
 
 <!--0D654005B02741A29A0491FD5AFEA6E8--><ETGO_SF_ENTITY>
@@ -306,6 +326,7 @@
 <!--0D654005B02741A29A0491FD5AFEA6E8-->  <JAVA_QUALIFIER><![CDATA[purchaseInvoiceHeaderHandler]]></JAVA_QUALIFIER>
 <!--0D654005B02741A29A0491FD5AFEA6E8-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--0D654005B02741A29A0491FD5AFEA6E8-->  <NAMED_FILTERS><![CDATA[[{"name":"completed","where":"e.paymentComplete = true","label":"Paid","description":"Fully paid invoices (payment complete)."},{"name":"pending","where":"e.paymentComplete = false and abs(e.outstandingAmount) >= abs(e.grandTotalAmount)","label":"Unpaid","description":"Unpaid invoices with nothing paid yet (outstanding equals the total)."},{"name":"partial","where":"e.paymentComplete = false and abs(e.outstandingAmount) > 0 and abs(e.outstandingAmount) < abs(e.grandTotalAmount)","label":"Partially paid","description":"Invoices with a partial payment: some amount paid but a balance remains."}]]]></NAMED_FILTERS>
+<!--0D654005B02741A29A0491FD5AFEA6E8-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["pisSupplierAccounts","pisTemplates","pisPaymentStatus","cancelPisPayment","retryPisPayment","psd2GenerateBankPayment"],"redirect":{"aPRMAddpayment":"registerPayment"},"reason":"Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA), so they are excluded from MCP","redirectReason":"The classic Add Payment button is not the Etendo payment flow; use registerPayment, which is what the invoice payment panel calls"}}]]></MCP_CONFIG>
 <!--0D654005B02741A29A0491FD5AFEA6E8--></ETGO_SF_ENTITY>
 
 <!--1091071B50744FC6855B5304D60D0AB8--><ETGO_SF_ENTITY>
@@ -441,6 +462,7 @@
 <!--1343B4002EE14A9896594655770261ED-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--1343B4002EE14A9896594655770261ED-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1343B4002EE14A9896594655770261ED-->  <SEQNO><![CDATA[80]]></SEQNO>
+<!--1343B4002EE14A9896594655770261ED-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--1343B4002EE14A9896594655770261ED--></ETGO_SF_ENTITY>
 
 <!--13A91DF2974D4D1FB24E6E026C04BB66--><ETGO_SF_ENTITY>
@@ -497,6 +519,7 @@
 <!--18FDC6F8F6B04F7EA22758965290D51E-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--18FDC6F8F6B04F7EA22758965290D51E-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--18FDC6F8F6B04F7EA22758965290D51E-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--18FDC6F8F6B04F7EA22758965290D51E-->  <JAVA_QUALIFIER><![CDATA[internal-consumption]]></JAVA_QUALIFIER>
 <!--18FDC6F8F6B04F7EA22758965290D51E-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--18FDC6F8F6B04F7EA22758965290D51E--></ETGO_SF_ENTITY>
 
@@ -656,6 +679,7 @@
 <!--1F7ACD054BF14A148B7A11CD32A8704D-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1F7ACD054BF14A148B7A11CD32A8704D-->  <JAVA_QUALIFIER><![CDATA[paymentDetailsHandler]]></JAVA_QUALIFIER>
 <!--1F7ACD054BF14A148B7A11CD32A8704D-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--1F7ACD054BF14A148B7A11CD32A8704D-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Payment details are the allocation of payments to this invoice's installments; the UI only reads them and writes them through the invoice payment actions","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--1F7ACD054BF14A148B7A11CD32A8704D--></ETGO_SF_ENTITY>
 
 <!--20E4528FA79B47FCBA60A45C24AC9180--><ETGO_SF_ENTITY>
@@ -850,6 +874,7 @@
 <!--26AAEE85345F4D549907007E8821360A-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--26AAEE85345F4D549907007E8821360A-->  <JAVA_QUALIFIER><![CDATA[payment-reactivate]]></JAVA_QUALIFIER>
 <!--26AAEE85345F4D549907007E8821360A-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--26AAEE85345F4D549907007E8821360A-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a collection header by hand: it is created from the invoice (window.hideCreate), which also allocates it to the invoice schedule; a draft header has no editable field; and the generic delete of a draft fails on its payment details, so the UI deletes it through an action","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') — with paymentId to edit a draft; to delete a draft: etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'deletePayment', parameters:{paymentId})"},"actions":{"hidden":["psd2GenerateBankPayment","aPRMAddScheduledpayments","aprmExecutepayment","aPRMReversePayment","aPRMReconcilePayment","aeatsiiSend","etblkpBulkposting","posted","retryPisPayment","pisPaymentStatus"],"values":{"aPRMProcessPayment":["P"]},"reason":"Not offered to agents by the collection window: its agent actions are Confirmar (aPRMProcessPayment, value P), Reactivar (etprReactivatePayment) and Eliminar (eTPRRemovePayment). Eliminar works at any status except void (RPVOID) or while the collection is locked by its bank transfer (pisLocked); it reactivates a processed collection first and gives back no credit the collection consumed. A collection is created and allocated with etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment'). The bank-transfer actions (PSD2/PIS) are hidden because fiscal and bank integrations are limited for agents"}}]]></MCP_CONFIG>
 <!--26AAEE85345F4D549907007E8821360A--></ETGO_SF_ENTITY>
 
 <!--2782B015D76B49219F3679BA13105E60--><ETGO_SF_ENTITY>
@@ -888,6 +913,7 @@
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--28A6378134714F1E8D3C0869C1C77438-->  <SEQNO><![CDATA[80]]></SEQNO>
+<!--28A6378134714F1E8D3C0869C1C77438-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The installments are generated from the invoice's payment terms when it is completed and only change through its payments; the UI only reads them","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--28A6378134714F1E8D3C0869C1C77438--></ETGO_SF_ENTITY>
 
 <!--28F9B00E6D8F4E489D5EF594423072C8--><ETGO_SF_ENTITY>
@@ -1101,6 +1127,7 @@
 <!--3116348AF9C843CFB3E6CB5ECACD1559-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--3116348AF9C843CFB3E6CB5ECACD1559-->  <JAVA_QUALIFIER><![CDATA[paymentScheduleDetailHandler]]></JAVA_QUALIFIER>
 <!--3116348AF9C843CFB3E6CB5ECACD1559-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--3116348AF9C843CFB3E6CB5ECACD1559-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Payment lines are the allocation of a payment to invoice schedules; the UI only writes them through the invoice payment actions","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--3116348AF9C843CFB3E6CB5ECACD1559--></ETGO_SF_ENTITY>
 
 <!--34EBCCEE2E9643BF962CDF84379232C4--><ETGO_SF_ENTITY>
@@ -1435,6 +1462,25 @@
 <!--434A402466384781936F3E794D3A0E72-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_config is per-organization SII configuration, not an owner: there is no foreign key between it and this tab's table in either direction, no two-hop path, and the tab carries neither a whereclause nor a link column — Etendo's own UI scopes this outside the dictionary. Reads are global and remain scoped by the caller's organization access."}}]]></MCP_CONFIG>
 <!--434A402466384781936F3E794D3A0E72--></ETGO_SF_ENTITY>
 
+<!--43EFCBF7B43A4300977DB3F7212380CC--><ETGO_SF_ENTITY>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ETGO_SF_ENTITY_ID><![CDATA[43EFCBF7B43A4300977DB3F7212380CC]]></ETGO_SF_ENTITY_ID>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <NAME><![CDATA[report-general-ledger]]></NAME>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ETGO_SF_SPEC_ID><![CDATA[263B8AA254F74A71A0E0C9D2C832554B]]></ETGO_SF_SPEC_ID>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISGETBYID><![CDATA[N]]></ISGETBYID>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <JAVA_QUALIFIER><![CDATA[generalLedgerReportHandler]]></JAVA_QUALIFIER>
+<!--43EFCBF7B43A4300977DB3F7212380CC-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--43EFCBF7B43A4300977DB3F7212380CC--></ETGO_SF_ENTITY>
+
 <!--45951533B9E743BC8A31AB9C4442FB2B--><ETGO_SF_ENTITY>
 <!--45951533B9E743BC8A31AB9C4442FB2B-->  <ETGO_SF_ENTITY_ID><![CDATA[45951533B9E743BC8A31AB9C4442FB2B]]></ETGO_SF_ENTITY_ID>
 <!--45951533B9E743BC8A31AB9C4442FB2B-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -1543,11 +1589,13 @@
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISGET><![CDATA[Y]]></ISGET>
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
-<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPOST><![CDATA[Y]]></ISPOST>
-<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPUT><![CDATA[Y]]></ISPUT>
-<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
-<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <JAVA_QUALIFIER><![CDATA[bankStatementEntityHandler]]></JAVA_QUALIFIER>
 <!--495659D935FB48EAA6E796F9ED42CAE7-->  <SEQNO><![CDATA[70]]></SEQNO>
+<!--495659D935FB48EAA6E796F9ED42CAE7-->  <AGENT_PROMPT><![CDATA[The `importedBankStatements` entity is a bank statement (FIN_BankStatement) of a financial account; `bankStatementLines` are its lines. Read both with etendo_list/etendo_get. Generic create/update/delete on both entities is refused with 405: change a statement with the `bank-statements` spec actions — `etendo_action {spec:"bank-statements", entity:"bank-statements", id:<statement id>, action:"updateStatement"|"processStatement"|"reactivateStatement"|"deleteStatement"}` — and create one with `createStatement`/`importStatement` (id = the financial account). Catalogue: `etendo_schema({spec:"bank-statements", view:"actions"})`.]]></AGENT_PROMPT>
 <!--495659D935FB48EAA6E796F9ED42CAE7--></ETGO_SF_ENTITY>
 
 <!--496A6E939C5B432D9BBB1CD1B583F2FD--><ETGO_SF_ENTITY>
@@ -1662,6 +1710,7 @@
 <!--4AB485D242AA4A4EA65C63A43F8508AF-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--4AB485D242AA4A4EA65C63A43F8508AF-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--4AB485D242AA4A4EA65C63A43F8508AF-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--4AB485D242AA4A4EA65C63A43F8508AF-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"reason":"Its parent cannot be identified (no link column points at M_Costing_Transactions_HQL), so a created adjustment would be attached to a parent nobody chose"}}]]></MCP_CONFIG>
 <!--4AB485D242AA4A4EA65C63A43F8508AF--></ETGO_SF_ENTITY>
 
 <!--4B4555F9C7A444258CDBBFE5B427D0F4--><ETGO_SF_ENTITY>
@@ -2282,6 +2331,7 @@
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <JAVA_QUALIFIER><![CDATA[payment-reactivate]]></JAVA_QUALIFIER>
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--65BF1DFD362B4F1CB6FEC60DB7030CF5-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a payment header by hand: it is created from the purchase invoice (window.hideCreate), which also allocates it to the invoice schedule; a draft header has no editable field; and the generic delete of a draft fails on its payment details, so the UI deletes it through an action","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment') — with paymentId to edit a draft; to delete a draft: etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'deletePayment', parameters:{paymentId})"},"actions":{"hidden":["psd2GenerateBankPayment","aPRMAddScheduledpayments","aprmExecutepayment","aPRMReversePayment","aPRMReconcilePayment","aeatsiiSend","etblkpBulkposting","posted","retryPisPayment","pisPaymentStatus"],"values":{"aPRMProcessPayment":["P"]},"reason":"Not offered to agents by the payment window: its agent actions are Confirmar (aPRMProcessPayment, value P), Reactivar (etprReactivatePayment) and Eliminar (eTPRRemovePayment). Eliminar works at any status except void (RPVOID) or while the payment is locked by its bank transfer (pisLocked); it reactivates a processed payment first and gives back no credit the payment consumed. A payment is created and allocated with etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment'). The bank-transfer actions (PSD2/PIS) are hidden because fiscal and bank integrations are limited for agents"}}]]></MCP_CONFIG>
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5--></ETGO_SF_ENTITY>
 
 <!--66782BC6A58C461FBBFC4B57C70BBB97--><ETGO_SF_ENTITY>
@@ -2568,10 +2618,11 @@
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISGET><![CDATA[Y]]></ISGET>
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
-<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPOST><![CDATA[Y]]></ISPOST>
-<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPUT><![CDATA[Y]]></ISPUT>
-<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
-<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPOST><![CDATA[N]]></ISPOST>
+<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--6EFF323FE464437FBE29EADAC6FFAE39-->  <JAVA_QUALIFIER><![CDATA[bankStatementEntityHandler]]></JAVA_QUALIFIER>
 <!--6EFF323FE464437FBE29EADAC6FFAE39-->  <SEQNO><![CDATA[80]]></SEQNO>
 <!--6EFF323FE464437FBE29EADAC6FFAE39--></ETGO_SF_ENTITY>
 
@@ -2690,6 +2741,7 @@
 <!--7240CAF07810439B85DE61E70BE8DC0B-->  <JAVA_QUALIFIER><![CDATA[salesInvoiceHeaderHandler]]></JAVA_QUALIFIER>
 <!--7240CAF07810439B85DE61E70BE8DC0B-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--7240CAF07810439B85DE61E70BE8DC0B-->  <NAMED_FILTERS><![CDATA[[{"name":"completed","where":"e.paymentComplete = true","label":"Paid","description":"Fully paid invoices (payment complete)."},{"name":"pending","where":"e.paymentComplete = false and abs(e.outstandingAmount) >= abs(e.grandTotalAmount)","label":"Unpaid","description":"Unpaid invoices with nothing collected yet (outstanding equals the total)."},{"name":"partial","where":"e.paymentComplete = false and abs(e.outstandingAmount) > 0 and abs(e.outstandingAmount) < abs(e.grandTotalAmount)","label":"Partially paid","description":"Invoices with a partial payment: some amount collected but a balance remains."}]]]></NAMED_FILTERS>
+<!--7240CAF07810439B85DE61E70BE8DC0B-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["pisSupplierAccounts","pisTemplates","pisPaymentStatus","cancelPisPayment","retryPisPayment","psd2GenerateBankPayment"],"redirect":{"aPRMAddpayment":"registerPayment"},"reason":"Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA), so they are excluded from MCP","redirectReason":"The classic Add Payment button is not the Etendo payment flow; use registerPayment, which is what the invoice payment panel calls"}}]]></MCP_CONFIG>
 <!--7240CAF07810439B85DE61E70BE8DC0B--></ETGO_SF_ENTITY>
 
 <!--7335BB3D92A0469E8CE1A340D276AF2E--><ETGO_SF_ENTITY>
@@ -3658,6 +3710,44 @@
 <!--AA12AE64DB2E4027AEC166A5CAF4FF3C-->  <SEQNO><![CDATA[210]]></SEQNO>
 <!--AA12AE64DB2E4027AEC166A5CAF4FF3C--></ETGO_SF_ENTITY>
 
+<!--AB897777F2CB45DC95DB280993686079--><ETGO_SF_ENTITY>
+<!--AB897777F2CB45DC95DB280993686079-->  <ETGO_SF_ENTITY_ID><![CDATA[AB897777F2CB45DC95DB280993686079]]></ETGO_SF_ENTITY_ID>
+<!--AB897777F2CB45DC95DB280993686079-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--AB897777F2CB45DC95DB280993686079-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--AB897777F2CB45DC95DB280993686079-->  <NAME><![CDATA[report-journal-entries]]></NAME>
+<!--AB897777F2CB45DC95DB280993686079-->  <ETGO_SF_SPEC_ID><![CDATA[9FE3DB0DC8064FD5BA1E581AA652A9AF]]></ETGO_SF_SPEC_ID>
+<!--AB897777F2CB45DC95DB280993686079-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISGETBYID><![CDATA[N]]></ISGETBYID>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--AB897777F2CB45DC95DB280993686079-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--AB897777F2CB45DC95DB280993686079-->  <JAVA_QUALIFIER><![CDATA[journalEntriesReportHandler]]></JAVA_QUALIFIER>
+<!--AB897777F2CB45DC95DB280993686079-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--AB897777F2CB45DC95DB280993686079--></ETGO_SF_ENTITY>
+
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A--><ETGO_SF_ENTITY>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ETGO_SF_ENTITY_ID><![CDATA[ABA8FB5C64384C4FB4F0EF344EBAB65A]]></ETGO_SF_ENTITY_ID>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <NAME><![CDATA[report-trial-balance]]></NAME>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ETGO_SF_SPEC_ID><![CDATA[F1334C8C3F7541E2A5F829ED3BE44040]]></ETGO_SF_SPEC_ID>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISGETBYID><![CDATA[N]]></ISGETBYID>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <JAVA_QUALIFIER><![CDATA[trialBalanceReportHandler]]></JAVA_QUALIFIER>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--ABA8FB5C64384C4FB4F0EF344EBAB65A--></ETGO_SF_ENTITY>
+
 <!--AC5E1116738F4C6ABA1D248180DFE037--><ETGO_SF_ENTITY>
 <!--AC5E1116738F4C6ABA1D248180DFE037-->  <ETGO_SF_ENTITY_ID><![CDATA[AC5E1116738F4C6ABA1D248180DFE037]]></ETGO_SF_ENTITY_ID>
 <!--AC5E1116738F4C6ABA1D248180DFE037-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -3715,6 +3805,7 @@
 <!--AF50E181A0094E439C7B46B25A9E38FC-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--AF50E181A0094E439C7B46B25A9E38FC-->  <JAVA_QUALIFIER><![CDATA[document-posting]]></JAVA_QUALIFIER>
 <!--AF50E181A0094E439C7B46B25A9E38FC-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--AF50E181A0094E439C7B46B25A9E38FC-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"The UI never writes a movement through this entity: deposits and withdrawals are recorded, edited, processed, reactivated and deleted with the account's movement actions, transfers with its transferFunds action, and posting goes through this entity's post/unpost actions, which stay available","instead":"etendo_action(spec:'financial-account', entity:'account', id:'<financialAccountId>', action:'createMovement' | 'updateMovement' | 'processMovement' | 'reactivateMovement' | 'deleteMovement' | 'transferFunds'); listMovements lists the account's movements"},"actions":{"hidden":["etprReactivateTransaction","etprRemoveTransaction","posted","etblkpBulkposting"],"reason":"Not offered by the financial account movements in the UI: a movement is reactivated and deleted with the account's movement actions (etendo_action(spec:'financial-account', entity:'account', action:'reactivateMovement' | 'deleteMovement')), and posted or unposted with this entity's post/unpost actions, which stay available"}}]]></MCP_CONFIG>
 <!--AF50E181A0094E439C7B46B25A9E38FC--></ETGO_SF_ENTITY>
 
 <!--AFEEDB8491474EE3BA724ACD6BA6DCB7--><ETGO_SF_ENTITY>
@@ -3813,6 +3904,7 @@
 <!--B2C4A9368AEC494D8EDA0D635E432978-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B2C4A9368AEC494D8EDA0D635E432978-->  <JAVA_QUALIFIER><![CDATA[paymentScheduleDetailHandler]]></JAVA_QUALIFIER>
 <!--B2C4A9368AEC494D8EDA0D635E432978-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--B2C4A9368AEC494D8EDA0D635E432978-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Payment lines are the allocation of a collection to invoice schedules; the UI only writes them through the invoice payment actions","instead":"etendo_action(spec:'sales-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--B2C4A9368AEC494D8EDA0D635E432978--></ETGO_SF_ENTITY>
 
 <!--B3FFED4A53DA480BA2B20E313623AC9C--><ETGO_SF_ENTITY>
@@ -3873,6 +3965,25 @@
 <!--B42E745D94FE499483AE5ECA444E013E-->  <SEQNO><![CDATA[30]]></SEQNO>
 <!--B42E745D94FE499483AE5ECA444E013E--></ETGO_SF_ENTITY>
 
+<!--B69B82EB82234B68B69D7E7D43630FCD--><ETGO_SF_ENTITY>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ETGO_SF_ENTITY_ID><![CDATA[B69B82EB82234B68B69D7E7D43630FCD]]></ETGO_SF_ENTITY_ID>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <NAME><![CDATA[aging-payable]]></NAME>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ETGO_SF_SPEC_ID><![CDATA[AF052DC40CF04C46B199EAAFCC0B136E]]></ETGO_SF_SPEC_ID>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISGETBYID><![CDATA[N]]></ISGETBYID>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <JAVA_QUALIFIER><![CDATA[agingPayableReportHandler]]></JAVA_QUALIFIER>
+<!--B69B82EB82234B68B69D7E7D43630FCD-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--B69B82EB82234B68B69D7E7D43630FCD--></ETGO_SF_ENTITY>
+
 <!--B845C674D49D48BF950AE2389C56C49F--><ETGO_SF_ENTITY>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <ETGO_SF_ENTITY_ID><![CDATA[B845C674D49D48BF950AE2389C56C49F]]></ETGO_SF_ENTITY_ID>
 <!--B845C674D49D48BF950AE2389C56C49F-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -3905,10 +4016,10 @@
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISGET><![CDATA[Y]]></ISGET>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISGETBYID><![CDATA[Y]]></ISGETBYID>
-<!--B898797B8C184821BFE6FD8B1304E943-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--B898797B8C184821BFE6FD8B1304E943-->  <ISPOST><![CDATA[N]]></ISPOST>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPUT><![CDATA[Y]]></ISPUT>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
-<!--B898797B8C184821BFE6FD8B1304E943-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
+<!--B898797B8C184821BFE6FD8B1304E943-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <JAVA_QUALIFIER><![CDATA[document-sequence]]></JAVA_QUALIFIER>
 <!--B898797B8C184821BFE6FD8B1304E943-->  <SEQNO><![CDATA[10]]></SEQNO>
 <!--B898797B8C184821BFE6FD8B1304E943--></ETGO_SF_ENTITY>
@@ -3969,7 +4080,12 @@
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <JAVA_QUALIFIER><![CDATA[financialAccountHeaderHandler]]></JAVA_QUALIFIER>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <SEQNO><![CDATA[10]]></SEQNO>
-<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <AGENT_PROMPT><![CDATA[The `account` entity represents the company's OWN financial accounts (Etendo table FIN_Financial_Account): its bank, cash and card accounts (required fields: name, currency, type), including their IBAN, SWIFT/BIC and account number. These are NOT a contact's bank details — for a contact's (business partner / BP) bank account (C_BP_BankAccount) use the `contacts` spec (`bankAccount` entity) instead.]]></AGENT_PROMPT>
+<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <AGENT_PROMPT><![CDATA[The `account` entity represents the company's OWN financial accounts (Etendo table FIN_Financial_Account): its bank, cash and card accounts (required fields: name, currency, type, country — country is mandatory for every account type and is never derived from the IBAN; on update, a Bank account that has an IBAN must keep a country), including their IBAN, SWIFT/BIC and account number. These are NOT a contact's bank details — for a contact's (business partner / BP) bank account (C_BP_BankAccount) use the `contacts` spec (`bankAccount` entity) instead.
+
+Bank statements: create, preview or import them with the `bank-statements` spec actions — `etendo_action {spec:"bank-statements", entity:"bank-statements", id:<this financial account id>, action:"createStatement"|"previewStatement"|"importStatement"}`; the catalogue is `etendo_schema({spec:"bank-statements", view:"actions"})`. Read statements with etendo_list/etendo_get on `importedBankStatements` / `bankStatementLines`; generic writes on those entities are refused with 405.
+
+Manual movements of the account (a deposit or a withdrawal booked against a G/L item, what the Movements tab records): use this entity's actions — `etendo_action {spec:"financial-account", entity:"account", id:<this financial account id>, action:"createMovement"|"updateMovement"|"processMovement"|"reactivateMovement"|"deleteMovement"}`, with `listMovements` and `movementGlItems` to read; the catalogue is `etendo_schema({spec:"financial-account", entity:"account", view:"actions"})`. A movement is not a bank-statement line: a statement line is what the bank reports, waiting to be matched in a reconciliation. Transfers between two of the company's accounts: `transferFunds` (id = the source account; `transferDestinations` lists the destinations and today's rate between currencies). A transfer is dated today and cannot be deleted; undo it with a transfer back.]]></AGENT_PROMPT>
+<!--BE3EAEED69644E56B0ECDCFE4A7E9BC1-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["aPRMImportBankFile","aPRMMatchTransactions","aPRMMatchTransactionsForce","aPRMReconcile","aprmAddMultiplePayments","pSD2GetBankstatement","pSD2GetConsent","psd2ReconnectFa","psd2GetConnections","psd2RefreshConnections"],"reason":"The financial account window offers none of its Core buttons: statements are created and imported with the bank-statements spec, reconciled with the bank-reconciliation spec, manual movements and transfers are recorded with this entity's own actions (createMovement, transferFunds and the rest, see etendo_schema view:'actions'); PSD2 consent and reconnection need a person to authorize at the bank (SCA)","redirect":{"aprmFundsTrans":"transferFunds"},"redirectReason":"the Classic Funds Transfer button is not the Etendo transfer flow"}}]]></MCP_CONFIG>
 <!--BE3EAEED69644E56B0ECDCFE4A7E9BC1--></ETGO_SF_ENTITY>
 
 <!--BE79CE1718074339AE35BE6DDD829308--><ETGO_SF_ENTITY>
@@ -4490,6 +4606,7 @@
 <!--D27F2EFB14FB4206BECC0DDB8441666B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--D27F2EFB14FB4206BECC0DDB8441666B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--D27F2EFB14FB4206BECC0DDB8441666B-->  <SEQNO><![CDATA[70]]></SEQNO>
+<!--D27F2EFB14FB4206BECC0DDB8441666B-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Bank-initiated (PIS) payments need a person to authorize them at the bank (SCA) and are excluded from MCP; pay by manual transfer instead","instead":"etendo_action(spec:'purchase-invoice', entity:'header', id:'<invoiceId>', action:'registerPayment')"}}]]></MCP_CONFIG>
 <!--D27F2EFB14FB4206BECC0DDB8441666B--></ETGO_SF_ENTITY>
 
 <!--D296D32F64F5455A97AA06219FEAB895--><ETGO_SF_ENTITY>
@@ -4892,6 +5009,7 @@
 <!--E04EDCE14C7E4E6C865F5C18847819CB-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--E04EDCE14C7E4E6C865F5C18847819CB-->  <JAVA_QUALIFIER><![CDATA[period-control-doc-openclose]]></JAVA_QUALIFIER>
 <!--E04EDCE14C7E4E6C865F5C18847819CB-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--E04EDCE14C7E4E6C865F5C18847819CB-->  <MCP_CONFIG><![CDATA[{"actions":{"hidden":["openClose","processNow"],"reason":"the calendar has no per-document-type open/close since ETP-4948: the period's own openClose (etendo_action(spec:'open-close-period-control', entity:'periodControl', id:'<periodId>', action:'openClose')) opens or closes every document type at once"}}]]></MCP_CONFIG>
 <!--E04EDCE14C7E4E6C865F5C18847819CB--></ETGO_SF_ENTITY>
 
 <!--E24C7489E4764489A8DCB07DD5348DF8--><ETGO_SF_ENTITY>
@@ -5322,6 +5440,25 @@
 <!--F3599546C06B4ECAAC2063F34243BA6C-->  <SEQNO><![CDATA[50]]></SEQNO>
 <!--F3599546C06B4ECAAC2063F34243BA6C--></ETGO_SF_ENTITY>
 
+<!--F3697EE3340347959B5DE24FB54CB1D0--><ETGO_SF_ENTITY>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ETGO_SF_ENTITY_ID><![CDATA[F3697EE3340347959B5DE24FB54CB1D0]]></ETGO_SF_ENTITY_ID>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <NAME><![CDATA[profit-loss]]></NAME>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ETGO_SF_SPEC_ID><![CDATA[B6491EB4CA8042878ACB4AA7885466CF]]></ETGO_SF_SPEC_ID>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISINCLUDED><![CDATA[Y]]></ISINCLUDED>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISGET><![CDATA[Y]]></ISGET>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISGETBYID><![CDATA[N]]></ISGETBYID>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISPOST><![CDATA[Y]]></ISPOST>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISPUT><![CDATA[N]]></ISPUT>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISPATCH><![CDATA[N]]></ISPATCH>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <ISDELETE><![CDATA[N]]></ISDELETE>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <JAVA_QUALIFIER><![CDATA[profitLossReportHandler]]></JAVA_QUALIFIER>
+<!--F3697EE3340347959B5DE24FB54CB1D0-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--F3697EE3340347959B5DE24FB54CB1D0--></ETGO_SF_ENTITY>
+
 <!--F391AE6AB4D742DB8A38A8801BE6D513--><ETGO_SF_ENTITY>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <ETGO_SF_ENTITY_ID><![CDATA[F391AE6AB4D742DB8A38A8801BE6D513]]></ETGO_SF_ENTITY_ID>
 <!--F391AE6AB4D742DB8A38A8801BE6D513-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -5456,6 +5593,7 @@
 <!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <SEQNO><![CDATA[90]]></SEQNO>
+<!--F904BC5EBBCA4C55BE9F62871E2AD171-->  <MCP_CONFIG><![CDATA[{"verbs":{"create":false,"update":false,"delete":false,"reason":"Reconciliations are created and undone by the reconciliation flow, never by hand","instead":"etendo_action(spec:'bank-reconciliation', entity:'bank-reconciliation', id:'<financialAccountId>', action:<one of etendo_schema(spec:'bank-reconciliation', view:'actions')>)"}}]]></MCP_CONFIG>
 <!--F904BC5EBBCA4C55BE9F62871E2AD171--></ETGO_SF_ENTITY>
 
 <!--FC1B38FFA12545A0B10D3485276F9F9F--><ETGO_SF_ENTITY>

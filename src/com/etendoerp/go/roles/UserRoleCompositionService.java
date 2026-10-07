@@ -199,6 +199,43 @@ public class UserRoleCompositionService {
       new RoleInheritanceReconciliationService();
 
   /**
+   * ETP-5278 — per-target-user write serialization, taken FIRST in every write entry point
+   * ({@link #assignTemplateRoles(String, List, Role, String)}, {@link #promoteToAdmin}, {@link
+   * #demoteFromAdmin}) — see {@link UserRoleWriteLock} for why it must precede any read of the
+   * target user.
+   */
+  private final UserRoleWriteLock writeLock;
+
+  /**
+   * ETP-5565 — realigns the personal role with its templates after every composition that
+   * changed its inheritances (see {@link TemplateAccessPropagationService#realignAfterComposition}).
+   */
+  private final TemplateAccessPropagationService templateAccessPropagation;
+
+  /**
+   * Creates the service with the real per-user {@link UserRoleWriteLock}, so every write entry
+   * point is serialized against concurrent writes on the same user (ETP-5278).
+   */
+  public UserRoleCompositionService() {
+    this(new UserRoleWriteLock(), new TemplateAccessPropagationService());
+  }
+
+  /**
+   * Test seam: plain unit tests that mock {@link OBDal} inject {@link UserRoleWriteLock#NO_OP};
+   * the post-composition sweep is native SQL, so they get {@link
+   * TemplateAccessPropagationService#NO_OP}.
+   */
+  UserRoleCompositionService(UserRoleWriteLock writeLock) {
+    this(writeLock, TemplateAccessPropagationService.NO_OP);
+  }
+
+  private UserRoleCompositionService(UserRoleWriteLock writeLock,
+      TemplateAccessPropagationService templateAccessPropagation) {
+    this.writeLock = writeLock;
+    this.templateAccessPropagation = templateAccessPropagation;
+  }
+
+  /**
    * The literal System Administrator {@code AD_Role_ID} — the ONLY role id that bypasses
    * {@link #enforceCallerClientBoundary(User, Role)}. Mirrors the same literal id
    * {@code NeoAccessHelper#isAdminOrClientAdmin} checks at the webhook-gating layer, but
@@ -294,6 +331,7 @@ public class UserRoleCompositionService {
     if (templateRoleIds == null) {
       throw new OBException("Missing template role id list for role composition");
     }
+    writeLock.acquire(userId);
     User user = OBDal.getInstance().get(User.class, userId);
     if (user == null) {
       throw new OBException(USER_NOT_FOUND + userId);
@@ -314,6 +352,9 @@ public class UserRoleCompositionService {
       OBDal.getInstance().flush();
 
       UserRoleSyncSupport.syncSingleActiveUserRole(user, personalRole);
+      if (counters[0] > 0 || counters[1] > 0) {
+        templateAccessPropagation.realignAfterComposition(personalRole);
+      }
 
       List<String> appliedIds = new ArrayList<>();
       for (Role template : templates) {
@@ -761,7 +802,28 @@ public class UserRoleCompositionService {
    */
   private Role resolveOrCreatePersonalRole(User user) {
     Role existing = findExistingPersonalRole(user);
-    return existing != null ? existing : createPersonalRole(user);
+    if (existing == null) {
+      return createPersonalRole(user);
+    }
+    claimOwnership(existing, user);
+    return existing;
+  }
+
+  /**
+   * ETP-5502 — records {@code user} as the owner of a legacy personal role (created before the
+   * owner column existed) that a write path has just proven to be theirs. No-op when the owner
+   * is already set. Runs inside the caller's transaction, so it rolls back with it. Flushed at
+   * once: the composition path evicts the role right after (see {@link
+   * #discardStaleSessionState(Role)}), which would silently drop an unflushed change.
+   */
+  private void claimOwnership(Role role, User user) {
+    if (role.getETGOPersonalOwner() != null) {
+      return;
+    }
+    role.setETGOPersonalOwner(user);
+    OBDal.getInstance().save(role);
+    OBDal.getInstance().flush();
+    log.info("Recorded user {} as owner of legacy personal role {}", user.getId(), role.getId());
   }
 
   /**
@@ -831,6 +893,12 @@ public class UserRoleCompositionService {
         || !user.getClient().getId().equals(candidate.getClient().getId())) {
       return false;
     }
+    // ETP-5502 — a role that names an owner is only ever that owner's. Without this, a role with
+    // zero AD_User_Roles rows (a deleted or promoted user's dormant role) passed as anyone's.
+    User owner = candidate.getETGOPersonalOwner();
+    if (owner != null && !owner.getId().equals(user.getId())) {
+      return false;
+    }
     if (isInheritFromTargetOfAnyInheritance(candidate)) {
       return false;
     }
@@ -886,6 +954,8 @@ public class UserRoleCompositionService {
     role.setManual(true);
     role.setTemplate(false);
     role.setClientAdmin(false);
+    // ETP-5502 — the link demote restores by; set once, never changed.
+    role.setETGOPersonalOwner(user);
     OBDal.getInstance().save(role);
     OBDal.getInstance().flush();
     personalRoleAccessProvisioningService.createOrgAccess(role, user, starOrg);
@@ -1066,7 +1136,7 @@ public class UserRoleCompositionService {
    * {@code AD_Role} row and {@code AD_Role_Inheritance} composition are NEVER deleted here —
    * only unassigned (via {@link UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)}, which
    * replaces the user's single active {@code AD_User_Roles} row) — so {@link
-   * #demoteFromAdmin(String, Role, String)} can find and restore it later by name.
+   * #demoteFromAdmin(String, Role, String)} can find and restore it later by its owner (ETP-5502).
    *
    * @param callerUserId the {@code AD_User_ID} making this request
    * @param callerRole the caller's currently resolved role, for {@link
@@ -1083,6 +1153,8 @@ public class UserRoleCompositionService {
     if (StringUtils.isBlank(targetUserId)) {
       throw new OBException("Missing user id for admin promotion");
     }
+    // ETP-5278 — first, before any read of the target user (see UserRoleWriteLock).
+    writeLock.acquire(targetUserId);
     if (!callerIsOwnerOrAdmin(callerUserId)) {
       throw new OBException("Not authorized to promote users to Admin: " + callerUserId);
     }
@@ -1118,41 +1190,75 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * ETP-5019 — finds the given user's dormant personal role by its deterministic name (see
-   * {@link PersonalRoleAccessProvisioningService#personalRoleBaseName(User)}), scoped to the
-   * user's client. Unlike {@link #findExistingPersonalRole(User)}, this does NOT consult {@code
-   * user.getDefaultRole()} — that field currently points at the Admin role being demoted FROM,
-   * not at the dormant personal role being restored TO. {@link
-   * #isReusablePersonalRole(User, Role)}'s other checks (active, non-template, non-client-admin,
-   * same client, not the target of any inheritance, exclusively assigned to this user or
-   * unassigned) are still applied defensively before trusting the name match.
+   * ETP-5502 — finds the dormant personal role to restore on demote. Unlike {@link
+   * #findExistingPersonalRole(User)}, this does NOT consult {@code user.getDefaultRole()}: that
+   * field points at the Admin role being demoted FROM, not at the dormant personal role.
    *
-   * @return the user's dormant personal role if one is found and still valid to reuse, otherwise
-   *     {@code null}
+   * <ol>
+   *   <li><b>By owner</b> ({@code AD_Role.EM_ETGO_Personal_Owner_ID = user}) — the normal case.</li>
+   *   <li><b>By name</b>, only among roles with no owner yet (created before ETP-5502 and not
+   *   backfilled): the name must be one {@link PersonalRoleAccessProvisioningService} builds for
+   *   this user (base or {@code " (n)"} variant), and the role must not be older than the user —
+   *   a deleted namesake's orphan is. The earliest survivor wins and is claimed for {@code user},
+   *   so the next demote takes path 1.</li>
+   * </ol>
+   *
+   * <p>Every candidate must still pass {@link #isReusablePersonalRole(User, Role)}.</p>
+   *
+   * @return the role to restore, or {@code null} when there is none
    */
-  @SuppressWarnings("unchecked")
-  private Role findDormantPersonalRoleByName(User user) {
-    String expectedName = personalRoleAccessProvisioningService.personalRoleBaseName(user);
-    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
-    criteria.add(Restrictions.eq(Role.PROPERTY_NAME, expectedName));
-    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    List<Role> roles = (List<Role>) criteria.list();
-    if (roles.isEmpty()) {
-      return null;
+  private Role findDormantPersonalRole(User user) {
+    Role owned = findOwnedPersonalRole(user);
+    if (owned != null) {
+      return owned;
     }
-    Role candidate = roles.get(0);
-    return isReusablePersonalRole(user, candidate) ? candidate : null;
+    Role legacy = findLegacyPersonalRoleByName(user);
+    if (legacy != null) {
+      claimOwnership(legacy, user);
+    }
+    return legacy;
+  }
+
+  @SuppressWarnings("unchecked")
+  private Role findOwnedPersonalRole(User user) {
+    OBCriteria<Role> criteria =
+        PersonalRoleAccessProvisioningService.personalRoleCandidateCriteria(user);
+    criteria.add(Restrictions.eq(Role.PROPERTY_ETGOPERSONALOWNER + ".id", user.getId()));
+    List<Role> roles = criteria.list();
+    if (roles.size() > 1) {
+      log.warn("User {} owns {} active personal roles; restoring the earliest created", user.getId(),
+          roles.size());
+    }
+    for (Role role : roles) {
+      if (isReusablePersonalRole(user, role)) {
+        return role;
+      }
+    }
+    return null;
+  }
+
+  @SuppressWarnings("unchecked")
+  private Role findLegacyPersonalRoleByName(User user) {
+    String nameSource = personalRoleAccessProvisioningService.personalRoleNameSource(user);
+    OBCriteria<Role> criteria =
+        PersonalRoleAccessProvisioningService.personalRoleCandidateCriteria(user);
+    criteria.add(Restrictions.isNull(Role.PROPERTY_ETGOPERSONALOWNER));
+    criteria.add(Restrictions.like(Role.PROPERTY_NAME,
+        PersonalRoleAccessProvisioningService.personalRoleName("", 1) + "%"));
+    for (Role role : (List<Role>) criteria.list()) {
+      if (PersonalRoleAccessProvisioningService.isPersonalRoleNameFor(nameSource, role.getName())
+          && !PersonalRoleAccessProvisioningService.isOlderThan(role, user)
+          && isReusablePersonalRole(user, role)) {
+        return role;
+      }
+    }
+    return null;
   }
 
   /**
    * ETP-5019 — demotes {@code targetUserId} from the client's Admin role back to a personal
-   * role: their prior one (found by name via {@link
-   * PersonalRoleAccessProvisioningService#personalRoleBaseName(User)}, composition intact — see
-   * {@link #findDormantPersonalRoleByName(User)}) if one exists, otherwise a fresh empty one
+   * role: their prior one (the role they own, composition intact — see {@link
+   * #findDormantPersonalRole(User)}, ETP-5502) if one exists, otherwise a fresh empty one
    * (same fallback {@link #resolveOrCreatePersonalRole(User)}'s "create" half already uses).
    *
    * @param callerUserId the {@code AD_User_ID} making this request
@@ -1162,7 +1268,8 @@ public class UserRoleCompositionService {
    * @return an {@link AssignmentResult} whose {@code personalRoleId} is the restored (or
    *     freshly created) personal role's id (field reused, not renamed, to avoid touching
    *     {@code SFAssignUserRoles}'s response shape for the unrelated composition endpoint)
-   * @throws OBException if the caller is not owner/admin, the target is the owner (never
+   * @throws OBException if the caller is not owner/admin, the caller is demoting themselves
+   *     (nobody may remove their own Admin role, ETP-5206), the target is the owner (never
    *     demotable, by anyone), or the target does not currently hold the client-admin role
    */
   public AssignmentResult demoteFromAdmin(String callerUserId, Role callerRole,
@@ -1170,8 +1277,12 @@ public class UserRoleCompositionService {
     if (StringUtils.isBlank(targetUserId)) {
       throw new OBException("Missing user id for admin demotion");
     }
+    writeLock.acquire(targetUserId);
     if (!callerIsOwnerOrAdmin(callerUserId)) {
       throw new OBException("Not authorized to demote an Admin: " + callerUserId);
+    }
+    if (callerUserId != null && callerUserId.equals(targetUserId)) {
+      throw new OBException("An Admin cannot demote themselves: " + targetUserId);
     }
     User target = OBDal.getInstance().get(User.class, targetUserId);
     if (target == null) {
@@ -1188,7 +1299,7 @@ public class UserRoleCompositionService {
 
     OBContext.setAdminMode(true);
     try {
-      Role restoredRole = findDormantPersonalRoleByName(target);
+      Role restoredRole = findDormantPersonalRole(target);
       if (restoredRole == null) {
         restoredRole = createPersonalRole(target);
       }

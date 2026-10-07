@@ -64,6 +64,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import com.etendoerp.go.common.SpanishTaxIdValidator;
 
 /**
  * Unit tests for {@link BusinessPartnerHandler}.
@@ -359,6 +360,143 @@ class BusinessPartnerHandlerTest {
     }
   }
 
+  // ── handle() — POST: org currency injection over MCP (ETP-5284) ──────────────
+
+  /**
+   * One database column, two spellings, and the reason the tests below exist at all.
+   *
+   * <p>{@code C_BPartner.BP_Currency_ID} reaches this hook as {@code bPCurrencyID} over REST and
+   * as {@code currency} over MCP, because the two paths hand the handler a body in different
+   * field-naming conventions. Neither path reports the other's key: a value written under the
+   * wrong spelling is dropped downstream in silence, the create succeeds, and the Business Partner
+   * is left with no currency — which surfaces much later as a purchase invoice that cannot be
+   * confirmed ({@code ProcessInvoiceUtil} rejects {@code businessPartner.getCurrency() == null}
+   * with no fallback). That is ETP-5284, and it only ever affected the MCP side: the four tests
+   * above build their context without {@code mcpOrigin}, so they covered the REST branch, which
+   * was never broken.
+   *
+   * <p>The same lesson as ETP-5405's tab-less entities: an agent-facing path that silently
+   * discards what it does not recognise produces a confident wrong result rather than a failure,
+   * so the branch has to be pinned by a test rather than inferred from the shared column. The
+   * crossed cases below are the load-bearing ones — collapse {@code currencyKey} back to a single
+   * constant, as the code comment invites once the conventions are reconciled, and they fail.
+   *
+   * @param mcpOrigin whether the call arrived through the MCP tools
+   * @param orgId     the current organization
+   */
+  private void stubCurrencyContext(boolean mcpOrigin, String orgId) {
+    when(ctx.isMcpOrigin()).thenReturn(mcpOrigin);
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getObContext()).thenReturn(obContext);
+  }
+
+  /**
+   * The ETP-5284 defect itself: over MCP the injected currency must land under {@code currency}.
+   *
+   * <p>The second assertion is the half that fixes the bug rather than merely observing it — the
+   * REST spelling must NOT appear, because writing {@code bPCurrencyID} on the MCP path is exactly
+   * what was discarded downstream with no error, leaving the Business Partner currency-less.
+   */
+  @Test
+  void testHandlePostMcpOriginInjectsCurrencyUnderMcpSpelling() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    stubCurrencyContext(true, "ORG1");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("currency"));
+      assertFalse(body.has("bPCurrencyID"), body.toString());
+    }
+  }
+
+  /**
+   * The MCP mirror of {@code testHandlePostKeepsExplicitCurrency}: a caller that already sent
+   * {@code currency} keeps it, and the org-currency resolver is never consulted.
+   */
+  @Test
+  void testHandlePostMcpOriginKeepsExplicitCurrency() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("currency", "EXISTING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.isMcpOrigin()).thenReturn(true);
+
+    try (MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      handler.handle(ctx);
+
+      assertEquals("EXISTING", body.getString("currency"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * The crossed case, and the one that would catch a regression first: an MCP body carrying the
+   * REST spelling.
+   *
+   * <p>{@code bPCurrencyID} on the MCP path is not a currency the caller set — it is a key that
+   * will be thrown away before it reaches the column. So the "caller already supplied one" guard
+   * must not fire on it: the handler still has to inject {@code currency}, or the record is
+   * created with no currency while the body looks as though it had one. A single shared constant
+   * for both conventions makes this test return early and fail.
+   */
+  @Test
+  void testHandlePostMcpOriginInjectsDespiteRestSpellingInBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("bPCurrencyID", "REST_SPELLING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    stubCurrencyContext(true, "ORG1");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("currency"));
+      // The caller's own key is left exactly as it arrived: this hook resolves a missing
+      // currency, it does not rewrite the request into the other convention.
+      assertEquals("REST_SPELLING", body.getString("bPCurrencyID"));
+    }
+  }
+
+  /**
+   * The symmetric crossed case, which pins the branch from the other side: a REST body carrying
+   * the MCP spelling must still get {@code bPCurrencyID}, for the same reason reversed —
+   * {@code currency} is discarded on the REST path, so it is not a value the guard may honour.
+   */
+  @Test
+  void testHandlePostRestOriginInjectsDespiteMcpSpellingInBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    body.put("currency", "MCP_SPELLING");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+    stubCurrencyContext(false, "ORG1");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> curMock = mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      handler.handle(ctx);
+
+      assertEquals("CUR1", body.getString("bPCurrencyID"));
+      assertEquals("MCP_SPELLING", body.getString("currency"));
+    }
+  }
+
   /**
    * On PATCH, when the persisted name is blank, the handler must derive it by merging
    * persisted parts with the incoming body values.
@@ -444,6 +582,290 @@ class BusinessPartnerHandlerTest {
     handler.handle(ctx);
 
     assertNull(body.optString("name", null));
+  }
+
+  // ── handle() — TaxID validation (ETP-5031) ───────────────────────────────────
+
+  private static final String VALID_NIF = "12345678Z";
+  private static final String INVALID_NIF_CHECK_DIGIT = "12345678A";
+  private static final String INVALID_NIF_FORMAT = "NOT-A-TAXID";
+  private static final String VALID_PASSPORT = "AB123456C";
+
+  /**
+   * A write that does not touch {@code taxID} at all must not be validated — otherwise an
+   * already-stored dirty legacy value would block every unrelated edit.
+   */
+  @Test
+  void testHandleTaxIdAbsentFromBodySkipsValidation() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("name", "Empresa Test");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * Clearing the field (blank {@code taxID}) is the {@code required} mechanism's business, not
+   * the format rules' — must not be rejected here.
+   */
+  @Test
+  void testHandleTaxIdBlankSkipsValidation() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", "   ");
+    body.put("oBTIKTaxIDKey", "1");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * POST + {@code oBTIKTaxIDKey = "1"} (NIF) with a well-formed value must pass through
+   * {@link SpanishTaxIdValidator} and not short-circuit {@code handle()}.
+   */
+  @Test
+  void testHandlePostValidNifPassesValidation() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", VALID_NIF);
+    body.put("oBTIKTaxIDKey", "1");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * POST + NIF with a shape that matches none of the three accepted forms must be rejected
+   * with {@link SpanishTaxIdValidator#ERR_FORMAT}, reusing the same algorithm and the same
+   * message {@link com.etendoerp.go.schemaforge.handlers.OrganizationInformationHandler} uses
+   * for {@code AD_OrgInfo.TaxID}.
+   */
+  @Test
+  void testHandlePostInvalidNifFormatReturnsError() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", INVALID_NIF_FORMAT);
+    body.put("oBTIKTaxIDKey", "1");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals(SpanishTaxIdValidator.ERR_FORMAT,
+        result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /**
+   * POST + NIF with the right shape but a wrong control letter must be rejected with
+   * {@link SpanishTaxIdValidator#ERR_CHECK_DIGIT}.
+   */
+  @Test
+  void testHandlePostInvalidNifCheckDigitReturnsError() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", INVALID_NIF_CHECK_DIGIT);
+    body.put("oBTIKTaxIDKey", "1");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+    assertEquals(SpanishTaxIdValidator.ERR_CHECK_DIGIT,
+        result.getBody().getJSONObject("error").getString("message"));
+  }
+
+  /**
+   * POST + {@code oBTIKTaxIDKey = "3"} (Pasaporte) with a well-formed value (up to 9
+   * alphanumerics, ICAO Doc 9303) must pass through.
+   */
+  @Test
+  void testHandlePostValidPassportPassesValidation() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", VALID_PASSPORT);
+    body.put("oBTIKTaxIDKey", "3");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * Passport values are normalized (trim + uppercase) before matching, same as the NIF/CIF/NIE
+   * side — a lowercase, loosely-typed value must still be accepted.
+   */
+  @Test
+  void testHandlePostPassportIsNormalizedBeforeMatching() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", "  ab123456c  ");
+    body.put("oBTIKTaxIDKey", "3");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * A passport value longer than 9 characters must be rejected.
+   */
+  @Test
+  void testHandlePostPassportTooLongReturnsError() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", "TOOLONGPASSPORT1");
+    body.put("oBTIKTaxIDKey", "3");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+  }
+
+  /**
+   * A passport value containing characters outside {@code [A-Z0-9]} (e.g. punctuation) must be
+   * rejected.
+   */
+  @Test
+  void testHandlePostPassportWithInvalidCharsReturnsError() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", "AB-12345");
+    body.put("oBTIKTaxIDKey", "3");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse result = handler.handle(ctx);
+
+    assertNotNull(result);
+    assertEquals(400, result.getHttpStatus());
+  }
+
+  /**
+   * Any {@code oBTIKTaxIDKey} other than "1" or "3" (e.g. "4", foreign official ID) must NOT be
+   * validated — the format rules only describe the Spanish NIF/CIF/NIE and the ICAO passport
+   * shape.
+   */
+  @Test
+  void testHandlePostUnhandledTaxIdKeySkipsValidation() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", "anything-goes-here");
+    body.put("oBTIKTaxIDKey", "4");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  /**
+   * Legacy-data policy: on PATCH, when the incoming {@code taxID} equals what is already
+   * persisted, the value must NOT be re-validated — a contact with a dirty legacy NIF must stay
+   * editable on every other field.
+   */
+  @Test
+  void testHandlePatchUnchangedTaxIdSkipsValidationEvenIfInvalid() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", INVALID_NIF_FORMAT);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("BP_TAX_1");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      Connection connMock = mock(Connection.class);
+      PreparedStatement psMock = mock(PreparedStatement.class);
+      ResultSet rsMock = mock(ResultSet.class);
+      when(rsMock.next()).thenReturn(true);
+      when(rsMock.getString(1)).thenReturn(INVALID_NIF_FORMAT);
+      when(rsMock.getString(2)).thenReturn("1");
+      when(psMock.executeQuery()).thenReturn(rsMock);
+      when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  /**
+   * Legacy-data policy: on PATCH, when the incoming {@code taxID} DIFFERS from what is
+   * persisted, the new value must be validated (and rejected here for being malformed).
+   */
+  @Test
+  void testHandlePatchChangedTaxIdIsValidated() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", INVALID_NIF_FORMAT);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("BP_TAX_2");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      Connection connMock = mock(Connection.class);
+      PreparedStatement psMock = mock(PreparedStatement.class);
+      ResultSet rsMock = mock(ResultSet.class);
+      when(rsMock.next()).thenReturn(true);
+      when(rsMock.getString(1)).thenReturn("OLDVALUE123");
+      when(rsMock.getString(2)).thenReturn("1");
+      when(psMock.executeQuery()).thenReturn(rsMock);
+      when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(400, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * On PATCH, when the request body sends {@code taxID} but NOT the sibling
+   * {@code oBTIKTaxIDKey}, the dispatch type must be resolved from the persisted value of that
+   * same field — the discriminator lives on the record, not necessarily in this request.
+   */
+  @Test
+  void testHandlePatchResolvesTaxIdKeyFromPersistedValueWhenBodyOmitsIt() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", VALID_NIF);
+    // No oBTIKTaxIDKey in the body.
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("BP_TAX_3");
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      Connection connMock = mock(Connection.class);
+      PreparedStatement psMock = mock(PreparedStatement.class);
+      ResultSet rsMock = mock(ResultSet.class);
+      when(rsMock.next()).thenReturn(true);
+      when(rsMock.getString(1)).thenReturn("OLDVALUE123");
+      when(rsMock.getString(2)).thenReturn("1"); // persisted key: NIF
+      when(psMock.executeQuery()).thenReturn(rsMock);
+      when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      // VALID_NIF is well-formed, so resolving the type as NIF (from the persisted sibling)
+      // must let it through.
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  /**
+   * On PATCH, when the recordId is blank (defensive guard), TaxID validation must be skipped
+   * without querying the database.
+   */
+  @Test
+  void testHandlePatchTaxIdSkipsValidationWhenRecordIdBlank() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("taxID", INVALID_NIF_FORMAT);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn("");
+
+    assertNull(handler.handle(ctx));
   }
 
   /**

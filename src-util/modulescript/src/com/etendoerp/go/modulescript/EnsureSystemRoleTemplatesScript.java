@@ -143,10 +143,11 @@ import org.openbravo.modulescript.ModuleScript;
  *       {@code ad_window_id} is null (points at an embedded chat feature, not a window).</li>
  *   <li><b>Documentos no contabilizados</b> — {@code not-posted-documents} spec, type W but
  *       {@code ad_window_id} null; fully custom, no classic window backing it. RESOLVED by this
- *       ETP-5116 pass, but NOT via {@link #reconcileProcessAccess} (which only ever DERIVES
- *       process access from a role's FULL window grants): Financiero now holds a standalone
+ *       ETP-5116 pass, but NOT through a window button (no window backs it): Financiero now
+ *       holds a standalone
  *       {@code OBUIAPP_Process_Access} grant on process {@code D6AB95CE52D34E1599590526115E26C6}
- *       (proxying "Not Posted Documents") via the new {@link #reconcileStandaloneProcessAccess}.</li>
+ *       (proxying "Not Posted Documents") via the standalone grants ({@link
+ *       #standaloneProcessGrantsByRoleId()}).</li>
  *   <li><b>Informes de inventario</b> — {@code inventory-stock-report} spec, type R, no window,
  *       no tab; pure webhook handler ({@code InventoryStockReportHandler}). Confirmed
  *       over-permissive in production: every authenticated role could retrieve this data because
@@ -168,7 +169,7 @@ import org.openbravo.modulescript.ModuleScript;
  *       nothing.</li>
  *   <li><b>Informe Antigüedad de Cobros</b> — {@code aging-receivable} spec exists (type R) but
  *       has neither {@code ad_window_id} nor {@code ad_tab_id}; same report-access-mechanism gap
- *       as ETP-4596. RESOLVED by this ETP-5116 pass via {@link #reconcileStandaloneProcessAccess}:
+ *       as ETP-4596. RESOLVED by this ETP-5116 pass via the standalone grants:
  *       Ventas (and Financiero) now hold a standalone grant on the real, confirmed OBUIAPP process
  *       {@code 0D37A9F6109549DEB058373EF2DAEB6A} (Receivables Aging Schedule; {@code AD_Menu} row
  *       {@code CC226771DE354AEEAA5D69F696F1A676}, {@code ad_window_id} still null — there is no
@@ -194,32 +195,24 @@ import org.openbravo.modulescript.ModuleScript;
  * AD_Window_Access} grant mechanism — out of scope for this script until that follow-up ticket
  * lands.</p>
  *
- * <p><b>ETP-5116 — {@link #reconcileStandaloneProcessAccess}, a new mechanism parallel to {@link
- * #reconcileProcessAccess}.</b> The window-button-derived mechanism above can only ever reach a
- * process that is a button on a window some role already has FULL access to — it has no path to a
- * process whose {@code AD_Menu} entry has {@code ad_window_id IS NULL}. Three such processes were
- * confirmed real via the {@code AD_Menu.em_obuiapp_process_id} FK chain (see the windowless-gap
- * list above) and needed direct grants: the "Documentos no contabilizados" proxy
+ * <p><b>ETP-5116 — standalone process grants.</b> The window-button-derived mechanism above can
+ * only ever reach a process that is a button on a window some role already has FULL access to — it
+ * has no path to a process whose {@code AD_Menu} entry has {@code ad_window_id IS NULL}. Three such
+ * processes were confirmed real via the {@code AD_Menu.em_obuiapp_process_id} FK chain (see the
+ * windowless-gap list above) and needed direct grants: the "Documentos no contabilizados" proxy
  * ({@code D6AB95CE52D34E1599590526115E26C6}, Financiero only) and the two
  * {@code AgingReportHandler} processes, Receivables ({@code 0D37A9F6109549DEB058373EF2DAEB6A},
  * Ventas + Financiero) and Payables ({@code EB4C4053F3B94A17A08D1DD7E89CEB7E}, Compras +
  * Financiero) — Financiero holds all three per the v2 target matrix. {@link
  * #standaloneProcessGrantsByRoleId()} is this script's own inlined copy of {@code
  * TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()} (same self-containment rule as the
- * window matrix above), and {@link #reconcileStandaloneProcessAccess} is called from the exact
- * same per-role loop in {@link #execute()} that calls {@link #reconcileWindowAccess}/{@link
- * #reconcileProcessAccess}, so it runs on every {@code update.database} too.
+ * window matrix above); ETP-5402 added the classic sibling {@link
+ * #standaloneClassicProcessGrantsByRoleId()}.</p>
  *
- * <p>Deliberately a genuinely separate mechanism, not layered on top of {@link
- * #reconcileProcessAccess}: it grants every desired process id directly, independent of any
- * window grant, reusing {@link #upsertObuiappProcessAccess} as-is for idempotent insert (no
- * duplicate row on a re-run — the existing check-then-insert/reactivate guard already handles
- * that). The one new piece is stale-removal: both mechanisms write to the SAME {@code
- * obuiapp_process_access} table for the SAME role, so a naive "delete every active row not in
- * my desired set" would delete the OTHER mechanism's grants. {@link
- * #removeStaleStandaloneProcessAccess} avoids that by scoping its delete to {@link
- * #ALL_STANDALONE_PROCESS_IDS} — the fixed, known universe of ids this mechanism ever grants —
- * so it can only ever touch rows it itself owns, never a window-button-derived grant.</p>
+ * <p>Since ETP-5565 the standalone ids are simply added to {@link #reconcileProcessAccess}'s
+ * desired set, so button-derived and standalone grants are reconciled together by one stale
+ * removal. They used to be a separate pass, which made every run delete and re-insert them; see
+ * that method's javadoc for the duplicate rows this left on production.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * (111, 108, and {@code 6006F3B3DDF74D618CBEE21BEFD398DC} respectively) but are deliberately NOT
@@ -520,16 +513,19 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * The fixed universe of every {@code obuiapp_process_id} ever granted through {@link
-   * #reconcileStandaloneProcessAccess}, across all four templates combined — used to scope {@link
-   * #removeStaleStandaloneProcessAccess}'s stale-removal to ONLY these ids, so it can never touch
-   * a window-button-derived grant {@link #reconcileProcessAccess} wrote for the same role in the
-   * very same {@code obuiapp_process_access} table.
+   * ETP-5402 — the full role→standalone-CLASSIC-process-grant-list map, keyed by {@code
+   * AD_Role_ID}. Inlined copy of {@code TemplateRoleWindowAccess#standaloneClassicProcessGrantsByRoleId()}
+   * — every one of the four template roles is a key, even the three with an empty list (Finance
+   * gets {@code tax-report}, the other three get nothing).
    */
-  private static final Set<String> ALL_STANDALONE_PROCESS_IDS = Set.of(
-      "D6AB95CE52D34E1599590526115E26C6",
-      "0D37A9F6109549DEB058373EF2DAEB6A",
-      "EB4C4053F3B94A17A08D1DD7E89CEB7E");
+  private static Map<String, List<String>> standaloneClassicProcessGrantsByRoleId() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(FINANCE_ROLE_ID, List.of("8C1331B9EC14CED7E040007F010119A0"));
+    map.put(SALES_ROLE_ID, Collections.emptyList());
+    map.put(PURCHASING_ROLE_ID, Collections.emptyList());
+    map.put(INVENTORY_ROLE_ID, Collections.emptyList());
+    return map;
+  }
 
   @Override
   public void execute() {
@@ -537,12 +533,15 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
       ConnectionProvider cp = getConnectionProvider();
       Map<String, List<WindowGrant>> grantsByRoleId = windowAccessByRoleId();
       Map<String, List<String>> standaloneProcessGrantsByRoleId = standaloneProcessGrantsByRoleId();
+      Map<String, List<String>> standaloneClassicProcessGrantsByRoleId = standaloneClassicProcessGrantsByRoleId();
       for (Map.Entry<String, List<WindowGrant>> entry : grantsByRoleId.entrySet()) {
         String roleId = entry.getKey();
         ensureRole(cp, roleId, ROLE_NAMES_BY_ID.get(roleId));
         reconcileWindowAccess(cp, roleId, entry.getValue());
-        reconcileProcessAccess(cp, roleId, entry.getValue());
-        reconcileStandaloneProcessAccess(cp, roleId, standaloneProcessGrantsByRoleId.get(roleId));
+        dedupeObuiappProcessAccess(cp, roleId);
+        reconcileProcessAccess(cp, roleId, entry.getValue(),
+            standaloneClassicProcessGrantsByRoleId.get(roleId),
+            standaloneProcessGrantsByRoleId.get(roleId));
       }
     } catch (Exception e) {
       handleError(e);
@@ -585,23 +584,30 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
    * replacement for the old insert-only smoke test. For
    * every desired grant: inserts it if missing, or corrects {@code IsReadWrite} in place if an
    * active row already exists with the wrong access level (e.g. a window that moved from "R" to
-   * "✓" between revisions of the matrix). Then removes (hard {@code DELETE}, mirroring the
-   * "remove it, don't just leave it" spirit of {@code UserRoleCompositionService
-   * #reconcileInheritances}) any active grant this role has for a window that is NOT in the
-   * current matrix — e.g. the old 2-window smoke-test grants, for roles/windows the real matrix
-   * says "—" for.
+   * "✓" between revisions of the matrix). Then deactivates any active grant this role has for a
+   * window that is NOT in the current matrix — e.g. the old 2-window smoke-test grants, for
+   * roles/windows the real matrix says "—" for.
    *
    * <p>Scoped strictly per {@code roleId}: only rows owned by THIS template role are ever
    * touched, never another role's. Safe because these four template roles are entirely managed
    * by this script — no other code path writes {@code AD_Window_Access} rows for them.</p>
    *
-   * <p><b>Out of scope:</b> retroactively updating personal roles that already inherited from a
-   * template before this reconciliation ran. This script writes raw SQL against the TEMPLATE role
-   * only — the {@code RoleInheritanceManager} propagation covered by {@code
-   * UserRoleCompositionServiceIntegrationTest} fires off {@code AD_Role_Inheritance}/{@code
-   * AD_Window_Access} Hibernate events, which this JDBC-only {@code ModuleScript} does not
-   * generate. Retroactively re-syncing already-composed personal roles when a template's matrix
-   * changes later is ETP-4877's territory, not this script's.</p>
+   * <p><b>ETP-5565 — removals are soft deletes ({@code IsActive='N'}), never {@code DELETE}. Do
+   * not revert.</b> Production never runs this script on its own database: the deploy runs it on
+   * a clone and ships the data diff as a delta, and that delta applies INSERTs and UPDATEs of
+   * access rows but defers every DELETE to a contract file that is never applied. A hard delete
+   * here therefore never reached production (ETP-5116's removed grants stayed active on the
+   * templates there). An UPDATE of {@code IsActive} does travel. A grant that comes back
+   * reactivates the inactive row instead of inserting a second one, which would hit
+   * {@code AD_Window_Access}'s {@code (AD_Role_ID, AD_Window_ID)} unique key. Inactive template
+   * rows are hard-deleted on the live database after a grace period by
+   * {@code TemplateRoleAccessStartup}, which is invisible to the delta.</p>
+   *
+   * <p>This script writes raw SQL against the TEMPLATE role only, so core's
+   * {@code RoleInheritanceManager} (which reacts to Hibernate events) never propagates these
+   * changes to the personal roles that inherit the template. That propagation is done at runtime
+   * by {@code TemplateRoleAccessStartup} and {@code TemplateAccessPropagationService}
+   * (ETP-5565).</p>
    */
   private void reconcileWindowAccess(ConnectionProvider cp, String roleId, List<WindowGrant> grants)
       throws Exception {
@@ -614,21 +620,22 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Inserts one {@code AD_Window_Access} row for {@code roleId}/{@code windowId} unless an active
-   * row already exists; if one exists but its {@code IsReadWrite} disagrees with {@code
-   * readOnly}, updates it in place instead of leaving a stale access level.
+   * Inserts one {@code AD_Window_Access} row for {@code roleId}/{@code windowId} unless a row
+   * already exists. An inactive row (a soft-deleted earlier grant) is reactivated with the desired
+   * {@code IsReadWrite}; an active row whose {@code IsReadWrite} disagrees with {@code readOnly}
+   * is updated in place instead of leaving a stale access level.
    */
   private void upsertWindowAccess(ConnectionProvider cp, String roleId, String windowId,
       boolean readOnly) throws Exception {
     String desiredReadWrite = readOnly ? "N" : "Y";
-    String currentReadWrite = singleString(cp,
-        "SELECT IsReadWrite FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ? "
-            + "AND IsActive = 'Y'",
+    String current = singleString(cp,
+        "SELECT IsActive || IsReadWrite FROM AD_Window_Access WHERE AD_Role_ID = ? "
+            + "AND AD_Window_ID = ?",
         roleId, windowId);
-    if (currentReadWrite == null) {
+    if (current == null) {
       insertWindowAccess(cp, roleId, windowId, desiredReadWrite);
-    } else if (!currentReadWrite.equals(desiredReadWrite)) {
-      updateWindowAccessReadWrite(cp, roleId, windowId, desiredReadWrite);
+    } else if (!current.equals("Y" + desiredReadWrite)) {
+      setWindowAccessActiveReadWrite(cp, roleId, windowId, desiredReadWrite);
     }
   }
 
@@ -649,10 +656,10 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     }
   }
 
-  private void updateWindowAccessReadWrite(ConnectionProvider cp, String roleId, String windowId,
-      String readWrite) throws Exception {
-    String sql = "UPDATE AD_Window_Access SET IsReadWrite = ?, Updated = now(), UpdatedBy = ? "
-        + "WHERE AD_Role_ID = ? AND AD_Window_ID = ? AND IsActive = 'Y'";
+  private void setWindowAccessActiveReadWrite(ConnectionProvider cp, String roleId,
+      String windowId, String readWrite) throws Exception {
+    String sql = "UPDATE AD_Window_Access SET IsActive = 'Y', IsReadWrite = ?, Updated = now(), "
+        + "UpdatedBy = ? WHERE AD_Role_ID = ? AND AD_Window_ID = ?";
     try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
       ps.setString(1, readWrite);
       ps.setString(2, SYSTEM_ADMIN_USER_ID);
@@ -663,10 +670,12 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Deletes every active {@code AD_Window_Access} row for {@code roleId} whose window is NOT in
-   * {@code desiredWindowIds} — the reconciliation half of ETP-4878's replacement for the old
+   * Deactivates every active {@code AD_Window_Access} row for {@code roleId} whose window is NOT
+   * in {@code desiredWindowIds} — the reconciliation half of ETP-4878's replacement for the old
    * insert-only smoke test (e.g. the old smoke-test grants for a role/window pair the real matrix
-   * now says "—" for).
+   * now says "—" for). A soft delete, see {@link #reconcileWindowAccess} for why. Already-inactive
+   * rows are left untouched, so their {@code Updated} stamp (the start of the purge grace period)
+   * never moves.
    */
   private void removeStaleWindowAccess(ConnectionProvider cp, String roleId,
       Set<String> desiredWindowIds) throws Exception {
@@ -684,12 +693,13 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         }
       }
     }
-    String deleteSql = "DELETE FROM AD_Window_Access WHERE AD_Role_ID = ? AND AD_Window_ID = ? "
-        + "AND IsActive = 'Y'";
+    String deactivateSql = "UPDATE AD_Window_Access SET IsActive = 'N', Updated = now(), "
+        + "UpdatedBy = ? WHERE AD_Role_ID = ? AND AD_Window_ID = ? AND IsActive = 'Y'";
     for (String windowId : staleWindowIds) {
-      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
-        ps.setString(1, roleId);
-        ps.setString(2, windowId);
+      try (PreparedStatement ps = cp.getPreparedStatement(deactivateSql)) {
+        ps.setString(1, SYSTEM_ADMIN_USER_ID);
+        ps.setString(2, roleId);
+        ps.setString(3, windowId);
         ps.executeUpdate();
       }
     }
@@ -725,12 +735,25 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
    * {@code obuiapp_process_access} the exact same generic way it propagates
    * {@code AD_Window_Access} (via its {@code ReportAndProcessAccessInjector}/
    * {@code ProcessDefinitionAccessInjector}), confirmed by inspecting the injector list — no
-   * change needed in {@code UserRoleCompositionService} at all.</p>
+   * change needed in {@code UserRoleCompositionService} at all. (ETP-5565: core propagates them
+   * only on Hibernate events, which this JDBC script never fires; see {@link
+   * #reconcileWindowAccess} for who propagates them now.)</p>
+   *
+   * <p><b>ETP-5565 — the standalone grants are part of the desired set.</b> The standalone
+   * classic and OBUIAPP processes ({@link #standaloneClassicProcessGrantsByRoleId()}, {@link
+   * #standaloneProcessGrantsByRoleId()}) are added to the button-derived ids before the stale
+   * removal, so one desired set decides what stays. They used to be reconciled by a separate pass
+   * that ran after this one: this method removed them on every run (no button derives them) and
+   * the separate pass re-inserted them with a new id. On {@code obuiapp_process_access}, which
+   * has no natural unique key, the deploy delta shipped each re-insert as a new row and never the
+   * delete, so production accumulated one duplicate standalone row per build. Removals are soft
+   * deletes, for the reason given in {@link #reconcileWindowAccess}.</p>
    */
-  private void reconcileProcessAccess(ConnectionProvider cp, String roleId, List<WindowGrant> grants)
-      throws Exception {
-    Set<String> desiredProcessIds = new HashSet<>();
-    Set<String> desiredObuiappProcessIds = new HashSet<>();
+  private void reconcileProcessAccess(ConnectionProvider cp, String roleId,
+      List<WindowGrant> grants, List<String> standaloneProcessIds,
+      List<String> standaloneObuiappProcessIds) throws Exception {
+    Set<String> desiredProcessIds = new HashSet<>(standaloneProcessIds);
+    Set<String> desiredObuiappProcessIds = new HashSet<>(standaloneObuiappProcessIds);
     for (WindowGrant grant : grants) {
       if (grant.isReadOnly()) {
         continue;
@@ -852,20 +875,25 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
    * or reactivates an existing INACTIVE row for that exact pair instead of blindly inserting a
    * duplicate (ETP-4830 PR review fix, OBUIAPP sibling of {@link #upsertProcessAccess}).
    * {@code obuiapp_process_access} has no unique constraint on {@code (AD_Role_ID,
-   * obuiapp_process_id)}, so the previous logic did not crash — but it could silently create a
-   * genuine duplicate row for the pair, which this fixes for correctness/consistency with the
-   * {@code AD_Process_Access} path above.
+   * obuiapp_process_id)}, so several rows can exist for one pair. An active row anywhere makes
+   * this a no-op; otherwise only the oldest inactive row is reactivated (ETP-5565: reactivating
+   * every row of the pair would bring back the duplicates {@link #dedupeObuiappProcessAccess}
+   * deactivated).
    */
   private void upsertObuiappProcessAccess(ConnectionProvider cp, String roleId,
       String obuiappProcessId) throws Exception {
-    String existingIsActive = singleString(cp,
-        "SELECT IsActive FROM obuiapp_process_access WHERE AD_Role_ID = ? "
-            + "AND obuiapp_process_id = ?",
+    if (exists(cp, "SELECT 1 FROM obuiapp_process_access WHERE AD_Role_ID = ? "
+        + "AND obuiapp_process_id = ? AND IsActive = 'Y'", roleId, obuiappProcessId)) {
+      return;
+    }
+    String inactiveRowId = singleString(cp,
+        "SELECT obuiapp_process_access_id FROM obuiapp_process_access WHERE AD_Role_ID = ? "
+            + "AND obuiapp_process_id = ? ORDER BY Created, obuiapp_process_access_id LIMIT 1",
         roleId, obuiappProcessId);
-    if (existingIsActive == null) {
+    if (inactiveRowId == null) {
       insertObuiappProcessAccess(cp, roleId, obuiappProcessId);
-    } else if (!"Y".equals(existingIsActive)) {
-      reactivateObuiappProcessAccess(cp, roleId, obuiappProcessId);
+    } else {
+      reactivateObuiappProcessAccess(cp, inactiveRowId);
     }
   }
 
@@ -887,24 +915,46 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Reactivates an existing (inactive) {@code obuiapp_process_access} row instead of re-inserting
-   * it.
+   * Reactivates one existing (inactive) {@code obuiapp_process_access} row, by its primary key,
+   * instead of re-inserting it.
    */
-  private void reactivateObuiappProcessAccess(ConnectionProvider cp, String roleId,
-      String obuiappProcessId) throws Exception {
+  private void reactivateObuiappProcessAccess(ConnectionProvider cp, String rowId)
+      throws Exception {
     String sql = "UPDATE obuiapp_process_access SET IsActive = 'Y', IsReadWrite = 'Y', "
-        + "Updated = now(), UpdatedBy = ? WHERE AD_Role_ID = ? AND obuiapp_process_id = ?";
+        + "Updated = now(), UpdatedBy = ? WHERE obuiapp_process_access_id = ?";
     try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
       ps.setString(1, SYSTEM_ADMIN_USER_ID);
-      ps.setString(2, roleId);
-      ps.setString(3, obuiappProcessId);
+      ps.setString(2, rowId);
       ps.executeUpdate();
     }
   }
 
   /**
-   * Deletes every active {@code AD_Process_Access} row for {@code roleId} whose process is NOT in
-   * {@code desiredProcessIds} — same reconciliation half as {@link #removeStaleWindowAccess}.
+   * ETP-5565 — collapses duplicate active {@code obuiapp_process_access} rows of {@code roleId}
+   * to one per process: the oldest row (by {@code Created}, then primary key, so every run picks
+   * the same survivor) stays active and the others are deactivated. The duplicates come from the
+   * old delete-then-reinsert cycle of the standalone grants (see {@link #reconcileProcessAccess}).
+   * A soft delete, for the reason given in {@link #reconcileWindowAccess}; a no-op once there are
+   * no duplicates.
+   */
+  private void dedupeObuiappProcessAccess(ConnectionProvider cp, String roleId) throws Exception {
+    String sql = "UPDATE obuiapp_process_access a SET IsActive = 'N', Updated = now(), "
+        + "UpdatedBy = ? WHERE a.AD_Role_ID = ? AND a.IsActive = 'Y' AND EXISTS ("
+        + "SELECT 1 FROM obuiapp_process_access k WHERE k.AD_Role_ID = a.AD_Role_ID "
+        + "AND k.obuiapp_process_id = a.obuiapp_process_id AND k.IsActive = 'Y' "
+        + "AND (k.Created < a.Created OR (k.Created = a.Created "
+        + "AND k.obuiapp_process_access_id < a.obuiapp_process_access_id)))";
+    try (PreparedStatement ps = cp.getPreparedStatement(sql)) {
+      ps.setString(1, SYSTEM_ADMIN_USER_ID);
+      ps.setString(2, roleId);
+      ps.executeUpdate();
+    }
+  }
+
+  /**
+   * Deactivates every active {@code AD_Process_Access} row for {@code roleId} whose process is
+   * NOT in {@code desiredProcessIds} — same reconciliation half as {@link
+   * #removeStaleWindowAccess}, and a soft delete for the same reason.
    */
   private void removeStaleProcessAccess(ConnectionProvider cp, String roleId,
       Set<String> desiredProcessIds) throws Exception {
@@ -922,113 +972,46 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         }
       }
     }
-    String deleteSql = "DELETE FROM AD_Process_Access WHERE AD_Role_ID = ? AND AD_Process_ID = ? "
-        + "AND IsActive = 'Y'";
+    String deactivateSql = "UPDATE AD_Process_Access SET IsActive = 'N', Updated = now(), "
+        + "UpdatedBy = ? WHERE AD_Role_ID = ? AND AD_Process_ID = ? AND IsActive = 'Y'";
     for (String processId : staleIds) {
-      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
-        ps.setString(1, roleId);
-        ps.setString(2, processId);
+      try (PreparedStatement ps = cp.getPreparedStatement(deactivateSql)) {
+        ps.setString(1, SYSTEM_ADMIN_USER_ID);
+        ps.setString(2, roleId);
+        ps.setString(3, processId);
         ps.executeUpdate();
       }
     }
   }
 
   /**
-   * Deletes every active {@code obuiapp_process_access} row for {@code roleId} whose process is
-   * NOT in {@code desiredObuiappProcessIds} — same reconciliation half as
-   * {@link #removeStaleWindowAccess}.
+   * Deactivates every active {@code obuiapp_process_access} row for {@code roleId} whose process
+   * is NOT in {@code desiredObuiappProcessIds} — same reconciliation half as
+   * {@link #removeStaleWindowAccess}, and a soft delete for the same reason.
    */
   private void removeStaleObuiappProcessAccess(ConnectionProvider cp, String roleId,
       Set<String> desiredObuiappProcessIds) throws Exception {
-    List<String> staleIds = new ArrayList<>();
-    for (String obuiappProcessId : activeObuiappProcessIds(cp, roleId)) {
-      if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
-        staleIds.add(obuiappProcessId);
-      }
-    }
-    deleteObuiappProcessAccessRows(cp, roleId, staleIds);
-  }
-
-  /**
-   * ETP-5116 — reconciles {@code roleId}'s standalone {@code obuiapp_process_access} grants (this
-   * script's own inlined copy of {@code TemplateRoleWindowAccess}'s standalone-process matrix) —
-   * for processes with NO backing {@code AD_Window} at all, so neither {@link
-   * #reconcileWindowAccess} nor the window-button-derived {@link #reconcileProcessAccess} can
-   * reach them (both need an {@code AD_Window_ID} to start from). Deliberately a separate,
-   * parallel mechanism, not layered on top of {@link #reconcileProcessAccess}: it grants every
-   * desired process id directly, independent of any window grant.
-   *
-   * <p>Idempotent the same way every other reconciliation in this class is: {@link
-   * #upsertObuiappProcessAccess} is reused as-is (insert if missing, reactivate if inactive,
-   * no-op if already active) — running this twice on an unchanged {@code desiredProcessIds} never
-   * creates a duplicate row. Stale removal is scoped to {@link #ALL_STANDALONE_PROCESS_IDS} only
-   * (never "every active row not in {@code desiredProcessIds}", unlike {@link
-   * #removeStaleObuiappProcessAccess}), so it can never delete a window-button-derived grant
-   * {@link #reconcileProcessAccess} wrote for the same role in the very same table — the two
-   * mechanisms coexist safely because each only ever touches the process ids it owns.</p>
-   */
-  private void reconcileStandaloneProcessAccess(ConnectionProvider cp, String roleId,
-      List<String> desiredProcessIds) throws Exception {
-    for (String processId : desiredProcessIds) {
-      upsertObuiappProcessAccess(cp, roleId, processId);
-    }
-    removeStaleStandaloneProcessAccess(cp, roleId, desiredProcessIds);
-  }
-
-  /**
-   * Deletes every active {@code obuiapp_process_access} row for {@code roleId} whose process id
-   * is in {@link #ALL_STANDALONE_PROCESS_IDS} (the fixed universe this mechanism owns) but NOT in
-   * {@code desiredProcessIds}. Scoped this way — rather than "every active row not desired",
-   * unlike {@link #removeStaleObuiappProcessAccess} — so it never touches a window-button-derived
-   * grant {@link #reconcileProcessAccess} wrote for the same role on the same table.
-   */
-  private void removeStaleStandaloneProcessAccess(ConnectionProvider cp, String roleId,
-      List<String> desiredProcessIds) throws Exception {
-    Set<String> desired = new HashSet<>(desiredProcessIds);
-    List<String> staleIds = new ArrayList<>();
-    for (String obuiappProcessId : activeObuiappProcessIds(cp, roleId)) {
-      if (ALL_STANDALONE_PROCESS_IDS.contains(obuiappProcessId) && !desired.contains(obuiappProcessId)) {
-        staleIds.add(obuiappProcessId);
-      }
-    }
-    deleteObuiappProcessAccessRows(cp, roleId, staleIds);
-  }
-
-  /**
-   * Every active {@code obuiapp_process_id} currently granted to {@code roleId} — shared read
-   * used by both {@link #removeStaleObuiappProcessAccess} and {@link
-   * #removeStaleStandaloneProcessAccess} so the two mechanisms' stale-removal logic differs only
-   * in which ids they consider "theirs", not in how they read the table.
-   */
-  private List<String> activeObuiappProcessIds(ConnectionProvider cp, String roleId)
-      throws Exception {
-    List<String> ids = new ArrayList<>();
+    Set<String> staleIds = new HashSet<>();
     String selectSql = "SELECT obuiapp_process_id FROM obuiapp_process_access "
         + "WHERE AD_Role_ID = ? AND IsActive = 'Y'";
     try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
       ps.setString(1, roleId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          ids.add(rs.getString(1));
+          String obuiappProcessId = rs.getString(1);
+          if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
+            staleIds.add(obuiappProcessId);
+          }
         }
       }
     }
-    return ids;
-  }
-
-  /**
-   * Hard-deletes the given active {@code obuiapp_process_access} rows for {@code roleId} — shared
-   * delete used by both {@link #removeStaleObuiappProcessAccess} and {@link
-   * #removeStaleStandaloneProcessAccess}.
-   */
-  private void deleteObuiappProcessAccessRows(ConnectionProvider cp, String roleId,
-      List<String> obuiappProcessIds) throws Exception {
-    String deleteSql = "DELETE FROM obuiapp_process_access WHERE AD_Role_ID = ? "
-        + "AND obuiapp_process_id = ? AND IsActive = 'Y'";
-    for (String obuiappProcessId : obuiappProcessIds) {
-      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
-        ps.setString(1, roleId);
-        ps.setString(2, obuiappProcessId);
+    String deactivateSql = "UPDATE obuiapp_process_access SET IsActive = 'N', Updated = now(), "
+        + "UpdatedBy = ? WHERE AD_Role_ID = ? AND obuiapp_process_id = ? AND IsActive = 'Y'";
+    for (String obuiappProcessId : staleIds) {
+      try (PreparedStatement ps = cp.getPreparedStatement(deactivateSql)) {
+        ps.setString(1, SYSTEM_ADMIN_USER_ID);
+        ps.setString(2, roleId);
+        ps.setString(3, obuiappProcessId);
         ps.executeUpdate();
       }
     }

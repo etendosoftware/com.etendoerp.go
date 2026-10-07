@@ -139,6 +139,127 @@ public class NeoHandlerUtilsTest {
     assertEquals("rec-1", result.getJSONObject(0).getString("id"));
   }
 
+  // ── extractResponseDataArray (ETP-5336) ──────────────────────────────────
+  // Method-agnostic twin of extractGetDataArray: must also accept the record echoed back by a
+  // POST/PUT/PATCH, not just a GET — the case that made a Return to Vendor line flash its
+  // stored NEGATIVE quantity right after a PATCH before this fix.
+
+  @Test
+  public void testExtractResponseDataArrayReturnsNullWhenNoPreviousResult() {
+    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").build();
+    assertNull(NeoHandlerUtils.extractResponseDataArray(ctx));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayReturnsNullWhenBodyNull() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .previousResult(new NeoResponse(200, null))
+        .build();
+    assertNull(NeoHandlerUtils.extractResponseDataArray(ctx));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayReturnsNullWhenNoResponseWrapper() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(new NeoResponse(200, new JSONObject()))
+        .build();
+    assertNull(NeoHandlerUtils.extractResponseDataArray(ctx));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayReturnsNullWhenDataMissing() throws Exception {
+    JSONObject body = new JSONObject().put("response", new JSONObject());
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+    assertNull(NeoHandlerUtils.extractResponseDataArray(ctx));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayReturnsNullWhenDataArrayEmpty() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", new JSONArray()));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+    assertNull(NeoHandlerUtils.extractResponseDataArray(ctx));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayAcceptsGetArrayPayload() throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", "rec-1"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+    JSONArray result = NeoHandlerUtils.extractResponseDataArray(ctx);
+    assertNotNull(result);
+    assertEquals(1, result.length());
+  }
+
+  @Test
+  public void testExtractResponseDataArrayAcceptsPostArrayPayload() throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", "rec-1"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(new NeoResponse(201, body))
+        .build();
+    JSONArray result = NeoHandlerUtils.extractResponseDataArray(ctx);
+    assertNotNull(result);
+    assertEquals("rec-1", result.getJSONObject(0).getString("id"));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayAcceptsPutArrayPayload() throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", "rec-1"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+    assertNotNull(NeoHandlerUtils.extractResponseDataArray(ctx));
+  }
+
+  @Test
+  public void testExtractResponseDataArrayAcceptsPatchArrayPayload() throws Exception {
+    // ETP-5336's actual repro: a PATCH echoing the updated record as an array, the exact shape
+    // the CRUD service always uses regardless of HTTP method.
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "rec-1").put("movementQuantity", -3.0));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+    JSONArray result = NeoHandlerUtils.extractResponseDataArray(ctx);
+    assertNotNull(result);
+    assertEquals(1, result.length());
+    assertEquals(-3.0, result.getJSONObject(0).getDouble("movementQuantity"), 0.0001);
+  }
+
+  @Test
+  public void testExtractResponseDataArrayNormalizesSingleObjectPayloadIntoOneElementArray()
+      throws Exception {
+    // Hand-built action responses (as opposed to the CRUD service's own output) put a single
+    // JSONObject at response.data instead of an array.
+    JSONObject singleRecord = new JSONObject().put("id", "rec-1");
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", singleRecord));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(new NeoResponse(201, body))
+        .build();
+    JSONArray result = NeoHandlerUtils.extractResponseDataArray(ctx);
+    assertNotNull(result);
+    assertEquals(1, result.length());
+    assertEquals("rec-1", result.getJSONObject(0).getString("id"));
+  }
+
   // ── collectIds ───────────────────────────────────────────────────────────
 
   @Test

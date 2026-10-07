@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -32,6 +33,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -45,21 +47,27 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * Unit tests for {@link EtendoGoJwtSupport}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -182,27 +190,144 @@ class EtendoGoJwtSupportTest {
     @DisplayName("loads roles and organizations through one native SQL query")
     void loadsRolesAndOrganizations() throws JSONException {
       mockRoleListQuery(Arrays.asList(
-          new Object[]{ "role-1", "Admin", "org-1", "Main Org" },
-          new Object[]{ "role-1", "Admin", "org-2", "Second Org" },
-          new Object[]{ "role-2", "User", null, null }));
+          new Object[]{ "role-1", "Admin", "org-1", "Main Org", "N" },
+          new Object[]{ "role-1", "Admin", "org-2", "Second Org", "N" },
+          new Object[]{ "role-2", "User", null, null, "N" }));
+      mockUserDefaultRole("unrelated-role");
 
-      EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id")).thenReturn(Collections.emptyList()))) {
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
-      assertEquals("role-1", data.getFirstRoleId());
-      assertEquals(2, data.getRoleArray().length());
-      JSONObject firstRole = data.getRoleArray().getJSONObject(0);
-      assertEquals("role-1", firstRole.getString("id"));
-      assertEquals("Admin", firstRole.getString("name"));
-      JSONArray orgList = firstRole.getJSONArray("orgList");
-      assertEquals(2, orgList.length());
-      assertEquals("org-1", orgList.getJSONObject(0).getString("id"));
-      assertEquals("Main Org", orgList.getJSONObject(0).getString("name"));
-      assertEquals("org-2", orgList.getJSONObject(1).getString("id"));
-      assertEquals("Second Org", orgList.getJSONObject(1).getString("name"));
-      assertEquals(0, data.getRoleArray().getJSONObject(1).getJSONArray("orgList").length());
-      verify(session, times(1)).createNativeQuery(anyString());
-      verify(query).setParameter("userId", "user-id");
-      verify(query).list();
+        assertEquals("role-1", data.getFirstRoleId());
+        assertEquals(2, data.getRoleArray().length());
+        JSONObject firstRole = data.getRoleArray().getJSONObject(0);
+        assertEquals("role-1", firstRole.getString("id"));
+        assertEquals("Admin", firstRole.getString("name"));
+        assertFalse(firstRole.has("effectiveRoleNames"));
+        assertFalse(firstRole.getBoolean("isClientAdmin"));
+        JSONArray orgList = firstRole.getJSONArray("orgList");
+        assertEquals(2, orgList.length());
+        assertEquals("org-1", orgList.getJSONObject(0).getString("id"));
+        assertEquals("Main Org", orgList.getJSONObject(0).getString("name"));
+        assertEquals("org-2", orgList.getJSONObject(1).getString("id"));
+        assertEquals("Second Org", orgList.getJSONObject(1).getString("name"));
+        assertEquals(0, data.getRoleArray().getJSONObject(1).getJSONArray("orgList").length());
+        assertFalse(data.getRoleArray().getJSONObject(1).has("effectiveRoleNames"));
+        verify(session, times(1)).createNativeQuery(anyString());
+        verify(query).setParameter("userId", "user-id");
+        verify(query).list();
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5329: attaches effectiveRoleNames only to the entry matching the user's "
+        + "default role")
+    void attachesEffectiveRoleNamesToDefaultRoleEntry() throws JSONException {
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "role-1", "Personal - user", "org-1", "Main Org", "N" },
+          new Object[]{ "role-2", "Other Role", null, null, "N" }));
+      // Default role is role-2 (NOT firstRoleId) to prove matching is by id, not by position.
+      mockUserDefaultRole("role-2");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id"))
+                  .thenReturn(Arrays.asList("tpl-finance", "tpl-sales")))) {
+        mockRoleNameLookup(
+            new Object[]{ "tpl-finance", "Finance" },
+            new Object[]{ "tpl-sales", "Sales" });
+
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        JSONObject role1 = data.getRoleArray().getJSONObject(0);
+        JSONObject role2 = data.getRoleArray().getJSONObject(1);
+        assertFalse(role1.has("effectiveRoleNames"));
+        assertTrue(role2.has("effectiveRoleNames"));
+        JSONArray names = role2.getJSONArray("effectiveRoleNames");
+        assertEquals(2, names.length());
+        assertEquals("Finance", names.getString(0));
+        assertEquals("Sales", names.getString(1));
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5329: omits effectiveRoleNames when the default role has no composed "
+        + "templates")
+    void omitsEffectiveRoleNamesWhenNoTemplatesApplied() throws JSONException {
+      mockRoleListQuery(Collections.singletonList(
+          new Object[]{ "role-1", "Personal - user", null, null, "N" }));
+      mockUserDefaultRole("role-1");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id")).thenReturn(Collections.emptyList()))) {
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        JSONObject role1 = data.getRoleArray().getJSONObject(0);
+        assertFalse(role1.has("effectiveRoleNames"));
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5329: skips a template role id with no matching active Role instead of "
+        + "throwing, keeping the remaining resolved names")
+    void skipsUnresolvedTemplateRoleId() throws JSONException {
+      mockRoleListQuery(Collections.singletonList(
+          new Object[]{ "role-1", "Personal - user", null, null, "N" }));
+      mockUserDefaultRole("role-1");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id"))
+                  .thenReturn(Arrays.asList("tpl-finance", "tpl-deleted")))) {
+        // "tpl-deleted" has no matching active Role row (deleted/renamed out from under
+        // AD_Role_Inheritance) -> fetchRoleNames simply omits it from namesById.
+        mockRoleNameLookup(new Object[]{ "tpl-finance", "Finance" });
+
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        JSONObject role1 = data.getRoleArray().getJSONObject(0);
+        assertTrue(role1.has("effectiveRoleNames"));
+        JSONArray names = role1.getJSONArray("effectiveRoleNames");
+        assertEquals(1, names.length());
+        assertEquals("Finance", names.getString(0));
+      }
+    }
+
+    @Test
+    @DisplayName("flags the tenant client-admin role with isClientAdmin (case-insensitive 'Y'), "
+        + "every other entry with isClientAdmin=false")
+    void flagsClientAdminRole() throws JSONException {
+      // A tenant admin's default role IS the client-admin AD_Role: tenant-specific raw name, no
+      // composed templates -> no effectiveRoleNames. Without the flag the topbar showed the raw
+      // "Acme SL Admin" instead of the localized "Administrator" (QA CP-6/CP-7).
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "admin-role", "Acme SL Admin", "org-1", "Main Org", 'Y' },
+          new Object[]{ "role-2", "Other Role", null, null, 'N' },
+          new Object[]{ "role-3", "Null Flag Role", null, null, null },
+          // Lowercase flags, as a char and as a string, must also read as client admin.
+          new Object[]{ "role-4", "Lowercase Char Admin", null, null, 'y' },
+          new Object[]{ "role-5", "Lowercase String Admin", null, null, "y" }));
+      mockUserDefaultRole("admin-role");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id")).thenReturn(Collections.emptyList()))) {
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        JSONObject admin = data.getRoleArray().getJSONObject(0);
+        assertEquals("Acme SL Admin", admin.getString("name"));
+        assertTrue(admin.getBoolean("isClientAdmin"));
+        assertFalse(admin.has("effectiveRoleNames"));
+        assertFalse(data.getRoleArray().getJSONObject(1).getBoolean("isClientAdmin"));
+        assertFalse(data.getRoleArray().getJSONObject(2).getBoolean("isClientAdmin"));
+        assertEquals("role-4", data.getRoleArray().getJSONObject(3).getString("id"));
+        assertTrue(data.getRoleArray().getJSONObject(3).getBoolean("isClientAdmin"));
+        assertEquals("role-5", data.getRoleArray().getJSONObject(4).getString("id"));
+        assertTrue(data.getRoleArray().getJSONObject(4).getBoolean("isClientAdmin"));
+      }
     }
 
     @Test
@@ -217,13 +342,37 @@ class EtendoGoJwtSupportTest {
           () -> EtendoGoJwtSupport.loadRoleListData("user-id"));
 
       assertTrue(exception.getMessage().contains("Error loading role list data for user: user-id"));
+      // The row query failed before any User/template-name resolution could run.
+      verify(obDal, times(0)).get(eq(User.class), anyString());
     }
 
-    private void mockRoleListQuery(java.util.List<Object[]> rows) {
+    private void mockRoleListQuery(List<Object[]> rows) {
       when(obDal.getSession()).thenReturn(session);
       when(session.createNativeQuery(anyString())).thenReturn(query);
       when(query.setParameter("userId", "user-id")).thenReturn(query);
       when(query.list()).thenReturn(rows);
+    }
+
+    private void mockUserDefaultRole(String defaultRoleId) {
+      Role defaultRole = mock(Role.class);
+      when(defaultRole.getId()).thenReturn(defaultRoleId);
+      User user = mock(User.class);
+      when(user.getDefaultRole()).thenReturn(defaultRole);
+      when(obDal.get(User.class, "user-id")).thenReturn(user);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void mockRoleNameLookup(Object[]... idAndName) {
+      OBCriteria<Role> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(Role.class)).thenReturn(criteria);
+      List<Role> roles = new java.util.ArrayList<>();
+      for (Object[] entry : idAndName) {
+        Role role = mock(Role.class);
+        when(role.getId()).thenReturn((String) entry[0]);
+        when(role.getName()).thenReturn((String) entry[1]);
+        roles.add(role);
+      }
+      when(criteria.list()).thenReturn(roles);
     }
   }
 
@@ -247,6 +396,24 @@ class EtendoGoJwtSupportTest {
       verify(clientQuery).setFilterOnReadableClients(false);
       verify(clientQuery).setFilterOnReadableOrganization(false);
       verify(clientQuery).setMaxResult(1);
+    }
+
+    @Test
+    @DisplayName("findClientIdsByName returns every same-named client, ignoring case")
+    void findClientIdsByName() {
+      Client first = mock(Client.class);
+      when(first.getId()).thenReturn("client-1");
+      Client second = mock(Client.class);
+      when(second.getId()).thenReturn("client-2");
+      when(obDal.createQuery(eq(Client.class), anyString())).thenReturn(clientQuery);
+      when(clientQuery.list()).thenReturn(Arrays.asList(first, second));
+
+      assertEquals(Arrays.asList("client-1", "client-2"),
+          EtendoGoJwtSupport.findClientIdsByName("  Acme "));
+      verify(clientQuery).setNamedParameter("clientName", "Acme");
+      verify(clientQuery).setFilterOnReadableClients(false);
+      verify(clientQuery).setFilterOnReadableOrganization(false);
+      assertTrue(EtendoGoJwtSupport.findClientIdsByName("  ").isEmpty());
     }
 
     @Test
@@ -282,7 +449,7 @@ class EtendoGoJwtSupportTest {
     @Mock private OBQuery<User> userQuery;
 
     @Test
-    @DisplayName("returns plain email when no active AD user exists")
+    @DisplayName("returns plain email when no AD user has it")
     void noExistingUser() {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
       when(userQuery.uniqueResult()).thenReturn(null);
@@ -295,17 +462,44 @@ class EtendoGoJwtSupportTest {
     @DisplayName("returns email plus sanitized client name when user exists")
     void existingUser() {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
-      when(userQuery.uniqueResult()).thenReturn(mock(User.class));
+      when(userQuery.uniqueResult()).thenReturn(mock(User.class), (User) null);
 
       assertEquals("user@test.com+my123company",
           EtendoGoJwtSupport.buildClientUsername("user@test.com", "My-123 Company!"));
     }
 
     @Test
+    @DisplayName("ETP-5548: numbers the suffix while email+company is taken, counting inactive users")
+    void numbersTheSuffixWhileTaken() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      User taken = mock(User.class);
+      // email, email+acme and email+acme2 taken; email+acme3 free.
+      when(userQuery.uniqueResult()).thenReturn(taken, taken, taken, null);
+
+      assertEquals("user@test.com+acme3",
+          EtendoGoJwtSupport.buildClientUsername("user@test.com", "Acme!"));
+      verify(userQuery, times(4)).setFilterOnActive(false);
+    }
+
+    @Test
+    @DisplayName("ETP-5548: a numbered suffix still fits AD_USER.USERNAME(60)")
+    void numberedSuffixFitsTheColumn() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      User taken = mock(User.class);
+      when(userQuery.uniqueResult()).thenReturn(taken, taken, null);
+      String email = "a".repeat(40) + "@test.com";
+
+      String username = EtendoGoJwtSupport.buildClientUsername(email, "Extremely Long Company Name SL");
+
+      assertEquals(OnboardingFieldLimits.EMAIL, username.length());
+      assertEquals(email + "+extremely2", username);
+    }
+
+    @Test
     @DisplayName("ETP-4665: trims the company suffix so the username fits AD_USER.USERNAME(60)")
     void suffixTrimmedToColumnSize() {
       when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
-      when(userQuery.uniqueResult()).thenReturn(mock(User.class));
+      when(userQuery.uniqueResult()).thenReturn(mock(User.class), (User) null);
 
       // A 49-char email leaves 60 - (49 + 1) = 10 characters for the company suffix,
       // so "extremelylongcompanynamesl" is cut down to "extremelyl".

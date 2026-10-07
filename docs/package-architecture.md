@@ -72,6 +72,41 @@ The current execution classes remain in `com.etendoerp.go.schemaforge` to avoid 
 
 New OAuth2 validation rules should prefer `OAuth2ClientPolicy` when they are pure policy decisions. Endpoint parsing/rendering should prefer a support class instead of increasing `OAuth2Servlet` method count or cognitive complexity.
 
+## Self-service public API keys
+
+The authenticated user-owned credential contract is exposed separately from the administrator/MCP
+client contract:
+
+| Route | Purpose |
+| --- | --- |
+| `GET/POST /oauth2/api-keys` | List or create keys for the current user, tenant, and organization |
+| `GET/PUT/DELETE /oauth2/api-keys/{id}` | Read, update name/active state, or delete an owned key |
+| `POST /oauth2/api-keys/{id}/rotate` | Replace the hash and return a plaintext secret once; revoke existing tokens |
+| `POST /oauth2/api-keys/{id}/revoke-tokens` | Idempotently revoke active tokens without returning credential data |
+
+`OAuth2Servlet` derives `client`, `organization`, `user`, and `role` from the authenticated JWT and
+validates the active role through DAL entities before any operation. Persistence and ownership
+queries use the generated `OAuth2Client`/`OAuth2Token` entities through `OBDal`; callers cannot
+submit AD identity or internal scope IDs. The only accepted capabilities are
+`public-api:read`, `public-api:write`, and `public-api:process`, mapped server-side to the internal
+OAuth scopes after checking the active role's access. Public credentials also carry the private
+server-managed `neo:public-api-key` scope marker, keeping them separate from legacy administrative
+and MCP clients without adding a second persistence model. Because `ETGO_OAUTH2_CLIENT` is a
+system-level technical entity, self-service rows use `AD_CLIENT_ID = '0'`; tenant isolation comes
+from a private owner-organization scope marker and owner predicates. OAuth2 token context
+resolution derives the operational client from the token organization.
+
+The active-key limit is the named `PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER` constant (10),
+and active names are unique case-insensitively per user/tenant/organization. Secrets are hashed at
+rest, never included in list/update/error/audit payloads, and are returned only by create or rotate.
+Opaque `client_credentials` tokens are accepted by NeoServlet through the existing
+`OAuth2Filter.validateToken` fallback; a healthy local deployment is still required for an
+end-to-end consumption check.
+
+Security edge cases covered by the contract include cross-user or cross-tenant IDs behaving as
+not-found, unknown/wildcard capabilities being rejected, and inactive/revoked credentials being
+unable to issue new tokens.
+
 ### Authorize-grant token validity policy
 
 The Authorization Code + PKCE flow (the grant used by the `/authorize` consent screen that guards `/sws/mcp`) lets the user choose how long the issued access token stays valid. The choice travels as a `validity_seconds` field and is enforced by a small policy in `OAuth2Servlet`.

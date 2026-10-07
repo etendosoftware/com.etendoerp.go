@@ -17,6 +17,7 @@
 package com.etendoerp.go.mcp;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -31,6 +32,8 @@ import org.junit.Test;
  * <p>
  * Full integration tests (RBAC filtering, DAL queries) require OBBaseTest and run
  * against a live Etendo instance. These unit tests cover the pure-logic parts.
+ *
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 public class ToolRegistryTest {
 
@@ -64,9 +67,9 @@ public class ToolRegistryTest {
   @Test
   public void testMcpToolDefinitionGetters() {
     Map<String, Object> schema = Map.of("type", "object");
-    McpToolDefinition tool = new McpToolDefinition("neo_list", "List records", schema);
+    McpToolDefinition tool = new McpToolDefinition("etendo_list", "List records", schema);
 
-    assertEquals("neo_list", tool.getName());
+    assertEquals("etendo_list", tool.getName());
     assertEquals("List records", tool.getDescription());
     assertEquals(schema, tool.getInputSchema());
   }
@@ -74,7 +77,7 @@ public class ToolRegistryTest {
   /** Tests that a null input schema is normalized to an empty map by McpToolDefinition. */
   @Test
   public void testMcpToolDefinitionNullSchema() {
-    McpToolDefinition tool = new McpToolDefinition("neo_discover", "Discover specs", null);
+    McpToolDefinition tool = new McpToolDefinition("etendo_discover", "Discover specs", null);
 
     assertNotNull(tool.getInputSchema());
     assertTrue(tool.getInputSchema().isEmpty());
@@ -101,26 +104,35 @@ public class ToolRegistryTest {
   /** Tests that McpToolDefinition.toString() includes the tool name and description. */
   @Test
   public void testMcpToolDefinitionToString() {
-    McpToolDefinition tool = new McpToolDefinition("neo_get", "Get record", Collections.emptyMap());
+    McpToolDefinition tool = new McpToolDefinition("etendo_get", "Get record", Collections.emptyMap());
     String str = tool.toString();
-    assertTrue(str.contains("neo_get"));
+    assertTrue(str.contains("etendo_get"));
     assertTrue(str.contains("Get record"));
   }
 
-  /** Tests that neo_batch is recognised as a CRUD tool (so spec resolution is skipped). */
+  /** Tests that etendo_batch is recognised as a CRUD tool (so spec resolution is skipped). */
   @Test
   public void testNeoBatchIsCrudTool() {
-    assertTrue(ToolRegistry.isCrudTool("neo_batch"));
+    assertTrue(ToolRegistry.isCrudTool("etendo_batch"));
   }
 
-  /** The vector-search tool exposes the required query/targets contract and remains read-only. */
+  /**
+   * The vector-search tool requires only {@code query} and remains read-only.
+   *
+   * <p>IMP-41: {@code targets} used to be required, which forced a caller to name an index before
+   * it could ask anything — the one thing a natural-language question does not arrive with, and
+   * the MCP surface offers no {@code namespaces} alternative. Omitting it now means "search every
+   * index this role can read", so {@code required} must stay exactly {@code ["query"]}. Asserted
+   * as the whole list rather than a {@code contains}, so re-adding {@code targets} fails here
+   * instead of silently closing that door again.</p>
+   */
   @Test
   @SuppressWarnings("unchecked")
   public void testVectorSearchToolSchema() {
-    McpToolDefinition tool = new ToolRegistry().buildVectorSearchTool();
-    assertEquals("neo_vector_search", tool.getName());
+    McpToolDefinition tool = new ToolRegistry().buildVectorSearchTool(List.of("product"));
+    assertEquals("etendo_vector_search", tool.getName());
     Map<String, Object> schema = tool.getInputSchema();
-    assertEquals(List.of("query", "targets"), schema.get("required"));
+    assertEquals(List.of("query"), schema.get("required"));
     Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
     assertEquals("string", ((Map<String, Object>) properties.get("query")).get("type"));
     assertEquals("array", ((Map<String, Object>) properties.get("targets")).get("type"));
@@ -136,7 +148,7 @@ public class ToolRegistryTest {
   public void testBuildBatchToolSchema() {
     McpToolDefinition tool = new ToolRegistry().buildBatchTool();
 
-    assertEquals("neo_batch", tool.getName());
+    assertEquals("etendo_batch", tool.getName());
     assertNotNull(tool.getDescription());
     // This assertion has now been wrong twice, in opposite directions, which is why it checks the
     // caller-visible consequence rather than a keyword. It first required the description to
@@ -170,5 +182,63 @@ public class ToolRegistryTest {
     assertNotNull(itemProps.get("entity"));
     assertNotNull(itemProps.get("parentRef"));
     assertNotNull(itemProps.get("body"));
+  }
+
+  // ── IMP-41: targets enum on the vector-search tool ─────────────────────
+
+  /**
+   * {@link McpJsonSchema#stringEnumArrayProp} must place the {@code enum} on the array's
+   * {@code items}, not on the property itself — a common and silent mistake, since an
+   * {@code enum} on the wrong node is simply ignored by the model with no error anywhere.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testStringEnumArrayPropPutsEnumOnItems() {
+    Map<String, Object> prop = McpJsonSchema.stringEnumArrayProp("desc", List.of("a", "b"));
+
+    assertEquals("array", prop.get("type"));
+    assertFalse("enum must not be on the array property itself", prop.containsKey("enum"));
+    Map<String, Object> items = (Map<String, Object>) prop.get("items");
+    assertEquals("string", items.get("type"));
+    assertEquals(List.of("a", "b"), items.get("enum"));
+  }
+
+  /** With configured target keys, the tool's {@code targets} parameter carries a closed enum. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildVectorSearchToolWithTargetKeysUsesEnum() {
+    McpToolDefinition tool =
+        new ToolRegistry().buildVectorSearchTool(List.of("sales-quotation", "purchase-order"));
+
+    Map<String, Object> properties = (Map<String, Object>) tool.getInputSchema().get("properties");
+    Map<String, Object> targetsProp = (Map<String, Object>) properties.get("targets");
+    Map<String, Object> items = (Map<String, Object>) targetsProp.get("items");
+    assertEquals(List.of("sales-quotation", "purchase-order"), items.get("enum"));
+  }
+
+  /** An empty target-key list leaves {@code targets} free-form: an empty enum is unsatisfiable. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildVectorSearchToolWithEmptyListLeavesFreeForm() {
+    McpToolDefinition tool = new ToolRegistry().buildVectorSearchTool(List.of());
+
+    Map<String, Object> properties = (Map<String, Object>) tool.getInputSchema().get("properties");
+    Map<String, Object> targetsProp = (Map<String, Object>) properties.get("targets");
+    assertEquals("array", targetsProp.get("type"));
+    Map<String, Object> items = (Map<String, Object>) targetsProp.get("items");
+    assertFalse("no enum should be present when no targets are configured", items.containsKey("enum"));
+  }
+
+  /** A {@code null} target-key list (catalog unavailable) also leaves {@code targets} free-form. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildVectorSearchToolWithNullListLeavesFreeForm() {
+    McpToolDefinition tool = new ToolRegistry().buildVectorSearchTool(null);
+
+    Map<String, Object> properties = (Map<String, Object>) tool.getInputSchema().get("properties");
+    Map<String, Object> targetsProp = (Map<String, Object>) properties.get("targets");
+    assertEquals("array", targetsProp.get("type"));
+    Map<String, Object> items = (Map<String, Object>) targetsProp.get("items");
+    assertFalse("no enum should be present when the catalog is unknown", items.containsKey("enum"));
   }
 }

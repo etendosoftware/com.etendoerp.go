@@ -30,6 +30,7 @@ import javax.servlet.ServletException;
 import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.annotation.WebFilter;
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -38,6 +39,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.session.GoSessionSecurity;
 
 /**
  * Servlet filter that validates OAuth2 Bearer tokens on requests to the MCP endpoints.
@@ -58,9 +60,11 @@ public class OAuth2Filter implements Filter {
   private static final String TOKEN_LOOKUP_SQL =
       "SELECT t.etgo_oauth2_token_id, t.scopes AS token_scopes, t.expires_at, t.is_revoked, "
           + "c.ad_user_id, c.ad_role_id, c.scopes AS client_scopes, c.isactive AS client_active, "
-          + "c.ad_client_id AS etendo_client_id "
+          + "COALESCE(o.ad_client_id, c.ad_client_id) AS etendo_client_id, "
+          + "t.ad_org_id AS etendo_org_id "
           + "FROM etgo_oauth2_token t "
           + "JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = c.etgo_oauth2_client_id "
+          + "LEFT JOIN ad_org o ON t.ad_org_id = o.ad_org_id "
           + "WHERE t.access_token_hash = ?";
 
   // Request attribute keys for downstream consumption
@@ -69,8 +73,6 @@ public class OAuth2Filter implements Filter {
   public static final String ATTR_CLIENT_ID = "oauth2.clientId";
   public static final String ATTR_ORG_ID = "oauth2.orgId";
   public static final String ATTR_SCOPES = "oauth2.scopes";
-
-  private static final String DEFAULT_ORG_ID = "0";
 
   @Override
   public void init(FilterConfig filterConfig) throws ServletException {
@@ -93,6 +95,19 @@ public class OAuth2Filter implements Filter {
     String authHeader = httpReq.getHeader(AUTH_HEADER);
 
     if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
+      if (hasGoSessionCookie(httpReq)) {
+        // Since ETP-4576 the browser SPA authenticates with the `__Host-` cookie session and
+        // sends no Authorization header at all, so rejecting here cut off every in-app
+        // conversation before the servlet could resolve the cookie. This filter validates
+        // OAuth2 tokens and has none to validate, so it defers: the servlet resolves the
+        // session and answers 401/403 itself.
+        //
+        // Gated on the cookie deliberately. A request carrying neither credential still gets
+        // this filter's own 401, byte for byte — including the `error="invalid_request"` field
+        // of `WWW-Authenticate`, which is what an MCP client's OAuth discovery reads.
+        chain.doFilter(request, response);
+        return;
+      }
       sendError(httpReq, httpResp, HttpServletResponse.SC_UNAUTHORIZED,
           "invalid_request", "Missing or malformed Authorization header. Expected: Bearer <token>");
       return;
@@ -126,7 +141,7 @@ public class OAuth2Filter implements Filter {
       httpReq.setAttribute(ATTR_USER_ID, tokenInfo.userId);
       httpReq.setAttribute(ATTR_ROLE_ID, tokenInfo.roleId);
       httpReq.setAttribute(ATTR_CLIENT_ID, tokenInfo.clientId);
-      httpReq.setAttribute(ATTR_ORG_ID, DEFAULT_ORG_ID);
+      httpReq.setAttribute(ATTR_ORG_ID, tokenInfo.orgId);
       httpReq.setAttribute(ATTR_SCOPES, tokenInfo.scopes);
 
       log.debug("OAuth2 token validated. userId={}, roleId={}, scopes={}",
@@ -139,6 +154,23 @@ public class OAuth2Filter implements Filter {
       sendError(httpReq, httpResp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "server_error", "Internal server error during token validation");
     }
+  }
+
+  /**
+   * Whether the request carries an Etendo Go session cookie, i.e. whether deferring to the
+   * servlet can plausibly resolve a credential this filter cannot see.
+   */
+  private static boolean hasGoSessionCookie(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) {
+      return false;
+    }
+    for (Cookie cookie : cookies) {
+      if (GoSessionSecurity.COOKIE_NAME.equals(cookie.getName())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override
@@ -186,6 +218,7 @@ public class OAuth2Filter implements Filter {
               rs.getString("ad_user_id"),
               rs.getString("ad_role_id"),
               rs.getString("etendo_client_id"),
+              rs.getString("etendo_org_id"),
               effectiveScopes);
         }
       }
@@ -216,7 +249,7 @@ public class OAuth2Filter implements Filter {
       identity.put(ATTR_USER_ID, info.userId);
       identity.put(ATTR_ROLE_ID, info.roleId);
       identity.put(ATTR_CLIENT_ID, info.clientId);
-      identity.put(ATTR_ORG_ID, DEFAULT_ORG_ID);
+      identity.put(ATTR_ORG_ID, info.orgId);
       identity.put(ATTR_SCOPES, info.scopes);
       return identity;
     } catch (Exception e) {
@@ -267,14 +300,20 @@ public class OAuth2Filter implements Filter {
     final String userId;
     final String roleId;
     final String clientId;
+    final String orgId;
     final String scopes;
     final String errorCode;
     final String errorDesc;
 
     TokenInfo(String userId, String roleId, String clientId, String scopes) {
+      this(userId, roleId, clientId, "0", scopes);
+    }
+
+    TokenInfo(String userId, String roleId, String clientId, String orgId, String scopes) {
       this.userId = userId;
       this.roleId = roleId;
       this.clientId = clientId;
+      this.orgId = orgId;
       this.scopes = scopes;
       this.errorCode = null;
       this.errorDesc = null;
@@ -284,6 +323,7 @@ public class OAuth2Filter implements Filter {
       this.userId = null;
       this.roleId = null;
       this.clientId = null;
+      this.orgId = null;
       this.scopes = null;
       this.errorCode = errorCode;
       this.errorDesc = errorDesc;

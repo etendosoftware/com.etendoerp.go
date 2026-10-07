@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -37,6 +38,7 @@ import java.util.Properties;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.session.OBPropertiesProvider;
@@ -46,13 +48,20 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.email.contracts.CoreEmailContractProvider;
 import com.etendoerp.go.schemaforge.email.contracts.GoodsShipmentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.PurchaseOrderSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.ReturnMaterialReceiptSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.ReturnToVendorSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.ReturnToVendorShipmentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesOrderSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Tests the built-in transactional email contracts.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.TransactionalEmailService
+ * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.contracts.CompanyInvitationEmailContract
  */
 public class InitialEmailContractsTest {
 
@@ -62,6 +71,24 @@ public class InitialEmailContractsTest {
    */
   private static final List<String> GATEWAY_TEMPLATE_ALLOWLIST =
       Arrays.asList("reset-password", "login-alert", "invoice", "custom");
+
+  /**
+   * ETP-5205 — {@code DefaultDocumentSendEmailContract.authorize} now requires the window write
+   * tier, read from the DAL. These tests drive real contracts end to end past authorization, so
+   * the tier is granted here; {@code DocumentSendAuthorizeTierTest} pins the check itself.
+   */
+  private MockedStatic<NeoAccessHelper> writeTierGranted;
+
+  @Before
+  public void grantWriteTier() {
+    writeTierGranted = mockStatic(NeoAccessHelper.class);
+    writeTierGranted.when(() -> NeoAccessHelper.canWriteSpec(any())).thenReturn(true);
+  }
+
+  @After
+  public void releaseWriteTier() {
+    writeTierGranted.close();
+  }
 
   @After
   public void clearProperties() {
@@ -90,7 +117,7 @@ public class InitialEmailContractsTest {
 
   @Test
   public void everyDocumentSendContractLogsReadableHistoryUnderItsOwnSpec() {
-    // The six windows whose send button an operator can press. The recipients are the tenant's
+    // The eight windows whose send button an operator can press. The recipients are the tenant's
     // own business partners and the copy is the tenant's own, so the readable table is the right
     // trade — and the document's window is where the history has to show up.
     EmailDocumentRecordResolver resolver = recordId -> Optional.empty();
@@ -103,6 +130,15 @@ public class InitialEmailContractsTest {
     // Known naming quirk: the window is return-to-vendor-shipment, so the derived spec resolves
     // no window. The column is nullable and best effort, and the history row is still written.
     assertLogsHistoryUnderSpec(new ReturnToVendorSendEmailContract(resolver), "return-to-vendor");
+    // ETP-5124: unlike return-to-vendor-send, this window name matches the `${windowName}-send`
+    // convention exactly, so no naming-mismatch comment is needed here.
+    assertLogsHistoryUnderSpec(new ReturnMaterialReceiptSendEmailContract(resolver),
+        "return-material-receipt");
+    // ETP-5124: this is the contract that fixes ETP-4717's naming mismatch — unlike
+    // return-to-vendor-send, whose derived spec resolves no window, this one's derived spec
+    // (return-to-vendor-shipment) IS the actual window name.
+    assertLogsHistoryUnderSpec(new ReturnToVendorShipmentSendEmailContract(resolver),
+        "return-to-vendor-shipment");
   }
 
   @Test
@@ -145,7 +181,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/reset?token=abc123",
         adapter.getLastRequest().getData().getString("link"));
-    assertEquals("Restablece tu contraseña de Etendo Go",
+    assertEquals("Restablece tu contraseña de Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/reset?token=abc123"));
@@ -170,7 +206,7 @@ public class InitialEmailContractsTest {
         adapter.getLastRequest().getData().getString("link"));
     // ETP-5003 — a command with no language now falls back to Spanish, the product's default,
     // instead of English.
-    assertEquals("Bienvenido a Etendo Go",
+    assertEquals("Bienvenido a Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/welcome"));
@@ -190,10 +226,10 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
-    assertEquals("Bienvenido a Etendo Go",
+    assertEquals("Bienvenido a Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
-        .contains("Tu cuenta de Etendo Go fue creada correctamente"));
+        .contains("Tu cuenta de Etendo fue creada correctamente"));
   }
 
   @Test
@@ -231,7 +267,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/dashboard",
         adapter.getLastRequest().getData().getString("link"));
-    assertEquals("Tu entorno de Etendo Go está listo",
+    assertEquals("Tu entorno de Etendo está listo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/dashboard"));
@@ -275,7 +311,7 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
-    assertEquals("Tu entorno de Etendo Go está listo",
+    assertEquals("Tu entorno de Etendo está listo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("Haz clic en el siguiente botón para acceder a tu panel"));
@@ -298,7 +334,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("2026-05-29T10:00:00Z",
         adapter.getLastRequest().getData().getString("date"));
-    assertEquals("Tu contraseña de Etendo Go fue modificada",
+    assertEquals("Tu contraseña de Etendo fue modificada",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("contacta a soporte"));
@@ -319,7 +355,7 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
-    assertEquals("Tu contraseña de Etendo Go fue modificada",
+    assertEquals("Tu contraseña de Etendo fue modificada",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("contacta a soporte"));

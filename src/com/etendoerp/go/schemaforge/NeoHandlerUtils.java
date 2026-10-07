@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -44,6 +45,8 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * Shared helpers for {@link NeoHandler} implementations.
@@ -70,6 +73,28 @@ final class NeoHandlerUtils {
     if (!"GET".equals(context.getHttpMethod())) {
       return null;
     }
+    return extractResponseDataArray(context);
+  }
+
+  /**
+   * Same as {@link #extractGetDataArray} but for ANY HTTP method — including the record a
+   * {@code POST}/{@code PUT}/{@code PATCH} echoes back.
+   *
+   * <p>ETP-5336: an {@code afterHandle} that only fixes up GET responses leaves the write
+   * response carrying the raw persisted value, so the frontend's optimistic row update (see
+   * {@code DetailView.jsx}'s {@code buildInlineRowUpdateHandler}) renders it until the next full
+   * refetch. That is what made a Return to Vendor line flash its stored NEGATIVE quantity right
+   * after a PATCH. Enrichment that describes the record itself — a sign convention, an
+   * identifier label — belongs on every response that carries the record, not just on reads;
+   * enrichment that is genuinely read-only (an expensive aggregate, a list-only badge) stays on
+   * {@link #extractGetDataArray}.
+   *
+   * <p>Accepts both shapes the NEO envelope uses: {@code response.data} as an array (the CRUD
+   * service's own output, for every method) and as a single object (what the hand-built action
+   * responses produce), normalising the latter into a one-element array. Returns {@code null}
+   * when there is no previous result, no {@code response} wrapper, or an empty array.
+   */
+  static JSONArray extractResponseDataArray(NeoContext context) {
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
       return null;
@@ -78,8 +103,15 @@ final class NeoHandlerUtils {
     if (responseWrapper == null) {
       return null;
     }
-    JSONArray dataArr = responseWrapper.optJSONArray("data");
-    return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
+    Object data = responseWrapper.opt("data");
+    if (data instanceof JSONArray) {
+      JSONArray dataArr = (JSONArray) data;
+      return dataArr.length() == 0 ? null : dataArr;
+    }
+    if (data instanceof JSONObject) {
+      return new JSONArray().put(data);
+    }
+    return null;
   }
 
   /** Unpacked callout-response fields, as extracted by {@link #extractCalloutFields}. */
@@ -439,6 +471,12 @@ final class NeoHandlerUtils {
    * fill-if-absent default like {@link #injectReturnDocType}. Table/window-agnostic: no field
    * names are hardcoded here, callers supply them.
    *
+   * <p>ETP-5273: {@code accountingDate} is independent and user-editable again, so this raw
+   * unconditional mirror must no longer run on every write. Callers now go through
+   * {@link #mirrorAccountingDateOnCreate}, which only mirrors on a create where the client did
+   * not supply the target field itself. This method is kept as the low-level primitive (used by
+   * that gated entry point) and for any future non-accountingDate mirroring need.
+   *
    * @param body        the request body to mutate in place; may be {@code null}
    * @param sourceField the field whose value is copied; no-op if absent from {@code body}
    * @param targetField the field overwritten with {@code sourceField}'s value
@@ -478,18 +516,55 @@ final class NeoHandlerUtils {
   }
 
   /**
-   * Mirrors {@code sourceField} into {@code targetField} on a CRUD write request — the shared
-   * body behind each header handler's {@code mirrorAccountingDate} (ETP-4531). Extracted out of
-   * {@code AbstractInvoiceHeaderHandler} to keep that class under the Sonar method-count limit
-   * (S1448); {@code AbstractOrderHeaderHandler} keeps its own copy.
+   * Mirrors {@code sourceField} into {@code targetField} on a CRUD {@code POST} (create) request
+   * — but ONLY when the client did not already supply an explicit, non-blank {@code targetField}
+   * — the shared body behind every header handler's {@code mirrorAccountingDate} pre-hook.
+   *
+   * <p>ETP-5273 (re-revert of ETP-4531): {@code accountingDate} is independent and user-editable
+   * again, so the mirror can no longer run unconditionally on every write (that would clobber a
+   * value the user deliberately typed on the very next PUT/PATCH of any other field). This method
+   * narrows the mirror to exactly the ticket's stated "default on creation" behavior (CA: "Al
+   * crear un documento, la Fecha Contable toma el mismo valor que la Fecha del documento."):
+   * <ul>
+   *   <li>{@code POST} (create) — mirrors {@code sourceField} into {@code targetField} ONLY when
+   *       {@code targetField} is absent or blank in the request body. A client that already sends
+   *       an explicit {@code accountingDate} on create (e.g. a document built by
+   *       {@code NeoCommercialDocumentFactory}, which sets both dates explicitly) is respected
+   *       as-is.</li>
+   *   <li>{@code PUT}/{@code PATCH} (update) — no-op, always. The forward sync FROM the
+   *       document's own date (CP-1: "Fecha documento cambia -> Fecha Contable se actualiza") is
+   *       instead handled entirely by the classic Etendo callout
+   *       {@code SifInvoiceOperationDateCallout} (registered on {@code C_Invoice.DateInvoiced},
+   *       extending {@code SE_Invoice_AccountingDate}) executed server-side by
+   *       {@link NeoCalloutService}. Nothing gates that cascade: it is one-way by construction,
+   *       because the callout registered on {@code DateAcct} is {@code SE_Invoice_TaxDate}, which
+   *       writes {@code Taxdate} and never {@code DateInvoiced} (CP-2).</li>
+   * </ul>
+   *
+   * <p>ETP-5273 applies ONLY to sales and purchase invoices, so only
+   * {@code SalesInvoiceHeaderHandler} and {@code PurchaseInvoiceHeaderHandler} call this. Orders,
+   * receipts and shipments keep the unified-date design — {@code accountingDate} stays hidden
+   * there and must follow the document date on EVERY write, so they still use the unconditional
+   * {@link #mirrorFieldValue} through their own {@code mirrorAccountingDate(NeoContext)} wrapper.
+   * Do not migrate them to this method without first making their accounting date visible.
    *
    * @param context     the current NeoContext
    * @param sourceField the visible date field whose value is copied
-   * @param targetField the hidden field overwritten with {@code sourceField}'s value
+   * @param targetField the accounting-date field defaulted from {@code sourceField}
    */
-  static void mirrorAccountingDate(NeoContext context, String sourceField, String targetField) {
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType()) && isWriteMethod(context.getHttpMethod())) {
-      mirrorFieldValue(context.getRequestBody(), sourceField, targetField);
+  static void mirrorAccountingDateOnCreate(NeoContext context, String sourceField, String targetField) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType()) || !"POST".equals(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return;
+    }
+    Object existing = body.opt(targetField);
+    boolean hasExplicitValue = existing != null && !JSONObject.NULL.equals(existing)
+        && StringUtils.isNotBlank(String.valueOf(existing));
+    if (!hasExplicitValue) {
+      mirrorFieldValue(body, sourceField, targetField);
     }
   }
 
@@ -593,7 +668,9 @@ final class NeoHandlerUtils {
    * import. Shared by {@link GoodsReceiptLineHandler} (ETP-4671, purchase receipts) and
    * {@link GoodsShipmentLineHandler} (ETP-5062, sales shipments) — for both, a manually-added
    * line must always start at its own default (0) instead of silently jumping to the product's
-   * on-hand quantity, which risks moving an entire warehouse's stock by accident.
+   * on-hand quantity, which risks moving an entire warehouse's stock by accident. Also reused by
+   * {@link InternalConsumptionLineHandler} (ETP-5445), whose {@code SL_Internal_Consumption_Product}
+   * callout copies the product's on-hand stock into {@code movementQuantity} the same way.
    *
    * <p>Mutates {@code context.getPreviousResult()} in place and returns nothing: the dispatcher
    * (see {@link NeoHandler#afterCallout}) merges a returned {@code NeoResponse} additively only,
@@ -886,5 +963,67 @@ final class NeoHandlerUtils {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Delegates to {@code postingService.handleAction(context)}, null-safe. ETP-5378: a return
+   * window's own handler owns the {@code JAVA_QUALIFIER} slot, so the shared
+   * {@code @Named("document-posting")} handler can never be reached for it — without this
+   * delegation "post"/"unpost" fall through to the generic AD-button path, which looks for a
+   * button column literally named "post", finds none, and answers 404 "Action not found: post"
+   * ({@code NeoButtonActionHelper#executeButtonActionCore}).
+   *
+   * <p>Package-visible only so {@link #delegateToPostingServiceOrElse} (below) — the entry
+   * point every caller actually uses — can reuse it; kept separate purely so that method has
+   * something to unit-test/compose against a bare {@code null} continuation.</p>
+   *
+   * @param context        the current NEO request context
+   * @param postingService the handler's own injected instance; may be {@code null} in a test
+   *                        that never called its {@code setPostingService} seam
+   * @return the service's response for {@code post}/{@code unpost}, or {@code null} when the
+   *     service declined the action (or is absent)
+   */
+  static NeoResponse delegateToPostingService(NeoContext context, DocumentPostingService postingService) {
+    return postingService != null ? postingService.handleAction(context) : null;
+  }
+
+  /**
+   * Runs the posting delegation above and, only when it declines (returns {@code null}), calls
+   * {@code continuation} with the same context — the null-check-and-early-return itself never
+   * appears in the caller.
+   *
+   * <p>ETP-5378 — this replaces what used to be the literal call site in each return-window
+   * handler's own {@code handle(NeoContext)}:
+   * <pre>{@code
+   * NeoResponse posting = NeoHandlerUtils.delegateToPostingService(context, postingService);
+   * if (posting != null) {
+   *   return posting;
+   * }
+   * }</pre>
+   * Those four lines were byte-identical between {@code ReturnMaterialReceiptHeaderHandler} and
+   * {@code ReturnToVendorShipmentHeaderHandler} and kept tripping SonarQube's
+   * duplicated-lines-on-new-code gate (3%) across two prior remediation attempts — moving the
+   * delegation's own BODY out (this class's earlier fix) and then removing a private wrapper
+   * method around it (a later fix) both still left this exact guard-clause SHAPE typed out at
+   * each call site, which is what CPD was actually matching. A guard clause that early-returns
+   * cannot be extracted into a plain callee — the caller always needs its own {@code if}/
+   * {@code return} — so the only way to remove it from the caller is to invert control: the
+   * caller hands over "what to do if posting didn't apply" as a continuation, and this method
+   * owns the one copy of the check. Each handler's own {@code handle()} is now just
+   * {@code mirrorAccountingDate(context); return delegateToPostingServiceOrElse(context,
+   * postingService, this::continueHandling);} — two lines with no branching of their own, well
+   * under whatever token threshold made the previous four-line shape register as a duplicate.
+   *
+   * @param context        the current NEO request context
+   * @param postingService the handler's own injected instance; may be {@code null} in a test
+   *                        that never called its {@code setPostingService} seam
+   * @param continuation   invoked with {@code context} when posting declined the action;
+   *                        typically a {@code this::someMethod} reference into the caller
+   * @return the posting service's response, or whatever {@code continuation} returns
+   */
+  static NeoResponse delegateToPostingServiceOrElse(NeoContext context, DocumentPostingService postingService,
+      Function<NeoContext, NeoResponse> continuation) {
+    NeoResponse posting = delegateToPostingService(context, postingService);
+    return posting != null ? posting : continuation.apply(context);
   }
 }

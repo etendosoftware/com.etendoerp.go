@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -33,16 +34,31 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 
 /**
- * NeoHandler that returns KPI summary data for the dashboard widget.
- * Queries real invoice data from c_invoice aggregated over the current calendar
- * year (January 1st through December 31st), compared against the full previous
- * calendar year.
+ * NeoHandler that returns KPI summary data for the dashboard widget ("Resumen financiero").
  *
- * <p>ETP-5011: this widget deliberately ignores the dashboard date-range selector
- * ({@code ?range=}). Unlike the widgets that go through
- * {@link WidgetQueryHelper#resolveQuery}, the Financial Summary is always a
- * calendar-year figure, which is what its "this year" / "vs previous year" copy
- * states. Do not wire it to the range selector.</p>
+ * <p>ETP-5493: the widget follows the dashboard period selector ({@code ?range=}), using the
+ * same range math as every other ranged widget ({@link WidgetQueryHelper#executeRangedQuery}):
+ * the current period is {@code [from, now]} and the comparison period is the window of
+ * equivalent size that precedes it ({@code [prevFrom, prevTo)}). For rolling ranges
+ * ({@code last30d}, {@code last90d}, {@code lastYear}) that is the immediately preceding
+ * window of the same length; for calendar ranges it is the same elapsed span one month/year
+ * earlier ({@code mtd} vs the same days of last month, {@code ytd} vs the same days of last
+ * year). This supersedes ETP-5011, which pinned the widget to the calendar year and made it
+ * ignore the selector.</p>
+ *
+ * <p>Missing/blank {@code range} defaults to {@code ytd}, which is the ETP-5011 behaviour
+ * (current calendar year) so callers that send no range (MCP/agent tools, older clients)
+ * keep getting a year-to-date figure. Unknown non-blank values are resolved by
+ * {@link WidgetQueryHelper} exactly as for the other widgets (rolling 12 months).</p>
+ *
+ * <p>Each KPI carries {@code hasPrevious}: {@code false} when the comparison period value is
+ * zero, in which case {@code trend} is {@code 0} and carries no meaning (a percentage change
+ * from zero is undefined). Clients must hide the trend badge instead of rendering "0%".
+ * {@code hasPrevious} is additive; {@code trend} keeps its numeric type so existing
+ * consumers are unaffected.</p>
+ *
+ * <p>Pending invoices is a point-in-time backlog count and is intentionally independent of
+ * the selected period.</p>
  *
  * <p>ETP-5011 (Inconsistency 2): revenue/expenses use {@code c_invoice.totallines}
  * (the tax-exclusive subtotal, i.e. "base imponible") rather than
@@ -60,20 +76,31 @@ public class WidgetKpisHandler implements NeoHandler {
   private static final String FORMAT_CURRENCY = "currency";
   private static final String CLIENT_ID_PARAM = "clientId";
 
+  /** Range applied when the request carries no {@code range} (year-to-date, the ETP-5011 behaviour). */
+  static final String DEFAULT_RANGE = "ytd";
+
+  private static final String ISSOTRX_PLACEHOLDER = "@ISSOTRX@";
+
+  /**
+   * Revenue/expense totals template. {@code %1$s}/{@code %2$s}/{@code %3$s} are the
+   * {@link WidgetQueryHelper} range expressions (current "from", previous "from", previous
+   * exclusive "to") and {@link #ISSOTRX_PLACEHOLDER} is replaced by a hardcoded 'Y'/'N' literal,
+   * because {@link WidgetQueryHelper#executeRangedQuery} binds only {@code :clientId}.
+   */
   private static final String REVENUE_SQL =
       "SELECT "
-      + "  COALESCE(SUM(CASE WHEN i.dateinvoiced >= date_trunc('year', NOW()) "
-      + "    AND i.dateinvoiced < date_trunc('year', NOW()) + INTERVAL '1 year' "
-      + "    THEN i.totallines END), 0) AS current_year, "
-      + "  COALESCE(SUM(CASE WHEN i.dateinvoiced >= date_trunc('year', NOW()) - INTERVAL '1 year' "
-      + "    AND i.dateinvoiced < date_trunc('year', NOW()) "
-      + "    THEN i.totallines END), 0) AS previous_year "
+      + "  COALESCE(SUM(CASE WHEN i.dateinvoiced >= %1$s "
+      + "    AND i.dateinvoiced <= NOW() "
+      + "    THEN i.totallines END), 0) AS current_period, "
+      + "  COALESCE(SUM(CASE WHEN i.dateinvoiced >= %2$s "
+      + "    AND i.dateinvoiced < %3$s "
+      + "    THEN i.totallines END), 0) AS previous_period "
       + "FROM c_invoice i "
       + "WHERE i.ad_client_id = :clientId "
-      + "  AND i.issotrx = :isSoTrx "
+      + "  AND i.issotrx = " + ISSOTRX_PLACEHOLDER + " "
       + "  AND i.docstatus IN ('CO','CL') "
-      + "  AND i.dateinvoiced >= date_trunc('year', NOW()) - INTERVAL '1 year' "
-      + "  AND i.dateinvoiced < date_trunc('year', NOW()) + INTERVAL '1 year'";
+      + "  AND i.dateinvoiced >= %2$s "
+      + "  AND i.dateinvoiced <= NOW()";
 
   private static final String PENDING_SQL =
       "SELECT COUNT(*) "
@@ -116,32 +143,37 @@ public class WidgetKpisHandler implements NeoHandler {
           return NeoResponse.ok(wrapper);
         }
 
-        BigDecimal[] revenue = queryInvoiceTotals(clientId, "Y");
-        BigDecimal[] expenses = queryInvoiceTotals(clientId, "N");
+        String range = resolveRange(context);
+        BigDecimal[] revenue = queryInvoiceTotals(clientId, "Y", range);
+        BigDecimal[] expenses = queryInvoiceTotals(clientId, "N", range);
 
-        BigDecimal revenueCurrentYear = revenue[0];
-        BigDecimal revenuePreviousYear = revenue[1];
-        BigDecimal expensesCurrentYear = expenses[0];
-        BigDecimal expensesPreviousYear = expenses[1];
+        BigDecimal revenueCurrent = revenue[0];
+        BigDecimal revenuePrevious = revenue[1];
+        BigDecimal expensesCurrent = expenses[0];
+        BigDecimal expensesPrevious = expenses[1];
 
-        BigDecimal netProfitCurrent = revenueCurrentYear.subtract(expensesCurrentYear);
-        BigDecimal netProfitPrevious = revenuePreviousYear.subtract(expensesPreviousYear);
+        BigDecimal netProfitCurrent = revenueCurrent.subtract(expensesCurrent);
+        BigDecimal netProfitPrevious = revenuePrevious.subtract(expensesPrevious);
 
         long pendingCount = queryPendingInvoices(clientId);
 
-        double revenueTrend = calculateTrend(revenueCurrentYear, revenuePreviousYear);
-        double expensesTrend = calculateTrend(expensesCurrentYear, expensesPreviousYear);
+        double revenueTrend = calculateTrend(revenueCurrent, revenuePrevious);
+        double expensesTrend = calculateTrend(expensesCurrent, expensesPrevious);
         double netProfitTrend = calculateTrend(netProfitCurrent, netProfitPrevious);
 
         JSONArray data = new JSONArray();
-        data.put(kpi("revenueThisMonth", "Revenue this year",
-          revenueCurrentYear.doubleValue(), FORMAT_CURRENCY, revenueTrend, "DollarSign"));
-        data.put(kpi("expensesThisMonth", "Expenses this year",
-          expensesCurrentYear.doubleValue(), FORMAT_CURRENCY, expensesTrend, "CreditCard"));
+        data.put(kpi("revenueThisMonth", "Revenue",
+          revenueCurrent.doubleValue(), FORMAT_CURRENCY, revenueTrend,
+          hasPrevious(revenuePrevious), "DollarSign"));
+        data.put(kpi("expensesThisMonth", "Expenses",
+          expensesCurrent.doubleValue(), FORMAT_CURRENCY, expensesTrend,
+          hasPrevious(expensesPrevious), "CreditCard"));
         data.put(kpi("netProfit", "Net Profit",
-          netProfitCurrent.doubleValue(), FORMAT_CURRENCY, netProfitTrend, "TrendingUp"));
+          netProfitCurrent.doubleValue(), FORMAT_CURRENCY, netProfitTrend,
+          hasPrevious(netProfitPrevious), "TrendingUp"));
+        // Point-in-time backlog: not period-based, so there is no comparison to make.
         data.put(kpi("pendingInvoices", "Pending Invoices",
-            pendingCount, "number", 0, "Clock"));
+            pendingCount, "number", 0, false, "Clock"));
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -161,18 +193,22 @@ public class WidgetKpisHandler implements NeoHandler {
   }
 
   /**
-   * Queries invoice totals for the current calendar year and the previous calendar year.
-   * Returns an array of [currentYearTotal, previousYearTotal].
+   * Returns the requested {@code range} query param, or {@link #DEFAULT_RANGE} when it is
+   * absent or blank.
    */
-  @SuppressWarnings("unchecked")
-  private BigDecimal[] queryInvoiceTotals(String clientId, String isSoTrx) {
-    NativeQuery<Object[]> query = OBDal.getInstance()
-        .getSession()
-        .createNativeQuery(REVENUE_SQL);
-    query.setParameter(CLIENT_ID_PARAM, clientId);
-    query.setParameter("isSoTrx", isSoTrx);
+  private static String resolveRange(NeoContext context) {
+    Map<String, String> params = context.getQueryParams();
+    String range = params != null ? params.get("range") : null;
+    return (range == null || range.trim().isEmpty()) ? DEFAULT_RANGE : range.trim();
+  }
 
-    List<Object[]> rows = query.list();
+  /**
+   * Queries invoice totals for the period selected by {@code range} and its comparison period.
+   * Returns an array of [currentPeriodTotal, previousPeriodTotal].
+   */
+  private BigDecimal[] queryInvoiceTotals(String clientId, String isSoTrx, String range) {
+    String sql = REVENUE_SQL.replace(ISSOTRX_PLACEHOLDER, "Y".equals(isSoTrx) ? "'Y'" : "'N'");
+    List<Object[]> rows = WidgetQueryHelper.executeRangedQuery(sql, clientId, range);
     if (rows.isEmpty() || rows.get(0) == null) {
       return new BigDecimal[] { BigDecimal.ZERO, BigDecimal.ZERO };
     }
@@ -214,7 +250,7 @@ public class WidgetKpisHandler implements NeoHandler {
    * Returns 0 if previous value is zero (avoids division by zero).
    * Result is rounded to 1 decimal place.
    */
-  private static double calculateTrend(BigDecimal current, BigDecimal previous) {
+  static double calculateTrend(BigDecimal current, BigDecimal previous) {
     if (previous.compareTo(BigDecimal.ZERO) == 0) {
       return 0.0;
     }
@@ -224,14 +260,23 @@ public class WidgetKpisHandler implements NeoHandler {
     return trend.doubleValue();
   }
 
+  /**
+   * A comparison is meaningful only when the previous-period value is non-zero; otherwise the
+   * percentage change is undefined and the client should hide the trend badge.
+   */
+  static boolean hasPrevious(BigDecimal previous) {
+    return previous.compareTo(BigDecimal.ZERO) != 0;
+  }
+
   private static JSONObject kpi(String key, String label, Number value, String format,
-      double trend, String icon) throws Exception {
+      double trend, boolean hasPrevious, String icon) throws Exception {
     JSONObject obj = new JSONObject();
     obj.put("key", key);
     obj.put("label", label);
     obj.put("value", value);
     obj.put("format", format);
     obj.put("trend", trend);
+    obj.put("hasPrevious", hasPrevious);
     obj.put("icon", icon);
     return obj;
   }

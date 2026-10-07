@@ -18,13 +18,16 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -44,8 +47,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -63,9 +69,11 @@ import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
+import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
@@ -82,6 +90,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * cover authorization, argument validation, spec/entity resolution errors,
  * process/report tool flows, NeoResponse conversion, and the static content
  * wrapper methods.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpRoutingException
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -201,7 +212,7 @@ class McpToolRouterRouteTest {
    * The router delegates BOTH {@code authorizeSpecAccess} and every handler's spec lookup
    * to {@link McpToolRouterSupport#findActiveSpecByName}, so stubbing that one method covers
    * the whole route. {@code hasSpecAccess} is also stubbed to grant access by default —
-   * both the 2-arg (GET-tier, used by neo_discover) and the 3-arg, method-aware overload
+   * both the 2-arg (GET-tier, used by etendo_discover) and the 3-arg, method-aware overload
    * (ETP-4510: used by {@code authorizeSpecAccess} for every route() call, including reads)
    * so a {@code mockStatic()} on {@link McpToolRouterSupport} doesn't silently deny every
    * mutating tool call by falling through to the unstubbed-static default of {@code false}.
@@ -222,7 +233,7 @@ class McpToolRouterRouteTest {
    */
   private void setupEntityLookup(SFEntity entity, Tab tab) {
     // The 8 entity-CRUD handlers resolve the entity via resolveIncludedEntityOrExplain
-    // (ETP-4257); neo_action still uses findIncludedEntity directly. Stub BOTH so every
+    // (ETP-4257); etendo_action still uses findIncludedEntity directly. Stub BOTH so every
     // success path keeps returning the entity regardless of the entry point.
     supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
         any(SFSpec.class), anyString())).thenReturn(entity);
@@ -233,6 +244,48 @@ class McpToolRouterRouteTest {
 
   private static String contentText(JSONObject result) throws Exception {
     return result.getJSONArray("content").getJSONObject(0).getString("text");
+  }
+
+  /**
+   * Assert the IMP-5 envelope {@link McpRoutingException#entityHasNoTab} builds for an entity that
+   * has neither an AD tab nor a {@code NeoHandler} (ETP-5405, no-handler branch).
+   *
+   * <p>Shared by every call site that exits at {@code McpWriteRequestSupport.getAdTabOrThrow}.
+   * Structured on purpose: the assertions these replaced matched the substring
+   * {@code "No AD_Tab"} of a prose message, which is exactly what let a deliberate reword — and a
+   * status change from 500 to 422 — pass unnoticed until the message disappeared. {@code status}
+   * and {@code error} are the machine-readable contract an agent branches on, so they are asserted
+   * exactly; the {@code detail} check is kept to the one clause that carries the meaning (there is
+   * nothing behind the entity) rather than the whole sentence.</p>
+   *
+   * @param envelope the parsed error content of the tool result
+   */
+  private static void assertNoTabEnvelope(JSONObject envelope) throws Exception {
+    assertEquals(422, envelope.getInt("status"));
+    assertEquals("validation_error", envelope.getString("error"));
+    assertTrue(envelope.getString("detail").contains("no window and no handler"),
+        envelope.toString());
+    assertTrue(envelope.getString("hint").contains("etendo_discover"), envelope.toString());
+  }
+
+  /**
+   * Assert the envelope {@link McpRoutingException#entityHasNoTab} builds for a tab-less entity
+   * that IS backed by a {@code NeoHandler} (ETP-5405, handler branch).
+   *
+   * <p>405 rather than 422 is the whole point of the branch: the entity is perfectly readable
+   * through {@code etendo_list}/{@code etendo_get}, only this tool cannot serve it, so the agent must
+   * not be told the configuration is broken and must not retry with corrected values —
+   * {@code method_not_allowed} is the code that says "the request is fine, this surface is
+   * wrong" (see {@code McpConstants#ERROR_METHOD_NOT_ALLOWED}).</p>
+   *
+   * @param envelope the parsed error content of the tool result
+   */
+  private static void assertHandlerServedEnvelope(JSONObject envelope) throws Exception {
+    assertEquals(405, envelope.getInt("status"));
+    assertEquals("method_not_allowed", envelope.getString("error"));
+    assertTrue(envelope.getString("detail").contains("served by a dedicated handler"),
+        envelope.toString());
+    assertTrue(envelope.getString("hint").contains("etendo_list"), envelope.toString());
   }
 
   private JSONObject buildCrudArgs() throws Exception {
@@ -255,13 +308,13 @@ class McpToolRouterRouteTest {
       setupSpecLookup(spec);
       supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
           .thenReturn(false);
-      // route() authorizes neo_list (a GET-tier tool) through the 3-arg overload —
+      // route() authorizes etendo_list (a GET-tier tool) through the 3-arg overload —
       // override the setupSpecLookup() default (true) back to denied for this method.
       supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString(), anyString()))
           .thenReturn(false);
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -269,13 +322,53 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── ETP-5602: removed neo_<x> tool names ──────────────────────────────
+
+  @Nested
+  @DisplayName("a removed neo_<x> tool name")
+  class RenamedToolTests {
+
+    @ParameterizedTest(name = "{0} -> {1}")
+    @CsvSource({
+        "neo_list, etendo_list",
+        "neo_action, etendo_action",
+        "neo_get_image_upload, etendo_get_image_upload",
+        "neo_generate_amortization_plan, etendo_generate_amortization_plan"
+    })
+    @DisplayName("answers with the new name and executes nothing")
+    void answersWithTheNewNameAndExecutesNothing(String oldName, String newName)
+        throws Exception {
+      JSONObject result = router.route(oldName, buildCrudArgs(), READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      JSONObject envelope = new JSONObject(contentText(result));
+      assertEquals("Tool '" + oldName + "' was renamed to '" + newName + "'",
+          envelope.getString("detail"));
+      assertEquals(404, envelope.getInt("status"));
+      assertEquals(newName, envelope.getJSONArray("available").getString(0));
+      // Refused before authorization or any lookup: this is not an alias.
+      authMock.verify(() -> McpAuthorizationService.authorizeToolCall(anyString(), any()),
+          never());
+      supportMock.verify(() -> McpToolRouterSupport.findActiveSpecByName(anyString()), never());
+    }
+
+    @Test
+    @DisplayName("an unrelated neo_ name is not treated as a rename")
+    void unrelatedNeoNameIsNotARename() {
+      assertNull(McpRoutingException.renamedToolName("neo_whatever"));
+      assertNull(McpRoutingException.renamedToolName("etendo_list"));
+      assertNull(McpRoutingException.renamedToolName(null));
+      assertEquals("etendo_list", McpRoutingException.renamedToolName("neo_list"));
+    }
+  }
+
   // ── ETP-4510 write-tier authorization (code-review BUG-2) ─────────────
 
   /**
    * Integration-level regression coverage for the ETP-4510 code-review BUG-2 gap: the
-   * only pre-existing {@code route()} authorization test used {@code neo_list} (a
+   * only pre-existing {@code route()} authorization test used {@code etendo_list} (a
    * GET/read-tier tool). Nothing exercised {@code route()} denying a WRITE tool
-   * (neo_create/neo_update/neo_delete) for a read-only-access role at the integration
+   * (etendo_create/etendo_update/etendo_delete) for a read-only-access role at the integration
    * level — only the unit-level {@code McpToolRouterSupportTest#hasSpecAccess} tests did.
    * <p>
    * These tests drive the real {@code McpToolRouter#route} entry point end to end
@@ -303,12 +396,12 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_create is denied for a read-only-access role")
+    @DisplayName("etendo_create is denied for a read-only-access role")
     void createDeniedForReadOnlyRole() throws Exception {
       SFSpec spec = mockSpec();
       setupReadOnlyAccess(spec);
 
-      JSONObject result = router.route("neo_create", buildCrudArgs(), WRITE_SCOPES);
+      JSONObject result = router.route("etendo_create", buildCrudArgs(), WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -316,7 +409,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_update is denied for a read-only-access role")
+    @DisplayName("etendo_update is denied for a read-only-access role")
     void updateDeniedForReadOnlyRole() throws Exception {
       SFSpec spec = mockSpec();
       setupReadOnlyAccess(spec);
@@ -325,7 +418,7 @@ class McpToolRouterRouteTest {
       args.put("id", "rec-1");
       args.put("fields", new JSONObject());
 
-      JSONObject result = router.route("neo_update", args, WRITE_SCOPES);
+      JSONObject result = router.route("etendo_update", args, WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -333,7 +426,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_delete is denied for a read-only-access role")
+    @DisplayName("etendo_delete is denied for a read-only-access role")
     void deleteDeniedForReadOnlyRole() throws Exception {
       SFSpec spec = mockSpec();
       setupReadOnlyAccess(spec);
@@ -341,7 +434,7 @@ class McpToolRouterRouteTest {
       JSONObject args = buildCrudArgs();
       args.put("id", "rec-1");
 
-      JSONObject result = router.route("neo_delete", args, WRITE_SCOPES);
+      JSONObject result = router.route("etendo_delete", args, WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -350,7 +443,7 @@ class McpToolRouterRouteTest {
 
     /**
      * Companion to the three denial tests above: the exact same read-only-access role
-     * must still be able to reach the read handlers (neo_list, neo_get) — proving the
+     * must still be able to reach the read handlers (etendo_list, etendo_get) — proving the
      * ETP-4510 fix only tightens writes and does not regress reads.
      * <p>
      * Deliberately omits a required argument (entity/id) rather than driving the handler
@@ -362,7 +455,7 @@ class McpToolRouterRouteTest {
      * proving authorization was passed before validation ran.
      */
     @Test
-    @DisplayName("neo_list still passes authorization for the same read-only-access role")
+    @DisplayName("etendo_list still passes authorization for the same read-only-access role")
     void listAllowedForReadOnlyRole() throws Exception {
       SFSpec spec = mockSpec();
       setupReadOnlyAccess(spec);
@@ -371,17 +464,17 @@ class McpToolRouterRouteTest {
       args.put("spec", SPEC_NAME);
       // "entity" intentionally omitted — proves we got past authorization into validateArgs.
 
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertFalse(text.contains("Access denied"),
-          "neo_list must not be blocked by access control for a read-only role, got: " + text);
+          "etendo_list must not be blocked by access control for a read-only role, got: " + text);
       assertTrue(text.contains("entity"));
     }
 
     @Test
-    @DisplayName("neo_get still passes authorization for the same read-only-access role")
+    @DisplayName("etendo_get still passes authorization for the same read-only-access role")
     void getAllowedForReadOnlyRole() throws Exception {
       SFSpec spec = mockSpec();
       setupReadOnlyAccess(spec);
@@ -389,17 +482,17 @@ class McpToolRouterRouteTest {
       JSONObject args = buildCrudArgs();
       // "id" intentionally omitted — proves we got past authorization into validateArgs.
 
-      JSONObject result = router.route("neo_get", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_get", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertFalse(text.contains("Access denied"),
-          "neo_get must not be blocked by access control for a read-only role, got: " + text);
+          "etendo_get must not be blocked by access control for a read-only role, got: " + text);
       assertTrue(text.contains("id"));
     }
   }
 
-  // ── neo_batch access control (ETP-4510 code-review BUG-2b) ────────────
+  // ── etendo_batch access control (ETP-4510 code-review BUG-2b) ────────────
 
   /**
    * {@code handleBatch}'s per-operation {@code authorizeSpecAccess(specName, "POST")} loop
@@ -450,7 +543,7 @@ class McpToolRouterRouteTest {
         // The denial must short-circuit before any DAL work — BatchService must never
         // be reached once authorizeSpecAccess throws.
         org.mockito.Mockito.verify(mockBatch, org.mockito.Mockito.never())
-            .executeBatch(any());
+            .executeBatch(any(), any());
       }
     }
 
@@ -471,31 +564,34 @@ class McpToolRouterRouteTest {
             .thenReturn(mockBatch);
         JSONObject batchResult = new JSONObject();
         batchResult.put("committed", true);
-        when(mockBatch.executeBatch(any())).thenReturn(batchResult);
+        when(mockBatch.executeBatch(any(), any())).thenReturn(batchResult);
 
         JSONObject result = router.handleBatch(buildBatchArgs());
 
         assertFalse(result.has("isError"));
-        org.mockito.Mockito.verify(mockBatch).executeBatch(any());
+        // ETP-5415: the two-arg overload is the assertion, not an incidental detail — the MCP
+        // body transforms now ride along as a per-operation preprocessor, and a call through the
+        // one-arg overload would silently run the batch with none of them.
+        org.mockito.Mockito.verify(mockBatch).executeBatch(any(), any());
       }
     }
   }
 
-  // ── neo_discover ──────────────────────────────────────────────────────
+  // ── etendo_discover ──────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_discover")
+  @DisplayName("route — etendo_discover")
   class DiscoverTests {
 
     @Test
-    @DisplayName("neo_discover returns specs array")
+    @DisplayName("etendo_discover returns specs array")
     @SuppressWarnings("unchecked")
     void discoverReturnsSpecs() throws Exception {
       OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
       when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
       when(specCriteria.list()).thenReturn(Collections.emptyList());
 
-      JSONObject result = router.route("neo_discover", null, READ_SCOPES);
+      JSONObject result = router.route("etendo_discover", null, READ_SCOPES);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -505,7 +601,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_discover includes accessible specs")
+    @DisplayName("etendo_discover includes accessible specs")
     @SuppressWarnings("unchecked")
     void discoverIncludesAccessibleSpecs() throws Exception {
       SFSpec spec = mockSpec();
@@ -528,7 +624,7 @@ class McpToolRouterRouteTest {
       supportMock.when(() -> McpToolRouterSupport.buildDiscoverSpec(
           eq(spec), eq("W"), any(), any(), any())).thenReturn(discoverSpec);
 
-      JSONObject result = router.route("neo_discover", null, READ_SCOPES);
+      JSONObject result = router.route("etendo_discover", null, READ_SCOPES);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -537,14 +633,14 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_list ──────────────────────────────────────────────────────────
+  // ── etendo_list ──────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_list")
+  @DisplayName("route — etendo_list")
   class ListTests {
 
     @Test
-    @DisplayName("neo_list missing entity argument returns error")
+    @DisplayName("etendo_list missing entity argument returns error")
     void listMissingEntityReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
@@ -552,7 +648,7 @@ class McpToolRouterRouteTest {
       JSONObject args = new JSONObject();
       args.put("spec", SPEC_NAME);
 
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -560,9 +656,9 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_list with null arguments returns error")
+    @DisplayName("etendo_list with null arguments returns error")
     void listNullArgsReturnsError() throws Exception {
-      JSONObject result = router.route("neo_list", null, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", null, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -570,12 +666,12 @@ class McpToolRouterRouteTest {
     }
 
     /**
-     * ETP-4257: neo_list on a CALLABLE report (R) spec no longer surfaces the opaque
+     * ETP-4257: etendo_list on a CALLABLE report (R) spec no longer surfaces the opaque
      * "Entity not found: header". End-to-end (route → handleList → shared guard) the error
      * names the report type and points the agent at the concrete etendo_generate_ tool.
      */
     @Test
-    @DisplayName("neo_list on a callable report (R) spec explains the generate tool")
+    @DisplayName("etendo_list on a callable report (R) spec explains the generate tool")
     void listOnReportSpecExplainsGenerateTool() throws Exception {
       SFSpec spec = mock(SFSpec.class);
       when(spec.getId()).thenReturn(SPEC_ID);
@@ -592,7 +688,7 @@ class McpToolRouterRouteTest {
           mockStatic(NeoReportCallability.class)) {
         callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
 
-        JSONObject result = router.route("neo_list", buildCrudArgs(), READ_SCOPES);
+        JSONObject result = router.route("etendo_list", buildCrudArgs(), READ_SCOPES);
 
         assertTrue(result.getBoolean("isError"));
         String text = contentText(result);
@@ -604,21 +700,21 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_get ───────────────────────────────────────────────────────────
+  // ── etendo_get ───────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_get")
+  @DisplayName("route — etendo_get")
   class GetTests {
 
     @Test
-    @DisplayName("neo_get missing id argument returns error")
+    @DisplayName("etendo_get missing id argument returns error")
     void getMissingIdReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
 
       JSONObject args = buildCrudArgs();
 
-      JSONObject result = router.route("neo_get", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_get", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -626,21 +722,21 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_create ────────────────────────────────────────────────────────
+  // ── etendo_create ────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_create")
+  @DisplayName("route — etendo_create")
   class CreateTests {
 
     @Test
-    @DisplayName("neo_create missing fields argument returns error")
+    @DisplayName("etendo_create missing fields argument returns error")
     void createMissingFieldsReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
 
       JSONObject args = buildCrudArgs();
 
-      JSONObject result = router.route("neo_create", args, WRITE_SCOPES);
+      JSONObject result = router.route("etendo_create", args, WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -648,14 +744,14 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_update ────────────────────────────────────────────────────────
+  // ── etendo_update ────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_update")
+  @DisplayName("route — etendo_update")
   class UpdateTests {
 
     @Test
-    @DisplayName("neo_update missing id returns error")
+    @DisplayName("etendo_update missing id returns error")
     void updateMissingIdReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
@@ -663,7 +759,7 @@ class McpToolRouterRouteTest {
       JSONObject args = buildCrudArgs();
       args.put("fields", new JSONObject());
 
-      JSONObject result = router.route("neo_update", args, WRITE_SCOPES);
+      JSONObject result = router.route("etendo_update", args, WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -671,21 +767,21 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_delete ────────────────────────────────────────────────────────
+  // ── etendo_delete ────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_delete")
+  @DisplayName("route — etendo_delete")
   class DeleteTests {
 
     @Test
-    @DisplayName("neo_delete missing id returns error")
+    @DisplayName("etendo_delete missing id returns error")
     void deleteMissingIdReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
 
       JSONObject args = buildCrudArgs();
 
-      JSONObject result = router.route("neo_delete", args, WRITE_SCOPES);
+      JSONObject result = router.route("etendo_delete", args, WRITE_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
     }
@@ -698,7 +794,7 @@ class McpToolRouterRouteTest {
    * {@code DefaultJsonDataService}, so before this fix they never consulted the
    * {@code ETGO_SF_ENTITY} method flags that the REST CRUD path enforces with a {@code 405}.
    * Turning the mutation flags off on a monitor/log window therefore blocked the React UI
-   * while leaving an MCP agent free to write — and made {@code neo_discover}'s
+   * while leaving an MCP agent free to write — and made {@code etendo_discover}'s
    * {@code readOnly: true} a lie.
    *
    * <p>These tests run the REAL {@code requireMethodEnabled} (same {@code thenCallRealMethod}
@@ -752,7 +848,7 @@ class McpToolRouterRouteTest {
     private JSONObject updateArgs() throws Exception {
       JSONObject args = createArgs();
       args.put("id", "rec-1");
-      // ETP-5073 / DOC-04: neo_update requires the record's `updated` value. These cases are about
+      // ETP-5073 / DOC-04: etendo_update requires the record's `updated` value. These cases are about
       // the method-flag gate, not about argument validation, so the token is supplied to let them
       // reach the gate they are testing — argument validation runs first and would otherwise
       // answer "Missing required argument: updated" before the gate is ever consulted.
@@ -767,38 +863,38 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_create is refused on a read-only entity")
+    @DisplayName("etendo_create is refused on a read-only entity")
     void createRefusedOnReadOnlyEntity() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
       setupEntityLookup(readOnlyEntity(), null);
 
-      String text = routeAndGetText("neo_create", createArgs());
+      String text = routeAndGetText("etendo_create", createArgs());
 
       assertTrue(text.contains("does not enable POST"), text);
       assertTrue(text.contains("read-only"), text);
     }
 
     @Test
-    @DisplayName("neo_update is refused on a read-only entity")
+    @DisplayName("etendo_update is refused on a read-only entity")
     void updateRefusedOnReadOnlyEntity() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
       setupEntityLookup(readOnlyEntity(), null);
 
-      String text = routeAndGetText("neo_update", updateArgs());
+      String text = routeAndGetText("etendo_update", updateArgs());
 
       assertTrue(text.contains("does not enable PUT"), text);
     }
 
     @Test
-    @DisplayName("neo_delete is refused on a read-only entity")
+    @DisplayName("etendo_delete is refused on a read-only entity")
     void deleteRefusedOnReadOnlyEntity() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
       setupEntityLookup(readOnlyEntity(), null);
 
-      String text = routeAndGetText("neo_delete", deleteArgs());
+      String text = routeAndGetText("etendo_delete", deleteArgs());
 
       assertTrue(text.contains("does not enable DELETE"), text);
     }
@@ -808,8 +904,13 @@ class McpToolRouterRouteTest {
      * given a null AD_Tab on purpose so the call then fails in {@code getAdTabOrThrow} — the
      * next step after the gate — instead of reaching {@code DefaultJsonDataService}, whose
      * static initialiser needs a servlet container (see this class's javadoc). What matters is
-     * that the failure is the AD_Tab error and never the method-flag refusal, mirroring
+     * that the failure is the tab-less one and never the method-flag refusal, mirroring
      * {@code WriteTierAuthorizationTests#listAllowedForReadOnlyRole}.
+     *
+     * <p>ETP-5405: that failure used to be a bare {@code IllegalArgumentException} rendered by the
+     * catch-all as {@code 500 server_error "No AD_Tab linked to entity: header"}. It is now
+     * {@link McpRoutingException#entityHasNoTab}'s no-handler branch, so the assertion reads the
+     * envelope rather than matching a prose substring that the reword silently invalidated.</p>
      */
     @Test
     @DisplayName("a writable entity passes the gate")
@@ -818,28 +919,28 @@ class McpToolRouterRouteTest {
       setupSpecLookup(spec);
       setupEntityLookup(writableEntity(), null);
 
-      String text = routeAndGetText("neo_create", createArgs());
+      String text = routeAndGetText("etendo_create", createArgs());
 
       assertFalse(text.contains("does not enable"), text);
-      assertTrue(text.contains("No AD_Tab linked to entity"), text);
+      assertNoTabEnvelope(new JSONObject(text));
     }
   }
 
-  // ── neo_selectors ─────────────────────────────────────────────────────
+  // ── etendo_selectors ─────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_selectors")
+  @DisplayName("route — etendo_selectors")
   class SelectorsTests {
 
     @Test
-    @DisplayName("neo_selectors missing column returns error")
+    @DisplayName("etendo_selectors missing column returns error")
     void selectorsMissingColumnReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
 
       JSONObject args = buildCrudArgs();
 
-      JSONObject result = router.route("neo_selectors", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_selectors", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -847,14 +948,14 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_defaults ──────────────────────────────────────────────────────
+  // ── etendo_defaults ──────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_defaults")
+  @DisplayName("route — etendo_defaults")
   class DefaultsTests {
 
     @Test
-    @DisplayName("neo_defaults returns default values")
+    @DisplayName("etendo_defaults returns default values")
     void defaultsReturnsValues() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
@@ -872,13 +973,13 @@ class McpToolRouterRouteTest {
           .thenReturn(neoResp);
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_defaults", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_defaults", args, READ_SCOPES);
 
       assertFalse(result.has("isError"));
     }
 
     @Test
-    @DisplayName("neo_defaults missing entity returns error")
+    @DisplayName("etendo_defaults missing entity returns error")
     void defaultsMissingEntityReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
@@ -886,11 +987,79 @@ class McpToolRouterRouteTest {
       JSONObject args = new JSONObject();
       args.put("spec", SPEC_NAME);
 
-      JSONObject result = router.route("neo_defaults", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_defaults", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("entity"));
+    }
+
+    // ── ETP-5558: etendo_defaults on an entity whose create MCP_CONFIG.verbs hides ──
+
+    private static final String HIDE_CREATE = "{\"verbs\":{\"create\":false,"
+        + "\"reason\":\"Payments are registered from the invoice\","
+        + "\"instead\":\"etendo_action(spec:'sales-invoice', entity:'header', "
+        + "action:'registerPayment')\"}}";
+
+    private JSONObject defaultsFor(SFEntity entity) throws Exception {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+      try {
+        setupSpecLookup(mockSpec());
+        setupEntityLookup(entity, mockTab());
+        obContextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+        supportMock.when(() -> McpToolRouterSupport.requireVerbNotHidden(any(), any(),
+            anyString())).thenCallRealMethod();
+        defaultsMock.when(() -> NeoDefaultsService.resolveDefaults(any(), isNull()))
+            .thenReturn(NeoResponse.ok(new JSONObject().put("documentNo", "<auto>")));
+        return router.route("etendo_defaults", buildCrudArgs(), READ_SCOPES);
+      } finally {
+        McpConfigCache.invalidateAll();
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-5558: a create hidden by MCP_CONFIG.verbs answers the 405 etendo_create gives")
+    void defaultsRefusedWhenCreateIsHidden() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(HIDE_CREATE);
+      when(entity.isPost()).thenReturn(true);
+
+      JSONObject result = defaultsFor(entity);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      JSONObject expected = McpRoutingException.verbHidden(SPEC_NAME, ENTITY_NAME, "POST",
+          "Payments are registered from the invoice",
+          "etendo_action(spec:'sales-invoice', entity:'header', action:'registerPayment')")
+          .toEnvelope();
+      JSONObject actual = new JSONObject(text);
+      assertEquals(405, actual.getInt(McpConstants.KEY_STATUS));
+      assertEquals("method_not_allowed", actual.getString(McpConstants.KEY_ERROR));
+      assertEquals(expected.getString(McpConstants.KEY_DETAIL),
+          actual.getString(McpConstants.KEY_DETAIL));
+      assertEquals(expected.getString(McpConstants.KEY_HINT),
+          actual.getString(McpConstants.KEY_HINT));
+      assertTrue(actual.getString(McpConstants.KEY_DETAIL)
+          .contains("Payments are registered from the invoice"), text);
+      assertTrue(actual.getString(McpConstants.KEY_HINT).contains("registerPayment"), text);
+      defaultsMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), any()), never());
+    }
+
+    @Test
+    @DisplayName("ETP-5558: a raw ISPOST off with no verbs section keeps the old etendo_defaults")
+    void defaultsUnchangedWhenOnlyTheFlagIsOff() throws Exception {
+      SFEntity entity = mockEntity();
+      when(entity.isPost()).thenReturn(false);
+
+      JSONObject result = defaultsFor(entity);
+
+      assertFalse(result.has("isError"), result.toString());
+      defaultsMock.verify(() -> NeoDefaultsService.resolveDefaults(any(), isNull()));
+      supportMock.verify(() -> McpToolRouterSupport.requireVerbNotHidden(any(), any(),
+          eq("POST")));
+      supportMock.verify(() -> McpToolRouterSupport.requireMethodEnabled(any(), any(),
+          anyString()), never());
     }
   }
 
@@ -1048,7 +1217,13 @@ class McpToolRouterRouteTest {
       when(handler.reportFormats()).thenReturn(List.of("json"));
       when(handler.handle(any(NeoContext.class))).thenReturn(handlerResponse);
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
             .thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
@@ -1087,7 +1262,13 @@ class McpToolRouterRouteTest {
       NeoHandler handler = mock(NeoHandler.class);
       when(handler.reportParameters()).thenReturn(Optional.empty());
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
             .thenReturn(handler);
 
@@ -1223,7 +1404,13 @@ class McpToolRouterRouteTest {
 
     private JSONObject routeReportWith(NeoHandler handler, SFEntity reportEntity, JSONObject args)
         throws Exception {
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
             .thenReturn(handler);
         hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
@@ -1240,16 +1427,16 @@ class McpToolRouterRouteTest {
   class ResolutionErrorTests {
 
     @Test
-    @DisplayName("unknown spec returns a 404 not_found envelope pointing at neo_discover")
+    @DisplayName("unknown spec returns a 404 not_found envelope pointing at etendo_discover")
     void unknownSpecReturnsError() throws Exception {
       // ETP-4793 / IMP-17: spec resolution throws McpRoutingException, which route renders as the
       // IMP-5 envelope instead of the old bare prose line. No `available` list on purpose — the
-      // catalog can hold dozens of specs, so the hint routes to neo_discover instead (ACE).
+      // catalog can hold dozens of specs, so the hint routes to etendo_discover instead (ACE).
       supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
           .thenThrow(McpRoutingException.specNotFound(SPEC_NAME));
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       JSONObject envelope = new JSONObject(
@@ -1258,7 +1445,7 @@ class McpToolRouterRouteTest {
       assertEquals("not_found", envelope.getString("error"));
       assertEquals("spec", envelope.getString("field"));
       assertTrue(envelope.getString("detail").contains(SPEC_NAME));
-      assertTrue(envelope.getString("hint").contains("neo_discover"));
+      assertTrue(envelope.getString("hint").contains("etendo_discover"));
       assertFalse(envelope.has("available"));
     }
 
@@ -1279,38 +1466,51 @@ class McpToolRouterRouteTest {
               List.of("orderHeader", "orderLines")));
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       JSONObject envelope = new JSONObject(contentText(result));
       assertEquals(404, envelope.getInt("status"));
       assertEquals("not_found", envelope.getString("error"));
       assertEquals("entity", envelope.getString("field"));
-      assertEquals("neo_list", envelope.getString("tool"));
+      assertEquals("etendo_list", envelope.getString("tool"));
       JSONArray available = envelope.getJSONArray("available");
       assertEquals(2, available.length());
       assertEquals("orderHeader", available.getString(0));
     }
 
+    /**
+     * An entity with neither a tab nor a handler is unserviceable, and ETP-5405 made the router
+     * say so as a routing failure instead of a server fault.
+     *
+     * <p>{@code McpWriteRequestSupport.getAdTabOrThrow} used to throw a bare
+     * {@code IllegalArgumentException}, which the catch-all rendered as
+     * {@code 500 server_error "No AD_Tab linked to entity: header"}. The blind-agent run on
+     * ETP-5405 showed the cost: the agent read the 500 and its "re-sending will not help" hint as
+     * proof the capability was broken and abandoned the spec. It is now a 422
+     * {@code validation_error} naming the configuration as the fault, which is the branch this
+     * mock produces — the entity declares no {@code Java_Qualifier}, so
+     * {@code McpHookExecutor.resolveEntityHandler} finds nothing and {@code hasHandler} is
+     * false.</p>
+     */
     @Test
-    @DisplayName("entity without AD_Tab returns error")
+    @DisplayName("entity with neither AD_Tab nor handler returns a 422 routing envelope")
     void entityWithoutTabReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
 
-      // Entity resolves (via the shared guard) but has no linked AD_Tab. The router's own
-      // getAdTabOrThrow (still private in McpToolRouter) raises "No AD_Tab linked to entity".
       supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
           any(SFSpec.class), anyString())).thenReturn(entity);
       when(entity.getADTab()).thenReturn(null);
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
-      String text = contentText(result);
-      assertTrue(text.contains("No AD_Tab"));
+      JSONObject envelope = new JSONObject(contentText(result));
+      assertNoTabEnvelope(envelope);
+      assertEquals("etendo_list", envelope.getString("tool"));
     }
   }
 
@@ -1339,7 +1539,7 @@ class McpToolRouterRouteTest {
           .thenReturn(errorResp);
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_defaults", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_defaults", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
     }
@@ -1361,7 +1561,7 @@ class McpToolRouterRouteTest {
           .thenReturn(emptyResp);
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_defaults", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_defaults", args, READ_SCOPES);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1385,7 +1585,7 @@ class McpToolRouterRouteTest {
           .thenThrow(new RuntimeException("Database connection lost"));
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1399,7 +1599,7 @@ class McpToolRouterRouteTest {
           .thenThrow(new RuntimeException("fail"));
 
       JSONObject args = buildCrudArgs();
-      JSONObject result = router.route("neo_list", args, READ_SCOPES);
+      JSONObject result = router.route("etendo_list", args, READ_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1445,15 +1645,96 @@ class McpToolRouterRouteTest {
     }
   }
 
-  // ── neo_vector_search ──────────────────────────────────────────────────
+  // ── etendo_vector_search ──────────────────────────────────────────────────
 
   @Test
-  @DisplayName("route — neo_vector_search validates required arguments")
+  @DisplayName("route — etendo_vector_search validates required arguments")
   void vectorSearchMissingArgumentsReturnsErrorContent() throws Exception {
-    JSONObject result = router.route("neo_vector_search", new JSONObject(), READ_SCOPES);
+    JSONObject result = router.route("etendo_vector_search", new JSONObject(), READ_SCOPES);
     assertTrue(result.optBoolean("isError"));
     assertTrue(result.getJSONArray("content").getJSONObject(0).getString("text")
         .contains("query and either targets or namespaces are required"));
+  }
+
+  // ── etendo_vector_search — omitted-targets substitution (IMP-41 follow-up) ─
+
+  @Nested
+  @DisplayName("route — etendo_vector_search omitted-targets substitution")
+  class VectorSearchTargetSubstitutionTests {
+
+    @Test
+    @DisplayName("omitted targets are substituted with the full authorized list")
+    void omittedTargetsSubstituteAuthorizedList() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("query", "quotation");
+
+      try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
+               mockStatic(NeoVectorSearchEndpoint.class);
+           MockedConstruction<NeoVectorSearchEndpoint> construction =
+               mockConstruction(NeoVectorSearchEndpoint.class, (endpointMock, context) ->
+                   when(endpointMock.handle(any(), any(), any(), any(), any(), any(), any()))
+                       .thenReturn(NeoResponse.ok(new JSONObject().put("items", new JSONArray()))))) {
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(Optional.of(List.of("sales-quotation", "purchase-order")));
+
+        JSONObject result = router.route("etendo_vector_search", args, READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError"));
+        assertEquals(1, construction.constructed().size());
+        NeoVectorSearchEndpoint endpoint = construction.constructed().get(0);
+        verify(endpoint).handle(eq("quotation"), isNull(), eq("sales-quotation,purchase-order"),
+            isNull(), isNull(), isNull(), isNull());
+      }
+    }
+
+    @Test
+    @DisplayName("no readable target returns the dedicated refusal, not a generic 400")
+    void noReadableTargetsReturnsDedicatedRefusal() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("query", "quotation");
+
+      try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
+               mockStatic(NeoVectorSearchEndpoint.class);
+           MockedConstruction<NeoVectorSearchEndpoint> construction =
+               mockConstruction(NeoVectorSearchEndpoint.class)) {
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(Optional.of(Collections.emptyList()));
+
+        JSONObject result = router.route("etendo_vector_search", args, READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("no_searchable_vector_targets"), "body must name the dedicated refusal code");
+        assertFalse(text.contains("query and either targets or namespaces are required"),
+            "must not read as the generic missing-parameter 400");
+        assertTrue(construction.constructed().isEmpty(),
+            "the endpoint must not even be constructed once the role has nothing to search");
+      }
+    }
+
+    @Test
+    @DisplayName("unreadable target catalog leaves targets null and defers to the endpoint")
+    void unreadableCatalogDefersToEndpoint() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("query", "quotation");
+
+      try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
+               mockStatic(NeoVectorSearchEndpoint.class)) {
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(Optional.empty());
+
+        // No mockConstruction here: the real endpoint runs, exactly as it did before this
+        // feature existed. With no substitution, both namespaces and targets stay empty, so the
+        // endpoint answers its own bad-request 400 without touching any DB.
+        JSONObject result = router.route("etendo_vector_search", args, READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("query and either targets or namespaces are required"));
+        assertFalse(text.contains("no_searchable_vector_targets"),
+            "a null catalog must not be confused with an empty (all-denied) one");
+      }
+    }
   }
 
   // ── docs ────────────────────────────────────────────────────────────────
@@ -1520,7 +1801,10 @@ class McpToolRouterRouteTest {
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertEquals("# Finance docs\nbody text", text);
+      // ETP-5306: the docs body is returned verbatim, preceded by the record-reference note —
+      // the construction rule that replaced the per-row `$ref` field.
+      assertTrue(text.endsWith("# Finance docs\nbody text"));
+      assertTrue(text.startsWith(McpConstants.RECORD_REF_NOTE));
     }
 
     @Test
@@ -1603,19 +1887,25 @@ class McpToolRouterRouteTest {
           org.mockito.ArgumentCaptor.forClass(String.class);
       org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
           org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
-      org.junit.jupiter.api.Assertions.assertNull(tokenCaptor.getValue());
+      assertNull(tokenCaptor.getValue());
     }
   }
 
-  // ── neo_action ────────────────────────────────────────────────────────
+  // ── etendo_action ────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_action")
+  @DisplayName("route — etendo_action")
   class ActionTests {
 
     private static final Set<String> ACTION_SCOPES = Set.of("neo:write");
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
+    /**
+     * ETP-5415: {@code NeoExtensionDispatcher} answers "no customization" for a blank
+     * {@code Java_Qualifier} before it consults {@code NeoHandlerLookup}, so an entity mock has to
+     * carry one for the stubbed handler to be reached.
+     */
+    private static final String HANDLER_QUALIFIER = "action-test-handler";
 
     @BeforeEach
     void setupActionSupport() {
@@ -1623,6 +1913,12 @@ class McpToolRouterRouteTest {
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
           .thenCallRealMethod();
+      // ETP-5415: a handler's pre-hook error now reaches the caller through
+      // McpHookExecutor.neoResponseToMcpResult, which normalizes it with toMcpHandlerError. With the
+      // class statically mocked that method returned null and the handler's message was lost; here
+      // the body is passed through so the test asserts on what the handler said.
+      supportMock.when(() -> McpToolRouterSupport.toMcpHandlerError(any(), anyInt()))
+          .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     private JSONObject buildActionArgs() throws Exception {
@@ -1635,7 +1931,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action routes and returns processResult:success")
+    @DisplayName("etendo_action routes and returns processResult:success")
     void actionSuccessReturnsProcessResult() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
@@ -1653,7 +1949,7 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(neoResp);
 
-      JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+      JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1663,7 +1959,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action surfaces processResult:error for error NeoResponse")
+    @DisplayName("etendo_action surfaces processResult:error for error NeoResponse")
     void actionErrorSurfacesProcessResultError() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
@@ -1681,7 +1977,7 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(errorResp);
 
-      JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+      JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1691,7 +1987,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action with missing action argument returns error")
+    @DisplayName("etendo_action with missing action argument returns error")
     void actionMissingActionArgReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
@@ -1702,7 +1998,7 @@ class McpToolRouterRouteTest {
       args.put("id", RECORD_ID);
       // "action" intentionally omitted
 
-      JSONObject result = router.route("neo_action", args, ACTION_SCOPES);
+      JSONObject result = router.route("etendo_action", args, ACTION_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1710,9 +2006,9 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action with null arguments returns error")
+    @DisplayName("etendo_action with null arguments returns error")
     void actionNullArgsReturnsError() throws Exception {
-      JSONObject result = router.route("neo_action", null, ACTION_SCOPES);
+      JSONObject result = router.route("etendo_action", null, ACTION_SCOPES);
 
       assertTrue(result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1720,7 +2016,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action with warning NeoResponse returns success content with processResult:warning")
+    @DisplayName("etendo_action with warning NeoResponse returns success content with processResult:warning")
     void actionWarningReturnsWarningResult() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
@@ -1738,7 +2034,7 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(warningResp);
 
-      JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+      JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -1747,10 +2043,11 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action runs the entity NeoHandler hooks around the button action")
+    @DisplayName("etendo_action runs the entity NeoHandler hooks around the button action")
     void actionRunsEntityHandlerHooks() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -1763,24 +2060,30 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(NeoResponse.ok(responseBody));
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+      // ETP-5415: etendo_action dispatches through NeoExtensionDispatcher, which on the MCP channel
+      // resolves via NeoHandlerLookup.byQualifier. Asserting on the handler itself rather than on
+      // McpHookExecutor is also the better test: what matters is that the customization ran, not
+      // which helper carried the call.
+      NeoHandler handler = mock(NeoHandler.class);
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+
+        router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
         // The REST action path wraps the button action in the entity's NeoHandler
         // (NeoSubEndpointDispatcher.handleHookedSubEndpoint with NeoEndpointType.ACTION),
-        // exactly as neo_create/neo_update/neo_delete already do on the MCP side. Without
+        // exactly as etendo_create/etendo_update/etendo_delete already do on the MCP side. Without
         // the same wrapping here, completing a document over MCP silently skips handler
         // logic the UI executes — e.g. AbstractOrderHeaderHandler's pre-CO total-discount
         // line, or GlJournalHeaderHandler's interception of the contextless classic
         // dispatch that would otherwise NPE inside FIN_AddPaymentFromJournal (ETP-4285).
-        hookMock.verify(() -> McpHookExecutor.resolveEntityHandler(entity));
-        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()));
-        hookMock.verify(() -> McpHookExecutor.runPostHook(any(), any(), any()));
+        verify(handler).handle(any(NeoContext.class));
+        verify(handler).afterHandle(any(NeoContext.class));
       }
     }
 
     @Test
-    @DisplayName("neo_action builds an ACTION hook context carrying the action name")
+    @DisplayName("etendo_action builds an ACTION hook context carrying the action name")
     void actionBuildsActionHookContextWithActionName() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
@@ -1796,29 +2099,38 @@ class McpToolRouterRouteTest {
           .thenReturn(NeoResponse.ok(responseBody));
 
       try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+        router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
+        // ETP-5558: the method comes from the declared contract; an AD button has none and stays
+        // on POST, exactly as before.
         hookMock.verify(() -> McpHookExecutor.buildActionHookContext(
             eq(SPEC_NAME), eq(ENTITY_NAME), eq(RECORD_ID), eq(ACTION_NAME),
-            any(), eq(tab), eq(entity)));
+            any(), eq(tab), eq(entity), eq("POST")));
       }
     }
 
     @Test
-    @DisplayName("neo_action pre-hook result short-circuits without firing the process")
+    @DisplayName("etendo_action pre-hook result short-circuits without firing the process")
     void actionPreHookShortCircuitsWithoutFiringTheProcess() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
 
-      JSONObject hookResult = McpToolRouter.wrapAsErrorContent("Order has no lines");
+      // ETP-5415: etendo_action dispatches through NeoExtensionDispatcher, which on the MCP channel
+      // resolves via NeoHandlerLookup.byQualifier. Asserting on the handler itself rather than on
+      // McpHookExecutor is also the better test: what matters is that the customization ran, not
+      // which helper carried the call.
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.handle(any(NeoContext.class)))
+          .thenReturn(NeoResponse.error(400, "Order has no lines"));
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.runPreHook(any(), any())).thenReturn(hookResult);
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
 
-        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+        JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
         assertTrue(result.getBoolean("isError"));
         assertTrue(contentText(result).contains("Order has no lines"));
@@ -1828,7 +2140,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action forwards the caller's parameters object to the process")
+    @DisplayName("etendo_action forwards the caller's parameters object to the process")
     void actionForwardsCallerParametersToProcess() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
@@ -1844,7 +2156,7 @@ class McpToolRouterRouteTest {
           .thenReturn(NeoResponse.ok(responseBody));
 
       // The documented way to complete a document: the chosen action value travels under
-      // the key neo_schema advertises as 'actionParameter' (ETP-4285).
+      // the key etendo_schema advertises as 'actionParameter' (ETP-4285).
       JSONObject args = buildActionArgs();
       JSONObject parameters = new JSONObject();
       parameters.put("docAction", "CO");
@@ -1852,7 +2164,7 @@ class McpToolRouterRouteTest {
 
       ArgumentCaptor<JSONObject> paramsCaptor = ArgumentCaptor.forClass(JSONObject.class);
 
-      router.route("neo_action", args, ACTION_SCOPES);
+      router.route("etendo_action", args, ACTION_SCOPES);
 
       buttonActionMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
           eq(entity), eq(RECORD_ID), eq(ACTION_NAME), paramsCaptor.capture()));
@@ -1860,10 +2172,11 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_action post-hook result replaces the default action result")
+    @DisplayName("etendo_action post-hook result replaces the default action result")
     void actionPostHookReplacesResult() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
+      when(entity.getJavaQualifier()).thenReturn(HANDLER_QUALIFIER);
       Tab tab = mockTab();
       setupSpecLookup(spec);
       setupEntityLookup(entity, tab);
@@ -1875,24 +2188,31 @@ class McpToolRouterRouteTest {
               eq(ACTION_NAME), any()))
           .thenReturn(NeoResponse.ok(responseBody));
 
-      JSONObject replaced = McpToolRouter.wrapAsTextContent("{\"processResult\":\"warning\"}");
+      // ETP-5415: etendo_action dispatches through NeoExtensionDispatcher, which on the MCP channel
+      // resolves via NeoHandlerLookup.byQualifier. Asserting on the handler itself rather than on
+      // McpHookExecutor is also the better test: what matters is that the customization ran, not
+      // which helper carried the call.
+      JSONObject replacedBody = new JSONObject();
+      replacedBody.put("processResult", "warning");
 
-      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
-        hookMock.when(() -> McpHookExecutor.runPreHook(any(), any())).thenReturn(null);
-        hookMock.when(() -> McpHookExecutor.runPostHook(any(), any(), any()))
-            .thenReturn(replaced);
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.handle(any(NeoContext.class))).thenReturn(null);
+      when(handler.afterHandle(any(NeoContext.class))).thenReturn(NeoResponse.ok(replacedBody));
 
-        JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+      try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+
+        JSONObject result = router.route("etendo_action", buildActionArgs(), ACTION_SCOPES);
 
         assertTrue(contentText(result).contains("warning"));
       }
     }
   }
 
-  // ── neo_generate_amortization_plan (ETP-4232) ─────────────────────────────
+  // ── etendo_generate_amortization_plan (ETP-4232) ─────────────────────────────
 
   @Nested
-  @DisplayName("route — neo_generate_amortization_plan (ETP-4232)")
+  @DisplayName("route — etendo_generate_amortization_plan (ETP-4232)")
   class GenerateAmortizationPlanTests {
 
     private static final Set<String> PROCESS_SCOPES_LOCAL = Set.of("neo:process");
@@ -1911,7 +2231,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("routes neo_generate_amortization_plan to handleGenerateAmortizationPlan and returns success")
+    @DisplayName("routes etendo_generate_amortization_plan to handleGenerateAmortizationPlan and returns success")
     void routesAmortizationToolToHandler() throws Exception {
       JSONObject planBody = new JSONObject();
       planBody.put("success", true);
@@ -1933,7 +2253,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_generate_amortization_plan propagates 400 error as isError")
+    @DisplayName("etendo_generate_amortization_plan propagates 400 error as isError")
     void amortizationToolPropagates400() throws Exception {
       NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
 
@@ -1946,7 +2266,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_generate_amortization_plan propagates 404 as isError")
+    @DisplayName("etendo_generate_amortization_plan propagates 404 as isError")
     void amortizationToolPropagates404() throws Exception {
       NeoResponse notFoundResp = NeoResponse.error(404, "Asset not found: UNKNOWN");
 
@@ -1964,7 +2284,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_generate_amortization_plan propagates 409 as isError")
+    @DisplayName("etendo_generate_amortization_plan propagates 409 as isError")
     void amortizationToolPropagates409() throws Exception {
       NeoResponse conflictResp = NeoResponse.error(409,
           "Asset already has a generated amortization plan");
@@ -1983,7 +2303,7 @@ class McpToolRouterRouteTest {
     }
 
     @Test
-    @DisplayName("neo_generate_amortization_plan with missing assetId arg delegates null to service")
+    @DisplayName("etendo_generate_amortization_plan with missing assetId arg delegates null to service")
     void amortizationToolMissingAssetIdDelegatesToService() throws Exception {
       // When args has no assetId, the handler passes null to the service.
       NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
@@ -2005,10 +2325,15 @@ class McpToolRouterRouteTest {
    * Every entity-CRUD handler now resolves its entity through
    * {@code McpToolRouterSupport.resolveIncludedEntityOrExplain} instead of
    * {@code findIncludedEntity}. These minimal tests drive each changed call-site
-   * (neo_get/create/update/delete/selectors/schema) with a resolved entity that has no
+   * (etendo_get/create/update/delete/selectors/schema) with a resolved entity that has no
    * AD_Tab, so the changed line executes and control exits at {@code getAdTabOrThrow} — before
-   * any DefaultJsonDataService/ModelProvider static-init dependency is touched. neo_list and
-   * neo_defaults call-sites are already covered by their own tests above.
+   * any DefaultJsonDataService/ModelProvider static-init dependency is touched. etendo_list and
+   * etendo_defaults call-sites are already covered by their own tests above.
+   *
+   * <p>ETP-5405: the entity here declares no {@code Java_Qualifier}, so the exit is the
+   * no-handler branch of {@link McpRoutingException#entityHasNoTab} — a 422 routing envelope,
+   * not the {@code 500 server_error "No AD_Tab linked to entity"} this used to match on. The
+   * handler branch and the tab-less read path are covered by {@code TablessEntityTests}.</p>
    */
   @Nested
   @DisplayName("route — entity-CRUD tools resolve via shared guard (ETP-4257)")
@@ -2026,27 +2351,27 @@ class McpToolRouterRouteTest {
 
     private void assertNoTabError(JSONObject result) throws Exception {
       assertTrue(result.getBoolean("isError"));
-      assertTrue(contentText(result).contains("No AD_Tab"));
+      assertNoTabEnvelope(new JSONObject(contentText(result)));
     }
 
     @Test
-    @DisplayName("neo_get resolves entity via the shared guard")
+    @DisplayName("etendo_get resolves entity via the shared guard")
     void getResolvesViaGuard() throws Exception {
       JSONObject args = buildCrudArgs();
       args.put("id", "rec-1");
-      assertNoTabError(routeWithNoTabEntity("neo_get", args, READ_SCOPES));
+      assertNoTabError(routeWithNoTabEntity("etendo_get", args, READ_SCOPES));
     }
 
     @Test
-    @DisplayName("neo_create resolves entity via the shared guard")
+    @DisplayName("etendo_create resolves entity via the shared guard")
     void createResolvesViaGuard() throws Exception {
       JSONObject args = buildCrudArgs();
       args.put("fields", new JSONObject());
-      assertNoTabError(routeWithNoTabEntity("neo_create", args, WRITE_SCOPES));
+      assertNoTabError(routeWithNoTabEntity("etendo_create", args, WRITE_SCOPES));
     }
 
     @Test
-    @DisplayName("neo_update resolves entity via the shared guard")
+    @DisplayName("etendo_update resolves entity via the shared guard")
     void updateResolvesViaGuard() throws Exception {
       JSONObject args = buildCrudArgs();
       args.put("id", "rec-1");
@@ -2054,29 +2379,278 @@ class McpToolRouterRouteTest {
       // ETP-5073 / DOC-04: required now, and supplied here for the same reason as in updateArgs —
       // this case is about entity resolution, and argument validation precedes it.
       args.put("updated", STALE_SAFE_VERSION);
-      assertNoTabError(routeWithNoTabEntity("neo_update", args, WRITE_SCOPES));
+      assertNoTabError(routeWithNoTabEntity("etendo_update", args, WRITE_SCOPES));
     }
 
     @Test
-    @DisplayName("neo_delete resolves entity via the shared guard")
+    @DisplayName("etendo_delete resolves entity via the shared guard")
     void deleteResolvesViaGuard() throws Exception {
       JSONObject args = buildCrudArgs();
       args.put("id", "rec-1");
-      assertNoTabError(routeWithNoTabEntity("neo_delete", args, WRITE_SCOPES));
+      assertNoTabError(routeWithNoTabEntity("etendo_delete", args, WRITE_SCOPES));
     }
 
     @Test
-    @DisplayName("neo_selectors resolves entity via the shared guard")
+    @DisplayName("etendo_selectors resolves entity via the shared guard")
     void selectorsResolvesViaGuard() throws Exception {
       JSONObject args = buildCrudArgs();
       args.put("column", "C_BPartner_ID");
-      assertNoTabError(routeWithNoTabEntity("neo_selectors", args, READ_SCOPES));
+      assertNoTabError(routeWithNoTabEntity("etendo_selectors", args, READ_SCOPES));
     }
 
     @Test
-    @DisplayName("neo_schema resolves entity via the shared guard")
+    @DisplayName("etendo_schema resolves entity via the shared guard")
     void schemaResolvesViaGuard() throws Exception {
-      assertNoTabError(routeWithNoTabEntity("neo_schema", buildCrudArgs(), READ_SCOPES));
+      assertNoTabError(routeWithNoTabEntity("etendo_schema", buildCrudArgs(), READ_SCOPES));
+    }
+  }
+
+  // ── ETP-5405: tab-less entities ──────────────────────────────────────────
+
+  /**
+   * The two halves of ETP-5405, neither of which existed before it.
+   *
+   * <p>Sixteen active, included entities carry {@code ETGO_SF_ENTITY.ad_tab_id IS NULL} because a
+   * handler serves them instead of a window — the dashboard widgets, {@code contacts/bp-stats},
+   * {@code not-posted-documents/header}, the report specs, {@code warehouse/location}. Over REST
+   * they answer fine: {@code NeoCrudHandler} consults the entity's {@code Java_Qualifier} first and
+   * only falls through to the tab-based path when there is none. The MCP router did the opposite —
+   * it demanded the tab up front — so every tool answered {@code 500 server_error} on an entity the
+   * SPA renders. ETP-5405 split that into two answers:</p>
+   *
+   * <ol>
+   *   <li>{@code etendo_list} and {@code etendo_get} now run the handler's pre-hook before the tab is
+   *       demanded, so those reads simply work ({@code runTablessReadHook});</li>
+   *   <li>every tool that genuinely needs a tab to answer — {@code etendo_schema} describes one's
+   *       fields, the write paths fill them — answers 405 naming the tools that do work, instead
+   *       of a 500 that reads as a broken instance.</li>
+   * </ol>
+   *
+   * <p>The third test is the guard on the narrowness of (1): the 171 tab-backed entities must keep
+   * the exact path they had, so the read hook must not fire for them.</p>
+   */
+  @Nested
+  @DisplayName("route — tab-less entities served by a handler (ETP-5405)")
+  class TablessEntityTests {
+
+    /** A tab-less entity resolved by the shared guard, as every tool sees one. */
+    private SFEntity setupTablessEntity() {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      supportMock.when(() -> McpToolRouterSupport.resolveIncludedEntityOrExplain(
+          any(SFSpec.class), anyString())).thenReturn(entity);
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenReturn(entity);
+      when(entity.getADTab()).thenReturn(null);
+      return entity;
+    }
+
+    /**
+     * What a handler's pre-hook hands back once {@code McpHookExecutor} has converted it: the MCP
+     * content wrapper, not a {@code NeoResponse}. Carries a marker the assertions can recognise,
+     * so "the handler answered" is proved by the payload rather than by the absence of an error.
+     */
+    private JSONObject handlerResult() throws Exception {
+      JSONObject payload = new JSONObject();
+      payload.put("servedBy", "handler");
+      JSONObject text = new JSONObject();
+      text.put("type", "text");
+      text.put("text", payload.toString());
+      JSONArray content = new JSONArray();
+      content.put(text);
+      JSONObject result = new JSONObject();
+      result.put("content", content);
+      return result;
+    }
+
+    /**
+     * {@code etendo_schema} describes a tab's fields, so a tab-less entity leaves it nothing to
+     * describe. With a handler behind the entity that is not a fault — the record is readable, the
+     * tool is the wrong one — and the 405 says so while pointing at {@code etendo_list}/{@code
+     * etendo_get}. This is the branch that never had a test: the pre-ETP-5405 code could not
+     * distinguish the two cases at all.
+     */
+    @Test
+    @DisplayName("etendo_schema on a tab-less entity WITH a handler answers 405, not 422")
+    void schemaOnTablessHandledEntityIsMethodNotAllowed() throws Exception {
+      SFEntity entity = setupTablessEntity();
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(mock(NeoHandler.class));
+
+        JSONObject result = router.route("etendo_schema", buildCrudArgs(), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        JSONObject envelope = new JSONObject(contentText(result));
+        assertHandlerServedEnvelope(envelope);
+        assertEquals("etendo_schema", envelope.getString("tool"));
+      }
+    }
+
+    /**
+     * The same refusal on a write tool. Kept separate from the {@code etendo_schema} case because the
+     * two reach {@code getAdTabOrThrow} from different call sites and only a per-site test proves
+     * both were converted; the write path additionally passes the method-flag gate first, so this
+     * also pins the order — the tab-less answer must come from the routing exception, never from a
+     * gate refusal.
+     */
+    @Test
+    @DisplayName("etendo_create on a tab-less entity WITH a handler answers 405")
+    void createOnTablessHandledEntityIsMethodNotAllowed() throws Exception {
+      SFEntity entity = setupTablessEntity();
+      JSONObject args = buildCrudArgs();
+      args.put("fields", new JSONObject());
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(mock(NeoHandler.class));
+
+        JSONObject result = router.route("etendo_create", args, WRITE_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        assertHandlerServedEnvelope(new JSONObject(contentText(result)));
+      }
+    }
+
+    /**
+     * {@code etendo_list} on a tab-less, handled entity must be answered BY the handler — no tab
+     * demanded, no error. Before ETP-5405 this call could only 500.
+     */
+    @Test
+    @DisplayName("etendo_list on a tab-less entity is served by the handler pre-hook")
+    void listOnTablessHandledEntityIsServedByHandler() throws Exception {
+      SFEntity entity = setupTablessEntity();
+      NeoHandler handler = mock(NeoHandler.class);
+      JSONObject handled = handlerResult();
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(handler);
+        // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
+        // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
+        // resolveEntityHandler + runPreHook; the seam moved, the assertion below did not.
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+            .thenReturn(handled);
+        hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
+
+        JSONObject result = router.route("etendo_list", buildCrudArgs(), READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError"), result.toString());
+        assertTrue(contentText(result).contains("\"servedBy\":\"handler\""), contentText(result));
+      }
+    }
+
+    /**
+     * The same for {@code etendo_get}, which reaches the hook from its own call site. The record id
+     * is what distinguishes a get from a list for the handler, so it must travel into the hook
+     * context — asserted here rather than left to the list case, which passes {@code null}.
+     */
+    @Test
+    @DisplayName("etendo_get on a tab-less entity is served by the handler pre-hook")
+    void getOnTablessHandledEntityIsServedByHandler() throws Exception {
+      SFEntity entity = setupTablessEntity();
+      NeoHandler handler = mock(NeoHandler.class);
+      JSONObject handled = handlerResult();
+      JSONObject args = buildCrudArgs();
+      args.put("id", "rec-1");
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(handler);
+        // ETP-5415 (D13): the tab-less read is served by runReadProvider, which runs the read's
+        // PRE phase before the tab is demanded. ETP-5405 reached the same behaviour through
+        // resolveEntityHandler + runPreHook; the seam moved, the assertion below did not.
+        hookMock.when(() -> McpHookExecutor.runReadProvider(any(), any(), any(), any(), any()))
+            .thenReturn(handled);
+        hookMock.when(() -> McpHookExecutor.runPreHook(eq(handler), any())).thenReturn(handled);
+
+        JSONObject result = router.route("etendo_get", args, READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError"), result.toString());
+        assertTrue(contentText(result).contains("\"servedBy\":\"handler\""), contentText(result));
+        // The seam the router now calls is runReadProvider (ETP-5415, D13); the earlier assertion on
+        // buildReadHookContext could not hold once the whole McpHookExecutor is stubbed.
+        hookMock.verify(() -> McpHookExecutor.runReadProvider(eq(SPEC_NAME), eq(ENTITY_NAME),
+            eq("rec-1"), eq(entity), any()));
+      }
+    }
+
+    /**
+     * A tab-less entity with NO handler falls through the read hook and reaches the tab demand, so
+     * {@code etendo_list} still refuses — with the 422 that says the entity itself is misconfigured.
+     * This pins the {@code return null} in {@code runTablessReadHook}: were it to swallow the call,
+     * an unserviceable entity would answer an empty success.
+     */
+    @Test
+    @DisplayName("etendo_list on a tab-less entity WITHOUT a handler still refuses with 422")
+    void listOnTablessUnhandledEntityStillRefuses() throws Exception {
+      SFEntity entity = setupTablessEntity();
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class);
+          MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+        // ETP-5415: resolution moved onto NeoExtensionDispatcher, which for the MCP channel asks
+        // NeoHandlerLookup.byQualifier. The resolveEntityHandler stub stays because
+        // McpWriteRequestSupport and McpWidgetHandler still call it; what this adds is the seam the
+        // router now actually uses. The assertions below are unchanged.
+        lookupMock.when(() -> NeoHandlerLookup.byQualifier(anyString())).thenReturn(null);
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(null);
+
+        JSONObject result = router.route("etendo_list", buildCrudArgs(), READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        assertNoTabEnvelope(new JSONObject(contentText(result)));
+        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()), never());
+      }
+    }
+
+    /**
+     * The narrowness guard. {@code runTablessReadHook} returns immediately when the entity has a
+     * tab, which is what keeps ETP-5405 incapable of changing the shape of any read that already
+     * worked — 171 entities, 80 of them with a handler whose {@code afterHandle} would otherwise
+     * start running on MCP reads for the first time.
+     *
+     * <p>The call is allowed to fail afterwards and its outcome is deliberately not asserted: a
+     * tab-backed {@code etendo_list} continues into {@code DefaultJsonDataService}, whose static
+     * initialiser needs a servlet container (see this class's javadoc), and it may surface as an
+     * error result or as an {@code Error} escaping {@code route}'s {@code catch (Exception)}.
+     * What this test pins is only that no hook ran before that point.</p>
+     */
+    @Test
+    @DisplayName("an entity WITH a tab never reaches the read hook")
+    void tabBackedEntityNeverRunsTheReadHook() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, mockTab());
+
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(entity))
+            .thenReturn(mock(NeoHandler.class));
+
+        try {
+          router.route("etendo_list", buildCrudArgs(), READ_SCOPES);
+        } catch (Throwable ignored) {
+          // See the javadoc: the generic path's dependencies are out of scope for this class.
+        }
+
+        hookMock.verify(() -> McpHookExecutor.resolveEntityHandler(entity), never());
+        hookMock.verify(() -> McpHookExecutor.runPreHook(any(), any()), never());
+      }
     }
   }
 }

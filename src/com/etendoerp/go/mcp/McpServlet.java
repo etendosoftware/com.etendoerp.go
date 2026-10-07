@@ -28,6 +28,7 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -39,7 +40,15 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoNeoAuth;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -64,20 +73,36 @@ public class McpServlet extends HttpServlet {
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
   private static final String PROTOCOL_VERSION = "2024-11-05";
-  private static final String SERVER_NAME = "etendo-neo";
+  private static final String SERVER_NAME = "etendo-mcp";
   private static final String SERVER_VERSION = "1.0.0";
+  /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
+  private static final String SERVER_TITLE = "Etendo MCP";
+  private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
+  /**
+   * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
+   * Same file for every environment, so a fixed production URL is fine. Clients that predate the
+   * field ignore it.
+   */
+  private static final String SERVER_ICON_URL = "https://app.etendo.ai/favicon.png";
+  private static final String SERVER_ICON_MIME_TYPE = "image/png";
+  private static final String SERVER_ICON_SIZES = "513x513";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  /** The only JSON-RPC method that produces a telemetry row (B1). */
+  private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
   // catalog and authorizes each operation by the user's role and window access.
-  private static final String LEGACY_JWT_FALLBACK_SCOPES =
-      "neo:read neo:write neo:process neo:report";
+  private static final String LEGACY_JWT_FALLBACK_SCOPES = String.join(" ",
+      ApiScopes.READ, ApiScopes.WRITE, ApiScopes.PROCESS, ApiScopes.REPORT);
+
+  private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
+      new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept, Mcp-Session-Id",
+        "Content-Type, Authorization, Accept, Mcp-Session-Id, X-Go-CSRF",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }
 
@@ -111,16 +136,27 @@ public class McpServlet extends HttpServlet {
     response.setContentType(CONTENT_TYPE_JSON);
 
     String body = readRequestBody(request);
+    // Telemetry only (B1): started before parsing so the measured duration is the whole call, and
+    // read here because nothing downstream sees the raw request.
+    long startedAtNanos = System.nanoTime();
+    JSONObject callParams = null;
+    String toolName = null;
 
+    McpUsageTelemetry.setCurrentSessionKey(
+        StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
       JSONObject rpcMessage = new JSONObject(body);
       String method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
+      callParams = rpcMessage.optJSONObject("params");
+      toolName = TOOLS_CALL.equals(method) && callParams != null
+          ? callParams.optString("name", null)
+          : null;
 
       log.debug("MCP request: method={}, id={}", method, id);
 
       // Dispatch the method
-      JSONObject result = dispatchMethod(identity, method, rpcMessage.optJSONObject("params"));
+      JSONObject result = dispatchMethod(identity, method, callParams, response);
 
       // Notifications (no id) don't get a response body
       if (id == null) {
@@ -134,8 +170,14 @@ public class McpServlet extends HttpServlet {
       rpcResponse.put("id", id);
       rpcResponse.put("result", result != null ? result : new JSONObject());
 
+      String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
-      response.getWriter().write(rpcResponse.toString());
+      response.getWriter().write(rendered);
+
+      // AFTER the business transaction has been committed and closed by McpSessionManager, and
+      // after the caller already has its answer: nothing below can affect either.
+      recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
+          toolName, callParams, result, null);
 
     } catch (Exception e) {
       log.error("Error processing MCP message: {}", e.getMessage(), e);
@@ -145,13 +187,123 @@ public class McpServlet extends HttpServlet {
         int errorCode = (e instanceof McpMethodNotFoundException) ? -32601 : -32603;
         JSONObject errorResponse = buildJsonRpcError(rpcId, errorCode, e.getMessage());
 
+        String rendered = errorResponse.toString();
         response.setStatus(HttpServletResponse.SC_OK);
-        response.getWriter().write(errorResponse.toString());
+        response.getWriter().write(rendered);
+
+        recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
+            toolName, callParams, null, McpConstants.ERROR_SERVER);
       } catch (Exception ex) {
         response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
         response.getWriter().write("{\"error\":\"Internal server error\"}");
       }
+    } finally {
+      // Servlet threads are pooled: a leaked session key would attribute one client's calls to
+      // another client's session — and a leaked tenant would attribute it to another company.
+      McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentTenant();
     }
+  }
+
+  // ── Telemetry (Track B1) ────────────────────────────────────────────────
+
+  /**
+   * Stop the telemetry writer on undeploy or container shutdown, so whatever is still queued is
+   * reported rather than lost silently (see {@link McpUsageLogger#shutdown()}).
+   */
+  @Override
+  public void destroy() {
+    try {
+      McpUsageLogger.shutdown();
+    } catch (Exception e) {
+      log.debug("Could not stop MCP telemetry on servlet destroy.", e);
+    }
+    super.destroy();
+  }
+  // ── Telemetry (Track B1) ────────────────────────────────────────────────
+
+  /**
+   * Hand one {@code tools/call} to {@link McpUsageLogger}, which writes it on its own thread, on its
+   * own connection, in its own transaction.
+   * <p>
+   * Called only once the response has been written, so the user's answer is already out and the
+   * business transaction is already committed and closed. The whole body is wrapped in a
+   * {@code catch (Throwable)} for the same reason the logger is: a defect in telemetry must not turn
+   * a successful tool call into a failed HTTP request.
+   *
+   * @param forcedErrorCode the canonical code to record when the call blew up before producing a
+   *     result envelope; null when {@code result} carries its own outcome
+   */
+  private void recordToolCall(AuthIdentity identity, McpCallObservation call, String toolName,
+      JSONObject params, JSONObject result, String forcedErrorCode) {
+    try {
+      if (StringUtils.isBlank(toolName) || !McpUsageLogger.isEnabled()) {
+        return;
+      }
+      JSONObject arguments = params != null ? params.optJSONObject("arguments") : null;
+      String sessionKey = call.sessionKey();
+      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfo(sessionKey);
+
+      boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
+      String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
+
+      // B3/D31: a etendo_feedback call IS a tool call, so it produces exactly ONE row — this one —
+      // discriminated by row_type and carrying the report. It therefore inherits the session,
+      // tenant, timestamp and client columns, and lands in the same sequence as the calls that
+      // provoked it. The payload is stored only when the tool accepted the verdict; a rejected or
+      // rate-limited call is an ordinary error row with nothing in Payload.
+      boolean isFeedback = McpConstants.TOOL_NEO_FEEDBACK.equals(toolName);
+      String payload = (isFeedback && !failed) ? McpFeedbackTool.payloadFor(arguments) : null;
+
+      // ETP-5594: the tenant the call ran under (resolved from the role when the token carries the
+      // "0" wildcard), falling back to the token's own values when no context was ever entered.
+      McpUsageTelemetry.Tenant tenant = McpUsageTelemetry.currentTenant();
+      String identityClient = identity != null ? identity.clientId : null;
+      String identityOrg = identity != null ? identity.orgId : null;
+
+      McpUsageLogger.enqueue(McpUsageRow.builder()
+          .clientId(tenant != null ? tenant.getClientId() : identityClient)
+          .orgId(tenant != null ? tenant.getOrgId() : identityOrg)
+          .userId(identity != null ? identity.userId : null)
+          .sessionKey(sessionKey)
+          .toolName(toolName)
+          .verb(McpUsageTelemetry.verbFor(toolName))
+          .targetEntity(McpUsageTelemetry.targetEntityFor(arguments))
+          .fieldsTouched(McpUsageTelemetry.fieldsTouched(arguments))
+          .outcome(failed ? McpUsageRow.OUTCOME_ERROR : McpUsageRow.OUTCOME_OK)
+          .errorCode(errorCode)
+          .durationMs(call.durationMs())
+          .reqBytes(call.reqBytes())
+          .respBytes(call.respBytes())
+          .clientName(client.getName())
+          .clientVersion(client.getVersion())
+          .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
+          .payload(payload)
+          .build());
+    } catch (Throwable t) { // NOSONAR — telemetry never escalates to the caller.
+      log.debug("Could not record MCP usage for tool '{}'.", toolName, t);
+    }
+  }
+
+  /**
+   * The canonical error code to store on the row, or null when the call succeeded.
+   *
+   * <p>Its own method rather than a nested ternary (java:S3358): this expression decides whether a
+   * call is remembered as failed and under which code, so it is worth reading at a glance. The
+   * order matters — a {@code forcedErrorCode} is set when the call blew up <i>before</i> producing
+   * a result envelope, so there is no envelope to derive a code from and it wins outright.</p>
+   *
+   * @param forcedErrorCode the code imposed by the caller, or null to derive one
+   * @param failed          whether the call is being recorded as a failure
+   * @param result          the tool result envelope, which may carry its own code
+   * @return the code to store, or null for a successful call
+   */
+  private static String errorCodeToRecord(String forcedErrorCode, boolean failed,
+      JSONObject result) {
+    if (forcedErrorCode != null) {
+      return forcedErrorCode;
+    }
+    return failed ? McpUsageTelemetry.errorCodeFrom(result) : null;
   }
 
   // ── GET: Server info / health check ────────────────────────────────────
@@ -203,8 +355,7 @@ public class McpServlet extends HttpServlet {
       JSONObject meta = new JSONObject();
       meta.put("resource", mcpResourceUrl);
       meta.put("authorization_servers", new JSONArray().put(oauth2Url));
-      meta.put("scopes_supported", new JSONArray()
-          .put(LEGACY_JWT_FALLBACK_SCOPES).put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
+      meta.put("scopes_supported", new JSONArray(ApiScopes.ADVERTISED));
       meta.put("bearer_methods_supported", new JSONArray().put("header"));
       response.getWriter().write(meta.toString());
     } catch (JSONException e) {
@@ -235,9 +386,10 @@ public class McpServlet extends HttpServlet {
     // Inline validation
     String authHeader = request.getHeader("Authorization");
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing Authorization: Bearer <token> header");
-      return null;
+      // Only reached when there is no Bearer credential at all — the case that used to be an
+      // unconditional 401. Every request that already carried a token keeps the exact path
+      // below, so OAuth2 and legacy-JWT clients are untouched by ETP-4576.
+      return cookieSessionIdentity(request, response);
     }
 
     String bearerToken = authHeader.substring(7).trim();
@@ -271,16 +423,81 @@ public class McpServlet extends HttpServlet {
     }
   }
 
+  /**
+   * Resolve the request against the backend-managed cookie session (ETP-4576).
+   *
+   * <p>Reached only when no {@code Authorization: Bearer} header is present, which before this
+   * existed was an unconditional 401. The browser SPA holds no token under the cookie scheme —
+   * {@code authHeaders()} deliberately sends nothing and lets the {@code __Host-} cookie travel
+   * on its own — so that 401 rejected every in-app conversation while reads elsewhere in the app
+   * kept working, which is what made it read like a deployment fault rather than an auth one.
+   *
+   * <p>{@link GoNeoAuth#decide} is the module's single arbiter of this, and the outcomes are kept
+   * distinct because the client reacts to them: a failed CSRF/Origin proof is 403 (the session is
+   * valid; re-authenticating would not help), an expired session is 401, and no session at all
+   * falls back to the unchanged "missing Authorization header" 401 — including its
+   * {@code WWW-Authenticate} discovery hint, so an MCP client's OAuth flow still starts here.
+   */
+  private AuthIdentity cookieSessionIdentity(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    GoSessionAuthResult sessionAuth = SESSION_AUTHENTICATOR.authenticate(request);
+    switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
+      case USE_SESSION:
+        return sessionIdentity(request, response, sessionAuth.getRecord());
+      case CSRF_REJECTED:
+        log.warn("Forbidden MCP request: {}", sessionAuth.getRefusalMessage());
+        sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
+            sessionAuth.getRefusalMessage());
+        return null;
+      case SESSION_INVALID:
+        log.warn("Unauthorized MCP request: invalid or expired session");
+        sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+            "Invalid or expired session");
+        return null;
+      default:
+        // NO_CREDENTIALS and USE_LEGACY_BEARER both land here: there is no cookie session AND no
+        // Bearer header, so the answer is the pre-existing one, unchanged.
+        sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+            "Missing Authorization: Bearer <token> header");
+        return null;
+    }
+  }
+
+  /**
+   * Build the request identity from a resolved cookie session.
+   *
+   * <p>The scopes are the same set the validated legacy JWT path grants, and for the same
+   * reason: both are interactive browser sessions, and RBAC still filters the tool catalog
+   * and authorizes every operation by the user's role and window access. Granting less here
+   * would make the same user see a different catalog depending only on which credential
+   * scheme the backend happened to issue.
+   *
+   * <p>A session with no environment selected is rejected rather than defaulted — the tenant
+   * scope is what every downstream query is filtered by, so guessing it is not an option.
+   */
+  private AuthIdentity sessionIdentity(HttpServletRequest request, HttpServletResponse response,
+      GoSessionRecord session) throws IOException {
+    if (StringUtils.isAnyBlank(session.getUserId(), session.getRoleId(), session.getCtxOrgId(),
+        session.getCtxClientId())) {
+      log.warn("Unauthorized MCP request: session has no environment selected");
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Session has no environment selected");
+      return null;
+    }
+    return new AuthIdentity(session.getUserId(), session.getRoleId(), session.getCtxClientId(),
+        session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
+  }
+
   // ── JSON-RPC method dispatch ────────────────────────────────────────────
 
   /**
    * Route a JSON-RPC method to its handler.
    */
-  private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params)
-      throws Exception {
+  private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params,
+      HttpServletResponse response) throws Exception {
     switch (method) {
       case "initialize":
-        return handleInitialize();
+        return handleInitialize(params, response);
       case "initialized":
       case "notifications/initialized":
         return null;
@@ -288,7 +505,7 @@ public class McpServlet extends HttpServlet {
         return new JSONObject();
       case "tools/list":
         return handleToolsList(identity);
-      case "tools/call":
+      case TOOLS_CALL:
         return handleToolsCall(identity, params);
       case "resources/list":
         return handleResourcesList(identity);
@@ -301,7 +518,24 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: initialize ─────────────────────────────────────────────────
 
-  private JSONObject handleInitialize() throws JSONException {
+  /**
+   * Answer the handshake and open a telemetry session.
+   * <p>
+   * The session key is published in the {@value McpUsageTelemetry#HEADER_SESSION_ID} response
+   * header, where the Streamable HTTP transport says it belongs; a spec-conformant client returns
+   * it on every later request, which is what lets a sequence of tool calls be read as one task and
+   * what carries {@code clientInfo} forward (B1). A client that ignores the header still works — it
+   * simply produces rows with no session key and no client name.
+   */
+  private JSONObject handleInitialize(JSONObject params, HttpServletResponse response)
+      throws JSONException {
+    try {
+      response.setHeader(McpUsageTelemetry.HEADER_SESSION_ID, McpUsageTelemetry.openSession(params));
+    } catch (Exception e) {
+      // Telemetry must never break the handshake.
+      log.debug("Could not open an MCP telemetry session.", e);
+    }
+
     JSONObject result = new JSONObject();
     result.put("protocolVersion", PROTOCOL_VERSION);
 
@@ -320,12 +554,31 @@ public class McpServlet extends HttpServlet {
     JSONObject serverInfo = new JSONObject();
     serverInfo.put("name", SERVER_NAME);
     serverInfo.put("version", SERVER_VERSION);
+    serverInfo.put("title", SERVER_TITLE);
+    serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
+    JSONObject icon = new JSONObject();
+    icon.put("src", SERVER_ICON_URL);
+    icon.put("mimeType", SERVER_ICON_MIME_TYPE);
+    icon.put("sizes", new JSONArray().put(SERVER_ICON_SIZES));
+    serverInfo.put("icons", new JSONArray().put(icon));
     result.put("serverInfo", serverInfo);
 
     return result;
   }
 
   // ── Handler: tools/list ─────────────────────────────────────────────────
+
+  /**
+   * Language code of the user the MCP token belongs to, for localized tool titles.
+   *
+   * @return a code such as {@code es_ES}, or {@code null} when the context carries none
+   */
+  private static String currentLanguageCode() {
+    OBContext context = OBContext.getOBContext();
+    return context != null && context.getLanguage() != null
+        ? context.getLanguage().getLanguage()
+        : null;
+  }
 
   private JSONObject handleToolsList(AuthIdentity identity) throws Exception {
     return McpSessionManager.executeInContext(
@@ -337,11 +590,13 @@ public class McpServlet extends HttpServlet {
             Set<String> scopes = parseScopes(identity.scopes);
             List<McpToolDefinition> tools = registry.generateTools(scopes);
 
+            String language = currentLanguageCode();
             JSONObject result = new JSONObject();
             JSONArray toolsArray = new JSONArray();
             for (McpToolDefinition tool : tools) {
               JSONObject toolJson = new JSONObject();
               toolJson.put("name", tool.getName());
+              toolJson.put("title", McpToolTitles.resolve(tool, language));
               toolJson.put("description", tool.getDescription());
               toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
               toolsArray.put(toolJson);
