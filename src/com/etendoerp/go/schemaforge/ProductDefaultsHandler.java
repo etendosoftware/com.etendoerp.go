@@ -177,7 +177,7 @@ public class ProductDefaultsHandler implements NeoHandler {
 
   /**
    * ETP-5009: keeps system-category products out of every list read — REST list and count, the
-   * {@code ?_distinct=} filter values, MCP {@code neo_list} — by putting the exclusion into the
+   * {@code ?_distinct=} filter values, MCP {@code etendo_list} — by putting the exclusion into the
    * query. Replaces the list half of {@link #hideSystemCategoryProducts}, which post-filtered a
    * page core had already cut and counted, and which the distinct fetch never reached at all: the
    * Product window's Categoría filter offered "Discounts" and its Tipo filter offered Servicio,

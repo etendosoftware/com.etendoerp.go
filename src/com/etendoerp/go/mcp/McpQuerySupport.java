@@ -36,7 +36,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 
 /**
- * neo_list query-shaping helpers extracted from {@link McpToolRouterSupport} (ETP-4254): builds the
+ * etendo_list query-shaping helpers extracted from {@link McpToolRouterSupport} (ETP-4254): builds the
  * HQL where clause from MCP filter key-value pairs and applies the optional IMP-2 field projection
  * (summary / explicit field whitelist) to a response. Kept as a focused, DAL-aware companion so
  * {@link McpToolRouterSupport} stays within the class method-count limit.
@@ -133,7 +133,7 @@ final class McpQuerySupport {
     // IMP-39: resolving against the DAL model is not the same question as "may this be filtered".
     // It used to be the only check, so a field the spec excluded filtered perfectly well while the
     // `available` list below - which has always been scoped to the included rows - did not name it
-    // and neo_get did not project it. The set that is enforced and the set that is advertised must
+    // and etendo_get did not project it. The set that is enforced and the set that is advertised must
     // be one set.
     if (excluded.contains(resolved.getName())) {
       throw unknownFilterField(key, dalEntity, sfEntity);
@@ -199,7 +199,7 @@ final class McpQuerySupport {
     /**
      * IMP-30 (second half): read-only properties exempted because their AD column carries a
      * literal configured default, mapped to that default. The exemption exists so an agent that
-     * echoes back what {@code neo_defaults} handed it is not refused for following the documented
+     * echoes back what {@code etendo_defaults} handed it is not refused for following the documented
      * sequence — so it should cover the echo and nothing else. It used to cover any value at all,
      * which is how {@code documentStatus} (default {@code 'DR'}) still accepted {@code "CO"} and
      * created a completed order with no lines, the exact state IMP-30's 2026-08-13 probe reached.
@@ -246,11 +246,11 @@ final class McpQuerySupport {
    *       have cost most of the gate — <b>79 of the 128 writable entities declare a qualifier, and
    *       783 curated read-only fields behind them are AD-updatable</b>, so the rejection would
    *       have fired on under two fifths of the surface. It was kept in the first implementation
-   *       and a live probe caught it: {@code neo_update} on {@code sales-order/header}, whose
+   *       and a live probe caught it: {@code etendo_update} on {@code sales-order/header}, whose
    *       qualifier is {@code salesOrderHeaderHandler}, accepted {@code documentNo} and answered
    *       200.</li>
    *   <li><b>Kept: the configured-AD-default exemption.</b> The platform fills that column, and an
-   *       agent following {@code neo_defaults} is actively invited to send resolved values back in
+   *       agent following {@code etendo_defaults} is actively invited to send resolved values back in
    *       {@code fields} (the subject of IMP-45), so a default echoed into a write is a shape the
    *       recommended sequence produces rather than a mistake.</li>
    * </ul>
@@ -281,7 +281,7 @@ final class McpQuerySupport {
       }
       // Through McpFieldView, never a Restrictions.eq on ISINCLUDED/ISREADONLY: the MCP_CONFIG
       // overrides are invisible to a criteria, and a reader that ignored them would drift from
-      // neo_schema - which is the disagreement IMP-39 exists to end.
+      // etendo_schema - which is the disagreement IMP-39 exists to end.
       McpFieldView view = McpFieldView.of(sfField);
       if (!view.isIncluded()) {
         excluded.add(prop.getName());
@@ -484,7 +484,7 @@ final class McpQuerySupport {
 
   /**
    * Collect the DAL property names the agent may write for an entity — the {@code editable} SFFields
-   * (IMP-7). Feeds {@link McpDefaultsView#apply} so the grouped {@code neo_defaults} view can split
+   * (IMP-7). Feeds {@link McpDefaultsView#apply} so the grouped {@code etendo_defaults} view can split
    * writable defaults from server-managed compliance flags. Returns an empty set (never null) when
    * the entity or its DAL model cannot be resolved, which makes the grouped view degrade to
    * "everything is systemManaged" rather than fail.
@@ -512,7 +512,7 @@ final class McpQuerySupport {
       // the spec and not read-only, mirroring mapVisibility() in push-to-neo.js, where editable is
       // the only visibility yielding isIncluded='Y', isReadOnly='N' - and prefers the curated
       // visibility string wherever one exists, including one the MCP_CONFIG "fields" section
-      // supplies. neo_schema and neo_selectors can no longer disagree about the same field.
+      // supplies. etendo_schema and etendo_selectors can no longer disagree about the same field.
       if (col == null || !McpFieldView.of(sfField).isEditable()) {
         continue;
       }
@@ -553,7 +553,7 @@ final class McpQuerySupport {
   }
 
   /**
-   * Apply the optional IMP-2 field projection to a {@code neo_list}/{@code neo_get} response.
+   * Apply the optional IMP-2 field projection to a {@code etendo_list}/{@code etendo_get} response.
    * Precedence: an explicit {@code fields:[...]} whitelist wins; otherwise {@code view:"summary"}
    * uses the entity's business-critical fields; anything else leaves the response full. A no-op
    * when neither is present, so the default behavior is unchanged.

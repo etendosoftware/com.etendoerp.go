@@ -86,7 +86,7 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * Resolve an included entity for an entity-CRUD tool (neo_list/get/create/update/delete/
+   * Resolve an included entity for an entity-CRUD tool (etendo_list/get/create/update/delete/
    * selectors/defaults/schema), or throw a descriptive error when the spec cannot expose
    * listable entities.
    *
@@ -135,7 +135,7 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * Build the {@code neo_discover} entity summary from an already-loaded entity list.
+   * Build the {@code etendo_discover} entity summary from an already-loaded entity list.
    *
    * <p>ETP-4254 changed this from taking a spec id to taking the list, so the discover loop can
    * load a spec's included entities ONCE and derive both the per-entity summary and the
@@ -159,8 +159,8 @@ final class McpToolRouterSupport {
    * Tells whether a tab is a spec's primary (header-level) one.
    *
    * <p>Same criterion {@link #resolvePrimaryEntityName(List)} applies, expressed for a caller that
-   * already holds the tab and must not pay for a second query to learn it — {@code neo_get} and
-   * {@code neo_create} deciding whether the record has an app page of its own (ETP-5200).</p>
+   * already holds the tab and must not pay for a second query to learn it — {@code etendo_get} and
+   * {@code etendo_create} deciding whether the record has an app page of its own (ETP-5200).</p>
    *
    * @param tab the AD tab backing the addressed entity
    * @return true when the tab is at level 0
@@ -170,8 +170,8 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * Resolve the root ("header") entity of a window spec for {@code neo_discover} (IMP-9), so an
-   * agent knows which entity to create first without calling {@code neo_schema} on each one.
+   * Resolve the root ("header") entity of a window spec for {@code etendo_discover} (IMP-9), so an
+   * agent knows which entity to create first without calling {@code etendo_schema} on each one.
    * <p>
    * Authoritative signal: {@code AD_Tab.tabLevel == 0} marks the header tab (same convention
    * {@link McpToolRouter#resolveParentFK} relies on). {@code SFEntity} carries no parent column,
@@ -216,7 +216,7 @@ final class McpToolRouterSupport {
    * consulted them. Their only gate was {@link #hasSpecAccess(SFSpec, String, String)}, which
    * is role-level ({@code AD_Window_Access} tiering, ETP-4510), not entity-level. Turning the
    * mutation flags off on a monitor/log window therefore blocked the React UI while leaving
-   * the agent free to write — and made {@code neo_discover}'s {@code readOnly: true} a lie.</p>
+   * the agent free to write — and made {@code etendo_discover}'s {@code readOnly: true} a lie.</p>
    *
    * <p>Reported as an explained refusal rather than a bare status code, matching
    * {@link #resolveIncludedEntityOrExplain(SFSpec, String)}: the thrown message names the
@@ -244,7 +244,7 @@ final class McpToolRouterSupport {
    * Refuse a method {@code MCP_CONFIG.verbs} hides from the MCP (ETP-5558), whatever the
    * {@code ETGO_SF_ENTITY} flag says.
    *
-   * <p>Split from {@link #requireMethodEnabled} for {@code neo_schema view:"create"}, which must
+   * <p>Split from {@link #requireMethodEnabled} for {@code etendo_schema view:"create"}, which must
    * refuse a hidden create without starting to refuse entities whose {@code ISPOST} is merely off
    * (its long-standing behaviour).</p>
    *
@@ -265,7 +265,7 @@ final class McpToolRouterSupport {
 
   /**
    * Decide whether a type-{@code W} spec must stay OUT of the agentic catalog entirely — out
-   * of {@code neo_discover}, out of the CRUD/action tool enums and out of
+   * of {@code etendo_discover}, out of the CRUD/action tool enums and out of
    * {@code McpResourceProvider}.
    *
    * <p>Two conditions, both required:</p>
@@ -278,11 +278,11 @@ final class McpToolRouterSupport {
    *
    * <p><b>Why the second condition exists.</b> Condition 1 alone is too broad, and matched two
    * specs rather than the one it was written for: {@code dashboard} (9 widget entities, no
-   * agentic surface at all — correctly hidden, exposed via {@code neo_widget} instead) and
+   * agentic surface at all — correctly hidden, exposed via {@code etendo_widget} instead) and
    * {@code not-posted-documents} (one tab-less entity whose handler serves {@code post} and
    * {@code bulk-post}). Hiding the latter would have removed a genuine transactional business
    * action from agents — the exact opposite of what ETP-4254 is for, since {@code hasSpecAccess}
-   * gates {@code neo_action} too. So a tab-less spec that still exposes an action route stays
+   * gates {@code etendo_action} too. So a tab-less spec that still exposes an action route stays
    * in the catalog; only the fully unreachable ones are dropped.</p>
    *
    * <p>Only applied to type-{@code W} specs. Report specs (type {@code R}) are handler-only by
@@ -359,7 +359,7 @@ final class McpToolRouterSupport {
   /**
    * Same predicate as {@link #isReadOnlySpec(SFSpec)}, evaluated against an already-loaded
    * entity list. This is the single implementation; the spec-taking overload is the querying
-   * entry point. Callers that already hold the list (the {@code neo_discover} loop) must use
+   * entry point. Callers that already hold the list (the {@code etendo_discover} loop) must use
    * this one so the flag costs no extra query.
    *
    * @param entities the spec's active, included entities (may be {@code null} or empty)
@@ -374,7 +374,7 @@ final class McpToolRouterSupport {
 
   /**
    * Read-tier ({@code GET}) spec access check. Use only for visibility/discovery
-   * (neo_discover, MCP resource listing) — never to gate an actual write operation;
+   * (etendo_discover, MCP resource listing) — never to gate an actual write operation;
    * see {@link #hasSpecAccess(SFSpec, String, String)} for that.
    */
   static boolean hasSpecAccess(SFSpec spec, String specType) {
@@ -386,7 +386,7 @@ final class McpToolRouterSupport {
    * <p>
    * For window specs (type {@code "W"}), enforces the read-only vs. full-access tiering
    * (ETP-4510) via {@link NeoAccessUtils#hasWindowAccess(String, String)} — callers that
-   * gate a mutating MCP tool (neo_create/neo_update/neo_delete/neo_batch) MUST pass the
+   * gate a mutating MCP tool (etendo_create/etendo_update/etendo_delete/etendo_batch) MUST pass the
    * write-intent method here, not the 1-arg overload, or a read-only
    * {@code AD_Window_Access} role would be able to write through MCP even though the
    * equivalent REST NEO Headless call correctly returns 403.
@@ -413,12 +413,12 @@ final class McpToolRouterSupport {
         return false;
       }
       // A window spec with neither a CRUD nor an action surface (the dashboard's business
-      // widgets) is not a CRUD window; it is surfaced via neo_widget, never through
-      // neo_discover's W catalog (ETP-4284 / G4). ETP-4254 made this test data-driven instead
+      // widgets) is not a CRUD window; it is surfaced via etendo_widget, never through
+      // etendo_discover's W catalog (ETP-4284 / G4). ETP-4254 made this test data-driven instead
       // of matching the literal spec name; it is scoped to "W" here because type-R report
       // specs are handler-only by design and must keep their existing path. Evaluated after
       // the role check so a denied spec costs no entity query. NOTE: this gate also covers
-      // neo_action (McpToolRouter#route → hasSpecAccess), which is why it must not exclude a
+      // etendo_action (McpToolRouter#route → hasSpecAccess), which is why it must not exclude a
       // tab-less spec that still serves actions — see isCatalogExcludedSpec.
       return !isCatalogExcludedSpec(spec);
     }
@@ -436,7 +436,7 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * Build one {@code neo_discover} spec entry.
+   * Build one {@code etendo_discover} spec entry.
    *
    * <p>ETP-4254 AC#4: a type-{@code W} spec whose every included entity is configured read-only
    * (the SII / VeriFactu / conversion-rate-log / TicketBAI monitors) carries a spec-level
@@ -459,8 +459,8 @@ final class McpToolRouterSupport {
    *                         for non-W specs (and then no marker is emitted)
    */
   /**
-   * {@code neo_discover} status of a report spec that is not a report generator but whose handler
-   * declares named actions reachable through {@code neo_action} (ETP-5468).
+   * {@code etendo_discover} status of a report spec that is not a report generator but whose handler
+   * declares named actions reachable through {@code etendo_action} (ETP-5468).
    */
   static final String STATUS_ACTIONS_ONLY = "actions_only";
 
@@ -495,24 +495,24 @@ final class McpToolRouterSupport {
       specObj.put("callable", callable);
       // ETP-5468: "not a report generator" (callable:false, IMP-19) is not "nothing to do" — a
       // handler may still serve named actions. Such a spec gets its own status instead of
-      // not_configured_for_report_generation, so the agent is sent to neo_action rather than told
+      // not_configured_for_report_generation, so the agent is sent to etendo_action rather than told
       // the spec is unconfigured (or left to go looking for Core buttons).
       java.util.Optional<NeoActionContract.SpecActions> declared = callable
           ? java.util.Optional.empty() : NeoActionContract.resolve(spec);
       if (callable) {
         // Surface the concrete report tool so the agent can call it directly instead of
-        // guessing an entity for neo_list (ETP-4257). Client sees it as etendo_<reportTool>.
+        // guessing an entity for etendo_list (ETP-4257). Client sees it as etendo_<reportTool>.
         specObj.put("reportTool",
             McpConstants.GENERATE_PREFIX + ToolRegistry.kebabToSnake(spec.getName()));
       } else if (declared.isPresent()) {
         String entity = declared.get().getEntityName();
         specObj.put("status", STATUS_ACTIONS_ONLY);
         specObj.put("message", "Not a report generator; '" + spec.getName()
-            + "' serves named actions through neo_action (entity " + entity + ").");
+            + "' serves named actions through etendo_action (entity " + entity + ").");
         specObj.put("actionEntity", entity);
         specObj.put("actions", new JSONArray(declared.get().getContracts().keySet()));
-        specObj.put("actionsHint", "Run these with neo_action (spec '" + spec.getName()
-            + "', entity '" + entity + "'); neo_schema with view:\"actions\" returns each "
+        specObj.put("actionsHint", "Run these with etendo_action (spec '" + spec.getName()
+            + "', entity '" + entity + "'); etendo_schema with view:\"actions\" returns each "
             + "action's parameters.");
       } else {
         specObj.put("status", NeoReportCallability.STATUS_NOT_CONFIGURED);
@@ -675,9 +675,9 @@ final class McpToolRouterSupport {
    * {@code McpToolRouter#coerceFieldTypes} must run before the body reaches this method.
    *
    * <p>That asymmetry is what let ETP-4793 / IMP-16 ship a working date coercer and still corrupt
-   * dates on {@code neo_update}: the verb wrapped without coercing, and nothing in either signature
+   * dates on {@code etendo_update}: the verb wrapped without coercing, and nothing in either signature
    * said it had to. Do not add coercion here to fix a future gap of that kind — it would give
-   * {@code neo_create} two passes and hide the missing call site again instead of naming it.
+   * {@code etendo_create} two passes and hide the missing call site again instead of naming it.
    */
   static String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
       String recordId, org.apache.logging.log4j.Logger log) {
@@ -726,7 +726,7 @@ final class McpToolRouterSupport {
    * Copy an alias argument onto its canonical key when the canonical key is absent (IMP-8).
    * <p>
    * Lets a natural first-try call shape succeed instead of failing on a missing-argument
-   * error. Used by {@code neo_selectors} to accept {@code field} as an alias for the
+   * error. Used by {@code etendo_selectors} to accept {@code field} as an alias for the
    * canonical {@code column} argument. The canonical key wins when both are present, and a
    * blank/null alias is ignored so it never shadows a required-argument check.
    *
@@ -753,7 +753,7 @@ final class McpToolRouterSupport {
    * A get-by-id that matches no record comes back as {@code {response:{data:[], status:0}}},
    * which is indistinguishable from a legitimate success — {@code status 0} reads as OK. This
    * is the ambiguous not-found signal the MCP must translate into an explicit error so an agent
-   * can self-correct. Only meaningful for get-by-id: an empty {@code neo_list} is a valid
+   * can self-correct. Only meaningful for get-by-id: an empty {@code etendo_list} is a valid
    * result, never a not-found.
    *
    * @param responseJson the parsed DefaultJsonDataService response (may be {@code null})
@@ -785,7 +785,7 @@ final class McpToolRouterSupport {
    * <p><b>Flat, as of IMP-5 clause (iii).</b> This envelope used to be returned wrapped in
    * {@code {"response":{…}}}, which made it the one read-verb error that did not match the shape of
    * its siblings on the same tool: an unknown filter or a DAL failure on the very same
-   * {@code neo_get} call came back flat from {@code buildDalFailureEnvelope}. IMP-17 §8.6 measured
+   * {@code etendo_get} call came back flat from {@code buildDalFailureEnvelope}. IMP-17 §8.6 measured
    * "read errors are flat" on that vector and the not-found vector was never re-checked, so the
    * asymmetry survived inside the item that introduced the envelope.</p>
    *
@@ -811,9 +811,9 @@ final class McpToolRouterSupport {
    * clause (iii)).
    *
    * <p><b>The asymmetry this closes.</b> Every MCP failure body is flat — {@code {status, error,
-   * detail, …}} — and so is every {@code neo_delete} success, which builds its own
-   * {@code {deleted,id}}. The four DAL-backed successes were the exception: {@code neo_list},
-   * {@code neo_get}, {@code neo_create} and {@code neo_update} forwarded
+   * detail, …}} — and so is every {@code etendo_delete} success, which builds its own
+   * {@code {deleted,id}}. The four DAL-backed successes were the exception: {@code etendo_list},
+   * {@code etendo_get}, {@code etendo_create} and {@code etendo_update} forwarded
    * {@code {"response":{data,status:0,startRow,endRow,totalRows}}} straight from
    * {@code DefaultJsonDataService}, so an agent had to unwrap <em>conditionally</em>, on a key it
    * could only predict by first knowing whether the call had succeeded. Same defect class as clauses
@@ -821,9 +821,9 @@ final class McpToolRouterSupport {
    *
    * <p><b>Wider than the clause as registered</b>, which reads "read-verb wrapped, write-verb bare".
    * That was measured on the <em>error</em> bodies (IMP-17 §8.6); on the success bodies the write
-   * verbs are wrapped too, and only {@code neo_delete} — which never returns
+   * verbs are wrapped too, and only {@code etendo_delete} — which never returns
    * {@code DefaultJsonDataService}'s response — is bare. Flattening the reads alone would have made
-   * {@code neo_create} and {@code neo_update} the new outliers, i.e. moved the inconsistency rather
+   * {@code etendo_create} and {@code etendo_update} the new outliers, i.e. moved the inconsistency rather
    * than removed it.</p>
    *
    * <p><b>Where the wrapper comes from, and why it is not removed there.</b> {@code response} is
@@ -871,7 +871,7 @@ final class McpToolRouterSupport {
   }
 
   /**
-   * Builds the guidance object advertised by {@code neo_discover} so a cold agent is routed to the
+   * Builds the guidance object advertised by {@code etendo_discover} so a cold agent is routed to the
    * {@code docs} tool for ready-to-run recipes (IMP-10). Shape:
    * {@code {"tool":"docs","hint":"Call docs(topic:…) for ready-to-run recipes per task."}}.
    *
@@ -897,7 +897,7 @@ final class McpToolRouterSupport {
    * {@code generate_aging_receivable({})} answered
    * {@code {"error":{"message":"No accounting schema with currency is configured for organization
    * 6184…","status":422}}}: the nested pre-IMP-5 shape, with no machine-detectable code to branch on.
-   * The same funnel serves {@code neo_process}, the {@code neo_widget}/amortization paths and every
+   * The same funnel serves {@code etendo_process}, the {@code etendo_widget}/amortization paths and every
    * entity pre/post hook, because all of them return through
    * {@code McpHookExecutor#neoResponseToMcpResult} — which is why one normalization here covers five
    * surfaces, the same leverage IMP-17 got from closing three funnels with one change.</p>

@@ -39,6 +39,8 @@ import org.junit.jupiter.api.Test;
  * request" would fix the false success and leave the caller just as stuck, so every assertion here
  * is about the self-correcting half: {@code available}, {@code parentField}, {@code parentEntity},
  * and a hint that names the next call.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpRoutingException
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -105,7 +107,7 @@ class McpRoutingExceptionRefusalTest {
           McpRoutingException.unknownFilterField("x", "e", names(150)).toEnvelope()
               .getString(McpConstants.KEY_HINT);
       assertTrue(truncated.contains("truncated"), "silence here would be the original bug again");
-      assertTrue(truncated.contains("neo_schema"), "and it must say where the rest live");
+      assertTrue(truncated.contains("etendo_schema"), "and it must say where the rest live");
 
       String complete = McpRoutingException.unknownFilterField("x", "e", names(3)).toEnvelope()
           .getString(McpConstants.KEY_HINT);
@@ -196,12 +198,12 @@ class McpRoutingExceptionRefusalTest {
     }
 
     @Test
-    @DisplayName("hints the exact neo_list call that finds the parent")
+    @DisplayName("hints the exact etendo_list call that finds the parent")
     void hintsTheNextCall() throws JSONException {
       String hint = McpRoutingException
           .parentRequired("sales-order", "lines", "header", "salesOrder").toEnvelope()
           .getString(McpConstants.KEY_HINT);
-      assertTrue(hint.contains("neo_list"));
+      assertTrue(hint.contains("etendo_list"));
       assertTrue(hint.contains("sales-order"));
       assertTrue(hint.contains("header"));
     }
@@ -216,8 +218,8 @@ class McpRoutingExceptionRefusalTest {
           .parentRequired("sales-order", "lines", null, "salesOrder").toEnvelope();
       assertFalse(envelope.has("parentEntity"));
       assertEquals("salesOrder", envelope.getString("parentField"));
-      assertFalse(envelope.getString(McpConstants.KEY_HINT).contains("neo_list"),
-          "offering a neo_list on an entity that is not exposed would send the agent nowhere");
+      assertFalse(envelope.getString(McpConstants.KEY_HINT).contains("etendo_list"),
+          "offering a etendo_list on an entity that is not exposed would send the agent nowhere");
       assertFalse(envelope.getString(McpConstants.KEY_DETAIL).contains("null"),
           "never leak the absent name into the prose");
     }

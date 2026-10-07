@@ -307,7 +307,7 @@ public final class NeoAccessHelper {
    * lives somewhere {@link #allConstituentWindowsAllow(List, String)} cannot evaluate — a classic
    * {@code AD_Process}, an OBUIAPP process definition, or a tab-less window — reaches that check
    * with nothing to compare against, and it answers permissively. Before this method, that meant
-   * {@code neo_discover} and the report-tool publication advertised reports the handler then
+   * {@code etendo_discover} and the report-tool publication advertised reports the handler then
    * refused with a 403 when they were called.</p>
    *
    * <p>A handler that does not override {@link NeoHandler#isAccessibleForCurrentRole} answers
