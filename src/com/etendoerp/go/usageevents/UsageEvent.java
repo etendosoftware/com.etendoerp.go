@@ -27,6 +27,8 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+
 /**
  * One {@code ETGO_USAGE_EVENT} row, fully resolved on the calling thread before it is handed to
  * {@link UsageEventRecorder}.
@@ -105,6 +107,23 @@ public record UsageEvent(
 
   /** Stored instead of {@link #properties} when the attributes do not fit. Valid JSON on purpose. */
   static final String PROPERTIES_OVERSIZE_MARKER = "{\"_truncated\":true}";
+
+  /**
+   * ETP-5351 (T7) — reserved {@link #properties} key naming who acted when it was not the tenant.
+   * Set by {@link Builder#build()} only; a value supplied by a caller (or by the UI body) is dropped,
+   * so the marker can be trusted when aggregating.
+   */
+  public static final String PROPERTY_ACTOR = "actor";
+
+  /** {@link #PROPERTY_ACTOR} value of an event done in a support session ("Soporte Etendo"). */
+  public static final String ACTOR_SUPPORT = "support";
+
+  /** {@link #properties} of a support event whose own attributes could not be stored. */
+  static final String PROPERTIES_SUPPORT_ONLY = "{\"actor\":\"support\"}";
+
+  /** {@link #PROPERTIES_OVERSIZE_MARKER} of a support event: the marker keeps the actor. */
+  static final String PROPERTIES_SUPPORT_OVERSIZE_MARKER =
+      "{\"_truncated\":true,\"actor\":\"support\"}";
 
   /** Etendo system user, used when there is no user in context. */
   static final String SYSTEM_USER = "100";
@@ -383,12 +402,30 @@ public record UsageEvent(
     /**
      * Assemble the event. Never throws.
      *
+     * <p>ETP-5351 (T7): an event whose actor is the tenant's "Soporte Etendo" user is kept and
+     * marked {@code "actor":"support"} in {@link UsageEvent#properties}, so usage, activity and
+     * health aggregations can leave it out. Decided here, from the who-columns, so every producer
+     * (backend events, the UI ingest endpoint, the AI BFF) is covered without knowing about it, and
+     * on any thread. {@value UsageEvent#PROPERTY_ACTOR} is reserved: whatever a caller put there is
+     * dropped.</p>
+     *
      * @return the immutable event, with {@code occurredAt} defaulted to now when unset
      */
     public UsageEvent build() {
+      boolean supportActor = SupportAccessGuard.isSupportUser(userId, clientId);
+      properties.remove(PROPERTY_ACTOR);
+      if (supportActor) {
+        properties.put(PROPERTY_ACTOR, ACTOR_SUPPORT);
+      }
+      String serialized = serializeProperties(properties);
+      if (supportActor && serialized == null) {
+        serialized = PROPERTIES_SUPPORT_ONLY;
+      } else if (supportActor && PROPERTIES_OVERSIZE_MARKER.equals(serialized)) {
+        serialized = PROPERTIES_SUPPORT_OVERSIZE_MARKER;
+      }
       return new UsageEvent(clientId, orgId, userId, roleId, eventType, source, sessionKey, target,
           action, outcome, errorCode, durationMs, occurredAt != null ? occurredAt : Instant.now(),
-          appVersion, serializeProperties(properties));
+          appVersion, serialized);
     }
   }
 

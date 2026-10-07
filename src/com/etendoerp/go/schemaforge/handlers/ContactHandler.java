@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -29,6 +30,7 @@ import org.openbravo.base.exception.OBException;
 import com.etendoerp.go.schemaforge.AbstractPersonNameHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * Pre-save hook for the {@code contact} entity ({@code AD_User}) of the contacts spec.
@@ -101,6 +103,18 @@ public class ContactHandler extends AbstractPersonNameHandler {
   @Override
   protected int maxNameLength() {
     return MAX_LENGTH;
+  }
+
+  /**
+   * ETP-5351 (T6) — a contact list read without a parent business partner would list every
+   * {@code AD_User} of the tenant; the tenant's "Soporte Etendo" user is never one of them.
+   *
+   * @param context the read context
+   * @return the support-user exclusion, or nothing when the request has no client
+   */
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    return SupportUserExclusion.userReadPredicates(context != null ? context.getObContext() : null);
   }
 
   @Override

@@ -30,6 +30,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoLocatorSelectorHelper;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * Generic dynamic selector service for FK fields.
@@ -404,6 +405,11 @@ public class NeoSelectorService {
       if (StringUtils.isNotBlank(finAccPaymentMethodId)) {
         ctxFilterParams.put("finAccPaymentMethodId", finAccPaymentMethodId);
       }
+    }
+    if (ctxParamFilter != null && ctxParamFilter.contains(":" + SupportUserExclusion.HQL_PARAM)) {
+      // ETP-5351 (T6): SupportUserSelectorPolicy names the parameter; the id is bound, not inlined.
+      ctxFilterParams.put(SupportUserExclusion.HQL_PARAM, StringUtils.defaultString(
+          SupportUserExclusion.supportUserIdOrNull(SupportUserExclusion.currentClientId())));
     }
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {

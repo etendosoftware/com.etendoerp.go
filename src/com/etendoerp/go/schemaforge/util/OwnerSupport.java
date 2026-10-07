@@ -50,6 +50,11 @@ public final class OwnerSupport {
   private static final Logger log = LogManager.getLogger(OwnerSupport.class);
 
   private static final String COLUMN_IS_OWNER = "em_etgo_is_owner";
+  /**
+   * ETP-5351 — the per-tenant "Soporte Etendo" user ({@code EM_ETGO_IS_SUPPORT = 'Y'}) can never
+   * become the owner, whatever order users are provisioned in.
+   */
+  private static final String COLUMN_IS_SUPPORT = "em_etgo_is_support";
   /** Sonar java:S1192 — ETP-5411 added a 3rd {@code setParameter("clientId", ...)} call. */
   private static final String PARAM_CLIENT_ID = "clientId";
 
@@ -157,7 +162,8 @@ public final class OwnerSupport {
     Session session = OBDal.getInstance().getSession();
     NativeQuery<?> update = session.createNativeQuery(
         "UPDATE ad_user SET " + COLUMN_IS_OWNER + " = 'Y' "
-            + "WHERE ad_user_id = :userId AND ad_client_id = :clientId AND NOT EXISTS ("
+            + "WHERE ad_user_id = :userId AND ad_client_id = :clientId "
+            + "AND " + COLUMN_IS_SUPPORT + " = 'N' AND NOT EXISTS ("
             + "SELECT 1 FROM ad_user u2 WHERE u2.ad_client_id = :clientId AND u2."
             + COLUMN_IS_OWNER + " = 'Y')");
     update.setParameter("userId", userId);

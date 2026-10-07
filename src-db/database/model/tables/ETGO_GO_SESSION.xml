@@ -97,6 +97,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="ETGO_SUPPORT_ACCESS_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="ETGO_ACCOUNT" name="ETGO_GOS_ACCOUNT_FK">
         <reference local="ETGO_ACCOUNT_ID" foreign="ETGO_ACCOUNT_ID"/>
       </foreign-key>
@@ -118,12 +122,23 @@
       <foreign-key foreignTable="ETGO_GO_SESSION" name="ETGO_GOS_ROTFROM_FK">
         <reference local="ROTATED_FROM_ID" foreign="ETGO_GO_SESSION_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="ETGO_SUPPORT_ACCESS" name="ETGO_GOS_SUPACC_FK">
+        <reference local="ETGO_SUPPORT_ACCESS_ID" foreign="ETGO_SUPPORT_ACCESS_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="AD_USER" name="ETGO_GOS_USER_FK">
         <reference local="AD_USER_ID" foreign="AD_USER_ID"/>
       </foreign-key>
       <foreign-key foreignTable="M_WAREHOUSE" name="ETGO_GOS_WH_FK">
         <reference local="M_WAREHOUSE_ID" foreign="M_WAREHOUSE_ID"/>
       </foreign-key>
+      <index name="ETGO_GOS_CTXCLIENT_IX" unique="false">
+        <index-column name="CTX_CLIENT_ID"/>
+        <index-column name="CREATED"/>
+      </index>
+      <index name="ETGO_GOS_SUPACC_IX" unique="false">
+        <index-column name="ETGO_SUPPORT_ACCESS_ID"/>
+        <whereClause><![CDATA[ETGO_SUPPORT_ACCESS_ID IS NOT NULL]]></whereClause>
+      </index>
       <unique name="ETGO_GOS_REFHASH_UQ">
         <unique-column name="REFRESH_TOKEN_HASH"/>
       </unique>
@@ -133,7 +148,7 @@
       <unique name="ETGO_GOS_TOKENHASH_UQ">
         <unique-column name="SESSION_TOKEN_HASH"/>
       </unique>
-      <check name="ETGO_GOS_AUTHMETHOD"><![CDATA[AUTH_METHOD IN ('password', 'sso')]]></check>
+      <check name="ETGO_GOS_AUTHMETHOD"><![CDATA[AUTH_METHOD IN ('password', 'sso', 'support')]]></check>
       <check name="ETGO_GOS_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_GOS_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
     </table>

@@ -105,6 +105,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="IS_SUPPORT_ACCOUNT" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault><![CDATA[N]]></onCreateDefault>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_ACCOUNT_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -117,6 +121,10 @@
       <foreign-key foreignTable="AD_USER" name="ETGO_ACCOUNT_UPDBY_FK">
         <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
       </foreign-key>
+      <index name="ETGO_ACCOUNT_SUPPORT_UQ" unique="true">
+        <index-column name="IS_SUPPORT_ACCOUNT"/>
+        <whereClause><![CDATA[IS_SUPPORT_ACCOUNT='Y']]></whereClause>
+      </index>
       <unique name="ETGO_ACCOUNT_EMAIL_UQ">
         <unique-column name="EMAIL"/>
       </unique>
@@ -125,6 +133,7 @@
         <unique-column name="EXTERNAL_SUBJECT"/>
       </unique>
       <check name="ETGO_ACCOUNT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_ACCOUNT_ISSUPPORT"><![CDATA[IS_SUPPORT_ACCOUNT IN ('Y', 'N')]]></check>
       <check name="ETGO_ACCOUNT_STATUS"><![CDATA[STATUS IN ('active', 'pending')]]></check>
     </table>
   </database>

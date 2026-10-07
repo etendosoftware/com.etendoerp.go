@@ -44,6 +44,7 @@ import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * Service managing company user invitations (ETP-4894).
@@ -266,6 +267,11 @@ public class CompanyInvitationService {
    */
   private JSONObject issueFreshInvitation(InviterContext inviter, Organization organization,
       User invitedUser, String email, String appBaseUrl, String language) throws JSONException {
+    if (SupportAccessGuard.isSupportEmail(email)) {
+      // ETP-5351 (T5): every invitation (create and resend) is minted here; none may target the
+      // technical support account's address.
+      return errorResponse(400, "INVITATION_EMAIL_RESERVED", "This email address is reserved");
+    }
     String rawToken = generateToken();
     Date expiresAt = Date.from(Instant.now().plus(INVITATION_TTL_DAYS, ChronoUnit.DAYS));
     Invitation invitation = persistInvitation(inviter, organization, invitedUser, email,
@@ -571,6 +577,11 @@ public class CompanyInvitationService {
     if (authenticatedAccount == null) {
       return errorResponse(401, "AUTHENTICATION_REQUIRED",
           "Sign in with the invited Etendo Go account before accepting");
+    }
+    if (SupportAccessGuard.isSupportAccount(authenticatedAccount)) {
+      // ETP-5351 (T5): the technical support account never joins a company.
+      return errorResponse(403, SupportAccessGuard.ERROR_CODE_FORBIDDEN,
+          SupportAccessGuard.MESSAGE_FORBIDDEN);
     }
 
     return withAdminMode(() -> acceptExistingAccountInAdminMode(rawToken, authenticatedAccount));

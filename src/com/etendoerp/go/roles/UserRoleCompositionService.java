@@ -45,6 +45,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 
 /**
  * ETP-4852 — server-side mechanism behind "compose a user's access from 1+ system-level
@@ -337,6 +338,7 @@ public class UserRoleCompositionService {
       throw new OBException(USER_NOT_FOUND + userId);
     }
     enforceCallerClientBoundary(user, callerRole);
+    rejectSupportUserTarget(user);
     enforceOwnerProtection(user, callerUserId);
 
     List<Role> templates = resolveAndValidateTemplates(templateRoleIds);
@@ -402,6 +404,7 @@ public class UserRoleCompositionService {
     if (user == null) {
       throw new OBException("Missing user for personal role creation");
     }
+    rejectSupportUserTarget(user);
     OBContext.setAdminMode(true);
     try {
       return resolveOrCreatePersonalRole(user);
@@ -451,11 +454,28 @@ public class UserRoleCompositionService {
     if (user == null) {
       throw new OBException("Missing user for personal role creation");
     }
+    rejectSupportUserTarget(user);
     OBContext.setAdminMode(true);
     try {
       return createPersonalRole(user);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5351 (T6) — the tenant's "Soporte Etendo" user keeps exactly the client-admin role its
+   * provisioner gives it; nothing here composes, creates or restores a personal role for it,
+   * whoever asks.
+   *
+   * @param user the already-resolved target user
+   * @throws OBException if {@code user} is its client's support user
+   */
+  private static void rejectSupportUserTarget(User user) {
+    if (user != null && user.getClient() != null
+        && SupportAccessGuard.isSupportUser(user.getId(), user.getClient().getId())) {
+      throw new OBException("The support user's role is managed by support access: "
+          + user.getId());
     }
   }
 
@@ -967,7 +987,8 @@ public class UserRoleCompositionService {
   /**
    * Queries every {@code AD_User} of {@code clientId} — used only by {@link
    * #getAppliedTemplateRoleIdsForClient(String)} (ETP-4906) to seed a "every user gets an entry"
-   * result map before any personal-role resolution.
+   * result map before any personal-role resolution. The tenant's "Soporte Etendo" user is not one
+   * of its users (ETP-5351, T6) and gets no entry: the role grid and the role cards never list it.
    */
   @SuppressWarnings("unchecked")
   private List<User> findUsersForClient(String clientId) {
@@ -975,7 +996,9 @@ public class UserRoleCompositionService {
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(User.PROPERTY_CLIENT + ".id", clientId));
-    return criteria.list();
+    List<User> users = new ArrayList<>((List<User>) criteria.list());
+    users.removeIf(user -> SupportAccessGuard.isSupportUser(user.getId(), clientId));
+    return users;
   }
 
   /**
@@ -1277,6 +1300,11 @@ public class UserRoleCompositionService {
     if (StringUtils.isBlank(targetUserId)) {
       throw new OBException("Missing user id for admin demotion");
     }
+    // ETP-5351 (T5): a support session never takes the admin role away from anyone.
+    if (callerRole != null && callerRole.getClient() != null
+        && SupportAccessGuard.isSupportUser(callerUserId, callerRole.getClient().getId())) {
+      throw new OBException("A support session cannot demote an Admin: " + targetUserId);
+    }
     writeLock.acquire(targetUserId);
     if (!callerIsOwnerOrAdmin(callerUserId)) {
       throw new OBException("Not authorized to demote an Admin: " + callerUserId);
@@ -1289,6 +1317,7 @@ public class UserRoleCompositionService {
       throw new OBException(USER_NOT_FOUND + targetUserId);
     }
     enforceCallerClientBoundary(target, callerRole);
+    rejectSupportUserTarget(target);
     if (OwnerSupport.isOwner(targetUserId)) {
       throw new OBException("The owner can never be demoted: " + targetUserId);
     }

@@ -35,6 +35,7 @@ import org.openbravo.model.ad.access.UserRoles;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.rest.EtendoGoJwtSupport.RoleListData;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -165,6 +166,14 @@ public class SFRefreshToken extends BaseWebhookService {
       if (!Boolean.TRUE.equals(user.isActive())) {
         responseVars.put(RESPONSE_VAR_RESULT,
             WebhookFailureResponses.failure("User is not active").toString());
+        return;
+      }
+      // ETP-5351 (T5): never mint a bearer JWT for a tenant's "Soporte Etendo" user — it would
+      // outlive the support session. Answer the no-op shape the frontend already handles.
+      if (SupportAccessGuard.isSupportUser(user.getId(),
+          user.getClient() == null ? null : user.getClient().getId())) {
+        RoleListData roleListData = EtendoGoJwtSupport.loadRoleListData(callerUserId);
+        responseVars.put(RESPONSE_VAR_RESULT, unchanged(roleListData.getRoleArray()).toString());
         return;
       }
       Role currentRole = user.getDefaultRole();

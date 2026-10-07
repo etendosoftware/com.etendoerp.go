@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
+import com.etendoerp.go.supportaccess.SupportAccessGuard;
+import com.etendoerp.go.supportaccess.SupportUserExclusion;
 
 /**
  * NeoHandler for the {@code user} spec. Three independent concerns share this one class because
@@ -281,16 +283,34 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       return handleCreate(context);
     }
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
-      return validateUpdate(context);
+      NeoResponse supportGuard = rejectSupportSessionOnAdmin(context, context.getRecordId(),
+          isAdminStrippingUpdate(context.getRequestBody()));
+      return supportGuard != null ? supportGuard : validateUpdate(context);
     }
     if (METHOD_DELETE.equalsIgnoreCase(method)) {
-      return rejectDangerousDelete(context);
+      NeoResponse supportGuard = rejectSupportSessionOnAdmin(context, resolveDeleteTarget(context),
+          true);
+      return supportGuard != null ? supportGuard : rejectDangerousDelete(context);
     }
     if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
       excludeContactOnlyUsers(context);
       applyRoleFilter(context);
     }
     return null;
+  }
+
+  /**
+   * ETP-5351 (T6) — the tenant's "Soporte Etendo" user never shows up in a list of users: the REST
+   * list, its count, the {@code ?_distinct=} values and MCP {@code neo_list} all get the predicate
+   * (see {@link NeoHandler#readPredicates}). A read by id is not affected, so the support user's
+   * own record stays readable for the audit links of the records it touched.
+   *
+   * @param context the read context
+   * @return the support-user exclusion, or nothing when the request has no client
+   */
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    return SupportUserExclusion.userReadPredicates(context != null ? context.getObContext() : null);
   }
 
   /**
@@ -818,6 +838,78 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   }
 
   /**
+   * ETP-5351 (T5) — in a support session, the tenant's "Soporte Etendo" user may not delete,
+   * deactivate or take the admin role away from the owner or any other admin (it may still do
+   * everything else an admin does). Checked before the ordinary guards, which only protect the
+   * last real admin (the support user is not counted, T6), not every admin.
+   *
+   * @param context   the request
+   * @param userId    the target {@code AD_User_ID}, may be null
+   * @param dangerous whether the request deletes, deactivates or changes the role of the target
+   * @return a 403 when refused, a 500 when the check itself failed, {@code null} to continue
+   */
+  private NeoResponse rejectSupportSessionOnAdmin(NeoContext context, String userId,
+      boolean dangerous) {
+    OBContext obContext = context.getObContext();
+    String actingUserId = obContext != null && obContext.getUser() != null
+        ? obContext.getUser().getId() : null;
+    String clientId = obContext != null && obContext.getCurrentClient() != null
+        ? obContext.getCurrentClient().getId() : null;
+    if (!dangerous || userId == null
+        || !SupportAccessGuard.isSupportUser(actingUserId, clientId)) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        User target = OBDal.getInstance().get(User.class, userId);
+        if (target != null && (OwnerSupport.isOwner(userId) || holdsClientAdminRole(target))) {
+          return NeoResponse.error(403, SupportAccessGuard.MESSAGE_FORBIDDEN);
+        }
+        return null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectSupportSessionOnAdmin error for user {}: {}",
+          userId, e.getMessage(), e);
+      // Fail CLOSED, same reasoning as the other write-path guards in this class.
+      return NeoResponse.error(500, "Error validating support restrictions: " + e.getMessage());
+    }
+  }
+
+  /** Whether an update deactivates the user or touches its role (a demotion path). */
+  private static boolean isAdminStrippingUpdate(JSONObject requestBody) {
+    return requestBody != null
+        && (AbstractSmartDeactivationHandler.isExplicitlyDeactivating(requestBody)
+            || requestBody.has(FIELD_DEFAULT_ROLE));
+  }
+
+  /** Whether the user holds an active client-admin role (default role or any assignment). */
+  private static boolean holdsClientAdminRole(User user) {
+    Role defaultRole = user.getDefaultRole();
+    if (defaultRole != null && Boolean.TRUE.equals(defaultRole.isClientAdmin())) {
+      return true;
+    }
+    for (UserRoles assignment : user.getADUserRolesList()) {
+      if (Boolean.TRUE.equals(assignment.isActive()) && assignment.getRole() != null
+          && Boolean.TRUE.equals(assignment.getRole().isClientAdmin())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The record a DELETE touches: the path id, else the query {@code id} (ETP-5195, R3). */
+  private static String resolveDeleteTarget(NeoContext context) {
+    String userId = context.getRecordId();
+    if (userId == null && context.getQueryParams() != null) {
+      userId = context.getQueryParams().get(FIELD_ID);
+    }
+    return userId;
+  }
+
+  /**
    * Pre-hook guard for a {@code user} {@code DELETE}: rejects a self-delete, a delete of the
    * client's owner record (by anyone, including the owner themself), and a delete of the last
    * remaining active client-admin. Runs BEFORE the default CRUD delete (this is a {@code
@@ -895,6 +987,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * javadoc: real access checks read {@code AD_User_Roles}, not the UI-convenience pointer
    * field). {@code false} when {@code targetUser} doesn't currently hold an active client-admin
    * role at all — deactivating it then carries no lockout risk from this angle.
+   *
+   * <p><b>ETP-5351 (T6).</b> The tenant's "Soporte Etendo" user holds the client-admin role too,
+   * but it is not a tenant admin: counting it would let the tenant delete or deactivate its last
+   * real admin while a support user exists. It is dropped from the set before counting, so the
+   * support user is never what keeps a real admin from being "the last one".</p>
    */
   private boolean isLastActiveClientAdmin(User targetUser) {
     Client client = targetUser.getClient();
@@ -914,6 +1011,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     for (UserRoles row : activeAdminAssignments) {
       activeAdminUserIds.add(row.getUserContact().getId());
     }
+    SupportUserExclusion.removeFrom(activeAdminUserIds, client.getId());
     return activeAdminUserIds.size() == 1 && activeAdminUserIds.contains(targetUser.getId());
   }
 
