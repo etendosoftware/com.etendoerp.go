@@ -27,7 +27,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * ({@link NeoMethodPolicy}), minus the verbs {@code MCP_CONFIG.verbs} hides ({@link McpVerbsSection},
  * ETP-5558).
  *
- * <p>The single MCP-side source of that answer. {@code neo_discover}, {@code neo_schema}, the tool
+ * <p>The single MCP-side source of that answer. {@code etendo_discover}, {@code etendo_schema}, the tool
  * catalogue, the MCP resources and every write verb ask here, never {@link NeoMethodPolicy}
  * directly: a surface that kept reading the raw flags would advertise or execute what the others
  * refuse. {@code McpVerbsSectionTest} pins that. REST keeps reading {@link NeoMethodPolicy} and is
@@ -117,11 +117,11 @@ final class McpMethodPolicy {
         .append("' does not enable ").append(method)
         .append(". Enabled methods: ").append(enabledText).append('.');
     if (isReadOnly(entity)) {
-      message.append(" This entity is read-only by configuration — use neo_list or neo_get "
+      message.append(" This entity is read-only by configuration — use etendo_list or etendo_get "
           + "to read it. CRUD writes to it are not allowed; a separately configured "
-          + "neo_action may still be available. Do not retry this CRUD operation.");
+          + "etendo_action may still be available. Do not retry this CRUD operation.");
     } else {
-      message.append(" Pick a tool that matches an enabled method, or use neo_discover to "
+      message.append(" Pick a tool that matches an enabled method, or use etendo_discover to "
           + "inspect this spec's entities before retrying.");
     }
     return message.toString();

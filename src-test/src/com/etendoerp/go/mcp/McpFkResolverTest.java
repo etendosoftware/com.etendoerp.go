@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * end-to-end claim still rests on a probe against a real instance; what they do pin down is the
  * resolver's own contract: which values short-circuit, which reach the selector, and — for IMP-22 —
  * <b>what context each selector call is given</b>.
+ *
+ * @covers com.etendoerp.go.mcp.McpFkResolver
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -117,7 +119,7 @@ class McpFkResolverTest {
   /**
    * The value-format matrix required by IMP-15: one FK field must accept a UUID, a legacy numeric
    * record id and a display name, and both write verbs share this resolver — so covering it here
-   * covers {@code neo_create}, {@code neo_update} and {@code neo_batch} at once.
+   * covers {@code etendo_create}, {@code etendo_update} and {@code etendo_batch} at once.
    */
   @Nested
   @DisplayName("resolveFkNames — value-format matrix (IMP-15)")
@@ -188,7 +190,7 @@ class McpFkResolverTest {
           MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class)) {
         obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
         assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
-        // Untouched: it was already the id, which is exactly what neo_defaults hands back.
+        // Untouched: it was already the id, which is exactly what etendo_defaults hands back.
         assertEquals(LEGACY_ID, body.getString(KEY));
         selector.verifyNoInteractions();
       }
@@ -232,7 +234,7 @@ class McpFkResolverTest {
         assertEquals(KEY, error.getString("field"));
         // The id path already ran, so this advice would send the agent back to what it just did.
         assertFalse(error.getString(McpConstants.KEY_DETAIL).contains("exact record id"));
-        assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("neo_selectors"));
+        assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("etendo_selectors"));
       }
     }
 
@@ -254,8 +256,8 @@ class McpFkResolverTest {
   /**
    * IMP-22: a selector whose candidate set only exists relative to a sibling field.
    * <p>
-   * The defect these guard is specific and was measured, not imagined: {@code neo_create} rejected
-   * the byte-identical {@code $_identifier} that {@code neo_selectors} returned for the same column
+   * The defect these guard is specific and was measured, not imagined: {@code etendo_create} rejected
+   * the byte-identical {@code $_identifier} that {@code etendo_selectors} returned for the same column
    * with a {@code recordContext}. So the assertions are about <b>what context the selector was
    * called with</b>, not merely about the end result — a test that only checked the resolved id would
    * pass against a resolver that guessed right for the wrong reason.
@@ -318,7 +320,7 @@ class McpFkResolverTest {
     @DisplayName("a dependent FK is looked up with the sibling id the body already carries")
     void dependentFkGetsTheSiblingAsContext() throws Exception {
       JSONObject body = new JSONObject();
-      body.put(BP_KEY, BP_ID);          // already an id, as neo_selectors would have returned it
+      body.put(BP_KEY, BP_ID);          // already an id, as etendo_selectors would have returned it
       body.put(ADDR_KEY, ADDR_NAME);    // the $_identifier that used to come back as a 422
       List<Map<String, String>> addressContexts = new ArrayList<>();
 

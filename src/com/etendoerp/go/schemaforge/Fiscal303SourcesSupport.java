@@ -283,17 +283,29 @@ class Fiscal303SourcesSupport {
    * #calculateCorrectiveOperations} EXACTLY, because the aggregate box totals of this same tab —
    * and, more importantly, the real AEAT 303 file produced by the classic module
    * ({@code AEAT303Report2014} / {@code AEAT303SubmissionService}) — classify a line with that
-   * rule. The generated file is the source of truth; a per-invoice "Casillas" label that used a
-   * different signal (e.g. the {@code C_DocType.EM_ETSG_IsRectificative} flag) diverges from the
-   * file for a POSITIVE-amount rectificativa: the file counts it as a normal operation
-   * (10/11/36/37) while the label would show the corrective boxes (14/15, 40/41).
+   * rule.
+   *
+   * <p>ETP-5599: a previous version of this Javadoc claimed the classic rule relies on the tax
+   * line's sign ALONE for doc base types {@code ARI}/{@code API}/{@code ARI_RM}, and deliberately
+   * did not check {@code C_DocType.EM_ETSG_IsRectificative}. That claim was wrong —
+   * {@code AEAT303CalculationsHelper#calculateCorrectiveOperations} branches on
+   * {@code isRectificative} (sourced from {@code invoice.getDocumentType().isEtsgIsRectificative()})
+   * BEFORE it ever looks at the sign: {@code isInvoiceDocCategory && isRectificative} routes
+   * straight to {@code applyRectificativeOperation}, which treats BOTH a positive and a negative
+   * amount as corrective (see its own Javadoc: "a positive amount increases the original
+   * base/quota, a negative amount reduces it" — never "is not corrective"). The sign-only check
+   * below used to miss exactly a POSITIVE-amount rectificativa, so a positive "al alza" correction
+   * fell through to the normal-operation box pair in this per-invoice label while the real
+   * aggregate totals (and the AEAT file) already counted it as corrective — see
+   * {@link Fiscal303BoxesHandler#fillMemoCorrectiveBoxPair}, which also uses the flag regardless
+   * of sign.
    *
    * <p>The classic rule, verbatim:
    * <ul>
    *   <li>a reversal document type, or doc base type {@code ARC}/{@code APC} (credit memo) →
    *       always corrective;</li>
-   *   <li>doc base type {@code ARI}/{@code API}/{@code ARI_RM} → corrective iff the line's
-   *       taxable amount is negative;</li>
+   *   <li>doc base type {@code ARI}/{@code API}/{@code ARI_RM} → corrective iff
+   *       {@code EM_ETSG_IsRectificative} is set OR the line's taxable amount is negative;</li>
    *   <li>anything else → not corrective.</li>
    * </ul>
    */
@@ -304,7 +316,10 @@ class Fiscal303SourcesSupport {
       return true;
     }
     if (INVOICE_SHAPED_DOC_CATEGORIES.contains(docBaseType)) {
-      return it.getTaxableAmount() != null && it.getTaxableAmount().signum() < 0;
+      final boolean isRectificative =
+          Boolean.TRUE.equals(inv.getDocumentType().isEtsgIsRectificative());
+      return isRectificative
+          || (it.getTaxableAmount() != null && it.getTaxableAmount().signum() < 0);
     }
     return false;
   }

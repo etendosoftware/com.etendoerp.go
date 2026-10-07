@@ -85,6 +85,8 @@ import com.smf.ticketbai.data.TbaiConfig;
  *
  * <p>{@link TbaiConfigSequenceHandler#handle} is always a pre-hook no-op and is asserted
  * separately; all the interesting behavior lives in {@code afterHandle}.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.TbaiConfigSequenceHandler
  */
 public class TbaiConfigSequenceHandlerTest {
 
@@ -895,7 +897,7 @@ public class TbaiConfigSequenceHandlerTest {
   // ─── afterHandle: ETP-5117 twice-a-day auto-send schedule ───────────────────
 
   private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
-      "Automatic TicketBAI invoice sending (Etendo GO)";
+      "Automatic TicketBAI invoice sending (Etendo)";
   private static final String USER_ID = "user-001";
   private static final String ROLE_ID = "role-001";
 

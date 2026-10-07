@@ -378,7 +378,7 @@ public class NeoDefaultsService {
     }
     if (sqlOutcome.getMissingParentToken() != null) {
       notes.put(propertyName + ": its default needs @" + sqlOutcome.getMissingParentToken()
-          + "@ from the parent record, but no parentId was given. Call neo_defaults again "
+          + "@ from the parent record, but no parentId was given. Call etendo_defaults again "
           + "with parentId to resolve it.");
     } else if (sqlOutcome.isZeroRows()) {
       notes.put(propertyName + ": its @SQL= default query matched zero rows for the current "
@@ -922,7 +922,7 @@ public class NeoDefaultsService {
    * short-circuit above or to {@link Utility#getDefault}, neither of which unquotes anything —
    * so the quoted literal reached property validation completely untouched. Reproduced for real:
    * {@code C_BPartner.EM_OBTIK_Tax_ID_Key} stores {@code '1'}, and a business partner created via
-   * {@code neo_create} with no explicit value for that field failed a 422 on the very default
+   * {@code etendo_create} with no explicit value for that field failed a 422 on the very default
    * NEO had just injected. The same quoting was found on 9 other columns across as many tables
    * (list references, {@code TableDir} FKs, a {@code YesNo}, and a {@code Table} FK) — all
    * fixed by this one shared choke point rather than a field-by-field patch.

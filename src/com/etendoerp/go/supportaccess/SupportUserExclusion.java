@@ -97,7 +97,7 @@ public final class SupportUserExclusion {
   /**
    * The {@code NeoHandler#readPredicates} of an entity over {@code AD_User}: hides the client's
    * support user from every list read (REST list and count, {@code ?_distinct=}, MCP
-   * {@code neo_list}).
+   * {@code etendo_list}).
    *
    * @param obContext the read's context; when null or without a client, the current
    *                  {@link OBContext} is used

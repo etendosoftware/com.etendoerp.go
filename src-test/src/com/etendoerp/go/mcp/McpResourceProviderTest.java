@@ -39,6 +39,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -62,10 +64,12 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * Unit tests for {@link McpResourceProvider}.
  *
  * <p>Covers: listResources (empty, W/P/R types, access-denied filtering),
- * readResource URI dispatch, readSpecsList (accessible/inaccessible specs),
+ * readResource URI dispatch (etendo:// and the deprecated neo://), readSpecsList (accessible/inaccessible specs),
  * readSpec (access denied, valid spec with entities), readEntity (found,
  * access denied), readProcess (non-process type, no linked process, valid
  * process with parameters), and unknown URI exception.
+ *
+ * @covers com.etendoerp.go.mcp.McpResourceProvider
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -179,7 +183,7 @@ class McpResourceProviderTest {
 
     /**
      * When no active specs exist, listResources should return only the static
-     * neo://specs resource descriptor.
+     * etendo://specs resource descriptor.
      */
     @Test
     @DisplayName("returns only the specs-list resource when no active specs exist")
@@ -189,7 +193,7 @@ class McpResourceProviderTest {
       JSONArray resources = provider.listResources();
 
       assertEquals(1, resources.length(), "Should contain only the static specs-list resource");
-      assertEquals("neo://specs", resources.getJSONObject(0).getString("uri"));
+      assertEquals("etendo://specs", resources.getJSONObject(0).getString("uri"));
       assertEquals("application/json", resources.getJSONObject(0).getString("mimeType"));
     }
 
@@ -210,7 +214,7 @@ class McpResourceProviderTest {
 
       // 1 static + 1 spec resource
       assertEquals(2, resources.length());
-      assertEquals("neo://specs/purchase-order", resources.getJSONObject(1).getString("uri"));
+      assertEquals("etendo://specs/purchase-order", resources.getJSONObject(1).getString("uri"));
       assertEquals("Spec: purchase-order", resources.getJSONObject(1).getString("name"));
     }
 
@@ -231,8 +235,8 @@ class McpResourceProviderTest {
 
       // 1 static + 1 spec + 1 process
       assertEquals(3, resources.length());
-      assertEquals("neo://specs/run-report", resources.getJSONObject(1).getString("uri"));
-      assertEquals("neo://processes/run-report", resources.getJSONObject(2).getString("uri"));
+      assertEquals("etendo://specs/run-report", resources.getJSONObject(1).getString("uri"));
+      assertEquals("etendo://processes/run-report", resources.getJSONObject(2).getString("uri"));
       assertEquals("Process parameters for run-report",
           resources.getJSONObject(2).getString("description"));
     }
@@ -276,7 +280,7 @@ class McpResourceProviderTest {
 
       // 1 static + 1 allowed spec
       assertEquals(2, resources.length());
-      assertEquals("neo://specs/open-spec", resources.getJSONObject(1).getString("uri"));
+      assertEquals("etendo://specs/open-spec", resources.getJSONObject(1).getString("uri"));
     }
 
     /**
@@ -312,15 +316,17 @@ class McpResourceProviderTest {
   class ReadResourceDispatchTests {
 
     /**
-     * Exact "neo://specs" URI should invoke readSpecsList and return a
+     * Exact "etendo://specs" URI (or its deprecated neo:// alias) should invoke readSpecsList and
+     * return a
      * result containing "specs" and "count" keys.
      */
-    @Test
-    @DisplayName("neo://specs dispatches to readSpecsList")
-    void specsUriDispatchesToSpecsList() throws Exception {
+    @ParameterizedTest(name = "{0}specs")
+    @ValueSource(strings = { "etendo://", "neo://" })
+    @DisplayName("etendo://specs (or the deprecated neo://specs) dispatches to readSpecsList")
+    void specsUriDispatchesToSpecsList(String scheme) throws Exception {
       mockSpecCriteria(Collections.emptyList());
 
-      JSONObject result = provider.readResource("neo://specs");
+      JSONObject result = provider.readResource(scheme + "specs");
 
       assertTrue(result.has("specs"), "Result must contain 'specs' key");
       assertTrue(result.has("count"), "Result must contain 'count' key");
@@ -328,11 +334,12 @@ class McpResourceProviderTest {
     }
 
     /**
-     * A single-segment path after neo://specs/ should invoke readSpec.
+     * A single-segment path after etendo://specs/ should invoke readSpec.
      */
-    @Test
-    @DisplayName("neo://specs/{name} dispatches to readSpec")
-    void specUriDispatchesToReadSpec() throws Exception {
+    @ParameterizedTest(name = "scheme {0}")
+    @ValueSource(strings = { "etendo://", "neo://" })
+    @DisplayName("etendo://specs/{name} (or neo://) dispatches to readSpec")
+    void specUriDispatchesToReadSpec(String scheme) throws Exception {
       SFSpec spec = buildSpec("s1", "my-spec", "W", "My Spec");
       Window window = mock(Window.class);
       when(window.getName()).thenReturn("My Window");
@@ -346,18 +353,19 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.listIncludedEntities("s1"))
           .thenReturn(Collections.emptyList());
 
-      JSONObject result = provider.readResource("neo://specs/my-spec");
+      JSONObject result = provider.readResource(scheme + "specs/my-spec");
 
       assertEquals("my-spec", result.getString("name"));
       assertEquals("W", result.getString("type"));
     }
 
     /**
-     * A two-segment path after neo://specs/ should invoke readEntity.
+     * A two-segment path after etendo://specs/ should invoke readEntity.
      */
-    @Test
-    @DisplayName("neo://specs/{name}/{entity} dispatches to readEntity")
-    void entityUriDispatchesToReadEntity() throws Exception {
+    @ParameterizedTest(name = "scheme {0}")
+    @ValueSource(strings = { "etendo://", "neo://" })
+    @DisplayName("etendo://specs/{name}/{entity} (or neo://) dispatches to readEntity")
+    void entityUriDispatchesToReadEntity(String scheme) throws Exception {
       SFSpec spec = buildSpec("s1", "my-spec", "W", "My Spec");
       SFEntity entity = buildEntity("e1", "Order", true);
 
@@ -372,7 +380,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.emptyList());
 
-      JSONObject result = provider.readResource("neo://specs/my-spec/Order");
+      JSONObject result = provider.readResource(scheme + "specs/my-spec/Order");
 
       assertEquals("Order", result.getString("name"));
       assertEquals("my-spec", result.getString("specName"));
@@ -380,11 +388,12 @@ class McpResourceProviderTest {
     }
 
     /**
-     * URI with neo://processes/ prefix should dispatch to readProcess.
+     * URI with etendo://processes/ prefix should dispatch to readProcess.
      */
-    @Test
-    @DisplayName("neo://processes/{name} dispatches to readProcess")
-    void processUriDispatchesToReadProcess() throws Exception {
+    @ParameterizedTest(name = "scheme {0}")
+    @ValueSource(strings = { "etendo://", "neo://" })
+    @DisplayName("etendo://processes/{name} (or neo://) dispatches to readProcess")
+    void processUriDispatchesToReadProcess(String scheme) throws Exception {
       SFSpec spec = buildSpec("p1", "my-process", "P", "My Process");
       Process adProcess = mock(Process.class);
       when(adProcess.getName()).thenReturn("RunImport");
@@ -400,7 +409,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "P"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://processes/my-process");
+      JSONObject result = provider.readResource(scheme + "processes/my-process");
 
       assertEquals("my-process", result.getString("specName"));
       assertEquals("P", result.getString("specType"));
@@ -410,18 +419,27 @@ class McpResourceProviderTest {
     /**
      * An unknown URI prefix should throw IllegalArgumentException.
      */
-    @Test
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = { "etendo://unknown/something", "neo://unknown/something",
+        "other://specs" })
     @DisplayName("unknown URI throws IllegalArgumentException")
-    void unknownUriThrowsException() {
-      assertThrows(IllegalArgumentException.class,
-          () -> provider.readResource("neo://unknown/something"));
+    void unknownUriThrowsException(String uri) {
+      assertThrows(IllegalArgumentException.class, () -> provider.readResource(uri));
+    }
+
+    @Test
+    @DisplayName("only the deprecated neo:// scheme is mapped to etendo://")
+    void canonicalUriMapsOnlyTheLegacyScheme() {
+      assertEquals("etendo://specs/x", McpResourceProvider.canonicalUri("neo://specs/x"));
+      assertEquals("etendo://specs/x", McpResourceProvider.canonicalUri("etendo://specs/x"));
+      assertEquals("other://neo://", McpResourceProvider.canonicalUri("other://neo://"));
     }
   }
 
   // ── readSpecsList ───────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("readSpecsList (neo://specs)")
+  @DisplayName("readSpecsList (etendo://specs)")
   class ReadSpecsListTests {
 
     /**
@@ -445,7 +463,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(denied, "W"))
           .thenReturn(false);
 
-      JSONObject result = provider.readResource("neo://specs");
+      JSONObject result = provider.readResource("etendo://specs");
 
       assertEquals(1, result.getInt("count"));
       JSONArray specs = result.getJSONArray("specs");
@@ -470,7 +488,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://specs");
+      JSONObject result = provider.readResource("etendo://specs");
 
       JSONObject specObj = result.getJSONArray("specs").getJSONObject(0);
       assertEquals("Sales Order", specObj.getString("windowName"));
@@ -493,7 +511,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "P"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://specs");
+      JSONObject result = provider.readResource("etendo://specs");
 
       JSONObject specObj = result.getJSONArray("specs").getJSONObject(0);
       assertEquals("DataImport", specObj.getString("processName"));
@@ -516,7 +534,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "R"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://specs");
+      JSONObject result = provider.readResource("etendo://specs");
 
       JSONObject specObj = result.getJSONArray("specs").getJSONObject(0);
       assertTrue(specObj.getBoolean("isReport"));
@@ -543,7 +561,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://specs");
+      JSONObject result = provider.readResource("etendo://specs");
 
       JSONObject specObj = result.getJSONArray("specs").getJSONObject(0);
       assertEquals(2, specObj.getInt("entityCount"));
@@ -553,7 +571,7 @@ class McpResourceProviderTest {
   // ── readSpec ────────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("readSpec (neo://specs/{name})")
+  @DisplayName("readSpec (etendo://specs/{name})")
   class ReadSpecTests {
 
     /**
@@ -570,7 +588,7 @@ class McpResourceProviderTest {
           .thenReturn(false);
 
       OBSecurityException ex = assertThrows(OBSecurityException.class,
-          () -> provider.readResource("neo://specs/secret"));
+          () -> provider.readResource("etendo://specs/secret"));
       assertTrue(ex.getMessage().contains("Access denied to spec 'secret'"));
     }
 
@@ -584,7 +602,7 @@ class McpResourceProviderTest {
           .thenReturn(null);
 
       assertThrows(OBSecurityException.class,
-          () -> provider.readResource("neo://specs/nonexistent"));
+          () -> provider.readResource("etendo://specs/nonexistent"));
     }
 
     /**
@@ -613,7 +631,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.emptyList());
 
-      JSONObject result = provider.readResource("neo://specs/purchase-order");
+      JSONObject result = provider.readResource("etendo://specs/purchase-order");
 
       assertEquals("purchase-order", result.getString("name"));
       assertEquals("W", result.getString("type"));
@@ -645,7 +663,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.listIncludedEntities("p1"))
           .thenReturn(Collections.emptyList());
 
-      JSONObject result = provider.readResource("neo://specs/import-data");
+      JSONObject result = provider.readResource("etendo://specs/import-data");
 
       assertEquals("DataImport", result.getString("processName"));
       assertEquals("proc-di", result.getString("processId"));
@@ -678,7 +696,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.singletonList(field));
 
-      JSONObject result = provider.readResource("neo://specs/order-spec");
+      JSONObject result = provider.readResource("etendo://specs/order-spec");
 
       JSONObject entityObj = result.getJSONArray("entities").getJSONObject(0);
       JSONArray fields = entityObj.getJSONArray("fields");
@@ -723,7 +741,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(List.of(included, excluded));
 
-      JSONObject result = provider.readResource("neo://specs/excl-spec");
+      JSONObject result = provider.readResource("etendo://specs/excl-spec");
 
       JSONArray fields = result.getJSONArray("entities").getJSONObject(0).getJSONArray("fields");
       assertEquals(1, fields.length(), "the excluded row must not reach the resource listing");
@@ -733,7 +751,7 @@ class McpResourceProviderTest {
     /**
      * The reason the filter had to move: an {@code MCP_CONFIG} {@code fields.included} override
      * lives in a JSON column no criteria joins, so this listing answered on the pre-override value
-     * while {@code neo_schema} answered on the override.
+     * while {@code etendo_schema} answered on the override.
      *
      * <p><b>The exclusion direction on purpose.</b> The reclaim direction cannot be asserted here
      * and it would be a mute test if it were: the criteria is mocked, so its rows reach the loop
@@ -770,7 +788,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.singletonList(field));
 
-      JSONObject result = provider.readResource("neo://specs/ovr-spec");
+      JSONObject result = provider.readResource("etendo://specs/ovr-spec");
 
       JSONArray fields = result.getJSONArray("entities").getJSONObject(0).getJSONArray("fields");
       assertEquals(0, fields.length(),
@@ -804,7 +822,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.singletonList(field));
 
-      JSONObject result = provider.readResource("neo://specs/sel-spec");
+      JSONObject result = provider.readResource("etendo://specs/sel-spec");
 
       JSONObject fieldObj = result.getJSONArray("entities").getJSONObject(0)
           .getJSONArray("fields").getJSONObject(0);
@@ -839,7 +857,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.singletonList(field));
 
-      JSONObject result = provider.readResource("neo://specs/def-spec");
+      JSONObject result = provider.readResource("etendo://specs/def-spec");
 
       JSONObject fieldObj = result.getJSONArray("entities").getJSONObject(0)
           .getJSONArray("fields").getJSONObject(0);
@@ -870,7 +888,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.singletonList(nullField));
 
-      JSONObject result = provider.readResource("neo://specs/null-col-spec");
+      JSONObject result = provider.readResource("etendo://specs/null-col-spec");
 
       JSONArray fields = result.getJSONArray("entities").getJSONObject(0)
           .getJSONArray("fields");
@@ -881,7 +899,7 @@ class McpResourceProviderTest {
   // ── readEntity ──────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("readEntity (neo://specs/{name}/{entity})")
+  @DisplayName("readEntity (etendo://specs/{name}/{entity})")
   class ReadEntityTests {
 
     /**
@@ -898,7 +916,7 @@ class McpResourceProviderTest {
           .thenReturn(false);
 
       OBSecurityException ex = assertThrows(OBSecurityException.class,
-          () -> provider.readResource("neo://specs/denied-spec/SomeEntity"));
+          () -> provider.readResource("etendo://specs/denied-spec/SomeEntity"));
       assertTrue(ex.getMessage().contains("Access denied to spec 'denied-spec'"));
     }
 
@@ -922,7 +940,7 @@ class McpResourceProviderTest {
 
       mockFieldCriteria(Collections.emptyList());
 
-      JSONObject result = provider.readResource("neo://specs/order-spec/OrderHeader");
+      JSONObject result = provider.readResource("etendo://specs/order-spec/OrderHeader");
 
       assertEquals("OrderHeader", result.getString("name"));
       assertEquals("order-spec", result.getString("specName"));
@@ -936,7 +954,7 @@ class McpResourceProviderTest {
   // ── readProcess ─────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("readProcess (neo://processes/{name})")
+  @DisplayName("readProcess (etendo://processes/{name})")
   class ReadProcessTests {
 
     /**
@@ -953,7 +971,7 @@ class McpResourceProviderTest {
           .thenReturn(false);
 
       assertThrows(OBSecurityException.class,
-          () -> provider.readResource("neo://processes/secret-proc"));
+          () -> provider.readResource("etendo://processes/secret-proc"));
     }
 
     /**
@@ -970,7 +988,7 @@ class McpResourceProviderTest {
           .thenReturn(true);
 
       IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
-          () -> provider.readResource("neo://processes/window-spec"));
+          () -> provider.readResource("etendo://processes/window-spec"));
       assertTrue(ex.getMessage().contains("not a process or report"));
     }
 
@@ -989,7 +1007,7 @@ class McpResourceProviderTest {
           .thenReturn(true);
 
       IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
-          () -> provider.readResource("neo://processes/orphan-proc"));
+          () -> provider.readResource("etendo://processes/orphan-proc"));
       assertTrue(ex.getMessage().contains("no linked AD_Process"));
     }
 
@@ -1014,7 +1032,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "P"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://processes/import-proc");
+      JSONObject result = provider.readResource("etendo://processes/import-proc");
 
       assertEquals("import-proc", result.getString("specName"));
       assertEquals("P", result.getString("specType"));
@@ -1048,7 +1066,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "R"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://processes/sales-report");
+      JSONObject result = provider.readResource("etendo://processes/sales-report");
 
       assertTrue(result.getBoolean("isReport"));
     }
@@ -1097,7 +1115,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "P"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://processes/param-proc");
+      JSONObject result = provider.readResource("etendo://processes/param-proc");
 
       assertEquals(1, result.getInt("parameterCount"));
       JSONArray params = result.getJSONArray("parameters");
@@ -1159,7 +1177,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "P"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://processes/ref-proc");
+      JSONObject result = provider.readResource("etendo://processes/ref-proc");
 
       JSONObject paramObj = result.getJSONArray("parameters").getJSONObject(0);
       assertEquals("800001", paramObj.getString("referenceSearchKeyId"));
@@ -1200,7 +1218,7 @@ class McpResourceProviderTest {
       routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "P"))
           .thenReturn(true);
 
-      JSONObject result = provider.readResource("neo://processes/range-proc");
+      JSONObject result = provider.readResource("etendo://processes/range-proc");
 
       JSONObject paramObj = result.getJSONArray("parameters").getJSONObject(0);
       assertTrue(paramObj.getBoolean("isRange"));

@@ -7,7 +7,7 @@
 <!--05F410A8100E4B17BB6CAE369D69A2F0-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--05F410A8100E4B17BB6CAE369D69A2F0-->  <NAME><![CDATA[Survey Configuration]]></NAME>
 <!--05F410A8100E4B17BB6CAE369D69A2F0-->  <DESCRIPTION><![CDATA[Configure the schema_forge NPS/CSAT survey engine (cooldowns, caps, and canned CSAT responses)]]></DESCRIPTION>
-<!--05F410A8100E4B17BB6CAE369D69A2F0-->  <HELP><![CDATA[Global tuning for the in-app survey engine, managed by the Etendo GO team. Not visible/customer-facing by default.]]></HELP>
+<!--05F410A8100E4B17BB6CAE369D69A2F0-->  <HELP><![CDATA[Global tuning for the in-app survey engine, managed by the Etendo team. Not visible/customer-facing by default.]]></HELP>
 <!--05F410A8100E4B17BB6CAE369D69A2F0-->  <WINDOWTYPE><![CDATA[M]]></WINDOWTYPE>
 <!--05F410A8100E4B17BB6CAE369D69A2F0-->  <ISSOTRX><![CDATA[Y]]></ISSOTRX>
 <!--05F410A8100E4B17BB6CAE369D69A2F0-->  <PROCESSING><![CDATA[N]]></PROCESSING>
@@ -192,7 +192,7 @@
 <!--A42231FFB2764AB38EC8D1C46637BA4C-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
 <!--A42231FFB2764AB38EC8D1C46637BA4C-->  <NAME><![CDATA[Email Send History]]></NAME>
 <!--A42231FFB2764AB38EC8D1C46637BA4C-->  <DESCRIPTION><![CDATA[Per-document transactional email send history]]></DESCRIPTION>
-<!--A42231FFB2764AB38EC8D1C46637BA4C-->  <HELP><![CDATA[One row per email send attempt made through an Etendo GO document email contract, with the subject, body, recipients and download link in clear. Client-level: each tenant sees only its own rows. Read-only.]]></HELP>
+<!--A42231FFB2764AB38EC8D1C46637BA4C-->  <HELP><![CDATA[One row per email send attempt made through an Etendo document email contract, with the subject, body, recipients and download link in clear. Client-level: each tenant sees only its own rows. Read-only.]]></HELP>
 <!--A42231FFB2764AB38EC8D1C46637BA4C-->  <WINDOWTYPE><![CDATA[M]]></WINDOWTYPE>
 <!--A42231FFB2764AB38EC8D1C46637BA4C-->  <ISSOTRX><![CDATA[Y]]></ISSOTRX>
 <!--A42231FFB2764AB38EC8D1C46637BA4C-->  <PROCESSING><![CDATA[N]]></PROCESSING>

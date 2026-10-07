@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -201,9 +202,15 @@ public class UserRoleAssignmentHandlerSupportTest {
         .obContext(tenantAdminContext())
         .build();
 
-    List<String> predicates = new UserRoleAssignmentHandler().readPredicates(context);
+    List<String> predicates;
+    try (MockedStatic<OwnerSupport> ownerSupport = mockStatic(OwnerSupport.class)) {
+      ownerSupport.when(() -> OwnerSupport.findOwnerUserId(CLIENT)).thenReturn(null);
+      predicates = new UserRoleAssignmentHandler().readPredicates(context);
+    }
 
-    assertEquals(List.of(EXPECTED_PREDICATE), predicates);
+    // ETP-5568 contributes the contact-only exclusion first; the support exclusion is ANDed after.
+    assertEquals(2, predicates.size());
+    assertEquals(EXPECTED_PREDICATE, predicates.get(1));
   }
 
   @Test
@@ -214,7 +221,11 @@ public class UserRoleAssignmentHandlerSupportTest {
         .obContext(mock(OBContext.class))
         .build();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
-      assertTrue(new UserRoleAssignmentHandler().readPredicates(context).isEmpty());
+      List<String> predicates = new UserRoleAssignmentHandler().readPredicates(context);
+
+      // Only the ETP-5568 contact-only exclusion remains: no client, no support literal.
+      assertEquals(1, predicates.size());
+      assertFalse(predicates.get(0).contains("<>"));
     }
   }
 

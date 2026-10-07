@@ -282,6 +282,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "If an account exists for that email, password reset instructions will be sent.";
   private static final String PASSWORD_RESET_INVALID_MESSAGE =
       "Invalid or expired password reset token";
+  // ETP-5258 — stable code so the reset screen translates the dead-link case by code instead of
+  // showing the English text above, which is a developer-facing fallback only.
+  private static final String CODE_PASSWORD_RESET_INVALID = "PASSWORD_RESET_INVALID";
   // 24h, not the 30 minutes a password reset gets. A reset is a deliberate act the user performs
   // and immediately waits on; a registration confirmation is often opened the next morning, and an
   // expired link there means a dead end in the middle of signup.
@@ -1987,7 +1990,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       Account account = EtendoGoJwtDalHelper.findActiveAccountByResetTokenHash(
           hashAuthToken(token), new Date());
       if (account == null) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, PASSWORD_RESET_INVALID_MESSAGE);
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PASSWORD_RESET_INVALID,
+            PASSWORD_RESET_INVALID_MESSAGE, PASSWORD_RESET_INVALID_MESSAGE);
         return;
       }
       EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());

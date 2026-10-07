@@ -44,6 +44,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * that omits a key the service reads would make the MCP refuse a valid call (it validates against
  * the contract before dispatch), and one that adds a key the service ignores would invite the agent
  * to send something that does nothing.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.PaymentActionHandlerSupport
  */
 @DisplayName("ETP-5558 — invoice payment action contracts")
 class PaymentActionContractsTest {
@@ -69,7 +71,7 @@ class PaymentActionContractsTest {
 
   @ParameterizedTest
   @ValueSource(booleans = { true, false })
-  @DisplayName("every contract says what the neo_action id is: the invoice")
+  @DisplayName("every contract says what the etendo_action id is: the invoice")
   void everyContractNamesItsId(boolean isReceipt) {
     for (NeoActionContract c : PaymentActionHandlerSupport.actionContracts(isReceipt).values()) {
       assertNotNull(c.getIdDescription(), c.getName());
