@@ -17,11 +17,16 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * The one object any header handler — invoice, order, goods movement — holds to offer follow-up
@@ -54,6 +59,44 @@ final class FollowUpSupport {
   /** The ACTION handler serving every registered flow's action name. */
   NeoHandler actionHandler() {
     return actionHandler;
+  }
+
+  /**
+   * One action contract per registered flow, by action name, in offer order (ETP-5576, MCP-8):
+   * what the source handler adds to its {@link NeoHandler#actionContracts()} so that
+   * {@code neo_schema(view:"actions")} lists the follow-up actions next to the AD buttons. Before,
+   * an agent found them only inside the {@code followUp} annotation of a record. Built from the
+   * flow's {@link FollowUpTarget} and its creator's {@link TargetCreator#inputParams()} — nothing
+   * here names a document.
+   *
+   * <p>The catalogue is per entity, not per record: whether a given record can run the action is
+   * {@code followUp.<key>.needed}, and the action itself answers {@code FOLLOW_UP_*} otherwise.
+   */
+  Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts = new LinkedHashMap<>();
+    for (FollowUpFlow flow : flows.get()) {
+      FollowUpTarget target = flow.target();
+      contracts.put(target.getActionName(), NeoActionContract.write(target.getActionName(),
+          "Creates a draft " + target.getEntity() + " (spec " + target.getSpec() + ") with the "
+              + "quantities of this record still pending, and links each new line to its source "
+              + "line. Only when the record's " + FollowUpDocumentService.FIELD_FOLLOW_UP + "."
+              + target.getKey() + ".needed is true (read it with neo_get); otherwise it answers "
+              + "a FOLLOW_UP_* error naming the reason. Returns 201 with the new document's id, "
+              + "documentNo, spec, entity and lineCount; the document stays in draft.",
+          flow.creator().inputParams().toArray(new NeoActionContract.Param[0])));
+    }
+    return contracts;
+  }
+
+  /**
+   * The response keys {@link #annotate} adds to every GET record: {@code followUp} when at least
+   * one flow is registered, nothing otherwise. Declared through
+   * {@link NeoHandler#responseEnrichedFields()} so an MCP {@code fields:[…]} projection does not
+   * report the key as unknown while the same response carries it.
+   */
+  Set<String> responseFields() {
+    return flows.get().isEmpty()
+        ? Collections.emptySet() : Set.of(FollowUpDocumentService.FIELD_FOLLOW_UP);
   }
 
   /**

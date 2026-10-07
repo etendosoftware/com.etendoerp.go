@@ -24,8 +24,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -181,6 +183,20 @@ public abstract class AbstractInvoiceHeaderHandler {
    * {@code followUp.annotate(dataArr)} on GET.
    */
   protected final FollowUpSupport followUp = new FollowUpSupport(this::followUpFlows);
+
+  /**
+   * The keys this header adds to every GET record that are not spec fields: the follow-up
+   * annotation ({@link FollowUpSupport#responseFields()}) and the invoice subtype
+   * ({@link #getInvoiceSubtypeKey()}). The concrete handlers implement {@link NeoHandler}, so this
+   * public method is their {@link NeoHandler#responseEnrichedFields()} (ETP-5576, MCP obs. 11).
+   *
+   * @return the injected response keys
+   */
+  public Set<String> responseEnrichedFields() {
+    Set<String> keys = new HashSet<>(followUp.responseFields());
+    keys.add(getInvoiceSubtypeKey());
+    return keys;
+  }
 
   /**
    * The follow-ups this invoice entity offers, in the order the UI should offer them — the ONE

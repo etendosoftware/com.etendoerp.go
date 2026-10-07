@@ -184,6 +184,28 @@ public interface NeoHandler {
   }
 
   /**
+   * Declares the response keys this handler adds to every GET record in {@link #afterHandle} —
+   * keys that are not {@code ETGO_SF_FIELD} columns, so {@code NeoFieldFilter} does not know them
+   * (ETP-5576, MCP observation 11).
+   *
+   * <p><b>Why this exists.</b> {@code neo_get}/{@code neo_list} validate a caller's
+   * {@code fields:[…]} whitelist against what the entity can emit and report the rest in
+   * {@code unknownFields} (IMP-18). That set came from the spec's fields only, so a key injected
+   * here was reported unknown while the very same response carried its value — the
+   * self-contradiction ETP-5073 removed for the audit keys. The handler is the only place that
+   * knows what it injects, so it is the one that says so.</p>
+   *
+   * <p>Reader: the MCP projection validator only. Nothing is filtered, renamed or written on
+   * account of it. Declare only keys injected on every record (or on every record of a status);
+   * a name declared here is never reported unknown.</p>
+   *
+   * @return the injected response keys; empty by default
+   */
+  default Set<String> responseEnrichedFields() {
+    return Collections.emptySet();
+  }
+
+  /**
    * Declares whether this handler serves ACTION sub-endpoint requests
    * ({@code POST /{spec}/{entity}/{id}/action/{name}}), i.e. whether the entity it backs has
    * an {@code /action} route at all.

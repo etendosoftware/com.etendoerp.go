@@ -584,9 +584,27 @@ final class McpQuerySupport {
       // derived server-side from properties that already resolved, so an unknown name there would
       // be a server bug, not caller input, and reporting it would blame the wrong party.
       McpFieldProjection.reportUnknownFields(responseJson, requested,
-          emittableBaseNames(fieldFilter, adTab));
+          emittableBaseNames(fieldFilter, adTab)
+              .map(names -> withEnrichedOnRead(names, sfEntity)));
     }
     McpFieldProjection.apply(responseJson, requested);
+  }
+
+  /**
+   * {@code names} plus the keys the entity's customization injects on every GET record
+   * ({@code NeoHandler#responseEnrichedFields}, ETP-5576): they are emittable although no spec
+   * field backs them, and the response that carries them must not also call them unknown. Only
+   * added to a set that could be determined — an undeterminable one stays "cannot validate".
+   */
+  private static java.util.Set<String> withEnrichedOnRead(java.util.Set<String> names,
+      SFEntity sfEntity) {
+    java.util.Set<String> enriched = McpServerResolvedFields.enrichedOnRead(sfEntity);
+    if (enriched.isEmpty()) {
+      return names;
+    }
+    java.util.Set<String> all = new java.util.HashSet<>(names);
+    all.addAll(enriched);
+    return all;
   }
 
   /**
