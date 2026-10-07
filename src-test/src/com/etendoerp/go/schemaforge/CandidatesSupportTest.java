@@ -65,6 +65,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *   <li>candidateCounts: unknown account short-circuits to all-zero counts; a real account computes
  *       per-receipt and per-issotrx counts; any failure is swallowed (counts are decorative).</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.CandidatesSupport
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class CandidatesSupportTest {
@@ -265,6 +267,24 @@ public class CandidatesSupportTest {
         null, USD, EUR));
 
     assertAmount("42.67", row, "amount");
+  }
+
+  /**
+   * A foreign pair with no stored rate (ETP-5657 refactor onto {@code ForeignOriginal}): the row is
+   * still re-expressed in the original currency, and only the {@code rate} key is left out.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildLinkedTransactionsForeignWithoutRateOmitsOnlyTheRate() throws Exception {
+    JSONObject row = runLinked(linkedRow(new BigDecimal("29.03"), new BigDecimal("42.67"),
+        null, USD, EUR));
+
+    assertAmount("42.67", row, "amount");
+    assertAmount("29.03", row, "amountBase");
+    assertEquals(USD, row.getString("currency"));
+    assertEquals(EUR, row.getString("baseCurrency"));
+    assertFalse(row.has("rate"));
   }
 
   /**

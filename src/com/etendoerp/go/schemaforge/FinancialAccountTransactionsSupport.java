@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -276,5 +277,30 @@ final class FinancialAccountTransactionsSupport {
     criteria.add(Restrictions.eq(fkProperty, trx));
     criteria.setMaxResults(1);
     return criteria.uniqueResult() != null;
+  }
+
+  /**
+   * ETP-5657: the original currency of a cross-currency movement, as Core stored it on the
+   * transaction — {@code foreignAmount} ({@code FOREIGN_AMOUNT} verbatim: an unsigned magnitude,
+   * like {@code depositAmount}/{@code withdrawalAmount}; the direction is {@code trxType} /
+   * the sign of {@code amount}), {@code foreignCurrency} (ISO code, what Classic's CSV prints) and
+   * {@code foreignConversionRate} ({@code FOREIGN_CONVERT_RATE}, equal to the "Índice" of the
+   * transaction's {@code C_Conversion_Rate_Document}). The keys are omitted on a same-currency row
+   * or when no foreign amount is stored (see {@link ForeignOriginal#of}), so those rows are
+   * unchanged; the rate key is also omitted when no rate is stored. The movements CSV export reads
+   * these same keys from this row.
+   */
+  static void putForeignOriginal(JSONObject row, ResultSet rs) throws Exception {
+    ForeignOriginal foreign = ForeignOriginal.of(rs.getString("foreign_currency_iso"),
+        rs.getString("account_currency_iso"), rs.getBigDecimal("foreign_amount"),
+        rs.getBigDecimal("foreign_convert_rate"));
+    if (foreign == null) {
+      return;
+    }
+    row.put("foreignAmount", foreign.storedAmount());
+    row.put("foreignCurrency", foreign.currencyIso());
+    if (foreign.rate() != null) {
+      row.put("foreignConversionRate", foreign.rate());
+    }
   }
 }

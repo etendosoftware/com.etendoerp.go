@@ -2391,13 +2391,32 @@ them `id` = the financial account:
 
 | Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
 |---|---|---|---|
-| `listMovements` | read | — | the Movements list (`GET financial-account-transactions`, same payload: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, … and `totals`) |
+| `listMovements` | read | — | the Movements list (`GET financial-account-transactions`, same payload: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, the cross-currency `foreignAmount`/`foreignCurrency`/`foreignConversionRate` (see below), … and `totals`) |
 | `movementGlItems` | read | `search` | the G/L item picker (`?action=glitem-lookup`) |
 | `createMovement` | write | **`trxType`** (`BPD`\|`BPW`), **`amount`** (> 0), **`date`** (also the accounting date), **`glItemId`**, `description` (≤ 255), `bpartnerId`, `projectId`, `costcenterId`, `productId`, `process` (`true` = Confirmar, default draft) | *Nuevo movimiento* — the form offers no bank fee and requires a G/L item |
 | `updateMovement` | write | **`movementId`**, any of the create fields, `process` (drafts only) | *Editar*: not on a payment-linked or posted movement; on a processed one only description, G/L item, contact and dimensions |
 | `processMovement` | write | **`movementId`** | *Procesar*: drafts that belong to no payment |
 | `reactivateMovement` | write | **`movementId`** | *Reactivar*: processed movements (payment-linked ones are refused by the endpoint, 409, ETP-5111) |
 | `deleteMovement` | write | **`movementId`** | *Eliminar*: any status — a processed movement is reactivated and removed (`TransactionRemovalUtil.reactivateAndRemove`); payment-linked movements and transfer legs are refused by the endpoint (409) |
+
+**Foreign-currency keys on a movement row (ETP-5657).** A `transactions[]` row whose payment
+crossed currencies also carries what Core stored on `FIN_FINACC_TRANSACTION`, read verbatim:
+
+| Key | Source | Type / convention |
+|---|---|---|
+| `foreignAmount` | `FOREIGN_AMOUNT` | number, the stored magnitude: Core writes it **unsigned** for deposits and withdrawals alike (like `depositAmount` / `withdrawalAmount`); the direction is `trxType` / the sign of `amount` |
+| `foreignCurrency` | ISO code of `FOREIGN_CURRENCY_ID` | string, e.g. `"USD"` — what Classic's movements CSV prints |
+| `foreignConversionRate` | `FOREIGN_CONVERT_RATE` | number; equals the "Índice" of the `C_Conversion_Rate_Document` Core writes for the transaction. Omitted when no rate is stored |
+
+The keys are present only when `foreignCurrency` is set and differs from the **account** currency and
+`foreignAmount` is not null; a same-currency row is unchanged. Example (EUR account, a 40.91 USD
+invoice collected as 27.80 EUR): `{"trxType":"BPD","amount":27.80,"depositAmount":27.80,
+"withdrawalAmount":0,"currencyIso":"EUR","foreignAmount":40.91,"foreignCurrency":"USD",
+"foreignConversionRate":0.67954, …}`. The "is it a foreign pair" rule is the one
+`ForeignOriginal.of` shares with the reconciliation candidates and statement-line transactions
+(ETP-5450), which re-sign the same stored amount for their own display. The movements CSV export
+(`?export=csv`, `MOVEMENT_CSV_COLUMNS` in the SPA) serializes these same rows, so its
+*Foreign Amount* / *Foreign Currency* columns are filled for those movements.
 
 Each write hands `FinancialAccountTransactionsHandler` the body the SPA sends (create: account,
 `trxType`, both dates, `depositAmount`/`paymentAmount` split by type, the account's currency, the
