@@ -645,42 +645,11 @@ final class AccountReportTree {
 
   private static void visit(Node node, int indent, boolean isRoot, boolean underReset,
       boolean underResetRef, VisitContext ctx) {
-    boolean withinCutoff = true;
     if (!isRoot) {
-      // Display: a descendant of a reset node shows 0 (filterSVC); every row re-applies its own
-      // clamp (filterStructure). Main and comparison periods reset independently.
-      BigDecimal amount = underReset ? BigDecimal.ZERO : applyShowValueCond(node.amount, node.row);
-      BigDecimal amountRef =
-          underResetRef ? BigDecimal.ZERO : applyShowValueCond(node.amountRef, node.row);
-      // An unknown/blank elementlevel is never a reason to drop a row.
-      Integer rank = ELEMENT_LEVEL_RANK.get(node.row.elementLevel);
-      withinCutoff = rank == null || rank <= ctx.cutoffRank;
-      boolean hasValue = amount.abs().compareTo(HAS_VALUE_EPSILON) > 0
-          || amountRef.abs().compareTo(HAS_VALUE_EPSILON) > 0;
-      if (withinCutoff && (!ctx.showOnlyWithValue || hasValue || node.row.alwaysShown)) {
-        boolean isGroupStart =
-            !ctx.out.isEmpty() && !equalsNullable(node.row.groupName, ctx.lastGroup[0]);
-        ctx.lastGroup[0] = node.row.groupName;
-        boolean isFormula = node.children.isEmpty()
-            && !ctx.operandsByOwner.getOrDefault(node.row.nodeId, List.of()).isEmpty();
-        ctx.out.add(OutputRow.builder()
-            .nodeId(node.row.nodeId)
-            .value(node.row.value)
-            .name(node.row.name)
-            .element(node.row.value + " - " + node.row.name)
-            .elementLevel(node.row.elementLevel)
-            .amount(amount)
-            .amountRef(amountRef)
-            .indent(indent)
-            .isHeading("E".equals(node.row.elementLevel))
-            .group(node.row.groupName)
-            .isGroupStart(isGroupStart)
-            .isFormula(isFormula)
-            .build());
+      if (!isWithinCutoff(node, ctx)) {
+        return; // cutoff reached: neither a row nor its descendants are shown
       }
-      if (!withinCutoff) {
-        return; // cutoff reached: do not descend further
-      }
+      emitRowIfShown(node, indent, underReset, underResetRef, ctx);
     }
     // The report's root node is a container (the accounting report's own node), never a row — so
     // its children start the visible tree at indent 0.
@@ -690,6 +659,59 @@ final class AccountReportTree {
       visit(child, isRoot ? 0 : indent + 1, false, underReset || node.reset,
           underResetRef || node.resetRef, ctx);
     }
+  }
+
+  /** An unknown/blank elementlevel is never a reason to drop a row. */
+  private static boolean isWithinCutoff(Node node, VisitContext ctx) {
+    Integer rank = ELEMENT_LEVEL_RANK.get(node.row.elementLevel);
+    return rank == null || rank <= ctx.cutoffRank;
+  }
+
+  /**
+   * Display: a descendant of a reset node shows 0 (filterSVC); every row re-applies its own clamp
+   * (filterStructure). Main and comparison periods reset independently.
+   */
+  private static BigDecimal displayedAmount(BigDecimal value, boolean underReset, NodeRow row) {
+    return underReset ? BigDecimal.ZERO : applyShowValueCond(value, row);
+  }
+
+  private static boolean hasValue(BigDecimal amount, BigDecimal amountRef) {
+    return amount.abs().compareTo(HAS_VALUE_EPSILON) > 0
+        || amountRef.abs().compareTo(HAS_VALUE_EPSILON) > 0;
+  }
+
+  private static void emitRowIfShown(Node node, int indent, boolean underReset,
+      boolean underResetRef, VisitContext ctx) {
+    BigDecimal amount = displayedAmount(node.amount, underReset, node.row);
+    BigDecimal amountRef = displayedAmount(node.amountRef, underResetRef, node.row);
+    if (ctx.showOnlyWithValue && !hasValue(amount, amountRef) && !node.row.alwaysShown) {
+      return;
+    }
+    ctx.out.add(buildOutputRow(node, indent, amount, amountRef, ctx));
+  }
+
+  /** Builds the visible row; advances {@code ctx.lastGroup} to detect the next group start. */
+  private static OutputRow buildOutputRow(Node node, int indent, BigDecimal amount,
+      BigDecimal amountRef, VisitContext ctx) {
+    boolean isGroupStart =
+        !ctx.out.isEmpty() && !equalsNullable(node.row.groupName, ctx.lastGroup[0]);
+    ctx.lastGroup[0] = node.row.groupName;
+    boolean isFormula = node.children.isEmpty()
+        && !ctx.operandsByOwner.getOrDefault(node.row.nodeId, List.of()).isEmpty();
+    return OutputRow.builder()
+        .nodeId(node.row.nodeId)
+        .value(node.row.value)
+        .name(node.row.name)
+        .element(node.row.value + " - " + node.row.name)
+        .elementLevel(node.row.elementLevel)
+        .amount(amount)
+        .amountRef(amountRef)
+        .indent(indent)
+        .isHeading("E".equals(node.row.elementLevel))
+        .group(node.row.groupName)
+        .isGroupStart(isGroupStart)
+        .isFormula(isFormula)
+        .build();
   }
 
   private static boolean equalsNullable(String a, String b) {
