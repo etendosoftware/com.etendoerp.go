@@ -52,6 +52,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.Claim;
@@ -391,9 +392,15 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
   }
 
-  /** Our own OBException messages are safe to show... */
+  // ============================== bind failures (ETP-5489) ==============================
+
+  /**
+   * The credential resolved and the server then failed to build its context: a 500, never a 401.
+   * A 401 is what made the client log a live session out and re-enter it in a loop. Our own
+   * OBException messages are safe to show...
+   */
   @Test
-  void anOBExceptionWhileBindingKeepsItsMessage() {
+  void anOBExceptionWhileBindingIsA500WithItsMessage() {
     stubCookie();
     swsStatic.when(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()))
@@ -402,13 +409,15 @@ class EnvironmentRequestAuthenticatorTest {
 
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
-    assertEquals(401, outcome.getHttpStatus());
+    assertFalse(outcome.isAuthenticated());
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
     assertEquals("Role not granted", outcome.getMessage());
   }
 
   /** ...anything else (NPEs, driver errors) must not leak internals. */
   @Test
-  void anyOtherFailureWhileBindingIsTheGenericInvalidToken() {
+  void anyOtherFailureWhileBindingIsA500WithTheGenericMessage() {
     stubCookie();
     swsStatic.when(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()))
@@ -418,8 +427,23 @@ class EnvironmentRequestAuthenticatorTest {
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
     assertFalse(outcome.isAuthenticated());
-    assertEquals(401, outcome.getHttpStatus());
-    assertEquals("Invalid or expired token", outcome.getMessage());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals("Environment context could not be established", outcome.getMessage());
+  }
+
+  /** ETP-5488, the production case: an entity the role cannot read while setting up the context. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = AuthScheme.class, names = { "COOKIE", "JWT", "OAUTH2" })
+  void aSecurityExceptionWhileBindingIsA500ForEveryScheme(AuthScheme scheme) {
+    swsStatic.when(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()))
+        .thenThrow(new OBSecurityException("Entity ADPreference is not readable by the user"));
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(requestFor(scheme), SurfacePolicy.NEO_API);
+
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals(scheme, outcome.getScheme());
   }
 
   // ============================== identify (resolve without binding) ==============================

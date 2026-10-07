@@ -42,6 +42,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.Claim;
@@ -153,6 +154,27 @@ class NeoAuthenticatorEnvironmentAccessTest {
     assertFalse(authenticated, "a refused environment must not authenticate the request");
     verify(servlet).sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED,
         "Environment access is not available: DEMO_TRIAL_EXPIRED");
+  }
+
+  /**
+   * ETP-5489 / ETP-5488 — the session is valid but its context cannot be built: the NEO request
+   * answers 500, never the 401 that made the client log a live session out in a loop.
+   */
+  @Test
+  void cookieSessionWhoseContextCannotBeBuiltReturns500NotA401() throws Exception {
+    stubCookieSession(CLIENT_ID);
+    swsStatic.when(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()))
+        .thenThrow(new OBSecurityException("Entity ADPreference is not readable by the user"));
+
+    HttpServletRequest request = cookieRequest();
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean authenticated = authenticator.authenticateRequest(request, response);
+
+    assertFalse(authenticated);
+    verify(servlet).sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        "Entity ADPreference is not readable by the user");
   }
 
   @Test

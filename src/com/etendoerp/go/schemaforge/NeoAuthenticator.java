@@ -69,6 +69,9 @@ class NeoAuthenticator {
     }
     if (outcome.getStatus() == EnvironmentAuthOutcome.Status.PAYMENT_REQUIRED) {
       log.info("Commercial access denied for NEO request: {}", outcome.getMessage());
+    } else if (outcome.getStatus() == EnvironmentAuthOutcome.Status.CONTEXT_UNAVAILABLE) {
+      // Already logged with its stack trace by the authenticator; not an auth refusal.
+      log.debug("NEO request context unavailable: {}", outcome.getMessage());
     } else {
       log.warn("Unauthorized NEO request: {}", outcome.getMessage());
     }
