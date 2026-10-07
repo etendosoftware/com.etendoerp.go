@@ -85,6 +85,29 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The machine-readable code of this refusal ({@code read_only_field}, {@code parent_required},
+   * ...), the same value the envelope carries under {@code error}.
+   *
+   * @return the error code
+   */
+  String getErrorCode() {
+    return errorCode;
+  }
+
+  /**
+   * The single WARN line this refusal leaves in the router's log, built from its error code
+   * (ETP-5639).
+   *
+   * @param toolName the tool that was called
+   * @return e.g. {@code MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only…
+   *         session=<key>}
+   */
+  String logLine(String toolName) {
+    return "MCP tool '" + toolName + "' rejected (" + errorCode + "): " + getMessage()
+        + " session=" + McpUsageTelemetry.sessionForLog();
+  }
+
+  /**
    * Attach extra envelope keys and return {@code this}, so a factory reads as one expression.
    *
    * @param extraKeys the keys to merge into {@link #toEnvelope()}
@@ -141,6 +164,30 @@ class McpRoutingException extends OBException {
         McpConstants.STATUS_NOT_FOUND, McpConstants.ERROR_NOT_FOUND, McpConstants.PARAM_SPEC,
         List.of(),
         "Call etendo_discover to list the specs this role can reach, with their exact names.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * {@code etendo_discover(spec)} named a spec this role does not reach — unknown, inactive, hidden
+   * from MCP or denied by window access, which are deliberately indistinguishable (IMP-53).
+   *
+   * <p>Unlike {@link #specNotFound}, the list <em>is</em> carried: the agent called the catalog tool
+   * precisely to learn the names, the handler already has the reachable ones in hand, and the list
+   * of names is a fraction of the full catalog the narrowed call exists to avoid.</p>
+   *
+   * @param unknown   every requested name that is not reachable, in request order — all of them,
+   *                  so one retry can fix an array call
+   * @param available the names of every spec this role reaches
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownDiscoverSpec(List<String> unknown, List<String> available) {
+    return new McpRoutingException((unknown.size() == 1 ? "Unknown spec '" : "Unknown specs '")
+        + String.join("', '", unknown) + "' for etendo_discover",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, McpConstants.PARAM_SPEC,
+        available,
+        available.isEmpty()
+            ? "This role reaches no spec. Call etendo_discover without arguments to confirm."
+            : RETRY_WITH_AVAILABLE + " Omit 'spec' to get the whole catalog.",
         McpConstants.SEE_ALSO_READING);
   }
 
@@ -303,6 +350,30 @@ class McpRoutingException extends OBException {
         "Unknown status '" + status + "' for entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, "status", available,
         RETRY_WITH_AVAILABLE, McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * {@link #unknownNamedFilter(String, String, List)} plus what each valid name means (IMP-50):
+   * {@code available} keeps its contract — the bare names — and {@code namedFilters} carries the
+   * same names with their short descriptions, in the shape the {@code etendo_list} response uses,
+   * so the agent can pick the right one rather than the first plausible one.
+   *
+   * @param described the entity's filters as {@code McpNamedFilters#summarize} renders them
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownNamedFilter(String status, String entityName,
+      List<String> available, JSONArray described) {
+    McpRoutingException refusal = unknownNamedFilter(status, entityName, available);
+    if (described == null || described.length() == 0) {
+      return refusal;
+    }
+    JSONObject extras = new JSONObject();
+    try {
+      extras.put(McpNamedFilters.KEY_NAMED_FILTERS, described);
+    } catch (JSONException e) {
+      return refusal;
+    }
+    return refusal.withExtras(extras);
   }
 
   /**
@@ -565,7 +636,10 @@ class McpRoutingException extends OBException {
    */
   static McpRoutingException parentRequired(String specName, String entityName,
       String parentEntity, String parentField) {
-    String parent = parentEntity == null ? "its parent" : parentEntity;
+    // "the id of its parent record" when the parent cannot be named — splicing "its parent" into
+    // "the parent … record" read "the id of the parent its parent record" (ETP-5639).
+    String parentRecord = parentEntity == null ? "its parent record"
+        : "the parent " + parentEntity + " record";
     JSONObject extras = new JSONObject();
     try {
       if (parentEntity != null) {
@@ -580,7 +654,7 @@ class McpRoutingException extends OBException {
     return new McpRoutingException(
         "'" + entityName + "' is a child entity of '" + specName
             + "'. In Etendo you browse its records inside one parent record — there is no global "
-            + "list. Pass parentId with the id of the parent " + parent + " record.",
+            + "list. Pass parentId with the id of " + parentRecord + ".",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_REQUIRED,
         McpConstants.PARAM_PARENT_ID, List.of(),
         parentEntity == null

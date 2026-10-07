@@ -344,7 +344,11 @@ public class CompanyInvitationService {
 
     Invitation latest = CompanyInvitationDalHelper.findLatestInvitation(inviter.client.getId(),
         email);
-    if (latest == null) {
+    // ETP-5194: the lookup above is by email, so it also matches an invitation sent to ANOTHER
+    // AD_User with the same address — typically a business-partner contact that shares an
+    // invitee's email. A contact never had an invitation of its own and must never be sent one.
+    if (latest == null
+        || !CompanyInvitationDalHelper.existsInvitationForUser(inviter.client.getId(), userId)) {
       return errorResponse(400, "NO_INVITATION_TO_RESEND",
           "No invitation has ever been sent to this user");
     }

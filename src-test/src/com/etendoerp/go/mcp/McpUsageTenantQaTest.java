@@ -48,6 +48,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -62,7 +63,9 @@ public class McpUsageTenantQaTest {
 
   @Before
   public void setUp() {
-    servlet = new McpServlet();
+    // A mocked lifecycle answers null (no lifecycle metadata): the commercial gate lets the call
+    // through without touching the DAL these tests stub call by call.
+    servlet = new McpServlet(mock(TenantEnvironmentLifecycleService.class));
     System.setProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY, "https://example.com/mcp");
     McpUsageTelemetry.clearCurrentTenant();
   }
@@ -119,8 +122,12 @@ public class McpUsageTenantQaTest {
     }
   }
 
+  /**
+   * Stubs the lookups of a wildcard ({@code "0"}) token in call order: the commercial-access gate
+   * resolves the role's client first (ETP-5642), then executeInContext resolves org and client.
+   */
   private static WorkStub resolves(String org, String client) {
-    return s -> when(s.doReturningWork(any())).thenReturn(org, client);
+    return s -> when(s.doReturningWork(any())).thenReturn(client, org, client);
   }
 
   private static JSONObject neoListArgs() throws Exception {
@@ -145,8 +152,9 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void nullTokenOrgIsRecordedAsTheResolvedOrg() throws Exception {
+    // A concrete token client needs no role lookup: the only query is the org resolution.
     McpUsageRow row = doPostToolsCall("etendo_list", neoListArgs(), "client1", null,
-        resolves("realOrg", null), new JSONObject());
+        s -> when(s.doReturningWork(any())).thenReturn("realOrg"), new JSONObject());
     assertEquals("client1", row.clientId());
     assertEquals("realOrg", row.orgId());
   }
@@ -212,7 +220,8 @@ public class McpUsageTenantQaTest {
     OBDal obDal = mock(OBDal.class);
     Session session = mock(Session.class);
     when(obDal.getSession()).thenReturn(session);
-    when(session.doReturningWork(any())).thenReturn("orgA", "clientA");
+    // Gate role lookup (ETP-5642), then executeInContext's org and client resolution.
+    when(session.doReturningWork(any())).thenReturn("clientA", "orgA", "clientA");
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
          MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {

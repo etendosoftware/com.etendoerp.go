@@ -56,6 +56,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 
+import com.etendoerp.go.rest.CompanyInvitationEmailCorrection;
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
 import com.etendoerp.go.roles.UserRoleCompositionService;
@@ -115,6 +116,9 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * handleAllowsCreateWhenNoDuplicateEmailExistsForClient}), and that the guard is a no-op when no
  * client is resolved (already covered by {@code handleForcesUsernameToMirrorEmailOnPost}, which
  * mocks no {@code OBContext} at all).
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.UserRoleAssignmentHandler
+ * @covers com.etendoerp.go.schemaforge.handlers.UserEmailCorrection
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -763,6 +767,568 @@ public class UserRoleAssignmentHandlerTest {
       // Fail CLOSED: an unexpected error must surface as a 500, never silently allow the
       // email change through unverified.
       assertEquals(500, response.getHttpStatus());
+    }
+  }
+
+  // ─── ETP-5194: email correction window (expired / failed invitation, blank email) ───
+
+  private static final String NEW_EMAIL = "new@example.com";
+  private static final String OLD_EMAIL = "old@example.com";
+
+  /** Outcome of {@link #runEmailChange}: the pre-hook response and the (possibly mutated) body. */
+  private static final class EmailChangeRun {
+    private final NeoResponse response;
+    private final JSONObject requestBody;
+    private final NeoContext context;
+
+    private EmailChangeRun(NeoResponse response, JSONObject requestBody, NeoContext context) {
+      this.response = response;
+      this.requestBody = requestBody;
+      this.context = context;
+    }
+  }
+
+  private static User mockUserInClient(String email) {
+    User user = mock(User.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(client.getName()).thenReturn("Acme");
+    when(user.getId()).thenReturn(USER_ID);
+    when(user.getClient()).thenReturn(client);
+    when(user.getEmail()).thenReturn(email);
+    return user;
+  }
+
+  /**
+   * Runs the {@code PATCH} pre-hook for an email change on {@link #USER_ID}, with the target's
+   * owner flag, current email, latest invitation status, accepted-history and duplicate-email
+   * lookups all stubbed.
+   */
+  private EmailChangeRun runEmailChange(boolean isOwner, String currentEmail,
+      String latestStatus, boolean acceptedBefore, boolean duplicate, Object incomingEmail)
+      throws Exception {
+    return runEmailChange(isOwner, currentEmail, latestStatus, acceptedBefore, duplicate,
+        incomingEmail, true);
+  }
+
+  /**
+   * @param invitedUser whether this {@code AD_User} has an invitation of its own — {@code false}
+   *     models a business-partner contact
+   */
+  @SuppressWarnings("unchecked")
+  private EmailChangeRun runEmailChange(boolean isOwner, String currentEmail,
+      String latestStatus, boolean acceptedBefore, boolean duplicate, Object incomingEmail,
+      boolean invitedUser) throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", incomingEmail);
+    OBContext requestObContext = mock(OBContext.class);
+    User actingUser = mock(User.class);
+    // The owner editing their own record passes the owner guard and reaches the email guard.
+    when(actingUser.getId()).thenReturn(isOwner ? USER_ID : "acting-admin");
+    when(requestObContext.getUser()).thenReturn(actingUser);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .obContext(requestObContext)
+        .build();
+    User user = mockUserInClient(currentEmail);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(USER_ID)).thenReturn(isOwner);
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(duplicate
+          ? Collections.singletonList(mock(User.class)) : Collections.emptyList());
+      invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
+          currentEmail)).thenReturn(latestStatus);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
+          .thenCallRealMethod();
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasAcceptedInvitation(CLIENT_ID,
+          USER_ID, currentEmail)).thenReturn(acceptedBefore);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
+          USER_ID)).thenReturn(invitedUser);
+
+      return new EmailChangeRun(handler.handle(ctx), requestBody, ctx);
+    }
+  }
+
+  private static void assertEmailLocked(NeoResponse response) throws Exception {
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains(UserEmailCorrection.MSG_EMAIL_LOCKED));
+  }
+
+  @Test
+  public void handleAllowsEmailCorrectionWhenInvitationExpired() throws Exception {
+    EmailChangeRun run = runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false,
+        "New@Example.com");
+
+    assertNull(run.response);
+    // Normalized the same way create normalizes it.
+    assertEquals(NEW_EMAIL, run.requestBody.getString("email"));
+  }
+
+  @Test
+  public void handleAllowsEmailCorrectionWhenInvitationDeliveryFailed() throws Exception {
+    assertNull(runEmailChange(false, OLD_EMAIL, "DELIVERY_FAILED", false, false, NEW_EMAIL)
+        .response);
+  }
+
+  @Test
+  public void handleKeepsBlankEmailLockedSinceSuchARowIsAContactOrWasNeverInvited()
+      throws Exception {
+    assertPointsToContactsSpec(
+        runEmailChange(false, null, null, false, false, NEW_EMAIL, false).response);
+  }
+
+  private static void assertPointsToContactsSpec(NeoResponse response) throws Exception {
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString()
+        .contains(UserEmailCorrection.MSG_EMAIL_NOT_A_GO_USER));
+  }
+
+  @Test
+  public void handleKeepsContactEmailLockedEvenWhenItsAddressHasAnExpiredInvitation()
+      throws Exception {
+    // A business-partner contact sharing an invitee's address: the expired invitation is not its
+    // own, so correcting it would invite a contact.
+    assertPointsToContactsSpec(
+        runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false, NEW_EMAIL, false).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedWhileInvitationIsSent() throws Exception {
+    assertEmailLocked(runEmailChange(false, OLD_EMAIL, "SENT", false, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedWhileInvitationIsPending() throws Exception {
+    assertEmailLocked(
+        runEmailChange(false, OLD_EMAIL, "PENDING", false, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedOnceInvitationAccepted() throws Exception {
+    assertEmailLocked(
+        runEmailChange(false, OLD_EMAIL, "ACCEPTED", true, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedWhenInvitationRevoked() throws Exception {
+    assertEmailLocked(
+        runEmailChange(false, OLD_EMAIL, "REVOKED", false, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedWhenUserWasNeverInvited() throws Exception {
+    assertPointsToContactsSpec(
+        runEmailChange(false, OLD_EMAIL, null, false, false, NEW_EMAIL, false).response);
+  }
+
+  /**
+   * An earlier correction whose re-invite could not be issued leaves the user with invitations of
+   * its own but none to its current address — that state must stay correctable, or it is stuck.
+   */
+  @Test
+  public void handleAllowsRecoveringAUserWhoseCurrentEmailHasNoInvitationYet() throws Exception {
+    assertNull(runEmailChange(false, OLD_EMAIL, null, false, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedWhenUserAcceptedAnInvitationUnderAnotherAddress()
+      throws Exception {
+    // Accepted under a previous address, email later changed outside Go: an account is linked.
+    assertEmailLocked(runEmailChange(false, OLD_EMAIL, null, true, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsEmailLockedWhenAnEarlierInvitationWasAccepted() throws Exception {
+    // The latest invitation expired, but an earlier one was accepted: an account is linked.
+    assertEmailLocked(
+        runEmailChange(false, OLD_EMAIL, "EXPIRED", true, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleKeepsOwnerEmailLockedEvenWhenBlank() throws Exception {
+    assertEmailLocked(runEmailChange(true, null, null, false, false, NEW_EMAIL).response);
+  }
+
+  @Test
+  public void handleRejectsClearingAnEditableEmail() throws Exception {
+    NeoResponse response =
+        runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false, "   ").response;
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("Field 'email' is required"));
+  }
+
+  @Test
+  public void handleRejectsJsonNullCorrectedEmailAsRequired() throws Exception {
+    // Jettison's optString turns JSON null into the string "null" (QA BUG-2).
+    NeoResponse response =
+        runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false, JSONObject.NULL).response;
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("Field 'email' is required"));
+  }
+
+  @Test
+  public void handleRejectsMalformedCorrectedEmail() throws Exception {
+    NeoResponse response =
+        runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false, "not-an-email").response;
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("Invalid email format"));
+  }
+
+  @Test
+  public void handleRejectsCorrectionToAnotherUsersEmail() throws Exception {
+    NeoResponse response =
+        runEmailChange(false, OLD_EMAIL, "EXPIRED", false, true, NEW_EMAIL).response;
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString().contains("already exists"));
+  }
+
+  @Test
+  public void handleTreatsCaseOnlyChangeOfEditableEmailAsNoOp() throws Exception {
+    EmailChangeRun run = runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false,
+        "Old@Example.com");
+
+    assertNull(run.response);
+    assertEquals(OLD_EMAIL, run.requestBody.getString("email"));
+    // No re-invite is scheduled: the address did not actually change.
+    try (MockedConstruction<CompanyInvitationService> invitationServiceMock =
+        mockConstruction(CompanyInvitationService.class)) {
+      new UserRoleAssignmentHandlerTestHooks().afterUpdate(run.context);
+      assertTrue(invitationServiceMock.constructed().isEmpty());
+    }
+  }
+
+  @Test
+  public void handleFailsClosedWhenInvitationLookupThrows() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", NEW_EMAIL);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(USER_ID)
+        .requestBody(requestBody)
+        .build();
+    User user = mockUserInClient(OLD_EMAIL);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+      invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(any(), any()))
+          .thenThrow(new RuntimeException("DB unavailable"));
+
+      assertEquals(500, handler.handle(ctx).getHttpStatus());
+    }
+  }
+
+  /**
+   * After an allowed correction, the post-hook re-derives the username through DAL, invites the
+   * new address, THEN revokes the old invitations, and reports the new status on the response.
+   */
+  @Test
+  public void afterHandleReinvitesAndRevokesAfterEmailCorrection() throws Exception {
+    EmailChangeRun run = runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false, NEW_EMAIL);
+    assertNull(run.response);
+
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, NEW_EMAIL, "Invitee");
+    body.getJSONObject("response").getJSONArray("data").getJSONObject(0)
+        .put("username", OLD_EMAIL);
+    run.context.setPreviousResult(NeoResponse.ok(body));
+    User user = mockUserInClient(NEW_EMAIL);
+    when(user.getDefaultRole()).thenReturn(mock(Role.class));
+    when(user.getUsername()).thenReturn(NEW_EMAIL);
+    JSONObject successResult = new JSONObject();
+    successResult.put("status", "success");
+    List<String> calls = new ArrayList<>();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class);
+        MockedConstruction<UserRoleCompositionService> compositionMock =
+            mockConstruction(UserRoleCompositionService.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenAnswer(inv -> {
+                      calls.add("invite");
+                      return successResult;
+                    }));
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+      ownerMock.when(() -> OwnerSupport.isOwner(USER_ID)).thenReturn(false);
+      usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(NEW_EMAIL, "Acme"))
+          .thenReturn(NEW_EMAIL);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.revokeSupersededInvitations(CLIENT_ID,
+          USER_ID, NEW_EMAIL)).thenAnswer(inv -> {
+            calls.add("revoke");
+            return 1;
+          });
+      invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
+          NEW_EMAIL)).thenReturn("SENT");
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
+          .thenCallRealMethod();
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.latestInvitationBelongsTo(CLIENT_ID,
+          NEW_EMAIL, USER_ID)).thenReturn(true);
+
+      assertNull(new UserRoleAssignmentHandler().afterHandle(run.context));
+
+      verify(user).setUsername(NEW_EMAIL);
+      verify(invitationServiceMock.constructed().get(0)).createInvitationForNewlyCreatedUser(
+          eq(run.context.getObContext()), eq(NEW_EMAIL), isNull(), isNull());
+      assertEquals(Arrays.asList("invite", "revoke"), calls);
+      // A correction never mints a personal role: only an invited user can be corrected.
+      assertTrue(compositionMock.constructed().isEmpty());
+      JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("SENT", row.getString("invitationStatus"));
+      assertFalse(row.getBoolean("emailEditable"));
+      // The row was serialized before the username was re-derived (QA BUG-4).
+      assertEquals(NEW_EMAIL, row.getString("username"));
+    }
+  }
+
+  /**
+   * The invite reports most failures as an error result, not an exception. Revoking the old
+   * invitations then would leave the user with no usable invitation and a locked email.
+   */
+  @Test
+  public void afterHandleKeepsOldInvitationsWhenTheReinviteReturnsAnError() throws Exception {
+    assertOldInvitationsKeptWhenReinviteIs(errorResult(), false);
+  }
+
+  /** The invite may just report back another user's open invitation for the new address. */
+  @Test
+  public void afterHandleKeepsOldInvitationsWhenTheNewAddressInvitationIsNotThisUsers()
+      throws Exception {
+    JSONObject existing = new JSONObject();
+    existing.put("status", "success");
+    assertOldInvitationsKeptWhenReinviteIs(existing, false);
+  }
+
+  private static JSONObject errorResult() throws Exception {
+    JSONObject error = new JSONObject();
+    error.put("error", true);
+    error.put("code", "INVITED_USER_NOT_FOUND");
+    return error;
+  }
+
+  private void assertOldInvitationsKeptWhenReinviteIs(JSONObject invitationResult,
+      boolean belongsToUser) throws Exception {
+    EmailChangeRun run = runEmailChange(false, OLD_EMAIL, "EXPIRED", false, false, NEW_EMAIL);
+    assertNull(run.response);
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, NEW_EMAIL, "Invitee");
+    run.context.setPreviousResult(NeoResponse.ok(body));
+    User user = mockUserInClient(NEW_EMAIL);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class, (m, constructionCtx) ->
+                when(m.createInvitationForNewlyCreatedUser(any(), any(), any(), any()))
+                    .thenReturn(invitationResult));
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+      usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(any(), any()))
+          .thenReturn(NEW_EMAIL);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.latestInvitationBelongsTo(CLIENT_ID,
+          NEW_EMAIL, USER_ID)).thenReturn(belongsToUser);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
+          .thenCallRealMethod();
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
+          USER_ID)).thenReturn(true);
+
+      assertNull(new UserRoleAssignmentHandler().afterHandle(run.context));
+
+      correctionMock.verify(() -> CompanyInvitationEmailCorrection.revokeSupersededInvitations(any(),
+          any(), any()), never());
+      // No invitation to the new address yet: the email stays correctable on the response.
+      JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(row.isNull("invitationStatus"));
+      assertTrue(row.getBoolean("emailEditable"));
+    }
+  }
+
+  @Test
+  public void afterHandleDoesNotReinviteOnAnUpdateThatKeptTheEmail() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(USER_ID)
+        .requestBody(new JSONObject())
+        .build();
+    try (MockedConstruction<CompanyInvitationService> invitationServiceMock =
+        mockConstruction(CompanyInvitationService.class)) {
+      new UserRoleAssignmentHandlerTestHooks().afterUpdate(ctx);
+      assertTrue(invitationServiceMock.constructed().isEmpty());
+    }
+  }
+
+  /** Runs {@code afterHandle} for an update with its role-sync collaborators stubbed out. */
+  private static final class UserRoleAssignmentHandlerTestHooks {
+    void afterUpdate(NeoContext ctx) {
+      try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+          MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class)) {
+        obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+        obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+        OBDal obDal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+        assertNull(new UserRoleAssignmentHandler().afterHandle(ctx));
+      }
+    }
+  }
+
+  @Test
+  public void afterHandleAttachesEmailEditableToEveryListRow() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("expired-user", "sent-user", "blank-user", OWNER_ID);
+    JSONArray rows = body.getJSONObject("response").getJSONArray("data");
+    rows.getJSONObject(0).put("email", "expired@example.com");
+    rows.getJSONObject(1).put("email", "sent@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(mockObContextForClient(CLIENT_ID))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      ownerMock.when(() -> OwnerSupport.isOwner(OWNER_ID)).thenReturn(true);
+      invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
+          "expired@example.com")).thenReturn("EXPIRED");
+      invitationMock.when(() -> CompanyInvitationService.findLatestInvitationStatus(CLIENT_ID,
+          "sent@example.com")).thenReturn("SENT");
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
+          .thenCallRealMethod();
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
+          "expired-user")).thenReturn(true);
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertTrue(rows.getJSONObject(0).getBoolean("emailEditable"));
+      assertFalse(rows.getJSONObject(1).getBoolean("emailEditable"));
+      // Blank email: a contact or a never-invited user — never correctable (no re-invite).
+      assertFalse(rows.getJSONObject(2).getBoolean("emailEditable"));
+      // The owner's blank email stays locked.
+      assertFalse(rows.getJSONObject(3).getBoolean("emailEditable"));
+    }
+  }
+
+  @Test
+  public void afterHandleReportsJsonNullEmailAsNotEditable() throws Exception {
+    // An invited user whose email was blanked outside Go: Jettison's optString would read the
+    // JSON null as the address "null" and unlock it (QA BUG-1).
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("invited-user");
+    JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    row.put("email", JSONObject.NULL);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(mockObContextForClient(CLIENT_ID))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.isEmailCorrectableStatus(any()))
+          .thenCallRealMethod();
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(any(), any()))
+          .thenReturn(true);
+
+      assertNull(handler.afterHandle(ctx));
+
+      assertFalse(row.getBoolean("emailEditable"));
+      invitationMock.verify(() -> CompanyInvitationService.findLatestInvitationStatus(any(),
+          any()), never());
+    }
+  }
+
+  @Test
+  public void afterHandleReportsEmailNotEditableWhenOwnerLookupFails() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildListResponseBody("blank-user");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .previousResult(NeoResponse.ok(body))
+        .obContext(mockObContextForClient(CLIENT_ID))
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<CompanyInvitationService> invitationMock =
+            mockStatic(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any()))
+          .thenThrow(new RuntimeException("DB unavailable"));
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject row = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(row.getBoolean("emailEditable"));
     }
   }
 

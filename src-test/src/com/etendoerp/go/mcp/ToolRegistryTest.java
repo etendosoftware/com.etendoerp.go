@@ -63,6 +63,19 @@ public class ToolRegistryTest {
     assertEquals("a_b", ToolRegistry.kebabToSnake("a-b"));
   }
 
+  /**
+   * IMP-53: etendo_discover declares an optional {@code spec} argument, and only that one — the
+   * unknown-argument guard reads this set, so a mistyped name is refused instead of ignored.
+   */
+  @Test
+  public void testDiscoverDeclaresOnlyOptionalSpecArgument() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_discover");
+
+    assertTrue(declared.isPresent());
+    assertEquals(java.util.Set.of("spec"), declared.get());
+  }
+
   /** Tests that McpToolDefinition getters return the values provided at construction. */
   @Test
   public void testMcpToolDefinitionGetters() {

@@ -22,7 +22,7 @@ import static com.etendoerp.go.mcp.McpToolResponses.buildUnexpectedErrorBody;
 import static com.etendoerp.go.mcp.McpToolResponses.deleteConfirmation;
 import static com.etendoerp.go.mcp.McpToolResponses.imageToolResult;
 
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -37,12 +37,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.erpCommon.utility.PropertyException;
@@ -78,7 +75,6 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoReadPredicates;
 import com.etendoerp.go.schemaforge.NeoResponse;
-import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -96,7 +92,7 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * <p>
  * Tool routing:
  * <ul>
- *   <li>{@code etendo_discover} — list all accessible specs</li>
+ *   <li>{@code etendo_discover} — list all accessible specs, or only the ones named by {@code spec}</li>
  *   <li>{@code etendo_list} — list records (GET)</li>
  *   <li>{@code etendo_get} — get single record by ID</li>
  *   <li>{@code etendo_create} — create a record (POST)</li>
@@ -134,12 +130,26 @@ public class McpToolRouter {
    * "spec" argument. For process and report tools, the spec name is derived from
    * the tool name itself via {@link ToolRegistry#resolveSpecName}.
    *
+   * <p>IMP-53: the presentation flag {@code _indentResponse} is taken out of {@code arguments}
+   * here, before anything else reads them, so it can never reach the unknown-argument guard, a
+   * handler, NEO or the usage telemetry. It only selects how this call's JSON is rendered.</p>
+   *
    * @param toolName  MCP tool name (e.g. "etendo_list", "complete_order")
-   * @param arguments tool arguments (may be null)
+   * @param arguments tool arguments (may be null); {@code _indentResponse} is removed from it
    * @param scopes    OAuth2 scopes granted to this call
    * @return MCP result object with "content" array
    */
   public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
+    boolean previous = McpResponseSanitizer.setIndented(McpIndentResponse.take(arguments));
+    try {
+      return routeCall(toolName, arguments, scopes);
+    } finally {
+      McpResponseSanitizer.restoreIndented(previous);
+    }
+  }
+
+  private JSONObject routeCall(String toolName, JSONObject arguments,
+      java.util.Set<String> scopes) {
     String renamedTo = McpRoutingException.renamedToolName(toolName);
     if (renamedTo != null) {
       // ETP-5602: answer a removed neo_<x> name with its new name before anything else — the
@@ -152,7 +162,7 @@ public class McpToolRouter {
     // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
     // Dispatching before setAdminMode preserves AD_Window/entity organization isolation.
     if (McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
-      return handleVectorSearch(arguments);
+      return McpVectorSearchTool.handle(arguments);
     }
     try {
       OBContext.setAdminMode();
@@ -168,7 +178,7 @@ public class McpToolRouter {
 
         switch (toolName) {
           case "etendo_discover":
-            return handleDiscover();
+            return McpDiscoverTool.handle(arguments);
           case "etendo_list":
             return handleList(specName, arguments);
           case "etendo_get":
@@ -224,76 +234,28 @@ public class McpToolRouter {
     } catch (McpRoutingException e) {
       // ETP-4793 / IMP-17: a spec/entity that does not exist already knows its own envelope,
       // including the self-correcting `available` list (evidence B20).
-      log.warn("MCP tool '{}' addressed something that does not exist: {}", toolName, e.getMessage());
+      // ETP-5639: keyed on the refusal's own code. It used to say "addressed something that does
+      // not exist" for every code — read-only fields, disabled methods and missing parentIds too.
+      log.warn(e.logLine(toolName));
       return wrapAsErrorContent(buildRoutingErrorBody(e, toolName));
     } catch (SecurityException e) {
       // An authorization refusal is a permanent answer for this role, not a server failure. It
       // used to fall into the generic handler below and surface as 500 server_error, whose own
       // hint invites no retry but whose status class does: a client with a retry-on-5xx rule
       // loops forever on a decision that will never change.
-      log.warn("MCP tool '{}' refused for the current role: {}", toolName, e.getMessage());
+      log.warn("MCP tool '{}' refused for the current role: {} session={}", toolName,
+          e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (org.openbravo.base.exception.OBSecurityException e) {
       // Openbravo's own refusal does NOT extend SecurityException, so without this clause it
       // reached the generic handler and answered 500 for the same kind of decision.
-      log.warn("MCP tool '{}' refused by the platform for the current role: {}",
-          toolName, e.getMessage());
+      log.warn("MCP tool '{}' refused by the platform for the current role: {} session={}",
+          toolName, e.getMessage(), McpUsageTelemetry.sessionForLog());
       return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}'", toolName, e);
+      log.error("Error routing MCP tool '{}' session={}", toolName,
+          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
-    }
-  }
-
-  /** Route semantic search through the same authenticated DB Extended contract as REST. */
-  private JSONObject handleVectorSearch(JSONObject arguments) {
-    String query = arguments == null ? null : arguments.optString(McpConstants.PARAM_QUERY, null);
-    String targets = McpArgumentUtils.joinStringArray(
-        arguments == null ? null : arguments.optJSONArray("targets"));
-    if (StringUtils.isBlank(targets)) {
-      // IMP-41: `targets` is optional, and omitting it means "search everywhere I may read".
-      // The MCP surface exposes no `namespaces` alternative, so demanding a target up front asked
-      // the agent for the one thing a natural-language question does not come with.
-      java.util.Optional<List<String>> allowed = NeoVectorSearchEndpoint.authorizedTargetKeys();
-      if (allowed.isPresent() && allowed.get().isEmpty()) {
-        return wrapAsErrorContent(buildNoSearchableTargetsBody());
-      }
-      // Absent means the catalogue could not be read at all, which is not the same as "you may
-      // search nothing": leave targets null so the endpoint decides, as it did before IMP-41.
-      targets = allowed.map(keys -> String.join(",", keys)).orElse(null);
-    }
-    NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
-        McpArgumentUtils.optionalString(arguments, "topK"),
-        McpArgumentUtils.optionalString(arguments, "minScore"),
-        McpArgumentUtils.optionalString(arguments, "maxScore"), null);
-    // ETP-5306: the JSONObject overloads, so the body is sanitised before it is rendered.
-    JSONObject body = response.getBody();
-    return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
-  }
-
-  /**
-   * The refusal for a role that can read no search target at all (IMP-41).
-   *
-   * <p>Said plainly and with a next step, because the alternative is worse than useless: an empty
-   * target list would reach the endpoint as "no targets and no namespaces" and come back as a
-   * generic 400 about a missing parameter, sending the agent to re-send the same call with
-   * invented target names.</p>
-   *
-   * @return the error envelope
-   */
-  private static JSONObject buildNoSearchableTargetsBody() {
-    try {
-      JSONObject envelope = new JSONObject();
-      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_FORBIDDEN);
-      envelope.put(McpConstants.KEY_ERROR, "no_searchable_vector_targets");
-      envelope.put(McpConstants.KEY_DETAIL, "Semantic search is configured on this instance, but "
-          + "your role cannot read any of its indexes.");
-      envelope.put(McpConstants.KEY_TOOL, McpConstants.TOOL_NEO_VECTOR_SEARCH);
-      envelope.put(McpConstants.KEY_HINT, "Do not retry with other target names — none would work. "
-          + "Use etendo_list or etendo_selectors to find the record instead.");
-      return envelope;
-    } catch (JSONException e) {
-      throw new McpToolException(ERROR_BUILDING_CONTENT, e);
     }
   }
 
@@ -347,7 +309,8 @@ public class McpToolRouter {
       // of a `$ref` field repeated on every row.
       return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
     } catch (Exception e) {
-      log.error("Error fetching docs for topic '{}'", topic, e);
+      log.error("Error fetching docs for topic '{}' session={}", topic,
+          McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
     }
   }
@@ -377,53 +340,6 @@ public class McpToolRouter {
       log.warn("Could not read preference {}: {}", PREF_CONTEXT7_TOKEN, e.getMessage());
       return null;
     }
-  }
-
-  // ── etendo_discover ──────────────────────────────────────────────────────
-
-  /**
-   * List all active specs the current user can access.
-   * Replicates NeoServlet.handleDiscovery() logic.
-   */
-  private JSONObject handleDiscover() throws Exception {
-    OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_SHOWINMCP, true));
-    specCriteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
-    List<SFSpec> allSpecs = specCriteria.list();
-
-    JSONArray specsArray = new JSONArray();
-    for (SFSpec spec : allSpecs) {
-      String specType = spec.getSpecType();
-      if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-        // ETP-4254: load the included entities ONCE per W spec — the entity summary, the
-        // caller-derived primaryEntity (IMP-9/ETP-4601) and the spec-level readOnly marker are
-        // all derived from this same list, so none of them costs an extra query.
-        List<SFEntity> includedEntities = "W".equals(specType)
-            ? McpToolRouterSupport.listIncludedEntities(spec.getId()) : null;
-        JSONArray entities = "W".equals(specType)
-            ? McpToolRouterSupport.buildEntitySummaryArray(includedEntities) : null;
-        // IMP-9: derived here (not inside buildDiscoverSpec) so that method stays DAL-free —
-        // handleDiscover already runs in the live/admin OBContext resolving tab levels needs.
-        String primaryEntity = "W".equals(specType)
-            ? McpToolRouterSupport.resolvePrimaryEntityName(includedEntities)
-            : null;
-        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(
-            spec, specType, entities, primaryEntity, includedEntities));
-      }
-    }
-
-    JSONObject result = new JSONObject();
-    result.put("specs", specsArray);
-    result.put("count", specsArray.length());
-    result.put("guidance", McpToolRouterSupport.buildDocsGuidance());
-    // ETP-5200: how to build an app link, advertised once per session instead of on every row.
-    // Omitted entirely when no public app base URL is configured — see McpRecordUrls.
-    JSONObject app = McpRecordUrls.buildAppMetadata();
-    if (app != null) {
-      result.put(McpRecordUrls.KEY_APP, app);
-    }
-    return wrapAsTextContent(result);
   }
 
   // ── etendo_list ──────────────────────────────────────────────────────────
@@ -552,8 +468,12 @@ public class McpToolRouter {
 
     // IMP-5 clause (iii): flatten last, so projection and field filtering keep operating on the
     // wrapped shape core produced and only the body handed to the agent changes.
-    return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson));
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
+    // IMP-50: a call that applied a named status filter learns which one, and what the entity's
+    // other filters mean — the moment it is choosing among them. After projection on purpose:
+    // `fields` selects row columns, and this block is not one.
+    McpNamedFilters.attachApplied(flat, sfEntity.getNamedFilters(), filters);
+    return wrapAsTextContent(flat);
   }
 
   // ── etendo_get ───────────────────────────────────────────────────────────
@@ -667,8 +587,11 @@ public class McpToolRouter {
    * Applies the parent gate to a list call and returns the filters to run with (IMP-40).
    *
    * <p>Three outcomes. For an entity that is not a gated child, the filters pass through
-   * untouched. For a gated child with no {@code parentId}, the call is refused with the same
-   * {@code parent_required} envelope {@code etendo_defaults} already uses — one wording, one copy.
+   * untouched. (A child gated by its tab where clause — {@code McpParentScope.Kind#TAB_WHERE} —
+   * has no parent field: it is refused without {@code parentId} and otherwise passes through, the
+   * clause doing the scoping.) For a gated child with no {@code parentId}, the call is refused with
+   * the same {@code parent_required} envelope {@code etendo_defaults} already uses — one wording,
+   * one copy.
    * For a gated child with a {@code parentId}, the parent field is added to the filters, so the
    * scope is enforced by the query rather than trusted.</p>
    *
@@ -690,12 +613,19 @@ public class McpToolRouter {
       return filters;
     }
     String parentField = scope.getParentField();
-    if (filters != null && filters.has(parentField) && !filters.isNull(parentField)) {
+    if (parentField != null && filters != null && filters.has(parentField)
+        && !filters.isNull(parentField)) {
       return filters;
     }
     if (StringUtils.isBlank(parentId)) {
       throw McpRoutingException.parentRequired(specName, entityName,
           scope.getParentEntity(), parentField);
+    }
+    if (parentField == null) {
+      // A TAB_WHERE child: the tab's where clause carries the parent placeholder, filled from
+      // parentId further down (NeoParentTabFilterResolver.resolveTabWhere). There is no field to
+      // add to the filters, and the query is still scoped to the parent.
+      return filters;
     }
     JSONObject scoped = filters == null ? new JSONObject() : new JSONObject(filters.toString());
     scoped.put(parentField, parentId);
@@ -847,7 +777,8 @@ public class McpToolRouter {
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
-    // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
+    // when possible (e.g. documentType="0" -> copy from transactionDocument); keep it when "0" is
+    // a real record of the target (the "*" organization), else remove.
     McpWriteRequestSupport.resolveFkSentinels(filteredBody, dalEntity, log);
 
     // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
@@ -1569,14 +1500,6 @@ public class McpToolRouter {
     return wrapAsTextContent(entitySchema);
   }
 
-  static String mapColumnTypeStatic(String refId) {
-    return McpSchemaFieldBuilder.mapColumnType(refId);
-  }
-
-  static String mapSelectorTypeStatic(String refId) {
-    return McpSchemaFieldBuilder.mapSelectorType(refId);
-  }
-
   // ── etendo_batch ─────────────────────────────────────────────────────────
 
   /**
@@ -1637,10 +1560,10 @@ public class McpToolRouter {
       }
       return wrapAsTextContent(result);
     } catch (SecurityException e) {
-      log.warn("etendo_batch access denied", e);
+      log.warn("etendo_batch access denied session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent(e.getMessage());
     } catch (Exception e) {
-      log.error("Error executing etendo_batch", e);
+      log.error("Error executing etendo_batch session={}", McpUsageTelemetry.sessionForLog(), e);
       return wrapAsErrorContent("Error executing etendo_batch: " + e.getMessage());
     }
   }

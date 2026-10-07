@@ -58,7 +58,7 @@ final class McpToolResponses {
       envelope.put(McpConstants.KEY_TOOL, toolName);
       // B3: the moment an agent is stuck is the moment its feedback is worth most.
       envelope.put(McpConstants.KEY_FEEDBACK, McpConstants.FEEDBACK_INVITATION);
-      return envelope.toString(2);
+      return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
       return "Error executing " + toolName + ": " + e.getMessage();
@@ -88,7 +88,7 @@ final class McpToolResponses {
           + "re-sending the same call with corrected values will not help.");
       // B3: a server fault the agent cannot fix is exactly what we want reported.
       envelope.put(McpConstants.KEY_FEEDBACK, McpConstants.FEEDBACK_INVITATION);
-      return envelope.toString(2);
+      return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build error envelope for '{}'", toolName, jsonEx);
       return "Error executing " + toolName + ": " + e.getMessage();

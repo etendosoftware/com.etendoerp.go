@@ -468,7 +468,8 @@ final class McpQuerySupport {
     String fragment = namedFilters.get(status);
     if (fragment == null) {
       throw McpRoutingException.unknownNamedFilter(status, sfEntity.getName(),
-          new java.util.ArrayList<>(namedFilters.keySet()));
+          new java.util.ArrayList<>(namedFilters.keySet()),
+          McpNamedFilters.summarize(sfEntity.getNamedFilters()));
     }
     log.debug("Applying named filter '{}' for entity '{}'", status, sfEntity.getName());
     appendAnd(where);

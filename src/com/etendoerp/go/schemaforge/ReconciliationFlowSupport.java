@@ -48,6 +48,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 final class ReconciliationFlowSupport {
 
   private static final String FIELD_INVOICE_ID = "invoiceId";
+  private static final String FIELD_SCHEDULE_ID = "scheduleId";
 
   private ReconciliationFlowSupport() {
   }
@@ -90,6 +91,13 @@ final class ReconciliationFlowSupport {
    * every one of them already has zero outstanding — a stale/already-paid selection). That is
    * not a legitimate partial match, just a selection that accomplishes nothing, so it is still
    * reported as the same "do not cover" 400 rather than silently succeeding as a no-op.
+   *
+   * <p><b>Default mode only (ETP-5657).</b> This greedy allocation at each invoice's own rate is what
+   * a request WITHOUT {@code actualPayment} / {@code conversionRate} / {@code convertedAmount} gets.
+   * When any of those fields is present, {@link ReconciliationWriteoffSupport#payInvoicesFromBody}
+   * routes to {@link ReconciliationConversionSupport} instead (Classic's Add Payment parity: the
+   * user states what the bank moved and how much of the invoices it pays) and this method is not
+   * called. Both paths share {@link #loadInstallment} and {@link #collectTransaction}.
    */
   static NeoResponse createInvoicePayments(FIN_FinancialAccount account,
       FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds,
@@ -124,7 +132,7 @@ final class ReconciliationFlowSupport {
   }
 
   /** The method named by {@code paymentMethodId}, or {@code null} when none was chosen. */
-  private static FIN_PaymentMethod resolveChosenMethod(String paymentMethodId) {
+  static FIN_PaymentMethod resolveChosenMethod(String paymentMethodId) {
     if (StringUtils.isBlank(paymentMethodId)) {
       return null;
     }
@@ -159,23 +167,13 @@ final class ReconciliationFlowSupport {
     FIN_BankStatementLine line = ctx.line();
     boolean isReceipt = ctx.isReceipt();
     FIN_PaymentMethod chosenMethod = ctx.chosenMethod();
-    List<String> operationIds = ctx.operationIds();
     BigDecimal tolerance = ctx.tolerance();
-    String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
-    String scheduleId = spec.optString("scheduleId", null);
-    if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
-      return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "invoiceId and scheduleId are required for each invoice"));
+    InvoiceInstallment installment = loadInstallment(spec);
+    if (installment.error() != null) {
+      return new SettlementOutcome(remaining, installment.error());
     }
-    // Both ids come from the request body and this method goes on to register a REAL payment
-    // against them, so a foreign id must resolve to nothing rather than to another tenant's
-    // invoice (ETP-4950).
-    Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
-    FIN_PaymentSchedule schedule = TenantOwnership.loadOwned(FIN_PaymentSchedule.class, scheduleId);
-    if (invoice == null || schedule == null) {
-      return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          "Invoice or payment schedule not found: " + invoiceId));
-    }
+    Invoice invoice = installment.invoice();
+    FIN_PaymentSchedule schedule = installment.schedule();
 
     BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
     BigDecimal rate = PaymentCurrencyConverter.resolveInvoiceRate(invoice, account);
@@ -195,15 +193,79 @@ final class ReconciliationFlowSupport {
         new ReconciliationPaymentService.ReconciliationPaymentRequest(invoice, schedule,
             paymentAmount, txnAmount, rate, line.getTransactionDate(), account, isReceipt,
             chosenMethod, ctx.writeoffDifference() && !fullSettlement));
+    NeoResponse txnError = collectTransaction(payment, ctx.operationIds());
+    if (txnError != null) {
+      return new SettlementOutcome(remaining, txnError);
+    }
+    return new SettlementOutcome(remaining.subtract(txnAmount), null);
+  }
+
+  /**
+   * One selected invoice installment of a {@code reconcileGroup} request, resolved from its
+   * {@code {invoiceId, scheduleId}} spec: either both entities (with {@code error} null) or the
+   * error response to return verbatim (with both entities null).
+   */
+  record InvoiceInstallment(Invoice invoice, FIN_PaymentSchedule schedule, NeoResponse error) {
+
+    static InvoiceInstallment failed(NeoResponse error) {
+      return new InvoiceInstallment(null, null, error);
+    }
+  }
+
+  /**
+   * Resolves one {@code {invoiceId, scheduleId}} spec of the request: 400 when either id is blank,
+   * 404 when either does not resolve for the current tenant, or when the schedule belongs to a
+   * different invoice. Shared by the greedy path ({@link #settleInvoice}) and the explicit-conversion
+   * path ({@link ReconciliationConversionSupport}).
+   *
+   * <p>Both ids come from the request body and the caller goes on to register a REAL payment against
+   * them, so a foreign id must resolve to nothing rather than to another tenant's invoice
+   * (ETP-4950). The 404 deliberately echoes only the requested {@code invoiceId}, never an amount of
+   * the record.
+   *
+   * <p>The schedule-to-invoice check (ETP-5657) refuses a schedule that names ANOTHER invoice: the
+   * payment would be created for one invoice while settling the instalment of a different one. A
+   * schedule with no invoice at all (an order schedule) is left to the payment registration, which
+   * finds no pending invoice schedule detail for it and refuses the payment
+   * ({@link PaymentRegistrationService#findPendingPSDs} is keyed on the invoice schedule).
+   */
+  static InvoiceInstallment loadInstallment(JSONObject spec) {
+    String invoiceId = spec.optString(FIELD_INVOICE_ID, null);
+    String scheduleId = spec.optString(FIELD_SCHEDULE_ID, null);
+    if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
+      return InvoiceInstallment.failed(NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "invoiceId and scheduleId are required for each invoice"));
+    }
+    Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
+    FIN_PaymentSchedule schedule = TenantOwnership.loadOwned(FIN_PaymentSchedule.class, scheduleId);
+    if (invoice == null || schedule == null || belongsToOtherInvoice(schedule, invoiceId)) {
+      return InvoiceInstallment.failed(NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Invoice or payment schedule not found: " + invoiceId));
+    }
+    return new InvoiceInstallment(invoice, schedule, null);
+  }
+
+  /** True when {@code schedule} is the instalment of an invoice other than {@code invoiceId}. */
+  private static boolean belongsToOtherInvoice(FIN_PaymentSchedule schedule, String invoiceId) {
+    Invoice owner = schedule.getInvoice();
+    return owner != null && !invoiceId.equals(owner.getId());
+  }
+
+  /**
+   * Joins the transaction Core auto-created for {@code payment} to {@code operationIds}, marked as
+   * created by the reconciliation (so undoing it removes it — see
+   * {@link ReactivationSupport#markAutoCreated}). Returns the 500 to report when the payment produced
+   * no transaction, else {@code null}.
+   */
+  static NeoResponse collectTransaction(FIN_Payment payment, List<String> operationIds) {
     List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
     if (txns.isEmpty()) {
-      return new SettlementOutcome(remaining,
-          NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "Payment did not produce a transaction: " + payment.getId()));
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Payment did not produce a transaction: " + payment.getId());
     }
     ReactivationSupport.markAutoCreated(txns.get(0));
     operationIds.add(txns.get(0).getId());
-    return new SettlementOutcome(remaining.subtract(txnAmount), null);
+    return null;
   }
 
   static NeoResponse validateOperations(List<String> operationIds, String accountId,
