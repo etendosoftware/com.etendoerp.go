@@ -339,4 +339,137 @@ class AccountReportTreeTest {
     assertEquals(1, findById(rows, "L1").indent);
     assertEquals(0, findById(rows, "L3").indent);
   }
+
+  // -------------------------------------------------------------------------
+  // ShowValueCond (ETP-5662)
+  // -------------------------------------------------------------------------
+
+  /** A node carrying {@code ShowValueCond} / {@code IsSummary}; own amount is Dr-Cr. */
+  private static AccountReportTree.NodeRow svcNode(String id, String parent, String sortPath,
+      String group, String value, String level, String sign, String own, String ownRef,
+      String svc, boolean summary) {
+    return AccountReportTree.NodeRow.builder()
+        .nodeId(id).parentId(parent).sortPath(sortPath).groupName(group).value(value)
+        .name(value).elementLevel(level).accountSign(sign)
+        .ownAmt(new BigDecimal(own)).ownAmtRef(new BigDecimal(ownRef))
+        .showValueCond(svc).summary(summary).build();
+  }
+
+  /**
+   * Mini PGC balance sheet. Activo (D): A.B &gt; 551(P) &gt; 5510(P) &gt; 55100000 leaf; A.TOTAL =
+   * A.B. Pasivo (C): (551)(P) &gt; (5510)(P formula, -1 x 5510); 555 leaf. {@code dr} is the
+   * Dr-Cr posted on 55100000, {@code dr555} on 555.
+   */
+  private static List<AccountReportTree.NodeRow> mirrorTree(String dr, String dr555) {
+    return List.of(
+        svcNode("A", null, "1", "A", "A", "E", "D", "0", "0", null, true),
+        svcNode("AB", "A", "1.1", "A", "A.B", "E", "D", "0", "0", null, true),
+        svcNode("551", "AB", "1.1.1", "A", "551", "C", "D", "0", "0", "P", true),
+        svcNode("5510", "551", "1.1.1.1", "A", "5510", "D", "D", "0", "0", "P", true),
+        svcNode("55100000", "5510", "1.1.1.1.1", "A", "55100000", "S", "D", dr, "0", null,
+            false),
+        svcNode("ATOT", "A", "1.2", "A", "A.TOTAL", "E", "D", "0", "0", null, true),
+        svcNode("P", null, "2", "P", "P", "E", "C", "0", "0", null, true),
+        svcNode("M551", "P", "2.1", "P", "(551)", "C", "C", "0", "0", "P", true),
+        svcNode("M5510", "M551", "2.1.1", "P", "(5510)", "D", "C", "0", "0", "P", true),
+        svcNode("555", "P", "2.2", "P", "555", "C", "C", dr555, "0", null, false));
+  }
+
+  private static List<AccountReportTree.OperandRow> mirrorOperands() {
+    return List.of(operand("M5510", "5510", -1), operand("ATOT", "AB", 1));
+  }
+
+  private static BigDecimal amt(List<AccountReportTree.OutputRow> rows, String id) {
+    return findById(rows, id).amount;
+  }
+
+  private static boolean has(List<AccountReportTree.OutputRow> rows, String id) {
+    return rows.stream().anyMatch(r -> id.equals(r.nodeId));
+  }
+
+  @Test
+  @DisplayName("oracle case 1: credit balance on 551 hides Activo side, mirror shows it")
+  void oracleCreditBalance() {
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(mirrorTree("-1", "1"), mirrorOperands(), "S", true);
+
+    assertFalse(has(rows, "AB"));
+    assertFalse(has(rows, "551"));
+    assertFalse(has(rows, "5510"));
+    assertFalse(has(rows, "55100000"), "cascade: descendants of a reset node show 0");
+    assertFalse(has(rows, "ATOT"), "a total over a clamped subtree is 0");
+    assertEquals(0, amt(rows, "M5510").compareTo(BigDecimal.ONE));
+    assertEquals(0, amt(rows, "M551").compareTo(BigDecimal.ONE));
+    assertEquals(0, amt(rows, "555").compareTo(BigDecimal.ONE.negate()));
+  }
+
+  @Test
+  @DisplayName("oracle case 2: debit balance on 551 shows Activo side, mirror is hidden")
+  void oracleDebitBalance() {
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(mirrorTree("5", "-5"), mirrorOperands(), "S", true);
+
+    for (String id : List.of("AB", "551", "5510", "55100000", "ATOT")) {
+      assertEquals(0, amt(rows, id).compareTo(new BigDecimal("5")), id);
+    }
+    assertFalse(has(rows, "M551"));
+    assertFalse(has(rows, "M5510"));
+  }
+
+  @Test
+  @DisplayName("N clamp keeps only negative values; non-summary and null svc pass through")
+  void negativeClampAndPassThrough() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("N1", "R", "1.1", "G", "N1", "C", "D", "5", "0", "N", true),
+        svcNode("N2", "R", "1.2", "G", "N2", "C", "D", "-5", "0", "N", true),
+        svcNode("L", "R", "1.3", "G", "L", "C", "D", "5", "0", "P", false),
+        svcNode("X", "R", "1.4", "G", "X", "C", "D", "-5", "0", null, true),
+        svcNode("A", "R", "1.5", "G", "A", "C", "D", "-5", "0", "A", true));
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", false);
+
+    assertEquals(0, amt(out, "N1").signum());
+    assertEquals(0, amt(out, "N2").compareTo(new BigDecimal("-5")));
+    assertEquals(0, amt(out, "L").compareTo(new BigDecimal("5")));
+    assertEquals(0, amt(out, "X").compareTo(new BigDecimal("-5")));
+    assertEquals(0, amt(out, "A").compareTo(new BigDecimal("-5")));
+  }
+
+  @Test
+  @DisplayName("clamped child contributes 0 to its parent roll-up")
+  void parentExcludesClampedChild() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("H", "R", "1.1", "G", "H", "E", "D", "0", "0", null, true),
+        svcNode("C1", "H", "1.1.1", "G", "C1", "C", "D", "-3", "0", "P", true),
+        svcNode("C2", "H", "1.1.2", "G", "C2", "C", "D", "4", "0", null, false));
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", true);
+
+    assertEquals(0, amt(out, "H").compareTo(new BigDecimal("4")));
+    assertFalse(has(out, "C1"));
+  }
+
+  @Test
+  @DisplayName("reference-period reset is independent of the main period")
+  void referenceResetIsIndependent() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("S", "R", "1.1", "G", "S", "C", "D", "0", "0", "P", true),
+        svcNode("K", "S", "1.1.1", "G", "K", "S", "D", "7", "-2", null, false));
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", false);
+
+    assertEquals(0, amt(out, "K").compareTo(new BigDecimal("7")));
+    assertEquals(0, findById(out, "K").amountRef.signum(), "ref period was reset");
+    assertEquals(0, findById(out, "S").amountRef.signum());
+  }
+
+  @Test
+  @DisplayName("a tree with no operand rows: mirror formula node resolves to 0 (R39 precondition)")
+  void noOperandsLeavesMirrorEmpty() {
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(mirrorTree("-1", "1"), List.of(), "S", true);
+
+    assertFalse(has(rows, "551"));
+    assertFalse(has(rows, "M551"));
+  }
 }

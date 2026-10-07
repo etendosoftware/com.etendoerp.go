@@ -427,6 +427,19 @@ class ProfitLossReportHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // ShowValueCond columns (ETP-5662)
+  // -------------------------------------------------------------------------
+
+  @Test
+  @DisplayName("node SQL selects showvaluecond/issummary AFTER own_amt_ref")
+  void selectsShowValueCondColumnsAfterOwnAmtRef() {
+    String cols = handler.ownAmountColumns();
+    assertTrue(cols.indexOf("own_amt_ref") < cols.indexOf("ev.showvaluecond"),
+        "positional COL_* mapping relies on these coming last");
+    assertTrue(cols.indexOf("ev.showvaluecond") < cols.indexOf("ev.issummary"));
+  }
+
+  // -------------------------------------------------------------------------
   // Test helpers
   // -------------------------------------------------------------------------
 

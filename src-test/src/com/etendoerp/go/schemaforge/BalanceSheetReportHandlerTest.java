@@ -379,6 +379,22 @@ class BalanceSheetReportHandlerTest {
   }
 
   // -------------------------------------------------------------------------
+  // ShowValueCond columns (ETP-5662)
+  // -------------------------------------------------------------------------
+
+  @Test
+  @DisplayName("node SQL selects showvaluecond/issummary AFTER own_amt_ref and groups by them")
+  void selectsShowValueCondColumnsAfterOwnAmtRef() {
+    String cols = handler.ownAmountColumns();
+    assertTrue(cols.indexOf("own_amt_ref") < cols.indexOf("ev.showvaluecond"),
+        "positional COL_* mapping relies on these coming last");
+    assertTrue(cols.indexOf("ev.showvaluecond") < cols.indexOf("ev.issummary"));
+    String groupBy = handler.outerGroupBy();
+    assertTrue(groupBy.contains("ev.showvaluecond") && groupBy.contains("ev.issummary"),
+        "aggregated query must group by the new columns");
+  }
+
+  // -------------------------------------------------------------------------
   // Test helpers
   // -------------------------------------------------------------------------
 
