@@ -58,16 +58,37 @@ final class ReconciliationWriteoffSupport {
    * <p>Moved here from {@code reconcileGroup} (ETP-5472) to keep that method under the Sonar
    * cognitive-complexity limit (java:S3776) once it gained the up-front operation-id check.
    *
+   * <p><b>Explicit conversion (ETP-5657).</b> When the body carries any of {@code actualPayment},
+   * {@code conversionRate} or {@code convertedAmount}, the invoices are paid by
+   * {@link ReconciliationConversionSupport} instead (the user states what the bank moved, Classic's
+   * Add Payment parity) and {@link #payInvoices} is not called. Without them, nothing changes.
+   * Those fields only describe the invoice leg: sent with no invoice they are refused with
+   * {@link ReconciliationConversionSupport#MSG_NOT_COMBINABLE} (400) rather than silently ignored —
+   * an agent sending {@code operationIds + convertedAmount} would otherwise get a 201 that booked
+   * nothing of what it asked for.
+   *
    * @return {@code null} on success or when there is nothing to pay, else the error to return
    */
   static NeoResponse payInvoicesFromBody(FIN_FinancialAccount account, FIN_BankStatementLine line,
       JSONArray invoiceSpecs, JSONObject body, List<String> operationIds, BigDecimal tolerance)
       throws Exception {
+    ReconciliationConversionSupport.ExplicitConversion conversion =
+        ReconciliationConversionSupport.parse(body);
     if (invoiceSpecs == null || invoiceSpecs.length() == 0) {
-      return null;
+      return conversion == null ? null
+          : NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+              ReconciliationConversionSupport.MSG_NOT_COMBINABLE);
     }
-    return payInvoices(account, line, invoiceSpecs, operationIds, tolerance,
-        body.optString("paymentMethodId", null), body.optBoolean("writeoffDifference", false));
+    String paymentMethodId = body.optString("paymentMethodId", null);
+    boolean writeoffDifference = body.optBoolean("writeoffDifference", false);
+    if (conversion != null) {
+      return ReconciliationConversionSupport.payInvoices(
+          new ReconciliationConversionSupport.ConversionPaymentContext(account, line, invoiceSpecs,
+              operationIds, paymentMethodId, writeoffDifference),
+          conversion);
+    }
+    return payInvoices(account, line, invoiceSpecs, operationIds, tolerance, paymentMethodId,
+        writeoffDifference);
   }
 
   /**

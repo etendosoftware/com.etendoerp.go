@@ -23,6 +23,8 @@ import com.etendoerp.go.schemaforge.data.Invitation;
 final class CompanyInvitationDalHelper {
 
   private static final String EMAIL_PARAMETER = "email";
+  private static final String CLIENT_ID_PARAMETER = "clientId";
+  private static final String USER_ID_PARAMETER = "userId";
 
   private CompanyInvitationDalHelper() {
   }
@@ -47,7 +49,7 @@ final class CompanyInvitationDalHelper {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and lower(i.email) = :email "
             + "and i.active = true and i.status in ('PENDING', 'SENT')");
-    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
@@ -66,12 +68,59 @@ final class CompanyInvitationDalHelper {
     OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
         "as i where i.client.id = :clientId and lower(i.email) = :email "
             + "and i.active = true order by i.creationDate desc");
-    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
     disableTenantFilters(query);
     query.setMaxResult(1);
     List<Invitation> list = query.list();
     return list.isEmpty() ? null : list.get(0);
+  }
+
+  /**
+   * Whether {@code clientId} has an {@code ACCEPTED} invitation addressed to {@code email} or
+   * issued to {@code userId} (ETP-5194). Either means a Go account was linked to this user in
+   * this tenant, whatever the latest invitation says — including when the email was later changed
+   * outside Go.
+   */
+  static boolean existsAcceptedInvitation(String clientId, String userId, String email) {
+    OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
+        "as i where i.client.id = :clientId and (lower(i.email) = :email or i.user.id = :userId) "
+            + "and i.active = true and i.status = 'ACCEPTED'");
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
+    query.setNamedParameter(USER_ID_PARAMETER, userId);
+    query.setNamedParameter(EMAIL_PARAMETER, email.toLowerCase(Locale.ROOT));
+    disableTenantFilters(query);
+    query.setMaxResult(1);
+    return !query.list().isEmpty();
+  }
+
+  /**
+   * Whether {@code userId} has ever been sent an invitation in {@code clientId} (ETP-5194). The
+   * structural "this {@code AD_User} is a Go user, not a contact" signal: a business-partner
+   * contact never goes through the invitation flow, so it never has a row of its own — the same
+   * signal the Users list uses to hide contacts (ETP-5411).
+   */
+  static boolean existsInvitationForUser(String clientId, String userId) {
+    OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
+        "as i where i.client.id = :clientId and i.user.id = :userId and i.active = true");
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
+    query.setNamedParameter(USER_ID_PARAMETER, userId);
+    disableTenantFilters(query);
+    query.setMaxResult(1);
+    return !query.list().isEmpty();
+  }
+
+  /**
+   * Every active invitation issued to {@code userId} in {@code clientId}, whatever its email
+   * (ETP-5194: an email correction leaves the old address's invitations behind).
+   */
+  static List<Invitation> findInvitationsForUser(String clientId, String userId) {
+    OBQuery<Invitation> query = OBDal.getInstance().createQuery(Invitation.class,
+        "as i where i.client.id = :clientId and i.user.id = :userId and i.active = true");
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
+    query.setNamedParameter(USER_ID_PARAMETER, userId);
+    disableTenantFilters(query);
+    return query.list();
   }
 
   static User findUserForClientEmail(Client client, String email) {

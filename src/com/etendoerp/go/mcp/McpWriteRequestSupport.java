@@ -24,6 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
@@ -33,6 +34,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
@@ -58,6 +61,10 @@ import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
  * rather than an arbitrary one: no field carried along, no constructor needed.
  */
 final class McpWriteRequestSupport {
+
+  private static final String FK_ZERO = "0";
+  /** Target entity name → whether it holds a record with id "0". See {@link #isExistingZeroRecord}. */
+  private static final Map<String, Boolean> ZERO_RECORD_BY_ENTITY = new ConcurrentHashMap<>();
 
   private McpWriteRequestSupport() {
     // utility class — no instances
@@ -599,10 +606,16 @@ final class McpWriteRequestSupport {
 
   /**
    * Replace FK sentinel values ("0") in the body with real values.
-   * The DAL's JsonToDataConverter tries to load entities by ID, and "0" is not a valid UUID.
-   * In Etendo, "0" means "not yet determined" — the real value comes from a related field
-   * (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
+   * In Etendo, "0" on some FKs means "not yet determined" — the real value comes from a related
+   * field (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
    * property in the body that targets the same entity and has a real value.
+   *
+   * <p>On other FKs "0" is a real record — the "no attributes" attribute set instance, the
+   * {@code *} organization. With no sibling to copy from, a "0" that resolves to an existing
+   * record of the target entity is kept: removing it wrote null or the default organization
+   * instead of what the agent sent. Only a "0" that is no record at all is removed. The sibling
+   * copy still goes first, because the document-type target holds a "0" record too (the
+   * placeholder "** New **") and must not be persisted as such.</p>
    */
   static void resolveFkSentinels(JSONObject body, Entity dalEntity, Logger log)
       throws JSONException {
@@ -619,7 +632,7 @@ final class McpWriteRequestSupport {
       }
       String targetEntity = prop.getTargetEntity().getName();
       String value = body.optString(key, "");
-      if ("0".equals(value)) {
+      if (FK_ZERO.equals(value)) {
         sentinelProps.put(key, targetEntity);
       } else if (!value.isEmpty()) {
         realValues.put(targetEntity, value);
@@ -635,13 +648,38 @@ final class McpWriteRequestSupport {
         body.put(propName, realValue);
         log.debug("Resolved FK sentinel: {} = {} (from sibling targeting {})",
             propName, realValue, targetEntity);
+      } else if (isExistingZeroRecord(targetEntity)) {
+        log.debug("Kept FK '0' for {} — it is an existing {} record", propName, targetEntity);
       } else {
         // No sibling with real value — remove to avoid DAL error. The column must
         // either have a DB default or be nullable; if not, the INSERT will fail.
         body.remove(propName);
-        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
-            propName, targetEntity);
+        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {} session={}",
+            propName, targetEntity, McpUsageTelemetry.sessionForLog());
       }
+    }
+  }
+
+  /**
+   * Whether the entity holds a record whose id is "0". Those are seed records of the dictionary
+   * (client 0), identical for every tenant and never created afterwards, so the answer is cached
+   * per entity: the lookup costs one primary-key read per entity for the life of the JVM, not one
+   * per FK per call. Read in admin mode because the question is whether the record exists, not
+   * whether the current role may read it.
+   *
+   * @param entityName DAL entity name of the FK's target
+   * @return {@code true} when a record with id "0" exists in that entity
+   */
+  static boolean isExistingZeroRecord(String entityName) {
+    return ZERO_RECORD_BY_ENTITY.computeIfAbsent(entityName, McpWriteRequestSupport::lookUpZeroRecord);
+  }
+
+  private static boolean lookUpZeroRecord(String entityName) {
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(entityName, FK_ZERO) != null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -708,6 +746,9 @@ final class McpWriteRequestSupport {
    *   <li>{@link McpParentScope.Kind#UNPARENTED} — only when a {@code parentId} is sent, since the
    *       entity declares it has no field to put it in. (Such an entity advertises no write
    *       method, so {@code requireMethodEnabled} normally refuses first.)</li>
+   *   <li>{@link McpParentScope.Kind#TAB_WHERE} — <b>always</b>: the parent is reached only through
+   *       the tab's where clause, so there is no field to write it into, and the defaults pass
+   *       would pick the intermediate link on its own.</li>
    * </ul>
    * <p>Not refused: a header, a same-record tab — its parent is the record itself — and a resolved
    * child. The update and delete verbs do not call this: neither runs the defaults pass, so neither
@@ -722,6 +763,7 @@ final class McpWriteRequestSupport {
     McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
     McpParentScope.Kind kind = scope.getKind();
     boolean refuse = kind == McpParentScope.Kind.UNRESOLVABLE
+        || kind == McpParentScope.Kind.TAB_WHERE
         || (kind == McpParentScope.Kind.UNPARENTED && StringUtils.isNotBlank(parentId));
     if (refuse) {
       SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();

@@ -44,24 +44,40 @@ final class McpConfigSections {
   /**
    * Register every section, once per JVM.
    *
-   * <p>Idempotent and safe to call on every read: after the first call this is a single volatile
-   * read. Registration itself is idempotent too, so a race between two first-callers cannot
-   * produce a duplicate-name failure.</p>
+   * <p>Safe to call on every read: after the first call this is a single volatile read. The first
+   * registration is serialised (double-checked under a lock), and each section is a single
+   * instance, so registering it again is a no-op.</p>
+   *
+   * <p><b>Both guards are needed (ETP-5639).</b> The earlier version claimed that a race between two
+   * first callers could not produce a duplicate-name failure. It could: every
+   * {@code declaration()} built a new section, so the slower thread registered a different object
+   * under a name already taken and got {@code "MCP config section 'parent' is already registered"}
+   * as a 500. This happened on the first concurrent calls after a restart. The lock also stops a
+   * caller from reading a half-built registry, where a section not yet registered would be reported
+   * as unknown. The duplicate-name check in {@link McpEntityConfig#register} stays in place for
+   * real programming errors: two different sections declared under one name.</p>
    */
   static void ensureRegistered() {
     if (REGISTERED.get()) {
       return;
     }
-    McpEntityConfig.register(McpParentSection.declaration());
-    McpEntityConfig.register(McpFieldsSection.declaration());
-    McpEntityConfig.register(McpVerbsSection.declaration());
-    McpEntityConfig.register(McpActionsSection.declaration());
-    REGISTERED.set(true);
+    synchronized (McpConfigSections.class) {
+      if (REGISTERED.get()) {
+        return;
+      }
+      McpEntityConfig.register(McpParentSection.declaration());
+      McpEntityConfig.register(McpFieldsSection.declaration());
+      McpEntityConfig.register(McpVerbsSection.declaration());
+      McpEntityConfig.register(McpActionsSection.declaration());
+      REGISTERED.set(true);
+    }
   }
 
   /** Undo the bootstrap so a test can register its own sections. Tests only. */
   static void resetForTests() {
-    REGISTERED.set(false);
-    McpEntityConfig.clearRegistrations();
+    synchronized (McpConfigSections.class) {
+      REGISTERED.set(false);
+      McpEntityConfig.clearRegistrations();
+    }
   }
 }
