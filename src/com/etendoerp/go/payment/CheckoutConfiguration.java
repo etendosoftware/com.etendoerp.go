@@ -29,7 +29,15 @@ public final class CheckoutConfiguration {
   }
 
   /**
-   * Returns the server-selected checkout price identifier.
+   * Returns the configured legacy fallback price identifier.
+   *
+   * <p>Since ETP-5046 what can be bought comes from the Subscription Plan Catalog, and this
+   * property is read for one purpose only: the <em>legacy price fallback</em>. While no active
+   * plan catalog row carries a provider price, a non-blank value here keeps checkout selling at this
+   * price under the grandfathered {@code legacy-productive} plan; the moment the first priced plan
+   * exists the fallback retires itself and this value is ignored. See
+   * {@link PlanCatalogService#isLegacyFallbackActive()}, the one predicate that decides it.
+   *
    * @return configured price identifier, or an empty string
    */
   public static String priceId() {
@@ -54,11 +62,39 @@ public final class CheckoutConfiguration {
   }
 
   /**
-   * Returns whether all mandatory checkout settings are present.
+   * Returns how long to wait for the provider to accept a connection.
+   *
+   * @return connect timeout in milliseconds
+   */
+  public static int connectTimeoutMs() {
+    return GoRuntimeProperties.readInt("etendo.go.checkout.connect.timeout.ms",
+        "ETGO_CHECKOUT_CONNECT_TIMEOUT_MS", 10000);
+  }
+
+  /**
+   * Returns how long to wait for the provider to answer once connected.
+   *
+   * @return read timeout in milliseconds
+   */
+  public static int readTimeoutMs() {
+    return GoRuntimeProperties.readInt("etendo.go.checkout.read.timeout.ms",
+        "ETGO_CHECKOUT_READ_TIMEOUT_MS", 20000);
+  }
+
+  /**
+   * Returns whether the provider credentials checkout needs are present.
+   *
+   * <p>This used to also require a configured price id, so a true answer additionally proved that
+   * <em>a purchasable thing existed</em>. That guarantee has moved to the Subscription Plan
+   * Catalog: a plan row carrying a provider price id, or — only while no such row exists — the
+   * legacy price fallback ({@link #priceId()}). A checkout that finds neither answers
+   * {@code CHECKOUT_NOT_CONFIGURED} or {@code PLAN_NOT_AVAILABLE} on its own; this method proves
+   * credentials and nothing else.
+   *
    * @return true when checkout can be used
    */
   public static boolean isConfigured() {
-    return !secretKey().trim().isEmpty() && !priceId().trim().isEmpty() && !webhookSecret().trim().isEmpty();
+    return !secretKey().trim().isEmpty() && !webhookSecret().trim().isEmpty();
   }
 
 }

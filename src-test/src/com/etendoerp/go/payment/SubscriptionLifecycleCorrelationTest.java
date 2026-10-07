@@ -341,6 +341,75 @@ public class SubscriptionLifecycleCorrelationTest {
     verify(eventStore, never()).markApplied(anyString());
   }
 
+  /**
+   * The lifecycle event runs under an explicit System context (the webhook is matched before the
+   * authentication chain and has none), and that context must be taken away again even when the
+   * write throws. A System context left on the request thread would make whatever runs next on it
+   * silently privileged.
+   */
+  @Test
+  public void aThrowingLifecycleWriteStillLeavesTheWebhookThreadWithoutAContext() throws Exception {
+    System.setProperty(WEBHOOK_SECRET_PROPERTY, WEBHOOK_SECRET);
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest purchase = purchaseWithClient("client-ctx");
+    when(requestStore.findByStripeSubscription("sub-ctx")).thenReturn(purchase);
+    when(lifecycle.updateSubscriptionStatus("client-ctx",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END))
+        .thenThrow(new IllegalStateException("subscription row write failed"));
+    OBDal dal = mock(OBDal.class);
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    setField(servlet, "checkoutWebhookProcessor", new CheckoutWebhookProcessor(eventId -> true,
+        300));
+    String payload = "{\"id\":\"evt-ctx\",\"type\":\"invoice.payment_failed\","
+        + "\"created\":" + CREATED + ",\"data\":{\"object\":{\"subscription\":\"sub-ctx\","
+        + "\"customer\":\"cus-ctx\",\"period_end\":1793750400}}}";
+
+    // The thread's context, as OBContext would hold it: none on arrival.
+    java.util.concurrent.atomic.AtomicReference<org.openbravo.dal.core.OBContext> threadContext =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    org.openbravo.dal.core.OBContext systemContext = mock(org.openbravo.dal.core.OBContext.class);
+    java.util.List<String> calls = new java.util.ArrayList<>();
+    ResponseCapture capture;
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+        MockedStatic<org.openbravo.dal.core.OBContext> context =
+            mockStatic(org.openbravo.dal.core.OBContext.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      context.when(org.openbravo.dal.core.OBContext::getOBContext)
+          .thenAnswer(invocation -> threadContext.get());
+      context.when(() -> org.openbravo.dal.core.OBContext.setOBContext("0", "0", "0", "0"))
+          .thenAnswer(invocation -> {
+            calls.add("system");
+            threadContext.set(systemContext);
+            return null;
+          });
+      context.when(() -> org.openbravo.dal.core.OBContext.setOBContext(
+          org.mockito.ArgumentMatchers.<org.openbravo.dal.core.OBContext>any()))
+          .thenAnswer(invocation -> {
+            org.openbravo.dal.core.OBContext restored = invocation.getArgument(0);
+            calls.add(restored == null ? "restore(null)" : "restore(context)");
+            threadContext.set(restored);
+            return null;
+          });
+      context.when(org.openbravo.dal.core.OBContext::restorePreviousMode)
+          .thenAnswer(invocation -> calls.add("restorePreviousMode"));
+      capture = deliver(servlet, payload);
+    }
+
+    assertEquals(500, capture.status);
+    verify(eventStore).markFailed(eq("evt-ctx"),
+        startsWith("Handler failed while applying the event: java.lang.IllegalStateException"));
+    verify(eventStore, never()).markApplied(anyString());
+    org.junit.Assert.assertTrue("the lifecycle must have run as System: " + calls,
+        calls.contains("system"));
+    org.junit.Assert.assertEquals("admin mode is left, then the (absent) caller context restored",
+        java.util.List.of("restorePreviousMode", "restore(null)"),
+        calls.subList(calls.size() - 2, calls.size()));
+    org.junit.Assert.assertNull("no System context may survive the failure on the webhook thread",
+        threadContext.get());
+  }
+
   private static JSONObject paymentFailedEventCreated(String subscriptionId, String customerId,
       long created) throws Exception {
     JSONObject event = paymentFailedEvent(subscriptionId, customerId);

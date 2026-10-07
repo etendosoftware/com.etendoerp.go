@@ -14,6 +14,7 @@ package com.etendoerp.go.payment;
 
 import java.time.Instant;
 import java.util.Locale;
+import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -26,6 +27,7 @@ import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.schemaforge.data.Subscription;
 
 /**
  * Persists the minimum lifecycle metadata needed to enforce demo access.
@@ -64,14 +66,21 @@ public class TenantEnvironmentLifecycleService {
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
 
   private final TenantPlanService tenantPlanService;
+  private final SubscriptionService subscriptionService;
 
   /** Creates a lifecycle service backed by the default plan resolver. */
   public TenantEnvironmentLifecycleService() {
-    this(new TenantPlanService());
+    this(new TenantPlanService(), new SubscriptionService());
   }
 
   TenantEnvironmentLifecycleService(TenantPlanService tenantPlanService) {
+    this(tenantPlanService, new SubscriptionService());
+  }
+
+  TenantEnvironmentLifecycleService(TenantPlanService tenantPlanService,
+      SubscriptionService subscriptionService) {
     this.tenantPlanService = tenantPlanService;
+    this.subscriptionService = subscriptionService;
   }
 
   /**
@@ -138,13 +147,7 @@ public class TenantEnvironmentLifecycleService {
       String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
       if (TYPE_PRODUCTIVE.equalsIgnoreCase(type)
           || TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
-        String status = readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId);
-        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
-            status, EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
-        Instant renewalDueAt = parseInstant(
-            readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
-        return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-            subscriptionStatus, renewalDueAt, false);
+        return productiveSnapshot(clientId);
       }
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
       if (StringUtils.isBlank(startedAt)
@@ -173,6 +176,67 @@ public class TenantEnvironmentLifecycleService {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
     }
+  }
+
+  /**
+   * Builds the productive snapshot, reading the billing state from the subscription row.
+   *
+   * <p>ETP-5046 made {@code ETGO_SUBSCRIPTION} the single source of truth for whether a tenant is
+   * paying and until when. The {@code ETGO_SubscriptionStatus} and {@code ETGO_SubscriptionDueAt}
+   * preferences survive only as a transitional fallback for a tenant the R37 backfill has not
+   * reached yet. The order matters: consulting the preferences first would let the access policy
+   * and the Subscription Plan Catalog disagree about the same tenant, which is precisely what
+   * this unification exists to prevent.
+   *
+   * <p>The Stripe lifecycle webhooks keep the row current: {@link #updateSubscriptionStatus}
+   * writes their outcome onto the open row whenever the tenant has one, so the row's
+   * {@code STATUS} and {@code CURRENT_PERIOD_END} are what the access policy reads here.
+   *
+   * @param clientId environment client id, already known to be productive
+   * @return the productive snapshot, never null
+   */
+  private EnvironmentSnapshot productiveSnapshot(String clientId) {
+    Optional<Subscription> openSubscription = subscriptionService.findOpen(clientId);
+    if (openSubscription.isPresent()) {
+      Subscription subscription = openSubscription.get();
+      Instant renewalDueAt = subscription.getCurrentPeriodEnd() == null ? null
+          : subscription.getCurrentPeriodEnd().toInstant();
+      return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
+          subscriptionStatusOf(subscription.getSubscriptionStatus()), renewalDueAt, false);
+    }
+    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant yet. Delete this part
+    // of the condition together with the rest of the fallback in Phase F, once every productive
+    // tenant has one.
+    EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
+        readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId),
+        EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
+    Instant renewalDueAt = parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
+    return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
+        subscriptionStatus, renewalDueAt, false);
+  }
+
+  /**
+   * Maps an {@code ETGO_SUBSCRIPTION.STATUS} value onto the access policy's vocabulary.
+   *
+   * <p>An unrecognised status degrades to {@code LEGACY_ENTITLEMENT}, never to {@code NONE}: the
+   * tenant demonstrably holds an open subscription row, so the safe reading of a status this build
+   * does not know about is "entitled", not "locked out of the product".
+   *
+   * @param status the stored subscription status, may be null or blank
+   * @return the matching access-policy status
+   */
+  static EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatusOf(String status) {
+    String normalized = StringUtils.lowerCase(StringUtils.trimToEmpty(status), Locale.ROOT);
+    if (SubscriptionService.STATUS_ACTIVE.equals(normalized)) {
+      return EnvironmentAccessPolicy.SubscriptionStatus.CURRENT;
+    }
+    if (SubscriptionService.STATUS_PAST_DUE.equals(normalized)) {
+      return EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE;
+    }
+    if (SubscriptionService.STATUS_CANCELED.equals(normalized)) {
+      return EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED;
+    }
+    return EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT;
   }
 
   /**
@@ -213,11 +277,22 @@ public class TenantEnvironmentLifecycleService {
   }
 
   /**
-   * Updates the local subscription projection; billing adapters supply the due date in UTC.
+   * Stores a subscription lifecycle outcome; billing adapters supply the due date in UTC.
+   *
+   * <p><b>Two stores, chosen per tenant.</b> A tenant with an open {@code ETGO_SUBSCRIPTION} row
+   * has the outcome written onto that row ({@link SubscriptionService#applyLifecycleStatus}), which
+   * is what {@link #resolve} reads for it. A tenant without one — a productive tenant the R37
+   * backfill has not reached — keeps the {@code ETGO_SubscriptionStatus} /
+   * {@code ETGO_SubscriptionDueAt} preference projection
+   * ({@code ETP-5046-TRANSITIONAL-FALLBACK}). Writing only one of them per tenant is what keeps the
+   * two from disagreeing.
+   *
+   * <p>Not committed here: the webhook handler commits it with the event's ledger row.
+   *
    * @param clientId environment client id
    * @param status subscription status to store
-   * @param renewalDueAt subscription renewal due date
-   * @return true when the projection was stored
+   * @param renewalDueAt grace anchor (end of the paid period), or null to clear it
+   * @return true when the outcome was stored in either place
    */
   public boolean updateSubscriptionStatus(String clientId,
       EnvironmentAccessPolicy.SubscriptionStatus status, Instant renewalDueAt) {
@@ -225,6 +300,10 @@ public class TenantEnvironmentLifecycleService {
       return false;
     }
     try {
+      if (subscriptionService.applyLifecycleStatus(clientId, status, renewalDueAt)) {
+        return true;
+      }
+      // ETP-5046-TRANSITIONAL-FALLBACK — no open subscription row for this tenant yet.
       Client client = OBDal.getInstance().get(Client.class, clientId);
       if (client == null) {
         return false;
@@ -234,13 +313,15 @@ public class TenantEnvironmentLifecycleService {
           renewalDueAt == null ? "" : renewalDueAt.toString(), client);
       return true;
     } catch (RuntimeException e) {
-      log.error("Could not update subscription projection for client {}", clientId, e);
+      log.error("Could not update subscription state for client {}", clientId, e);
       return false;
     }
   }
 
   /**
-   * Reads the stored subscription projection the lifecycle applier decides against.
+   * Reads the stored subscription state the lifecycle applier decides against: the open
+   * subscription row when the tenant has one, otherwise the preference projection — the same
+   * store {@link #updateSubscriptionStatus} writes to.
    * @param clientId environment client id
    * @return stored status, grace anchor and last applied event instant; empty when none is stored
    */
@@ -248,10 +329,23 @@ public class TenantEnvironmentLifecycleService {
     if (StringUtils.isBlank(clientId)) {
       return SubscriptionLifecycleApplier.StoredState.NONE;
     }
+    // The event instant stays a preference for both stores: it is the ordering watermark of the
+    // webhook stream, not subscription state, and the row has no column for it.
+    Instant lastEventAt = parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId));
+    Optional<Subscription> open = subscriptionService.findOpen(clientId);
+    if (open.isPresent()) {
+      Subscription subscription = open.get();
+      return new SubscriptionLifecycleApplier.StoredState(
+          subscriptionStatusOf(subscription.getSubscriptionStatus()),
+          subscription.getCurrentPeriodEnd() == null ? null
+              : subscription.getCurrentPeriodEnd().toInstant(),
+          lastEventAt);
+    }
+    // ETP-5046-TRANSITIONAL-FALLBACK — no open subscription row: the preference projection.
     return new SubscriptionLifecycleApplier.StoredState(
         parseSubscriptionStatus(readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId), null),
         parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId)),
-        parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId)));
+        lastEventAt);
   }
 
   /**
@@ -301,6 +395,7 @@ public class TenantEnvironmentLifecycleService {
       }
       if (subscriptionStatus != null) {
         setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, subscriptionStatus.name(), client);
+        applyDevelopmentStatusToSubscription(clientId, subscriptionStatus, renewalDueAt);
       }
       if (renewalDueAt != null) {
         setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, renewalDueAt.toString(), client);
@@ -311,6 +406,20 @@ public class TenantEnvironmentLifecycleService {
     } catch (RuntimeException e) {
       log.error("Could not update development lifecycle state for client {}", clientId, e);
       return false;
+    }
+  }
+
+  /**
+   * Mirrors a development-tool status onto the open subscription row, which is what
+   * {@link #resolve} reads for a tenant that has one; without this the tool would stop affecting
+   * every tenant with a subscription. Statuses the row cannot hold are left to the preferences.
+   */
+  private void applyDevelopmentStatusToSubscription(String clientId,
+      EnvironmentAccessPolicy.SubscriptionStatus status, Instant renewalDueAt) {
+    if (status == EnvironmentAccessPolicy.SubscriptionStatus.CURRENT
+        || status == EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE
+        || status == EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED) {
+      subscriptionService.applyLifecycleStatus(clientId, status, renewalDueAt);
     }
   }
 
@@ -330,10 +439,11 @@ public class TenantEnvironmentLifecycleService {
       if (demo == null || productive == null) {
         return false;
       }
+      // One admin-mode span covers both cross-client writes, so they call the unwrapped writer.
       OBContext.setAdminMode();
       try {
-        setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
-        setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+        setPreferenceValue(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
+        setPreferenceValue(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -415,7 +525,22 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
+  /**
+   * Writes a lifecycle preference, in admin mode for the same reason {@link #readPreference} reads
+   * in it: these are system flags, and the callers include the Stripe webhook, which is matched
+   * before the authentication chain and has no user context of its own. Admin mode is what lets
+   * the lookup and the save run there without depending on a context some earlier call leaked.
+   */
   private void setPreference(String attribute, String value, Client client) {
+    OBContext.setAdminMode();
+    try {
+      setPreferenceValue(attribute, value, client);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void setPreferenceValue(String attribute, String value, Client client) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
             + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID

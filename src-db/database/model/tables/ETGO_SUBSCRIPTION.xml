@@ -1,0 +1,132 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SUBSCRIPTION">
+    <table name="ETGO_SUBSCRIPTION" primaryKey="ETGO_SUB_PK">
+      <column name="ETGO_SUBSCRIPTION_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ENVIRONMENT_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_PLAN_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default><![CDATA[active]]></default>
+        <onCreateDefault><![CDATA[active]]></onCreateDefault>
+      </column>
+      <column name="START_DATE" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="END_DATE" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CURRENT_PERIOD_START" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CURRENT_PERIOD_END" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STRIPE_CUSTOMER_ID" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STRIPE_SUBSCRIPTION_ID" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_ACCOUNT_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="PROVIDER_PRICE_ID" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SNAPSHOT_AMOUNT" primaryKey="false" required="false" type="DECIMAL" size="20,4" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SNAPSHOT_CURRENCY" primaryKey="false" required="false" type="VARCHAR" size="3" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="PENDING_PLAN_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="PENDING_EFFECTIVE_DATE" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="ETGO_ACCOUNT" name="ETGO_SUB_ACCOUNT_FK">
+        <reference local="ETGO_ACCOUNT_ID" foreign="ETGO_ACCOUNT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SUB_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUB_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SUB_ENVCLIENT_FK">
+        <reference local="ENVIRONMENT_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SUB_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_PLAN" name="ETGO_SUB_PENDPLAN_FK">
+        <reference local="PENDING_PLAN_ID" foreign="ETGO_PLAN_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_PLAN" name="ETGO_SUB_PLAN_FK">
+        <reference local="ETGO_PLAN_ID" foreign="ETGO_PLAN_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUB_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <index name="ETGO_SUB_OPEN_ENVCLIENT_UQ" unique="true">
+        <index-column name="ENVIRONMENT_CLIENT_ID"/>
+        <whereClause><![CDATA[ISACTIVE='Y' AND end_date IS NULL]]></whereClause>
+      </index>
+      <index name="ETGO_SUB_STRIPESUB_IX" unique="false">
+        <index-column name="STRIPE_SUBSCRIPTION_ID"/>
+      </index>
+      <check name="ETGO_SUB_DATES_CHK"><![CDATA[END_DATE IS NULL OR END_DATE >= START_DATE]]></check>
+      <check name="ETGO_SUB_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_SUB_PERIOD_CHK"><![CDATA[CURRENT_PERIOD_END IS NULL OR CURRENT_PERIOD_START IS NULL OR CURRENT_PERIOD_END >= CURRENT_PERIOD_START]]></check>
+      <check name="ETGO_SUB_STATUS_CHK"><![CDATA[STATUS IN ('active', 'past_due', 'canceled')]]></check>
+    </table>
+  </database>

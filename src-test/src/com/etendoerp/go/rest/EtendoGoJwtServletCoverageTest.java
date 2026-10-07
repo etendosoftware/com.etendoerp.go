@@ -20,10 +20,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -42,10 +44,12 @@ import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
 import java.io.PrintWriter;
+import java.io.Serializable;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -55,18 +59,30 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.Cookie;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Filter;
+import org.apache.logging.log4j.core.Layout;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
+import org.apache.logging.log4j.core.config.Property;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.junit.Before;
 import org.junit.After;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.exception.OBException;
@@ -81,17 +97,22 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.etendoerp.go.common.PublicUrlResolver;
-import com.etendoerp.go.payment.CheckoutRequestStore;
-import com.etendoerp.go.payment.DemoDataTransferService;
-import com.etendoerp.go.payment.HostedCheckoutService;
-import com.etendoerp.go.payment.TenantPlanService;
-import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
-import com.etendoerp.go.payment.TenantPaywallService;
-import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
+import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.ProvisioningFailureReason;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.Subscription;
+import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.DemoDataTransferService;
+import com.etendoerp.go.payment.HostedCheckoutService;
+import com.etendoerp.go.payment.TenantPaywallService;
+import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
 import com.etendoerp.go.session.GoSessionService;
@@ -105,6 +126,16 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * loop, the GET /login (environment login) success and user-not-found paths, and the
  * onboarding pre-flight helpers (resolveCurrencyId, parseOnboardingRequest,
  * writeEnvironmentLoginResponse).
+ *
+ * <p>It also owns the specs for {@code applyPaidUpgradeSideEffects} (ETP-5046): which store records
+ * a paid tenant's plan, and that the per-tenant retirement of the legacy ETGO_TenantPlan preference
+ * can never fail an upgrade that has already been paid for.
+ *
+ * <p>And the specs for the scoped system context of the two ETP-5548 checks,
+ * {@code isProductiveNameTakenByAccount} and {@code isAssociatedDemo}: each runs as System and
+ * hands the caller back its own OBContext and admin-mode depth, on every path.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletCoverageTest {
 
@@ -256,8 +287,8 @@ public class EtendoGoJwtServletCoverageTest {
     CheckoutRequestStore store = mock(CheckoutRequestStore.class);
     servlet.checkoutRequestStore = store;
     CheckoutRequest nameInUse = mock(CheckoutRequest.class);
-    when(nameInUse.getFailureReason()).thenReturn(CheckoutRequestStore.encodeFailureReason(
-        CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE, "raw cause"));
+    when(nameInUse.getFailureReason()).thenReturn(ProvisioningFailureReason.encode(
+        ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE, "raw cause"));
     when(store.deriveProvisioningStatus(nameInUse))
         .thenReturn(CheckoutRequestStore.DERIVED_STATUS_PROVISIONING_FAILED);
     when(store.isProvisioningRetryAllowed(nameInUse)).thenReturn(false);
@@ -370,7 +401,8 @@ public class EtendoGoJwtServletCoverageTest {
 
     JSONObject checkoutResult = new JSONObject().put("requestId", "purchase-prod-1");
     when(checkout.createSession(eq("account-1"), eq("owner@example.test"), eq("New Production"),
-        eq("https://app.example.test"), isNull(), eq(false), eq(false), any()))
+        eq("https://app.example.test"), isNull(), argThat(
+            EtendoGoJwtServletCoverageTest::selectsNoDemo)))
         .thenReturn(checkoutResult);
     HttpServletRequest request = jsonRequest("/billing/purchases",
         "{\"clientName\":\"New Production\",\"demoClientId\":\"DEMO-1\","
@@ -397,8 +429,8 @@ public class EtendoGoJwtServletCoverageTest {
       purchaseServlet.doPost(request, response.response);
 
       verify(checkout).createSession(eq("account-1"), eq("owner@example.test"),
-          eq("New Production"), eq("https://app.example.test"), isNull(), eq(false), eq(false),
-          any());
+          eq("New Production"), eq("https://app.example.test"), isNull(),
+          argThat(EtendoGoJwtServletCoverageTest::selectsNoDemo));
       verify(requestStore).findActiveForAccountAndClientName("account-1", "owner@example.test",
           "New Production");
       org.mockito.Mockito.verifyNoInteractions(transfer);
@@ -408,6 +440,12 @@ public class EtendoGoJwtServletCoverageTest {
     JSONObject responseBody = new JSONObject(response.body());
     assertFalse(responseBody.has("demoClientId"));
     assertFalse(responseBody.has("dataTransfer"));
+  }
+
+  /** A productive-origin purchase carries no demo source and transfers nothing. */
+  private static boolean selectsNoDemo(HostedCheckoutService.SessionOptions options) {
+    return options != null && options.getDemoClientId() == null
+        && !options.isTransferProducts() && !options.isTransferContacts();
   }
 
   /**
@@ -445,7 +483,8 @@ public class EtendoGoJwtServletCoverageTest {
 
     JSONObject checkoutResult = new JSONObject().put("requestId", "purchase-prod-1");
     when(checkout.createSession(eq("account-1"), eq("owner@example.test"), eq("New Production"),
-        eq("https://app.example.test"), isNull(), eq(false), eq(false), any()))
+        eq("https://app.example.test"), isNull(), argThat(
+            EtendoGoJwtServletCoverageTest::selectsNoDemo)))
         .thenReturn(checkoutResult);
     HttpServletRequest request = jsonRequest("/billing/purchases",
         "{\"clientName\":\"New Production\",\"demoClientId\":\"SPENT-DEMO\","
@@ -472,8 +511,8 @@ public class EtendoGoJwtServletCoverageTest {
       purchaseServlet.doPost(request, response.response);
 
       verify(checkout).createSession(eq("account-1"), eq("owner@example.test"),
-          eq("New Production"), eq("https://app.example.test"), isNull(), eq(false), eq(false),
-          any());
+          eq("New Production"), eq("https://app.example.test"), isNull(),
+          argThat(EtendoGoJwtServletCoverageTest::selectsNoDemo));
       verify(requestStore).findActiveForAccountAndClientName("account-1", "owner@example.test",
           "New Production");
       org.mockito.Mockito.verifyNoInteractions(transfer);
@@ -558,7 +597,7 @@ public class EtendoGoJwtServletCoverageTest {
     assertEquals("DEMO_SELECTION_REQUIRED",
         new JSONObject(response.body()).getJSONObject("error").getString("code"));
     org.mockito.Mockito.verify(checkout, never()).createSession(anyString(), anyString(), anyString(),
-        anyString(), any(), anyBoolean(), anyBoolean(), any());
+        anyString(), any(), any(HostedCheckoutService.SessionOptions.class));
   }
 
   @Test
@@ -1101,6 +1140,12 @@ public class EtendoGoJwtServletCoverageTest {
     users.add(userWithOrgs);
     users.add(userWithoutOrgs);
 
+    // The environment list resolves every tenant's plan through ONE subscription query built
+    // before the sort. Stubbed here so this mapping spec stays a pure unit test.
+    SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    when(subscriptionService.findOpenForClients(any())).thenReturn(java.util.Map.of());
+    servlet.subscriptionService = subscriptionService;
+
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
@@ -1112,14 +1157,16 @@ public class EtendoGoJwtServletCoverageTest {
       dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("client-2"))
           .thenReturn(Collections.emptyList());
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          any(Client.class), any(), any(User.class))).thenReturn(new JSONObject());
+          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class)))
+          .thenReturn(new JSONObject());
 
       servlet.doGet(req, resp.response);
 
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          eq(clientWithOrgs), eq(org), eq(userWithOrgs)));
+          eq(clientWithOrgs), eq(org), eq(userWithOrgs), any(EnvironmentPlanCache.class)));
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          eq(clientWithoutOrgs), eq(null), eq(userWithoutOrgs)));
+          eq(clientWithoutOrgs), eq(null), eq(userWithoutOrgs),
+          any(EnvironmentPlanCache.class)));
     }
 
     assertEquals(200, resp.status);
@@ -1950,6 +1997,253 @@ public class EtendoGoJwtServletCoverageTest {
         + Base64.getEncoder().encodeToString(hash);
   }
 
+  // ===================== applyPaidUpgradeSideEffects — ETP-5046 per-tenant retirement ==========
+  //
+  // The paid-upgrade path used to write BOTH stores on every upgrade: the ETGO_SUBSCRIPTION row
+  // AND the legacy ETGO_TenantPlan preference. Since ETP-5046 the subscription is the source of
+  // truth, so writing the preference alongside it was not a safety measure but a second answer
+  // that drifts. The preference is now written ONLY when the subscription write failed — which is
+  // exactly when TenantPlanPreferenceFallback needs it — and is RETIRED on the success path, so a
+  // newly paid tenant lands directly in the post-cutover state. Grep marker for the Phase F
+  // deletion: ETP-5046-TRANSITIONAL-FALLBACK.
+
+  private static final String PAID_CLIENT_ID = "48F0981053084BC49CCEEFEC296E2A3D";
+  private static final String PAID_STAR_ORG_ID = "9F5511B92BD0465FA678F75278FA9C3A";
+  private static final String PAID_TOKEN = "chk_etp5046";
+
+  /**
+   * Wires the servlet with mocked collaborators and a checkout request that carries a plan, so the
+   * subscription write has everything it needs.
+   *
+   * @param subscriptionOpens whether {@code openSubscription} succeeds or throws
+   * @return the mocked collaborators, for verification
+   */
+  private PaidUpgradeFixture givenPaidUpgrade(boolean subscriptionOpens) {
+    PaidUpgradeFixture fixture = new PaidUpgradeFixture();
+    CheckoutRequest checkoutRequest = mock(CheckoutRequest.class);
+    when(checkoutRequest.getPlan()).thenReturn(mock(Plan.class));
+    when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(checkoutRequest);
+    if (subscriptionOpens) {
+      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any(),
+          any()))
+          .thenReturn(mock(Subscription.class));
+    } else {
+      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any(),
+          any()))
+          .thenThrow(new IllegalStateException("subscription write failed"));
+    }
+    servlet.checkoutRequestStore = fixture.checkoutRequestStore;
+    servlet.subscriptionService = fixture.subscriptionService;
+    servlet.tenantPlanService = fixture.tenantPlanService;
+    servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    // The lifecycle projection is a separate concern from the payment record and has its own
+    // specs; stubbed to succeed so it contributes no ERROR lines to the assertions below.
+    when(fixture.lifecycleService.markProductive(anyString())).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = fixture.lifecycleService;
+    return fixture;
+  }
+
+  private void applyPaidUpgrade() {
+    // The static DAL helper is mocked so no stray OBDal read can add an ERROR line to the log
+    // assertions below. The demo link is no longer made here: paid onboarding links the demo
+    // recorded on the purchase, in transferDemoCompanyProfile.
+    try (MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      servlet.applyPaidUpgradeSideEffects(PAID_CLIENT_ID, PAID_STAR_ORG_ID, "Acme S.L.",
+          "user@test.com", PAID_TOKEN);
+    }
+  }
+
+  @Test
+  public void paidUpgradeWithASubscriptionDoesNotWriteThePreferenceAndRetiresTheStaleOne() {
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    when(fixture.tenantPlanService.retireProductivePreference(PAID_CLIENT_ID)).thenReturn(true);
+
+    applyPaidUpgrade();
+
+    verify(fixture.subscriptionService)
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
+    // The whole point: no parallel truth is written any more.
+    verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+    // ...and whatever marker this tenant still carried is retired, so it is immediately in the
+    // post-cutover state and the fleet-wide count moves one closer to zero.
+    verify(fixture.tenantPlanService).retireProductivePreference(PAID_CLIENT_ID);
+    // A recorded productive tenant still gets its ETSG_ForceTestMode override reverted (ETP-5117).
+    verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void paidUpgradeWhoseSubscriptionWriteFailsWritesThePreferenceAsTheSafetyNet() {
+    PaidUpgradeFixture fixture = givenPaidUpgrade(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    applyPaidUpgrade();
+
+    // Without a subscription row, the preference is the ONLY record that this tenant paid, and
+    // TenantPlanPreferenceFallback is what will read it back. This is the case the fallback and
+    // the whole transitional apparatus exist for.
+    verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+    // Nothing is retired: retiring the safety net in the same breath as writing it would leave the
+    // tenant with no record at all.
+    verify(fixture.tenantPlanService, never()).retireProductivePreference(anyString());
+    verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void paidUpgradeWithNoCheckoutRequestFallsBackToThePreferenceAndRetiresNothing() {
+    // The third way the subscription write can fail to record anything: the token resolves to no
+    // request at all, so there is no plan to open a subscription on. Same answer as a throwing
+    // write — the safety net is written, nothing is retired.
+    PaidUpgradeFixture fixture = new PaidUpgradeFixture();
+    when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(null);
+    servlet.checkoutRequestStore = fixture.checkoutRequestStore;
+    servlet.subscriptionService = fixture.subscriptionService;
+    servlet.tenantPlanService = fixture.tenantPlanService;
+    servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    // Stubbed to succeed as in givenPaidUpgrade: a failed projection now fails the upgrade closed
+    // (ETP-5548), which is its own concern and not what this spec is about.
+    when(fixture.lifecycleService.markProductive(anyString())).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = fixture.lifecycleService;
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    applyPaidUpgrade();
+
+    verifyNoInteractions(fixture.subscriptionService);
+    verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+    verify(fixture.tenantPlanService, never()).retireProductivePreference(anyString());
+  }
+
+  @Test
+  public void aFailedRetirementIsLoggedAndNeverFailsAnUpgradeThatWasAlreadyPaidFor() {
+    // A failed retirement is the one failure with nothing contradictory left behind — the
+    // subscription records the payment, the transitional fallback simply keeps answering for the
+    // tenant and the R37 backfill retires the row later — so unlike a missing payment record
+    // (ETP-5548 aborts on that) it must be logged loudly and then ignored.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    when(fixture.tenantPlanService.retireProductivePreference(PAID_CLIENT_ID))
+        .thenThrow(new IllegalStateException("no session"));
+    LogCapture errors = LogCapture.attachTo(EtendoGoJwtServlet.class, Level.ERROR);
+
+    try {
+      applyPaidUpgrade();
+
+      List<String> logged = errors.messagesAt(Level.ERROR);
+      assertEquals("the failure must be searchable, not silent: " + logged, 1, logged.size());
+      assertTrue("the line must name the tenant: " + logged.get(0),
+          logged.get(0).contains(PAID_CLIENT_ID));
+      assertTrue("the line must name the preference that survived: " + logged.get(0),
+          logged.get(0).contains(TenantPlanService.PREFERENCE_ATTRIBUTE));
+      // The upgrade completed all the same: the subscription was written and the fiscal test-mode
+      // override was still reverted.
+      verify(fixture.subscriptionService)
+          .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any(), any());
+      verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+      // And the failed retirement must NOT make the servlet fall back to writing the marker: the
+      // subscription exists, so the tenant is recorded.
+      verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+    } finally {
+      errors.detach();
+    }
+  }
+
+  @Test
+  public void aFallbackPurchaseOpensOnTheGrandfatheredPlanWithTheChargedPrice() {
+    // Bought under the legacy price fallback: the request carries legacy-productive, which has no
+    // price of its own, and the configured price that was actually charged. The subscription must
+    // snapshot THAT price — it is the only record of what this subscriber pays.
+    PaidUpgradeFixture fixture = new PaidUpgradeFixture();
+    Plan legacy = mock(Plan.class);
+    when(legacy.getSearchKey()).thenReturn("legacy-productive");
+    Account payer = mock(Account.class);
+    CheckoutRequest checkoutRequest = mock(CheckoutRequest.class);
+    when(checkoutRequest.getPlan()).thenReturn(legacy);
+    when(checkoutRequest.getEtendoGoAccount()).thenReturn(payer);
+    when(checkoutRequest.getStripeCustomer()).thenReturn("cus_legacy");
+    when(checkoutRequest.getStripeSubscription()).thenReturn("sub_legacy");
+    when(checkoutRequest.getStripePrice()).thenReturn("price_LEGACY_configured");
+    when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(checkoutRequest);
+    Subscription opened = mock(Subscription.class);
+    when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any(),
+        any())).thenReturn(opened);
+    servlet.checkoutRequestStore = fixture.checkoutRequestStore;
+    servlet.subscriptionService = fixture.subscriptionService;
+    servlet.tenantPlanService = fixture.tenantPlanService;
+    servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    when(fixture.lifecycleService.markProductive(anyString())).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = fixture.lifecycleService;
+
+    applyPaidUpgrade();
+
+    verify(fixture.subscriptionService).openSubscription(PAID_CLIENT_ID, legacy, payer,
+        "cus_legacy", "sub_legacy", "price_LEGACY_configured");
+    verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+  }
+
+  /** The mocked collaborators of one paid-upgrade spec. */
+  private static final class PaidUpgradeFixture {
+    final CheckoutRequestStore checkoutRequestStore = mock(CheckoutRequestStore.class);
+    final SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    final TenantPlanService tenantPlanService = mock(TenantPlanService.class);
+    final OnboardingForceTestModeService forceTestModeService =
+        mock(OnboardingForceTestModeService.class);
+    final TenantEnvironmentLifecycleService lifecycleService =
+        mock(TenantEnvironmentLifecycleService.class);
+  }
+
+  /**
+   * Collects the log events of one logger so a spec can assert on them.
+   *
+   * <p>Log4j2's default configuration is ERROR-only in this build, so the level is pinned before
+   * attaching and restored afterwards; without that a WARN would never reach an appender and a
+   * spec asserting on one would pass vacuously.
+   */
+  private static final class LogCapture extends AbstractAppender {
+
+    private final List<LogEvent> events = new ArrayList<>();
+    private final String loggerName;
+    private final Level previousLevel;
+
+    private LogCapture(String loggerName, Level previousLevel) {
+      super("Etp5046ServletCapture", (Filter) null, (Layout<? extends Serializable>) null, true,
+          new Property[0]);
+      this.loggerName = loggerName;
+      this.previousLevel = previousLevel;
+    }
+
+    static LogCapture attachTo(Class<?> type, Level level) {
+      String name = type.getName();
+      Level previous = LogManager.getLogger(name).getLevel();
+      Configurator.setLevel(name, level);
+      LogCapture appender = new LogCapture(name, previous);
+      appender.start();
+      ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(name)).addAppender(appender);
+      return appender;
+    }
+
+    void detach() {
+      ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(loggerName))
+          .removeAppender(this);
+      stop();
+      Configurator.setLevel(loggerName, previousLevel);
+    }
+
+    List<String> messagesAt(Level level) {
+      List<String> messages = new ArrayList<>();
+      for (LogEvent event : events) {
+        if (level.equals(event.getLevel())) {
+          messages.add(event.getMessage().getFormattedMessage());
+        }
+      }
+      return messages;
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      events.add(event.toImmutable());
+    }
+  }
+
   private static Account stubAuthenticatedAccount(
       MockedStatic<EtendoGoJwtDalHelper> dalMock) {
     Account account = mock(Account.class);
@@ -1971,7 +2265,10 @@ public class EtendoGoJwtServletCoverageTest {
     return account;
   }
 
-  /** A paid onboarding must abort when its productive plan marker cannot be written. */
+  /**
+   * A paid onboarding must abort when its payment cannot be recorded at all: no subscription row
+   * (no checkout request behind the token) and no fallback plan marker either.
+   */
   @Test
   public void paidUpgradeMustAbortWhenProductivePlanMarkerCannotBeWritten() throws Exception {
     TenantPlanService plans = mock(TenantPlanService.class);
@@ -1979,14 +2276,11 @@ public class EtendoGoJwtServletCoverageTest {
     when(plans.markProductive("CLIENT-PAID", "ORG-STAR")).thenReturn(false);
     servlet.tenantPlanService = plans;
     servlet.tenantEnvironmentLifecycleService = lifecycle;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
-    Method sideEffects = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "applyPaidUpgradeSideEffects", String.class, String.class, String.class, String.class);
-    sideEffects.setAccessible(true);
-
-    assertThrows(java.lang.reflect.InvocationTargetException.class,
-        () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
-            "paid@example.test"));
+    assertThrows(OBException.class,
+        () -> servlet.applyPaidUpgradeSideEffects("CLIENT-PAID", "ORG-STAR", "Paid Co",
+            "paid@example.test", PAID_TOKEN));
     verify(lifecycle, never()).markProductive(anyString());
   }
 
@@ -1999,14 +2293,11 @@ public class EtendoGoJwtServletCoverageTest {
     when(lifecycle.markProductive("CLIENT-PAID")).thenReturn(false);
     servlet.tenantPlanService = plans;
     servlet.tenantEnvironmentLifecycleService = lifecycle;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
 
-    Method sideEffects = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "applyPaidUpgradeSideEffects", String.class, String.class, String.class, String.class);
-    sideEffects.setAccessible(true);
-
-    assertThrows(java.lang.reflect.InvocationTargetException.class,
-        () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
-            "paid@example.test"));
+    assertThrows(OBException.class,
+        () -> servlet.applyPaidUpgradeSideEffects("CLIENT-PAID", "ORG-STAR", "Paid Co",
+            "paid@example.test", PAID_TOKEN));
     verify(lifecycle).markProductive("CLIENT-PAID");
   }
 
@@ -2022,15 +2313,12 @@ public class EtendoGoJwtServletCoverageTest {
         .when(forceTestMode).revertTestModeForProductiveTenant("CLIENT-PAID");
     servlet.tenantPlanService = plans;
     servlet.tenantEnvironmentLifecycleService = lifecycle;
+    servlet.checkoutRequestStore = mock(CheckoutRequestStore.class);
     servlet.onboardingForceTestModeService = forceTestMode;
 
-    Method sideEffects = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "applyPaidUpgradeSideEffects", String.class, String.class, String.class, String.class);
-    sideEffects.setAccessible(true);
-
-    assertThrows(java.lang.reflect.InvocationTargetException.class,
-        () -> sideEffects.invoke(servlet, "CLIENT-PAID", "ORG-STAR", "Paid Co",
-            "paid@example.test"));
+    assertThrows(OBException.class,
+        () -> servlet.applyPaidUpgradeSideEffects("CLIENT-PAID", "ORG-STAR", "Paid Co",
+            "paid@example.test", PAID_TOKEN));
     verify(forceTestMode).revertTestModeForProductiveTenant("CLIENT-PAID");
   }
 
@@ -2086,7 +2374,7 @@ public class EtendoGoJwtServletCoverageTest {
         countResultLines(run.response.body()));
     assertTrue(run.response.body().contains("Org info unavailable"));
     verify(run.store).recordFailureReason("purchase-1",
-        CheckoutRequestStore.FAILURE_CODE_PROVISIONING_FAILED + ": Org info unavailable");
+        ProvisioningFailureReason.CODE_PROVISIONING_FAILED + ": Org info unavailable");
   }
 
   /**
@@ -2102,10 +2390,10 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(1, countResultLines(run.response.body()));
     assertTrue(run.response.body().contains(
-        "\"code\":\"" + CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE + "\""));
+        "\"code\":\"" + ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE + "\""));
     verify(run.store).recordFailureReason(eq("purchase-1"),
         org.mockito.ArgumentMatchers.startsWith(
-            CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE + ": "));
+            ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE + ": "));
     verify(servlet.tenantPlanService, never()).markProductive(anyString(), anyString());
   }
 
@@ -2136,7 +2424,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     JSONObject body = new JSONObject(response.body());
     assertEquals("provisioning_failed", body.getString("status"));
-    assertEquals(CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE,
+    assertEquals(ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE,
         body.getString("failureCode"));
     assertFalse("A deterministic failure is not offered for retry",
         body.getBoolean("retryAllowed"));
@@ -2255,7 +2543,7 @@ public class EtendoGoJwtServletCoverageTest {
     PurchaseAttempt attempt = postPurchaseNamed("Acme", TenantPlanService.PLAN_PRODUCTIVE);
 
     assertEquals(409, attempt.response.status);
-    assertTrue(attempt.response.body().contains(CheckoutRequestStore.FAILURE_CODE_CLIENT_NAME_IN_USE));
+    assertTrue(attempt.response.body().contains(ProvisioningFailureReason.CODE_CLIENT_NAME_IN_USE));
     verifyNoInteractions(attempt.checkout);
   }
 
@@ -2269,7 +2557,8 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(201, attempt.response.status);
     verify(attempt.checkout).createSession(eq("account-1"), eq("owner@example.test"), eq("Acme"),
-        eq("https://app.example.test"), any(), anyBoolean(), anyBoolean(), any());
+        eq("https://app.example.test"), isNull(),
+        argThat(EtendoGoJwtServletCoverageTest::selectsNoDemo));
   }
 
   @Test
@@ -2296,6 +2585,265 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(400, resp.status);
     assertTrue(resp.body().contains("reserved"));
+  }
+
+  // --- Scoped system context of the ETP-5548 checks (ETP-5046) -----------------------------------
+  //
+  // Driven directly, never through the checkout endpoints: there hasOwnedEnvironment installs a
+  // system context first, which would hide a leak from these two methods.
+
+  private static final String NAME_CHECK_WARNING =
+      "Could not check whether company name is in use before checkout";
+
+  /**
+   * The name check runs as System with admin mode on, and the caller gets back the very context
+   * it had and its admin-mode depth — not a leftover System context.
+   */
+  @Test
+  public void productiveNameCheckRunsAsSystemAndHandsTheCallerItsContextBack() throws Exception {
+    OBContext caller = mock(OBContext.class);
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("OWN-PROD")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    AtomicBoolean lookupRanAsSystem = new AtomicBoolean();
+
+    try (ContextThread thread = new ContextThread(caller, 1);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme")).thenAnswer(call -> {
+        lookupRanAsSystem.set(thread.isSystemWithAdminMode());
+        return List.of("OWN-PROD");
+      });
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-PROD",
+          "owner@example.test")).thenReturn(true);
+
+      assertTrue(isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+
+      assertTrue("the lookup must see user/role/client/org 0 with admin mode on",
+          lookupRanAsSystem.get());
+      assertSame(caller, thread.current.get());
+      assertEquals(1, thread.adminDepth.get());
+    }
+  }
+
+  /** A caller with no context (the webhook's case) gets no context back, not a System one. */
+  @Test
+  public void productiveNameCheckRestoresNoContextAsNoContext() throws Exception {
+    servlet.tenantPlanService = mock(TenantPlanService.class);
+
+    try (ContextThread thread = new ContextThread(null, 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class)) {
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme")).thenReturn(List.of());
+
+      assertFalse(isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+
+      assertNull(thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+    }
+  }
+
+  /**
+   * ETP-5548 semantics are unchanged by the scoping: another account's productive and this
+   * account's demo do not count; only this account's productive does.
+   */
+  @Test
+  public void productiveNameCheckCountsOnlyThisAccountsProductive() throws Exception {
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("OTHER-ACCOUNT")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    when(tenantPlan.resolvePlan("OWN-DEMO")).thenReturn(TenantPlanService.PLAN_FREE);
+    when(tenantPlan.resolvePlan("OWN-PROD")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+
+    try (ContextThread thread = new ContextThread(mock(OBContext.class), 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-DEMO",
+          "owner@example.test")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-PROD",
+          "owner@example.test")).thenReturn(true);
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Other"))
+          .thenReturn(List.of("OTHER-ACCOUNT"));
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Demo"))
+          .thenReturn(List.of("OWN-DEMO"));
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
+          .thenReturn(List.of("OTHER-ACCOUNT", "OWN-DEMO", "OWN-PROD"));
+
+      assertFalse("another account's productive is free to reuse",
+          isProductiveNameTakenByAccount("Other", "owner@example.test"));
+      assertFalse("this account's demo is free to reuse",
+          isProductiveNameTakenByAccount("Demo", "owner@example.test"));
+      assertTrue("this account's productive is taken",
+          isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+    }
+  }
+
+  /** The name lookup failing fails open, logged, and still hands the caller its context back. */
+  @Test
+  public void productiveNameCheckFailsOpenWhenTheNameLookupThrows() throws Exception {
+    servlet.tenantPlanService = mock(TenantPlanService.class);
+    assertNameCheckFailsOpen(support -> support.when(
+        () -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
+        .thenThrow(new IllegalStateException("lookup failed")));
+  }
+
+  /** The plan resolution failing fails open the same way. */
+  @Test
+  public void productiveNameCheckFailsOpenWhenThePlanResolutionThrows() throws Exception {
+    TenantPlanService tenantPlan = mock(TenantPlanService.class);
+    servlet.tenantPlanService = tenantPlan;
+    when(tenantPlan.resolvePlan("OWN-PROD")).thenThrow(new IllegalStateException("plan failed"));
+    assertNameCheckFailsOpen(support -> support.when(
+        () -> EtendoGoJwtSupport.findClientIdsByName("Acme")).thenReturn(List.of("OWN-PROD")));
+  }
+
+  private void assertNameCheckFailsOpen(
+      java.util.function.Consumer<MockedStatic<EtendoGoJwtSupport>> failure) throws Exception {
+    OBContext caller = mock(OBContext.class);
+    LogCapture warnings = LogCapture.attachTo(EtendoGoJwtServlet.class, Level.WARN);
+    try (ContextThread thread = new ContextThread(caller, 0);
+        MockedStatic<EtendoGoJwtSupport> support = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("OWN-PROD",
+          "owner@example.test")).thenReturn(true);
+      failure.accept(support);
+
+      assertFalse(isProductiveNameTakenByAccount("Acme", "owner@example.test"));
+
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+      assertTrue(warnings.messagesAt(Level.WARN).stream()
+          .anyMatch(message -> message.startsWith(NAME_CHECK_WARNING)));
+    } finally {
+      warnings.detach();
+    }
+  }
+
+  /** The associated-demo check answers the lifecycle service, as System, and restores the caller. */
+  @Test
+  public void associatedDemoCheckAnswersTheLifecycleAndHandsTheCallerItsContextBack()
+      throws Exception {
+    OBContext caller = mock(OBContext.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    when(lifecycle.isAssociatedWithProductive("DEMO-FREE")).thenReturn(false);
+
+    try (ContextThread thread = new ContextThread(caller, 0)) {
+      AtomicBoolean ranAsSystem = new AtomicBoolean();
+      when(lifecycle.isAssociatedWithProductive("DEMO-SPENT")).thenAnswer(call -> {
+        ranAsSystem.set(thread.isSystemWithAdminMode());
+        return true;
+      });
+
+      assertTrue(isAssociatedDemo("DEMO-SPENT"));
+      assertTrue("the lifecycle read must run as System with admin mode on", ranAsSystem.get());
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+
+      assertFalse(isAssociatedDemo("DEMO-FREE"));
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+    }
+  }
+
+  /**
+   * The associated-demo check does not swallow a failure: it propagates, after the caller's
+   * context and admin-mode depth have been put back.
+   */
+  @Test
+  public void associatedDemoCheckPropagatesAFailureAfterRestoringTheCaller() throws Exception {
+    OBContext caller = mock(OBContext.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    servlet.tenantEnvironmentLifecycleService = lifecycle;
+    IllegalStateException boom = new IllegalStateException("lifecycle unavailable");
+    when(lifecycle.isAssociatedWithProductive("DEMO-1")).thenThrow(boom);
+
+    try (ContextThread thread = new ContextThread(caller, 0)) {
+      IllegalStateException thrown = assertThrows(IllegalStateException.class,
+          () -> isAssociatedDemo("DEMO-1"));
+
+      assertSame(boom, thrown);
+      assertSame(caller, thread.current.get());
+      assertEquals(0, thread.adminDepth.get());
+    }
+  }
+
+  private boolean isProductiveNameTakenByAccount(String clientName, String accountEmail)
+      throws Exception {
+    return invokePrivateCheck("isProductiveNameTakenByAccount",
+        new Class<?>[] { String.class, String.class }, clientName, accountEmail);
+  }
+
+  private boolean isAssociatedDemo(String clientId) throws Exception {
+    return invokePrivateCheck("isAssociatedDemo", new Class<?>[] { String.class }, clientId);
+  }
+
+  /** Invokes a private boolean check, rethrowing its own runtime failure unwrapped. */
+  private boolean invokePrivateCheck(String name, Class<?>[] types, Object... args)
+      throws Exception {
+    Method check = EtendoGoJwtServlet.class.getDeclaredMethod(name, types);
+    check.setAccessible(true);
+    try {
+      return (Boolean) check.invoke(servlet, args);
+    } catch (InvocationTargetException e) {
+      if (e.getCause() instanceof RuntimeException) {
+        throw (RuntimeException) e.getCause();
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * A stand-in for OBContext's per-thread state — the current context and the admin-mode depth —
+   * so a spec can see what the code under test leaves behind for its caller.
+   */
+  private static final class ContextThread implements AutoCloseable {
+    final AtomicReference<OBContext> current = new AtomicReference<>();
+    final AtomicInteger adminDepth = new AtomicInteger();
+    private final AtomicReference<List<String>> systemIds = new AtomicReference<>();
+    private final OBContext system = mock(OBContext.class);
+    private final MockedStatic<OBContext> statics = mockStatic(OBContext.class);
+    private final int callerAdminDepth;
+
+    ContextThread(OBContext caller, int callerAdminDepth) {
+      this.callerAdminDepth = callerAdminDepth;
+      current.set(caller);
+      adminDepth.set(callerAdminDepth);
+      statics.when(OBContext::getOBContext).thenAnswer(call -> current.get());
+      statics.when(() -> OBContext.setOBContext(anyString(), anyString(), anyString(),
+          anyString())).thenAnswer(call -> {
+            systemIds.set(List.of(call.getArgument(0), call.getArgument(1), call.getArgument(2),
+                call.getArgument(3)));
+            current.set(system);
+            return null;
+          });
+      statics.when(() -> OBContext.setOBContext(ArgumentMatchers.<OBContext>any()))
+          .thenAnswer(call -> {
+            current.set(call.getArgument(0));
+            return null;
+          });
+      statics.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(call -> {
+        adminDepth.incrementAndGet();
+        return null;
+      });
+      statics.when(OBContext::restorePreviousMode).thenAnswer(call -> {
+        adminDepth.decrementAndGet();
+        return null;
+      });
+    }
+
+    /**
+     * Whether the current context is the one installed for user/role/client/org "0" and admin
+     * mode was entered on top of the caller's depth.
+     */
+    boolean isSystemWithAdminMode() {
+      return current.get() == system && List.of("0", "0", "0", "0").equals(systemIds.get())
+          && adminDepth.get() > callerAdminDepth;
+    }
+
+    @Override
+    public void close() {
+      statics.close();
+    }
   }
 
   private static final class PurchaseAttempt {
@@ -2336,7 +2884,7 @@ public class EtendoGoJwtServletCoverageTest {
     when(tenantPlan.resolvePlan("OTHER-ACCOUNT")).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
     when(tenantPlan.resolvePlan("OWN-SAME-NAME")).thenReturn(ownPlan);
     when(checkout.createSession(anyString(), anyString(), anyString(), anyString(), any(),
-        anyBoolean(), anyBoolean(), any()))
+        any(HostedCheckoutService.SessionOptions.class)))
         .thenReturn(new JSONObject().put("requestId", "purchase-1"));
     HttpServletRequest request = jsonRequest("/billing/purchases",
         "{\"clientName\":\"" + clientName + "\"}");

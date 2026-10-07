@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -60,8 +61,10 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -494,6 +497,7 @@ class EtendoGoJwtDalHelperTest {
 
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
+    @Mock private OBQuery<Subscription> subscriptionQuery;
 
     @Test
     @DisplayName("excludes the new destination when resolving the only free source tenant")
@@ -510,12 +514,16 @@ class EtendoGoJwtDalHelperTest {
       when(usersQuery.list()).thenReturn(List.of(demoUser, targetUser));
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
+      // ETP-5046: the plan is resolved from the open subscription row first; none exists here.
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
 
       String result = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
           "user@test.com", "target-client");
 
+      // Both tenants resolve as free here, so a single answer proves the destination was left out
+      // of the candidates: counted in, the lookup would be ambiguous and answer null.
       assertEquals("demo-client", result);
-      verify(preferenceQuery).setNamedParameter("clientId", "demo-client");
     }
   }
 
@@ -548,19 +556,34 @@ class EtendoGoJwtDalHelperTest {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
     // ETP-5488 wrapped TenantEnvironmentLifecycleService.readPreference in
-    // OBContext.setAdminMode()/restorePreviousMode(); this class has no live session, so the real
-    // static methods NPE. mockStatic() turns both into no-ops — buildEnvironmentJson's admin-mode
-    // plumbing isn't what these tests exercise.
+    // OBContext.setAdminMode()/restorePreviousMode(), and the ETP-5046 plan and subscription reads
+    // enter admin mode too; this class has no live session, so the real static methods NPE.
+    // mockStatic() turns them into no-ops — buildEnvironmentJson's admin-mode plumbing isn't what
+    // these tests exercise.
     private MockedStatic<OBContext> obContextMock;
     // With the context mocked, the lifecycle reaches its legacy-trial branch, which reads the
     // Etendo configuration. Loading it here, in a JVM without a configured environment, left the
     // config provider without a location for the integration tests that run after this class in
     // the same JVM (OBBaseTest.initializeDisabledTestCases -> Paths.get(null)).
     private MockedStatic<com.etendoerp.go.common.ConfigPropertyReader> configMock;
+    private MockedStatic<org.openbravo.base.session.OBPropertiesProvider> propertiesMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
+      // buildEnvironmentJson reaches TenantEnvironmentLifecycleService.resolve/evaluateAccess,
+      // which read runtime configuration (GoRuntimeProperties -> OBPropertiesProvider). The FIRST
+      // real OBPropertiesProvider read in a JVM also initialises OBConfigFileProvider, and under
+      // this class's static OBProvider mock that init NPEs silently and leaves
+      // OBConfigFileProvider.fileLocation null for good — every OBBaseTest forked into the same
+      // JVM afterwards fails in initializeDisabledTestCases. So the provider is stubbed here and
+      // the real one is never touched by this class.
+      org.openbravo.base.session.OBPropertiesProvider propertiesProvider =
+          mock(org.openbravo.base.session.OBPropertiesProvider.class);
+      when(propertiesProvider.getOpenbravoProperties()).thenReturn(new java.util.Properties());
+      propertiesMock = mockStatic(org.openbravo.base.session.OBPropertiesProvider.class);
+      propertiesMock.when(org.openbravo.base.session.OBPropertiesProvider::getInstance)
+          .thenReturn(propertiesProvider);
       obContextMock = mockStatic(OBContext.class);
       configMock = mockStatic(com.etendoerp.go.common.ConfigPropertyReader.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
@@ -572,6 +595,7 @@ class EtendoGoJwtDalHelperTest {
       ownerSupportMock.close();
       obContextMock.close();
       configMock.close();
+      propertiesMock.close();
     }
 
     @Mock private Client client;
@@ -590,7 +614,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("admin@test.com");
       when(environmentUser.getName()).thenReturn("Admin User");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertNotNull(result);
       assertEquals("C-1", result.getString("clientId"));
@@ -611,7 +636,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("admin@test.com");
       when(environmentUser.getName()).thenReturn("Admin User");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertNotNull(result);
       assertEquals("C-1", result.getString("clientId"));
@@ -624,8 +650,8 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all eight fields are populated")
-    void allEightFieldsPopulated() throws Exception {
+    @DisplayName("all eleven fields are populated")
+    void allElevenFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
       when(organization.getId()).thenReturn("O-2");
@@ -634,10 +660,13 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@two.com");
       when(environmentUser.getName()).thenReturn("User Two");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
+          EnvironmentPlanCache.empty());
 
-      // Seven original fields plus plan, relationship and demo-association metadata.
-      assertEquals(10, result.length());
+      // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046), the
+      // relationship marker and the demo-association flag (ETP-5548). Lifecycle fields are
+      // conditional and absent here.
+      assertEquals(11, result.length());
     }
 
     @Test
@@ -649,9 +678,50 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@three.com");
       when(environmentUser.getName()).thenReturn("User Three");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+      // A plan KEY names a row in the catalog, and a tenant with no subscription has none. Null,
+      // deliberately not the string "free", which would invent a catalog entry nothing can look
+      // up. The coarse `plan` field above is what stays "free" for backward compatibility.
+      assertTrue(result.isNull("planKey"));
+      assertTrue(result.isNull("subscriptionStatus"));
+    }
+
+    @Test
+    @DisplayName("ETP-5046-TRANSITIONAL-FALLBACK: a tenant the backfill has not reached is "
+        + "productive with null plan facts")
+    void reportsTheTransitionalFallbackTenantAsProductiveWithNullPlanFacts() throws Exception {
+      // TRANSITIONAL — delete with TenantPlanPreferenceFallback in Phase F.
+      // The tenant has no ETGO_SUBSCRIPTION row and still carries the retired ETGO_TenantPlan
+      // preference. It must read back as "productive" — environmentPresentation.js and
+      // UpgradePage.jsx both compare `plan` against that literal — while planKey and
+      // subscriptionStatus stay JSON null, because there genuinely is no catalog row and no
+      // subscription. Reporting an invented key such as "legacy-productive" would claim a row that
+      // does not exist and would hide the gap from anyone reading the payload.
+      when(client.getId()).thenReturn("C-4");
+      when(client.getName()).thenReturn("Client Four");
+      when(environmentUser.getId()).thenReturn("U-4");
+      when(environmentUser.getUsername()).thenReturn("user@four.com");
+      when(environmentUser.getName()).thenReturn("User Four");
+
+      Client preferenceTenant = mock(Client.class);
+      when(preferenceTenant.getId()).thenReturn("C-4");
+      Preference preference = mock(Preference.class);
+      when(preference.getVisibleAtClient()).thenReturn(preferenceTenant);
+      when(preference.getSearchKey()).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+      @SuppressWarnings("unchecked")
+      OBQuery<Preference> tenantPlanQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(tenantPlanQuery);
+      when(tenantPlanQuery.list()).thenReturn(List.of(preference));
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.of(List.of("C-4"), Map.of()));
+
+      assertEquals(TenantPlanService.PLAN_PRODUCTIVE, result.getString("plan"));
+      assertTrue(result.isNull("planKey"));
+      assertTrue(result.isNull("subscriptionStatus"));
     }
 
     @Test
@@ -663,7 +733,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@four.com");
       when(environmentUser.getName()).thenReturn("User Four");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       // ETP-5548: always present, so the purchase picker never has to guess from a missing key.
       assertFalse(result.getBoolean("associatedWithProductive"));
