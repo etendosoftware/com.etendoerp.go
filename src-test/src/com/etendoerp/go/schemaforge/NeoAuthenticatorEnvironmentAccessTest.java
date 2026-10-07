@@ -174,7 +174,7 @@ class NeoAuthenticatorEnvironmentAccessTest {
 
     assertFalse(authenticated);
     verify(servlet).sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-        "Entity ADPreference is not readable by the user");
+        "Environment context could not be established");
   }
 
   @Test

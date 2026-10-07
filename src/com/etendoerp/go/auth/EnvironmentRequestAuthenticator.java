@@ -354,14 +354,15 @@ public class EnvironmentRequestAuthenticator {
   /**
    * ETP-5489 — a failure AFTER the credential resolved: the session is fine, the server could not
    * build its context (ETP-5488 was an {@code OBSecurityException} reading a preference while
-   * binding). Answered 500, never 401, so the client does not log a live session out. Same
-   * message rule as {@link #refusedFor}: an {@link OBException} message is ours and safe to show.
+   * binding). Answered 500, never 401, so the client does not log a live session out. Always the
+   * generic message: unlike {@link #refusedFor}, the OBExceptions raised here come from the
+   * platform core (entity access, "Current Client ... is not active!") and the trace is logged.
    */
   private static EnvironmentAuthOutcome contextUnavailableFor(RuntimeException e,
       AuthScheme scheme) {
     log.error("Environment context could not be established for an authenticated request", e);
-    String message = e instanceof OBException ? e.getMessage() : MSG_CONTEXT_UNAVAILABLE;
-    return EnvironmentAuthOutcome.refused(Status.CONTEXT_UNAVAILABLE, message, scheme);
+    return EnvironmentAuthOutcome.refused(Status.CONTEXT_UNAVAILABLE, MSG_CONTEXT_UNAVAILABLE,
+        scheme);
   }
 
   /** The credential's claims, whatever carried them. */
