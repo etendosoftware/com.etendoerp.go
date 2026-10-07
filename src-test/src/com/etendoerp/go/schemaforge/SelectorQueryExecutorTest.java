@@ -1225,9 +1225,9 @@ public class SelectorQueryExecutorTest {
   private static SelectorMeta.Builder productByPriceSelector() {
     return new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product.name")
         .isRich(true).valueProperty("product.id")
-        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("product.id"),
-            SearchableFragment.relativePath("product.name"),
-            SearchableFragment.relativePath("product.searchKey")));
+        .searchableProperties(Arrays.asList(SearchableFragment.ofRelativePath("product.id"),
+            SearchableFragment.ofRelativePath("product.name"),
+            SearchableFragment.ofRelativePath("product.searchKey")));
   }
 
   /**
@@ -1264,8 +1264,8 @@ public class SelectorQueryExecutorTest {
   @Test
   public void testPkValuedSelectorSearchWhereIsUnchanged() throws Exception {
     SelectorMeta meta = new SelectorMeta.Builder("Country", "name").isRich(true)
-        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("name"),
-            SearchableFragment.relativePath("iSOCountryCode")))
+        .searchableProperties(Arrays.asList(SearchableFragment.ofRelativePath("name"),
+            SearchableFragment.ofRelativePath("iSOCountryCode")))
         .build();
 
     List<String> where = captureRichWhere(meta, "es", "e.active = true");
@@ -1284,8 +1284,8 @@ public class SelectorQueryExecutorTest {
     SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product.name")
         .isRich(true).valueProperty("product.id")
         .auxFields(Arrays.asList(auxWithSuffix("_QTY"), auxWithSuffix("_LOC")))
-        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("product.name"),
-            SearchableFragment.relativePath("product.searchKey")))
+        .searchableProperties(Arrays.asList(SearchableFragment.ofRelativePath("product.name"),
+            SearchableFragment.ofRelativePath("product.searchKey")))
         .build();
 
     List<String> where = captureRichWhere(meta, "p", "e.active = true");

@@ -270,8 +270,8 @@ public final class SelectorDescriptorResolver {
         && !searchFragment.endsWith("_identifier")) {
       // resolveSearchableFragment only falls back to clause_left_part when property is blank
       searchableProps.add(StringUtils.isNotBlank(prop)
-          ? SearchableFragment.relativePath(searchFragment)
-          : SearchableFragment.clauseLeftPart(searchFragment));
+          ? SearchableFragment.ofRelativePath(searchFragment)
+          : SearchableFragment.ofClauseLeftPart(searchFragment));
     }
   }
 
@@ -286,7 +286,7 @@ public final class SelectorDescriptorResolver {
     ensureSearchableFallback(expressions, targetEntity, displayProp, valueProp);
     List<SearchableFragment> result = new ArrayList<>(classified);
     for (String path : expressions.subList(classifiedCount, expressions.size())) {
-      result.add(SearchableFragment.relativePath(path));
+      result.add(SearchableFragment.ofRelativePath(path));
     }
     return result;
   }

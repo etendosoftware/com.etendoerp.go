@@ -47,7 +47,7 @@ public final class SearchableFragment {
    * @param path DAL property path, e.g. {@code product.name}
    * @return the fragment
    */
-  public static SearchableFragment relativePath(String path) {
+  public static SearchableFragment ofRelativePath(String path) {
     return new SearchableFragment(path, true);
   }
 
@@ -57,7 +57,7 @@ public final class SearchableFragment {
    * @param hql HQL fragment, e.g. {@code bp.name}
    * @return the fragment
    */
-  public static SearchableFragment clauseLeftPart(String hql) {
+  public static SearchableFragment ofClauseLeftPart(String hql) {
     return new SearchableFragment(hql, false);
   }
 

@@ -83,10 +83,10 @@ class SelectorQueryBuilderTest {
   void testResolveRichExprDottedRelativePath() {
     assertEquals("e.contact.businessPartner.name",
         SelectorOrgFilter.resolveRichSearchableExpression("e",
-            SearchableFragment.relativePath("contact.businessPartner.name")));
+            SearchableFragment.ofRelativePath("contact.businessPartner.name")));
     assertEquals("e.product.name",
         SelectorOrgFilter.resolveRichSearchableExpression("e",
-            SearchableFragment.relativePath("product.name")));
+            SearchableFragment.ofRelativePath("product.name")));
   }
 
   /** A bare relative DAL path keeps today's single prefix. */
@@ -94,7 +94,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("resolveRichSearchableExpression prefixes alias once for a bare relative path")
   void testResolveRichExprBareRelativePath() {
     assertEquals("e.name",
-        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.relativePath("name")));
+        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.ofRelativePath("name")));
   }
 
   /** A clause_left_part fragment keeps the custom rule on the rich path: dotted stays as written. */
@@ -102,9 +102,9 @@ class SelectorQueryBuilderTest {
   @DisplayName("resolveRichSearchableExpression leaves a clause_left_part fragment unchanged")
   void testResolveRichExprClauseLeftPart() {
     assertEquals("bp.name",
-        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.clauseLeftPart("bp.name")));
+        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.ofClauseLeftPart("bp.name")));
     assertEquals("e.searchKey",
-        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.clauseLeftPart("searchKey")));
+        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.ofClauseLeftPart("searchKey")));
   }
 
   /** Blank fragment is returned as-is (caller is responsible for filtering). */
@@ -175,9 +175,9 @@ class SelectorQueryBuilderTest {
   void testAppendRichFilterQualifiesRelativePaths() {
     StringBuilder hql = new StringBuilder();
     SelectorOrgFilter.appendRichSearchFilter(hql, Arrays.asList(
-        SearchableFragment.relativePath("product.name"),
-        SearchableFragment.relativePath("name"),
-        SearchableFragment.clauseLeftPart("bp.searchKey")), "e", "mi", false);
+        SearchableFragment.ofRelativePath("product.name"),
+        SearchableFragment.ofRelativePath("name"),
+        SearchableFragment.ofClauseLeftPart("bp.searchKey")), "e", "mi", false);
     assertEquals(" WHERE (lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
         + " OR lower(COALESCE(cast(e.name as string), '')) LIKE :search"
         + " OR lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search)", hql.toString());
@@ -189,7 +189,7 @@ class SelectorQueryBuilderTest {
   void testAppendRichFilterBlankSearch() {
     StringBuilder hql = new StringBuilder("e.active = true");
     SelectorOrgFilter.appendRichSearchFilter(hql,
-        Collections.singletonList(SearchableFragment.relativePath("product.name")), "e", " ", true);
+        Collections.singletonList(SearchableFragment.ofRelativePath("product.name")), "e", " ", true);
     assertEquals("e.active = true", hql.toString());
   }
 
@@ -251,8 +251,8 @@ class SelectorQueryBuilderTest {
   void testRichWhereClauseQualifiesDottedSearchProperties() {
     SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product.name")
         .isRich(true).valueProperty("product.id")
-        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("product.name"),
-            SearchableFragment.relativePath("product.searchKey")))
+        .searchableProperties(Arrays.asList(SearchableFragment.ofRelativePath("product.name"),
+            SearchableFragment.ofRelativePath("product.searchKey")))
         .build();
 
     String where = withoutOrgFilters(() -> SelectorQueryBuilder.buildRichQueryWhereClause(
@@ -268,9 +268,9 @@ class SelectorQueryBuilderTest {
   void testCustomFromClauseKeepsDottedFragments() {
     SelectorMeta meta = new SelectorMeta.Builder("BusinessPartner", "name")
         .isRich(true).isCustomQuery(true).entityAlias("bp")
-        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("contact.name"),
-            SearchableFragment.clauseLeftPart("bp.searchKey"),
-            SearchableFragment.relativePath("name")))
+        .searchableProperties(Arrays.asList(SearchableFragment.ofRelativePath("contact.name"),
+            SearchableFragment.ofClauseLeftPart("bp.searchKey"),
+            SearchableFragment.ofRelativePath("name")))
         .build();
 
     String from = withoutOrgFilters(() -> SelectorQueryBuilder.buildCustomHqlFromClause(

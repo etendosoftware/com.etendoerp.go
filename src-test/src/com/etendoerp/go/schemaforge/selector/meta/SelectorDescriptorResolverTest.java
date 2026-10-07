@@ -1214,7 +1214,7 @@ public class SelectorDescriptorResolverTest {
     assertEquals("_LOC", meta.auxFields.get(0).suffix);
     assertEquals("location_alias", meta.auxFields.get(0).hqlAlias);
     // "name" added both by grid-search classification and ensureSearchableFallback → no duplicates
-    assertTrue(meta.searchableProperties.contains(SearchableFragment.relativePath("name")));
+    assertTrue(meta.searchableProperties.contains(SearchableFragment.ofRelativePath("name")));
     assertEquals("p.active = true", meta.whereClause);
   }
 
@@ -1328,9 +1328,9 @@ public class SelectorDescriptorResolverTest {
 
     assertNotNull(meta);
     assertEquals(Arrays.asList(
-        SearchableFragment.relativePath("product.name"),
-        SearchableFragment.clauseLeftPart("bp.name"),
-        SearchableFragment.relativePath("description")), meta.searchableProperties);
+        SearchableFragment.ofRelativePath("product.name"),
+        SearchableFragment.ofClauseLeftPart("bp.name"),
+        SearchableFragment.ofRelativePath("description")), meta.searchableProperties);
   }
 
   @SuppressWarnings("unchecked")
