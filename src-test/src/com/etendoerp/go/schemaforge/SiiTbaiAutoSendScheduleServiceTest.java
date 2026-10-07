@@ -67,6 +67,8 @@ import org.openbravo.scheduling.ProcessContext;
  * directly (real method, mocked {@link OBCriteria} chain) to prove the actual client + organization
  * + process + active scoping used for idempotency recognition, and {@link #activateSchedule} is
  * tested for its best-effort error-swallowing contract.
+ *
+ * @covers com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService
  */
 public class SiiTbaiAutoSendScheduleServiceTest {
 
@@ -78,7 +80,7 @@ public class SiiTbaiAutoSendScheduleServiceTest {
   private static final String EXISTING_REQUEST_ID = "req-existing";
   private static final String NEW_REQUEST_ID = "req-new";
   private static final String OB_CONTEXT = "ob-context-string";
-  private static final String DESCRIPTION = "Automatic SII invoice sending (Etendo GO)";
+  private static final String DESCRIPTION = "Automatic SII invoice sending (Etendo)";
 
   // "Human-created row" shape used by the existing-row-recognition test below.
   private static final String GO_CLIENT_ID = "23C59575B9CF467C9620760EB255B389";

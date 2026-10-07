@@ -92,6 +92,8 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * behavior is pre-existing and only re-verified at the {@code @Named} qualifier level here.
  * The Remove action ({@code eTPRRemovePayment}) is fully covered below — it is the new
  * behavior fixing the "cannot be deleted, see Linked Items" FK violation on applied payments.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandler
  */
 public class ReactivatePaymentHandlerTest {
 
@@ -1531,7 +1533,7 @@ public class ReactivatePaymentHandlerTest {
 
   // ── ETP-5558: an action named by its DB column reaches the same branch ──
   //
-  // neo_schema publishes each button as {name: <property>, action: <DB column>}, and the button
+  // etendo_schema publishes each button as {name: <property>, action: <DB column>}, and the button
   // lookup accepts either spelling. Matched on the property name alone, the column spelling skipped
   // this handler: Reactivate ran without action=RE and Eliminar without the agent's gate.
 

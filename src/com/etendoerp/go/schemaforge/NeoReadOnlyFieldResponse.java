@@ -42,7 +42,7 @@ final class NeoReadOnlyFieldResponse {
       error.put(NeoCrudHandler.KEY_FIELD, fieldName);
       error.put(NeoCrudHandler.KEY_HINT, "Remove '" + fieldName + "' from the request. If this value "
           + "must be set, it is derived automatically (e.g. by a callout or a dedicated write path) — "
-          + "check neo_schema's field descriptor for this entity before retrying.");
+          + "check etendo_schema's field descriptor for this entity before retrying.");
       error.put(NeoCrudHandler.KEY_SEE_ALSO, "docs(topic:\"creating records\")");
       return NeoResponse.error(STATUS_UNPROCESSABLE, error);
     } catch (Exception e) {

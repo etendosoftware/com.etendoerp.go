@@ -53,7 +53,8 @@ public final class EtendoGoJwtSupport {
   private static final int MAX_USERNAME_NUMBER = 99;
   private static final String SQL_FIND_ROLE_LIST_BY_USER =
       "SELECT r.ad_role_id AS role_id, r.name AS role_name, "
-          + "o.ad_org_id AS org_id, o.name AS org_name "
+          + "o.ad_org_id AS org_id, o.name AS org_name, "
+          + "r.is_client_admin AS is_client_admin "
           + "FROM ad_user_roles ur "
           + "JOIN ad_role r ON ur.ad_role_id = r.ad_role_id "
           + "LEFT JOIN ad_role_orgaccess roa ON r.ad_role_id = roa.ad_role_id "
@@ -99,6 +100,12 @@ public final class EtendoGoJwtSupport {
    * a composed-template list that does not actually apply to it. Resolution runs only after the
    * role rows have loaded successfully — there is no reason to resolve template names when the
    * underlying role query already failed.
+   *
+   * <p>ETP-5329 (QA follow-up) — every entry also carries a boolean {@code isClientAdmin}
+   * ({@code AD_Role.Is_Client_Admin}). A tenant admin's default role IS the client-admin role
+   * itself (no composed templates, so no {@code effectiveRoleNames}) and its raw {@code name} is
+   * tenant-specific (e.g. {@code "Acme SL Admin"}); the flag lets the frontend show the same
+   * localized "Administrator" label Settings &gt; Users already shows for that role.
    *
    * @param userId the {@code AD_User_ID} whose roles are being resolved
    * @return the resolved role list, never {@code null}
@@ -197,7 +204,7 @@ public final class EtendoGoJwtSupport {
       JSONObject roleObj = rolesById.get(roleId);
       if (roleObj == null) {
         boolean isDefaultRole = roleId != null && roleId.equals(defaultRoleId);
-        roleObj = buildRoleJson(roleId, stringValue(row[1]),
+        roleObj = buildRoleJson(roleId, stringValue(row[1]), isYesFlag(row[4]),
             isDefaultRole ? effectiveRoleNames : null);
         rolesById.put(roleId, roleObj);
         if (firstRoleId == null) {
@@ -327,11 +334,17 @@ public final class EtendoGoJwtSupport {
     return query.uniqueResult() != null;
   }
 
-  private static JSONObject buildRoleJson(String roleId, String roleName,
+  /** {@code AD_Role.Is_Client_Admin} comes back from the native query as a 'Y'/'N' char/string. */
+  private static boolean isYesFlag(Object value) {
+    return value != null && "Y".equalsIgnoreCase(value.toString());
+  }
+
+  private static JSONObject buildRoleJson(String roleId, String roleName, boolean isClientAdmin,
       List<String> effectiveRoleNames) throws JSONException {
     JSONObject roleObj = new JSONObject();
     roleObj.put("id", roleId);
     roleObj.put("name", roleName);
+    roleObj.put("isClientAdmin", isClientAdmin);
     roleObj.put("orgList", new JSONArray());
     if (effectiveRoleNames != null && !effectiveRoleNames.isEmpty()) {
       roleObj.put("effectiveRoleNames", new JSONArray(effectiveRoleNames));

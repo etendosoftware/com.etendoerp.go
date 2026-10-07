@@ -37,6 +37,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 import javax.servlet.http.HttpServletRequest;
@@ -72,6 +73,8 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
  * Unit tests for {@link PurchaseInvoiceHeaderHandler}.
@@ -94,7 +97,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  *       list and write responses (ETP-5087: without it the SIF tab of a purchase invoice sent to
  *       Batuz had no sub-record id and showed neither request nor response XML).</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
+ *   <li>{@code followUpFlows()} — the one goods-receipt follow-up and its purchase-side wiring,
+ *       and the {@code followUp} annotation written on every GET row (ETP-5576).</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
  */
 public class PurchaseInvoiceHeaderHandlerTest {
 
@@ -274,7 +281,22 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .previousResult(new NeoResponse(200, body))
         .build();
 
-    NeoResponse result = handler.afterHandle(ctx);
+    NeoResponse result;
+    // ETP-5576: every row with an id is annotated with followUp; the pending query is stubbed
+    // empty so the lookup is deterministic (this id is unknown to it).
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      result = handler.afterHandle(ctx);
+    }
     assertNotNull(result);
     assertEquals(200, result.getHttpStatus());
     JSONObject resultRec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
@@ -282,6 +304,13 @@ public class PurchaseInvoiceHeaderHandlerTest {
     // fixture → resolves to FAC without touching OBDal).
     assertEquals("FAC", resultRec.getString("apInvoiceSubtype"));
     assertFalse(resultRec.has("docTypeLocked"));
+    JSONObject followUp = resultRec.getJSONObject("followUp");
+    assertEquals(0, followUp.getJSONArray("available").length());
+    JSONObject receipt = followUp.getJSONObject("receipt");
+    assertFalse(receipt.getBoolean("needed"));
+    assertEquals("FOLLOW_UP_SOURCE_NOT_FOUND", receipt.getString("reason"));
+    assertEquals("createGoodsReceipt", receipt.getString("action"));
+    assertFalse("a purchase invoice offers no shipment", followUp.has("shipment"));
   }
 
   // ── afterHandle — total discount adjustment (ETP-4029 follow-up) ─────────
@@ -1348,5 +1377,83 @@ public class PurchaseInvoiceHeaderHandlerTest {
   public void testHandleStillReturnsNullForNonSelectorRequestAfterPaymentMethodWiring() {
     NeoContext ctx = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(handler.handle(ctx));
+  }
+
+  // ── follow-up document registration (ETP-5576) ────────────────────────────
+
+  /**
+   * A purchase invoice offers exactly one follow-up, the goods receipt, wired end to end to the
+   * PURCHASE side: its resolver rejects a sales invoice, its eligibility is this handler's own FAC
+   * classification (a credit note is not eligible), its creator builds a PURCHASE movement
+   * through {@link InvoiceInOutMapping}, and the created lines are linked through M_MatchInv.
+   */
+  @Test
+  public void followUpFlowsRegisterTheGoodsReceiptWiredToThePurchaseSide() throws Exception {
+    List<FollowUpFlow> flows = new PurchaseInvoiceHeaderHandler().followUpFlows();
+
+    assertEquals(1, flows.size());
+    FollowUpFlow flow = flows.get(0);
+    assertSame(FollowUpTarget.GOODS_RECEIPT, flow.target());
+    assertEquals(Invoice.class, flow.sourceEntity());
+    InvoicePendingResolver resolver = (InvoicePendingResolver) flow.resolver();
+    assertEquals(FollowUpException.Reason.WRONG_DIRECTION,
+        resolver.ineligibility("Y", "CO", "dt-api"));
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType creditNote = mock(DocumentType.class);
+      when(creditNote.getDocumentCategory()).thenReturn("APC");
+      DocumentType standard = mock(DocumentType.class);
+      when(standard.getDocumentCategory()).thenReturn("API");
+      when(dal.get(DocumentType.class, "dt-apc")).thenReturn(creditNote);
+      when(dal.get(DocumentType.class, "dt-api")).thenReturn(standard);
+
+      assertEquals(FollowUpException.Reason.NOT_ELIGIBLE_TYPE,
+          resolver.ineligibility("N", "CO", "dt-apc"));
+      assertNull(resolver.ineligibility("N", "CO", "dt-api"));
+    }
+
+    InOutTargetBuilder.Line line = InOutTargetBuilder.Line.builder().sourceLineId("il-1")
+        .quantity(BigDecimal.ONE).stockable(false).build();
+    Object[] buildArgs = createThroughFlow(flow, line);
+
+    assertEquals(InOutTargetBuilder.Direction.PURCHASE, buildArgs[0]);
+    ShipmentInOutLine created = mock(ShipmentInOutLine.class);
+    when(created.getId()).thenReturn("iol-1");
+    try (MockedStatic<InvoiceLineLinker> linkerMock = Mockito.mockStatic(InvoiceLineLinker.class)) {
+      ((InOutTargetBuilder.LineLinker) buildArgs[3]).link(line, created);
+
+      linkerMock.verify(() -> InvoiceLineLinker.linkInvoiceLineToInOutLine("il-1", "iol-1",
+          InOutInvoiceLinks.MatchTable.PURCHASE));
+    }
+  }
+
+  /**
+   * Runs {@code flow.createTarget} with {@link InvoiceInOutMapping#map} answering one
+   * {@code line} and {@link InOutTargetBuilder#build} mocked, and returns the arguments the
+   * builder received (direction, header, lines, linker).
+   */
+  private static Object[] createThroughFlow(FollowUpFlow flow, InOutTargetBuilder.Line line) {
+    List<PendingResolver.SourceLine> pending = Collections.singletonList(
+        new PendingResolver.SourceLine("il-1", BigDecimal.ONE));
+    InOutFollowUpCreator.Mapping mapping = new InOutFollowUpCreator.Mapping(
+        new InOutTargetBuilder.Header(null, null, null, null, null, null, null),
+        Collections.singletonList(line));
+    ShipmentInOut inout = mock(ShipmentInOut.class);
+    when(inout.getId()).thenReturn("io-1");
+    AtomicReference<Object[]> buildArgs = new AtomicReference<>();
+    try (MockedStatic<InvoiceInOutMapping> mappingMock = Mockito.mockStatic(InvoiceInOutMapping.class);
+         MockedStatic<InOutTargetBuilder> builderMock = Mockito.mockStatic(InOutTargetBuilder.class)) {
+      mappingMock.when(() -> InvoiceInOutMapping.map("inv-1", pending, FollowUpInputs.none()))
+          .thenReturn(mapping);
+      builderMock.when(() -> InOutTargetBuilder.build(any(), any(), any(), any()))
+          .thenAnswer(inv -> {
+            buildArgs.set(inv.getArguments());
+            return inout;
+          });
+
+      assertEquals("io-1", flow.createTarget("inv-1", pending, FollowUpInputs.none()).getId());
+    }
+    return buildArgs.get();
   }
 }

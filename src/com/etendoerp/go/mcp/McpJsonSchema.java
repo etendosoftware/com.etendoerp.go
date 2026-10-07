@@ -107,7 +107,7 @@ final class McpJsonSchema {
     return prop;
   }
 
-  /** A JSON-schema array of objects, used for the {@code neo_feedback} verdict's nested lists. */
+  /** A JSON-schema array of objects, used for the {@code etendo_feedback} verdict's nested lists. */
   static Map<String, Object> objectArrayProp(String description, Map<String, Object> itemProps,
       List<String> itemRequired) {
     Map<String, Object> prop = new LinkedHashMap<>();
@@ -122,7 +122,7 @@ final class McpJsonSchema {
    *
    * <p>The array counterpart of {@link #enumProp}: where a scalar parameter with a closed set of
    * legal values gets an {@code enum}, a list-valued one gets the same {@code enum} on its
-   * {@code items}. IMP-41 — {@code neo_vector_search.targets} was a free string array, so the only
+   * {@code items}. IMP-41 — {@code etendo_vector_search.targets} was a free string array, so the only
    * way to learn a legal key was to guess one and read the refusal. A model that can only pick from
    * the list cannot misspell the key at all.</p>
    *

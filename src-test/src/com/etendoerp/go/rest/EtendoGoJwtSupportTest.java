@@ -66,6 +66,8 @@ import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * Unit tests for {@link EtendoGoJwtSupport}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -189,9 +191,9 @@ class EtendoGoJwtSupportTest {
     @DisplayName("loads roles and organizations through one native SQL query")
     void loadsRolesAndOrganizations() throws JSONException {
       mockRoleListQuery(Arrays.asList(
-          new Object[]{ "role-1", "Admin", "org-1", "Main Org" },
-          new Object[]{ "role-1", "Admin", "org-2", "Second Org" },
-          new Object[]{ "role-2", "User", null, null }));
+          new Object[]{ "role-1", "Admin", "org-1", "Main Org", "N" },
+          new Object[]{ "role-1", "Admin", "org-2", "Second Org", "N" },
+          new Object[]{ "role-2", "User", null, null, "N" }));
       mockUserDefaultRole("unrelated-role");
 
       try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
@@ -207,6 +209,7 @@ class EtendoGoJwtSupportTest {
         assertEquals("role-1", firstRole.getString("id"));
         assertEquals("Admin", firstRole.getString("name"));
         assertFalse(firstRole.has("effectiveRoleNames"));
+        assertFalse(firstRole.getBoolean("isClientAdmin"));
         JSONArray orgList = firstRole.getJSONArray("orgList");
         assertEquals(2, orgList.length());
         assertEquals("org-1", orgList.getJSONObject(0).getString("id"));
@@ -226,8 +229,8 @@ class EtendoGoJwtSupportTest {
         + "default role")
     void attachesEffectiveRoleNamesToDefaultRoleEntry() throws JSONException {
       mockRoleListQuery(Arrays.asList(
-          new Object[]{ "role-1", "Personal - user", "org-1", "Main Org" },
-          new Object[]{ "role-2", "Other Role", null, null }));
+          new Object[]{ "role-1", "Personal - user", "org-1", "Main Org", "N" },
+          new Object[]{ "role-2", "Other Role", null, null, "N" }));
       // Default role is role-2 (NOT firstRoleId) to prove matching is by id, not by position.
       mockUserDefaultRole("role-2");
 
@@ -291,7 +294,7 @@ class EtendoGoJwtSupportTest {
         + "templates")
     void omitsEffectiveRoleNamesWhenNoTemplatesApplied() throws JSONException {
       mockRoleListQuery(Collections.singletonList(
-          new Object[]{ "role-1", "Personal - user", null, null }));
+          new Object[]{ "role-1", "Personal - user", null, null, "N" }));
       mockUserDefaultRole("role-1");
 
       try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
@@ -309,7 +312,7 @@ class EtendoGoJwtSupportTest {
         + "throwing, keeping the remaining resolved names")
     void skipsUnresolvedTemplateRoleId() throws JSONException {
       mockRoleListQuery(Collections.singletonList(
-          new Object[]{ "role-1", "Personal - user", null, null }));
+          new Object[]{ "role-1", "Personal - user", null, null, "N" }));
       mockUserDefaultRole("role-1");
 
       try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
@@ -327,6 +330,40 @@ class EtendoGoJwtSupportTest {
         JSONArray names = role1.getJSONArray("effectiveRoleNames");
         assertEquals(1, names.length());
         assertEquals("Finance", names.getString(0));
+      }
+    }
+
+    @Test
+    @DisplayName("flags the tenant client-admin role with isClientAdmin (case-insensitive 'Y'), "
+        + "every other entry with isClientAdmin=false")
+    void flagsClientAdminRole() throws JSONException {
+      // A tenant admin's default role IS the client-admin AD_Role: tenant-specific raw name, no
+      // composed templates -> no effectiveRoleNames. Without the flag the topbar showed the raw
+      // "Acme SL Admin" instead of the localized "Administrator" (QA CP-6/CP-7).
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "admin-role", "Acme SL Admin", "org-1", "Main Org", 'Y' },
+          new Object[]{ "role-2", "Other Role", null, null, 'N' },
+          new Object[]{ "role-3", "Null Flag Role", null, null, null },
+          // Lowercase flags, as a char and as a string, must also read as client admin.
+          new Object[]{ "role-4", "Lowercase Char Admin", null, null, 'y' },
+          new Object[]{ "role-5", "Lowercase String Admin", null, null, "y" }));
+      mockUserDefaultRole("admin-role");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id")).thenReturn(Collections.emptyList()))) {
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        JSONObject admin = data.getRoleArray().getJSONObject(0);
+        assertEquals("Acme SL Admin", admin.getString("name"));
+        assertTrue(admin.getBoolean("isClientAdmin"));
+        assertFalse(admin.has("effectiveRoleNames"));
+        assertFalse(data.getRoleArray().getJSONObject(1).getBoolean("isClientAdmin"));
+        assertFalse(data.getRoleArray().getJSONObject(2).getBoolean("isClientAdmin"));
+        assertEquals("role-4", data.getRoleArray().getJSONObject(3).getString("id"));
+        assertTrue(data.getRoleArray().getJSONObject(3).getBoolean("isClientAdmin"));
+        assertEquals("role-5", data.getRoleArray().getJSONObject(4).getString("id"));
+        assertTrue(data.getRoleArray().getJSONObject(4).getBoolean("isClientAdmin"));
       }
     }
 

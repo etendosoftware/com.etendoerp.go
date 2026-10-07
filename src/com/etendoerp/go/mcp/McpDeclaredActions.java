@@ -53,7 +53,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  *
  * <p>Resolution follows the dispatcher's order — the {@code @NeoExtension} annotation first, the
  * {@code Java_Qualifier} second — so the handler whose contracts are published is the handler
- * {@code neo_action} actually runs. A composite header handler declares the union of what its
+ * {@code etendo_action} actually runs. A composite header handler declares the union of what its
  * delegates serve. {@code MCP_CONFIG.actions} then removes what the MCP must not offer.</p>
  *
  * <p>Two shapes, chosen by the spec's structure, never its name: on a report spec the
@@ -128,12 +128,12 @@ final class McpDeclaredActions {
   }
 
   /**
-   * Judge a {@code neo_action} call before the customization runs.
+   * Judge a {@code etendo_action} call before the customization runs.
    *
    * <ol>
    *   <li>An unusable {@code MCP_CONFIG}, a hidden action or a redirected button is refused (405).
    *       The customization would still serve it — that is the point: the refusal is MCP-only. A
-   *       button is matched under every name {@code neo_action} fires it by (field name or DB column
+   *       button is matched under every name {@code etendo_action} fires it by (field name or DB column
    *       name, {@link NeoButtonActionHelper#findButtonColumn}), so the configuration cannot be
    *       bypassed by spelling it the other way.</li>
    *   <li>A declared action is validated against its contract: an undeclared key, a missing
@@ -248,7 +248,7 @@ final class McpDeclaredActions {
   /**
    * Every action name: what a customization whose {@code agentExcludedActions()} threw excludes
    * (ETP-5558). Its consumers only ask {@code contains}, so every action of the entity is then
-   * refused by {@code neo_action} and left out of {@code neo_schema} and {@code neo_discover}.
+   * refused by {@code etendo_action} and left out of {@code etendo_schema} and {@code etendo_discover}.
    */
   static final Set<String> ALL = new AbstractSet<>() {
     @Override
@@ -290,7 +290,7 @@ final class McpDeclaredActions {
   }
 
   /**
-   * The AD button {@code action} names on the entity, or {@code null}: the one {@code neo_action}
+   * The AD button {@code action} names on the entity, or {@code null}: the one {@code etendo_action}
    * would fire ({@link NeoButtonActionHelper#findButtonColumn} — included fields, by DB column or
    * field name), else a button column of the entity's table under either name. The second lookup
    * matters for a button whose field curation left out: it cannot fire, but its alias must still
@@ -328,7 +328,7 @@ final class McpDeclaredActions {
 
   /**
    * Every name the call is known by: as typed, and — for a button — its DB column name and the
-   * field name {@code neo_schema} publishes (the DAL property name), which is what
+   * field name {@code etendo_schema} publishes (the DAL property name), which is what
    * {@code MCP_CONFIG.actions} lists.
    */
   private static Set<String> namesOf(String action, Column button) {

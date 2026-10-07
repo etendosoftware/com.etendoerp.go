@@ -28,18 +28,18 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * The {@code neo_feedback} tool (B3): the agent tells us, in its own words, what was confusing,
+ * The {@code etendo_feedback} tool (B3): the agent tells us, in its own words, what was confusing,
  * what it could not find, what it had to guess, and what failed.
  *
  * <h2>Why this is the highest-value row in the table</h2>
  *
- * <p>{@code ETGO_MCP_USAGE} can see <i>that</i> an agent called {@code neo_schema} five times and
+ * <p>{@code ETGO_MCP_USAGE} can see <i>that</i> an agent called {@code etendo_schema} five times and
  * gave up. It cannot see what the agent was <i>trying to do</i>. That intent is what turns a metric
  * into an actionable defect, and the calling agent is the only party that holds it.</p>
  *
  * <h2>The row is written by the servlet, not here</h2>
  *
- * <p>A {@code neo_feedback} call <i>is</i> a tool call, so it produces exactly ONE row (D31):
+ * <p>A {@code etendo_feedback} call <i>is</i> a tool call, so it produces exactly ONE row (D31):
  * {@code McpServlet.recordToolCall} writes it with {@code row_type = 'feedback'} and the normalized
  * verdict in {@code Payload}, carrying the same session, tenant, timestamp and client columns as
  * every other row. That is the point of storing it here rather than in a table of its own — the
@@ -84,7 +84,7 @@ final class McpFeedbackTool {
   }
 
   /**
-   * Handle one {@code neo_feedback} call.
+   * Handle one {@code etendo_feedback} call.
    *
    * @param args the submitted verdict
    * @return the MCP tool result — an acknowledgement, or an error envelope the agent can act on
@@ -93,7 +93,7 @@ final class McpFeedbackTool {
     try {
       return dispatch(args);
     } catch (JSONException e) {
-      throw new McpToolException("Error building the neo_feedback response", e);
+      throw new McpToolException("Error building the etendo_feedback response", e);
     }
   }
 
@@ -117,7 +117,7 @@ final class McpFeedbackTool {
           errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()).toString(2));
     }
 
-    log.info("neo_feedback accepted for session {}", sessionKey);
+    log.info("etendo_feedback accepted for session {}", sessionKey);
     return McpToolRouter.wrapAsTextContent(acknowledgement());
   }
 
@@ -135,7 +135,7 @@ final class McpFeedbackTool {
     try {
       return McpFeedbackVerdict.normalize(args);
     } catch (Exception e) {
-      log.debug("neo_feedback verdict not storable: {}", e.getMessage());
+      log.debug("etendo_feedback verdict not storable: {}", e.getMessage());
       return null;
     }
   }

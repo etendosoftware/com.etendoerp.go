@@ -47,6 +47,8 @@ import org.openbravo.model.ad.ui.Tab;
  * containment, which is precisely why a wrong base ({@code localhost:8080} instead of
  * {@code localhost:3100}) survived the suite and was only caught by a 405 against the running
  * instance.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpRecordUrls
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -198,7 +200,7 @@ class McpRecordUrlsTest {
     }
 
     @Test
-    @DisplayName("reads the id back from the response when the caller has none (neo_create)")
+    @DisplayName("reads the id back from the response when the caller has none (etendo_create)")
     void readsIdFromTheResponse() throws Exception {
       JSONObject flat = singleRecordResult(RECORD_ID);
 
