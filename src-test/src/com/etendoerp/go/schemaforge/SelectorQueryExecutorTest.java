@@ -48,10 +48,12 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 
 import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoTrl;
@@ -59,6 +61,8 @@ import com.etendoerp.go.schemaforge.util.NeoTrl;
 /**
  * Unit tests for {@link SelectorQueryExecutor} covering routing, property resolution,
  * language extraction, and country-translation enrichment.
+ *
+ * @covers com.etendoerp.go.schemaforge.SelectorQueryExecutor
  */
 public class SelectorQueryExecutorTest {
 
@@ -1167,5 +1171,128 @@ public class SelectorQueryExecutorTest {
       assertEquals(3, capturedTotal[0]);
       assertEquals(3, capturedItems[0].length());
     }
+  }
+
+  // ---------------------------------------------------------------
+  // Search inside the de-dup subquery (ETP-5670)
+  // ---------------------------------------------------------------
+
+  /**
+   * Runs a rich selector query end to end through the REAL {@link SelectorQueryBuilder} (only the
+   * DAL, the org model and the response are mocked) and returns the where strings handed to the
+   * count and the data query. No OBContext and an unknown entity mean no org filter is added.
+   */
+  @SuppressWarnings("unchecked")
+  private static List<String> captureRichWhere(SelectorMeta meta, String search,
+      String validationFilter) throws Exception {
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(0);
+    when(dataQuery.list()).thenReturn(Collections.emptyList());
+
+    List<String> capturedWhere = new ArrayList<>();
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      capturedWhere.add(inv.getArgument(1));
+      return capturedWhere.size() == 1 ? countQuery : dataQuery;
+    });
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(anyString())).thenReturn(null);
+
+    try (MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<ModelProvider> mpMock = mockStatic(
+        ModelProvider.class); MockedStatic<OBContext> ctxMock = mockStatic(
+        OBContext.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class)) {
+
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
+          .thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      ctxMock.when(OBContext::getOBContext).thenReturn(null);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenReturn(NeoResponse.ok(new JSONObject()));
+
+      SelectorQueryExecutor.execute(meta, search, 20, 0, validationFilter, null, null);
+    }
+    return capturedWhere;
+  }
+
+  /** The product-by-price selector shape: view-backed, Value Field product.id, dotted search. */
+  private static SelectorMeta.Builder productByPriceSelector() {
+    return new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product.name")
+        .isRich(true).valueProperty("product.id")
+        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("product.id"),
+            SearchableFragment.relativePath("product.name"),
+            SearchableFragment.relativePath("product.searchKey")));
+  }
+
+  /**
+   * Repro ETP-5670: a de-dup selector searching dotted DAL paths copied {@code product.name} into
+   * the representative-row subquery unqualified, so Hibernate bound it to the OUTER row and
+   * PostgreSQL re-ran the subquery once per candidate row. Every property reference inside the
+   * subquery must belong to the sub-alias {@code e_dv}.
+   */
+  @Test
+  public void testDedupSubquerySearchesItsOwnRowsNotTheOuterOne() throws Exception {
+    List<String> where = captureRichWhere(productByPriceSelector().build(), "p", "e.active = true");
+
+    assertEquals(2, where.size());
+    String count = where.get(0);
+    int subStart = count.indexOf("(select min(e_dv.id)");
+    assertTrue("de-dup subquery present: " + count, subStart > 0);
+    String outer = count.substring(0, subStart);
+    String sub = count.substring(subStart);
+
+    assertTrue("outer search is alias-qualified: " + outer,
+        outer.contains("cast(e.product.name as string)"));
+    assertTrue("subquery searches its own product: " + sub,
+        sub.contains("cast(e_dv.product.name as string)"));
+    assertTrue("subquery searches its own searchKey: " + sub,
+        sub.contains("cast(e_dv.product.searchKey as string)"));
+    assertFalse("no bare relative path may bind to the outer row: " + count,
+        java.util.regex.Pattern.compile("(?<![\\w.])product\\.").matcher(count).find());
+  }
+
+  /**
+   * A PK-valued selector gets no de-dup subquery; with a search over bare properties its where is
+   * byte-identical to the pre-ETP-5670 output.
+   */
+  @Test
+  public void testPkValuedSelectorSearchWhereIsUnchanged() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("Country", "name").isRich(true)
+        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("name"),
+            SearchableFragment.relativePath("iSOCountryCode")))
+        .build();
+
+    List<String> where = captureRichWhere(meta, "es", "e.active = true");
+
+    assertEquals("as e where e.active = true AND ("
+        + "lower(COALESCE(cast(e.name as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(e.iSOCountryCode as string), '')) LIKE :search)", where.get(0));
+  }
+
+  /**
+   * A stock-breakdown selector keeps every per-locator row: no de-dup subquery even with a search,
+   * and the where is exactly the builder output.
+   */
+  @Test
+  public void testStockBreakdownSelectorSearchHasNoDedupSubquery() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("MaterialMgmtProductStock", "product.name")
+        .isRich(true).valueProperty("product.id")
+        .auxFields(Arrays.asList(auxWithSuffix("_QTY"), auxWithSuffix("_LOC")))
+        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("product.name"),
+            SearchableFragment.relativePath("product.searchKey")))
+        .build();
+
+    List<String> where = captureRichWhere(meta, "p", "e.active = true");
+
+    assertEquals("as e where e.active = true AND ("
+        + "lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search)", where.get(0));
+    assertFalse("stock-breakdown selector must not be de-duplicated", where.get(0).contains("e_dv"));
   }
 }

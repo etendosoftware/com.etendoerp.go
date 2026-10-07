@@ -58,6 +58,8 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * <p>All Etendo static singletons ({@link OBDal}, {@link ModelProvider}) are mocked
  * with {@link MockedStatic} in {@code setUp}/{@code tearDown} to guarantee test isolation
  * even when the full suite runs in a single JVM fork.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver
  */
 public class SelectorDescriptorResolverTest {
 
@@ -1212,7 +1214,7 @@ public class SelectorDescriptorResolverTest {
     assertEquals("_LOC", meta.auxFields.get(0).suffix);
     assertEquals("location_alias", meta.auxFields.get(0).hqlAlias);
     // "name" added both by grid-search classification and ensureSearchableFallback → no duplicates
-    assertTrue(meta.searchableProperties.contains("name"));
+    assertTrue(meta.searchableProperties.contains(SearchableFragment.relativePath("name")));
     assertEquals("p.active = true", meta.whereClause);
   }
 
@@ -1263,10 +1265,72 @@ public class SelectorDescriptorResolverTest {
 
     assertNotNull(meta);
     // _identifier suffix field must never appear in searchableProperties
-    for (String prop : meta.searchableProperties) {
+    for (SearchableFragment prop : meta.searchableProperties) {
       assertFalse("_identifier fields must be excluded from searchableProps",
-          prop.endsWith("_identifier"));
+          prop.expression.endsWith("_identifier"));
     }
+  }
+
+  /**
+   * ETP-5670: each searchable fragment carries its origin. A {@code property} (dotted or not) and
+   * every fallback path are DAL paths relative to the entity; a {@code clause_left_part}, only
+   * used when {@code property} is blank, is raw HQL kept as written.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void resolveTarget_obuiselSelector_searchableFragmentsCarryTheirOrigin() {
+    Reference refSearchKey = mock(Reference.class);
+    when(refSearchKey.getId()).thenReturn("OBUISEL-ORIGIN-REF");
+
+    Column column = columnWithNoObuiselSelector("M_Product_ID");
+    when(column.getReferenceSearchKey()).thenReturn(refSearchKey);
+    when(column.getDBColumnName()).thenReturn("M_Product_ID");
+
+    Table selectorTable = mock(Table.class);
+    when(selectorTable.getDBTableName()).thenReturn("M_Product_Price_Warehouse_V");
+
+    SelectorField propertyField = mock(SelectorField.class);
+    when(propertyField.isActive()).thenReturn(true);
+    when(propertyField.isOutfield()).thenReturn(false);
+    when(propertyField.getProperty()).thenReturn("product.name");
+    when(propertyField.isShowingrid()).thenReturn(false);
+    when(propertyField.isSearchinsuggestionbox()).thenReturn(true);
+    when(propertyField.getClauseLeftPart()).thenReturn("ignored.because.property.wins");
+
+    SelectorField clauseField = mock(SelectorField.class);
+    when(clauseField.isActive()).thenReturn(true);
+    when(clauseField.isOutfield()).thenReturn(false);
+    when(clauseField.getProperty()).thenReturn(null);
+    when(clauseField.isShowingrid()).thenReturn(false);
+    when(clauseField.isSearchinsuggestionbox()).thenReturn(true);
+    when(clauseField.getClauseLeftPart()).thenReturn("bp.name");
+
+    Selector sel = mock(Selector.class);
+    when(sel.isCustomQuery()).thenReturn(false);
+    when(sel.getHQL()).thenReturn(null);
+    when(sel.getEntityAlias()).thenReturn("e");
+    when(sel.getTable()).thenReturn(selectorTable);
+    when(sel.getName()).thenReturn("Product origin selector");
+    when(sel.getDisplayfield()).thenReturn(null);
+    when(sel.getValuefield()).thenReturn(null);
+    when(sel.getHQLWhereClause()).thenReturn(null);
+    when(sel.getOBUISELSelectorFieldList()).thenReturn(Arrays.asList(propertyField, clauseField));
+
+    OBCriteria<Selector> selCrit = selectorCriteria(sel);
+    when(dal.createCriteria(Selector.class)).thenReturn(selCrit);
+
+    Entity entity = entityWithName("ProductByPriceAndWarehouse");
+    when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
+    when(entity.hasProperty(anyString())).thenAnswer(inv -> "description".equals(inv.getArgument(0)));
+    when(modelProvider.getEntityByTableName("M_Product_Price_Warehouse_V")).thenReturn(entity);
+
+    SelectorMeta meta = SelectorDescriptorResolver.resolveTarget(column, NeoSelectorService.REF_TABLE);
+
+    assertNotNull(meta);
+    assertEquals(Arrays.asList(
+        SearchableFragment.relativePath("product.name"),
+        SearchableFragment.clauseLeftPart("bp.name"),
+        SearchableFragment.relativePath("description")), meta.searchableProperties);
   }
 
   @SuppressWarnings("unchecked")
