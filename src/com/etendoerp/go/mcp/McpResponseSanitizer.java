@@ -74,12 +74,63 @@ final class McpResponseSanitizer {
    */
   static final String RESERVED_REF_KEY = "$ref";
 
+  /** Indent factor of a result rendered for a human, the pre-IMP-53 format. */
+  private static final int HUMAN_INDENT = 2;
+
+  /**
+   * Whether the tool call running on this thread asked for {@code _indentResponse:true} (IMP-53).
+   * Set and restored by {@code McpToolRouter.route} around the whole call, so every JSON body that
+   * call renders — result or error — follows it without each handler passing a flag along.
+   */
+  private static final ThreadLocal<Boolean> INDENTED = ThreadLocal.withInitial(() -> false);
+
   private McpResponseSanitizer() {
   }
 
   /**
-   * Strip the reserved keys from {@code body} in place and render it with the indentation the MCP
-   * tool results use.
+   * Set the rendering mode for the tool call on this thread.
+   *
+   * @param indented {@code true} to indent JSON results for human reading
+   * @return the previous mode, to hand back to {@link #restoreIndented(boolean)}
+   */
+  static boolean setIndented(boolean indented) {
+    boolean previous = INDENTED.get();
+    INDENTED.set(indented);
+    return previous;
+  }
+
+  /**
+   * Restore the mode {@link #setIndented(boolean)} returned; the default mode removes the value.
+   *
+   * @param previous the mode to restore
+   */
+  static void restoreIndented(boolean previous) {
+    if (previous) {
+      INDENTED.set(true);
+    } else {
+      INDENTED.remove();
+    }
+  }
+
+  /**
+   * Serialise a JSON body in the mode of the current tool call: compact unless the call asked for
+   * {@code _indentResponse:true}. The one place an MCP JSON result becomes text.
+   *
+   * @param body the body to serialise, not {@code null}
+   * @return the serialised body
+   * @throws JSONException if the body cannot be rendered
+   */
+  static String serialize(JSONObject body) throws JSONException {
+    return Boolean.TRUE.equals(INDENTED.get()) ? body.toString(HUMAN_INDENT) : body.toString();
+  }
+
+  /**
+   * Strip the reserved keys from {@code body} in place and render it.
+   *
+   * <p>No indentation by default (IMP-53): pretty-printing was 41 % of {@code etendo_discover}'s
+   * bytes — 76 541 against 45 051 compact — and the usual reader is an agent that pays for every
+   * byte in context. A call with {@code _indentResponse:true} gets the indented form
+   * ({@link #serialize}). Whitespace only: the data is unchanged either way.</p>
    *
    * @param body the tool-result body (may be {@code null})
    * @return the rendered body, or {@code "{}"} when {@code body} is {@code null}
@@ -90,7 +141,7 @@ final class McpResponseSanitizer {
       return "{}";
     }
     strip(body);
-    return body.toString(2);
+    return serialize(body);
   }
 
   /**

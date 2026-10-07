@@ -119,7 +119,10 @@ final class McpEntityConfig {
     }
   }
 
-  /** Drop every registration. Tests only — production registers once at class-init time. */
+  /**
+   * Drop every registration. Tests only — production registers once, through
+   * {@link McpConfigSections#ensureRegistered()}.
+   */
   static void clearRegistrations() {
     SECTIONS.clear();
   }
