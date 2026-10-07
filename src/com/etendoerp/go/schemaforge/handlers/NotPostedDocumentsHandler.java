@@ -290,8 +290,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * This spec is tab-less, so ETP-4254's catalog rule would hide it as "handler-only" were it
    * not for the {@code post} / {@code bulk-post} ACTION routes below — which are exactly the
    * transactional business actions the agentic catalog must keep. Declaring the action surface
-   * is what keeps {@code not-posted-documents} in {@code neo_discover} and reachable through
-   * {@code neo_action}.
+   * is what keeps {@code not-posted-documents} in {@code etendo_discover} and reachable through
+   * {@code etendo_action}.
    *
    * @return always {@code true}
    */

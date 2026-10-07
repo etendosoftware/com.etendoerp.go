@@ -36,7 +36,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * {@code neo_schema} answers for entities whose handler declares named actions (ETP-5468): the
+ * {@code etendo_schema} answers for entities whose handler declares named actions (ETP-5468): the
  * action catalog served by {@link McpActionsView#buildDeclaredResponse} instead of the AD field
  * schema.
  *
@@ -59,7 +59,7 @@ final class McpReportActionsSchema {
   }
 
   /**
-   * {@code neo_schema} for a report spec whose handler declares named actions (ETP-5468): the
+   * {@code etendo_schema} for a report spec whose handler declares named actions (ETP-5468): the
    * action catalog of the requested entity. When {@code entity} is omitted and exactly one included
    * entity declares actions, that one is used; with none or several, {@code null} lets the generic
    * path answer (its "Missing required argument: entity" stays the error).
@@ -91,7 +91,7 @@ final class McpReportActionsSchema {
    * The active report spec named {@code specName} when it declares named actions (ETP-5468), or
    * {@code null} otherwise — including a lookup failure, a missing/non-report spec, or a report
    * spec whose handler declares none. Only a spec that actually declares actions is handled here.
-   * Every other report spec returns before any entity lookup, so its {@code neo_schema} answer
+   * Every other report spec returns before any entity lookup, so its {@code etendo_schema} answer
    * stays exactly the generic path's (e.g. the 422 pointing at its {@code generate_*} tool) —
    * BUG-4.
    */
@@ -129,7 +129,7 @@ final class McpReportActionsSchema {
   }
 
   /**
-   * Whether the entity's {@code neo_schema} IS its declared action catalog (ETP-5468), whatever view
+   * Whether the entity's {@code etendo_schema} IS its declared action catalog (ETP-5468), whatever view
    * was asked for: it declares named actions and has no field payload of its own — no
    * {@code ETGO_SF_FIELD} row, which is the shape of every report-spec entity (bank-statements,
    * bank-reconciliation). An entity that declares actions AND has fields keeps its normal schema;
@@ -163,7 +163,7 @@ final class McpReportActionsSchema {
 
   /**
    * The named actions the entity's handler declares (ETP-5468), or an empty map. Looked up quietly:
-   * a CDI failure must not break {@code neo_schema} for an ordinary entity. ETP-5558: resolved by
+   * a CDI failure must not break {@code etendo_schema} for an ordinary entity. ETP-5558: resolved by
    * {@link McpDeclaredActions}, so the {@code @NeoExtension} binding counts as the dispatcher's
    * does and {@code MCP_CONFIG.actions} can hide one.
    */

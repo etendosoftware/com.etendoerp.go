@@ -64,7 +64,7 @@ final class FollowUpSupport {
   /**
    * One action contract per registered flow, by action name, in offer order (ETP-5576, MCP-8):
    * what the source handler adds to its {@link NeoHandler#actionContracts()} so that
-   * {@code neo_schema(view:"actions")} lists the follow-up actions next to the AD buttons. Before,
+   * {@code etendo_schema(view:"actions")} lists the follow-up actions next to the AD buttons. Before,
    * an agent found them only inside the {@code followUp} annotation of a record. Built from the
    * flow's {@link FollowUpTarget} and its creator's {@link TargetCreator#inputParams()} — nothing
    * here names a document.
@@ -80,7 +80,7 @@ final class FollowUpSupport {
           "Creates a draft " + target.getEntity() + " (spec " + target.getSpec() + ") with the "
               + "quantities of this record still pending, and links each new line to its source "
               + "line. Only when the record's " + FollowUpDocumentService.FIELD_FOLLOW_UP + "."
-              + target.getKey() + ".needed is true (read it with neo_get); otherwise it answers "
+              + target.getKey() + ".needed is true (read it with etendo_get); otherwise it answers "
               + "a FOLLOW_UP_* error naming the reason. Returns 201 with the new document's id, "
               + "documentNo, spec, entity and lineCount; the document stays in draft.",
           flow.creator().inputParams().toArray(new NeoActionContract.Param[0])));

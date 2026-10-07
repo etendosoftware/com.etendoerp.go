@@ -184,7 +184,7 @@ final class McpEntityConfig {
     }
 
     /**
-     * One line naming what is wrong, for the {@code neo_discover} report and the deploy validator.
+     * One line naming what is wrong, for the {@code etendo_discover} report and the deploy validator.
      *
      * @return the joined problems, or an empty string when there are none
      */
@@ -275,7 +275,7 @@ final class McpEntityConfig {
     }
     if (!problems.isEmpty()) {
       // Warned, not just returned. The caller surfaces the problem to the agent that happened to
-      // ask (neo_discover reports it per entity), but a misconfiguration nobody queries today is
+      // ask (etendo_discover reports it per entity), but a misconfiguration nobody queries today is
       // still a misconfiguration, and the server log is where an operator looks after a deploy.
       //
       // A modulescript would be the earlier signal, but it cannot work: sections register at

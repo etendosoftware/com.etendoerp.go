@@ -55,6 +55,8 @@ import org.junit.jupiter.api.Test;
  * cheap half — and it is paired with, not a substitute for, the trace parity in
  * {@code NeoExtensionParityTest} and the live verification recorded in the plan (§6.0.11, §6.0.13).
  * </p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoExtensionDispatcher
  */
 @DisplayName("E4 (structural) — every MCP surface dispatches, and REST dispatches at all")
 class NeoExtensionSurfaceCoverageTest {
@@ -128,7 +130,7 @@ class NeoExtensionSurfaceCoverageTest {
         "REST CRUD must dispatch on REST_SINGLE");
     assertTrue(McpSourceScanner.read(REST_BATCH).contains("REST_BATCH"),
         "the batch service must dispatch on REST_BATCH — the channel whose divergence from "
-            + "neo_create had BATCH_TOOL_ENABLED off until ETP-5415 converged them");
+            + "etendo_create had BATCH_TOOL_ENABLED off until ETP-5415 converged them");
   }
 
   private static Set<String> surfaceLiterals(String source) {

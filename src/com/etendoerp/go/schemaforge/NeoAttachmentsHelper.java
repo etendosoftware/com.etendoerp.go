@@ -51,6 +51,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
@@ -365,6 +367,13 @@ public final class NeoAttachmentsHelper {
       if (tabId == null) {
         return NeoResponse.error(400,
             "Could not resolve a standard tab for table '" + tableName + "'");
+      }
+
+      // ETP-5309: an unsaved record (the SPA's literal id "new") used to reach the core,
+      // whose OBSecurityException came back as a raw 500. Answer a clean 404 instead.
+      if (!recordExists(tableId, recordId)) {
+        return NeoResponse.error(404, "Record '" + recordId + "' does not exist in table '"
+            + tableName + "'. Save it before attaching files.");
       }
 
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
@@ -683,6 +692,30 @@ public final class NeoAttachmentsHelper {
     String tableId = rows.get(0);
     TABLE_ID_CACHE.put(key, tableId);
     return tableId;
+  }
+
+  /**
+   * Whether the record an attachment would be bound to exists (ETP-5309). Mirrors the
+   * lookup {@link AttachImplementationManager} itself performs in {@code checkReadableAccess}
+   * — by the table's DAL entity, in admin mode — so it only answers existence; readable
+   * access is still enforced by the core on upload. A table with no DAL entity is not
+   * checked here, exactly as the core skips it.
+   *
+   * @param tableId  the AD_Table.id
+   * @param recordId the record's primary key
+   * @return {@code false} only when the table has an entity and no row with that id
+   */
+  static boolean recordExists(String tableId, String recordId) {
+    Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+    if (entity == null) {
+      return true;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(entity.getName(), recordId) != null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**

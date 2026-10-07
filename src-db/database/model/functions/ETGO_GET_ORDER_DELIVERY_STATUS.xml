@@ -6,8 +6,8 @@
       </parameter>
       <body><![CDATA[v_cancelled character varying;
   v_cancelledorder_id character varying;
-  v_qty_ordered numeric;
-  v_qty_delivered numeric;
+  v_qty_ordered NUMBER;
+  v_qty_delivered NUMBER;
 BEGIN
   -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction,
   -- so ANY exception raised here rolls back the order/line save itself. Every

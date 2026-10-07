@@ -106,7 +106,7 @@ public final class NeoHandlerLookup {
    * Same as {@link #byQualifier(String)} but never propagates a lookup failure.
    *
    * <p>For callers on a discovery path — building the tool catalog, answering
-   * {@code neo_discover} — where a CDI environment that is absent or not yet started must
+   * {@code etendo_discover} — where a CDI environment that is absent or not yet started must
    * degrade to "no handler" rather than fail the whole listing.</p>
    *
    * @param qualifier the {@code Java_Qualifier} to match

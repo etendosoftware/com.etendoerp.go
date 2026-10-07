@@ -53,7 +53,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
- * Unit tests for {@link McpFieldProjection} — the pure {@code neo_list}/{@code neo_get} field
+ * Unit tests for {@link McpFieldProjection} — the pure {@code etendo_list}/{@code etendo_get} field
  * projection behind the IMP-2 {@code fields} / {@code view:"summary"} arguments — and for the
  * emittable set {@code McpQuerySupport.applyProjection} judges a {@code fields:[…]} whitelist by.
  *

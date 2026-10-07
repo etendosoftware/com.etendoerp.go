@@ -86,16 +86,18 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
   /**
    * Bucketed series. {@code %1$s} is the current window "from" expression from
    * {@link WidgetQueryHelper}; everything is cast to {@code timestamp} so bucket comparison does
-   * not depend on the session time zone. {@code dateinvoiced} is a DATE (00:00), so the first
-   * bucket is the one holding the first midnight {@code >= from}: a daily series never starts on
-   * a day that can not match (last30d gives exactly 30 points). Columns: bucket start (ISO date),
+   * not depend on the session time zone. {@code dateinvoiced} is a {@code timestamp} (invoices
+   * created by GO carry a time of day), so {@link WidgetQueryHelper} day-aligns every rolling
+   * "from" to the first midnight at or after it (ETP-5493): the series can start straight at
+   * {@code date_trunc(unit, from)}, the first bucket is never one that cannot match (last30d gives
+   * exactly 30 points) and the trend counts exactly the invoices the KPIs count. Columns: bucket
+   * start (ISO date),
    * month label, revenue, expenses.
    */
   private static final String TREND_QUERY =
       "WITH buckets AS ( "
     + "  SELECT generate_series( "
-    + "    CAST(date_trunc('@UNIT@', CASE WHEN date_trunc('day', %1$s) < %1$s "
-    + "      THEN date_trunc('day', %1$s) + INTERVAL '1 day' ELSE date_trunc('day', %1$s) END) AS timestamp), "
+    + "    CAST(date_trunc('@UNIT@', %1$s) AS timestamp), "
     + "    CAST(date_trunc('@UNIT@', NOW()) AS timestamp), "
     + "    CAST('1 @UNIT@' AS interval) "
     + "  ) AS bucket "

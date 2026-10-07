@@ -95,7 +95,7 @@ public interface NeoHandler {
    *
    * <p><b>Where it is applied.</b> ANDed into the generic list query of every channel: the REST
    * list {@code GET} (and therefore its count and any CSV/XLSX export of it), the REST
-   * {@code ?_distinct=<field>} value fetch, and MCP {@code neo_list}. It is <b>not</b> applied to
+   * {@code ?_distinct=<field>} value fetch, and MCP {@code etendo_list}. It is <b>not</b> applied to
    * a single-record read by id: core resolves that with its own {@code id = :id} query and ignores
    * the where clause, so a handler that must also hide a record from a direct read keeps doing so
    * in {@code afterHandle}. Nor is it applied to a read a handler serves itself from
@@ -127,7 +127,7 @@ public interface NeoHandler {
    * permissive, so without this declaration the catalogue advertises a report the role is then
    * refused when it calls it.</p>
    *
-   * <p>Overriding it puts the answer in ONE place: {@code neo_discover}, the publication of the
+   * <p>Overriding it puts the answer in ONE place: {@code etendo_discover}, the publication of the
    * report tool and the execution itself all resolve through the same method, so a role that
    * cannot run a report no longer sees it offered. Implementations must answer for the surface
    * as a whole; a rule that varies per request (the aging report's receivables/payables split)
@@ -156,8 +156,8 @@ public interface NeoHandler {
    * Declares the DAL property names this customization resolves server-side on create, so a
    * caller does not have to send them even though AD marks the column mandatory (ETP-5535).
    *
-   * <p><b>Why the customization declares it.</b> {@code neo_schema(view:"create")} learns what the
-   * server fills from two generic sources: the values {@code neo_defaults} resolves without any
+   * <p><b>Why the customization declares it.</b> {@code etendo_schema(view:"create")} learns what the
+   * server fills from two generic sources: the values {@code etendo_defaults} resolves without any
    * input, and the selector policies' own wrapper fields. Neither can see a value the server derives
    * <em>from another field of the same body</em> — the create callout cascade, or the
    * customization's own pre-hook — because that derivation only runs once the caller has sent its
@@ -166,8 +166,8 @@ public interface NeoHandler {
    * agent's can then disagree. The customization is the only place that knows the derivation
    * exists, so it is the one that says so.</p>
    *
-   * <p>Reader: {@code neo_schema(view:"create")} moves the names to {@code optional} with
-   * {@code serverDefaulted:true}. The {@code neo_create} mandatory pre-check does not skip them: it
+   * <p>Reader: {@code etendo_schema(view:"create")} moves the names to {@code optional} with
+   * {@code serverDefaulted:true}. The {@code etendo_create} mandatory pre-check does not skip them: it
    * runs after the create callout cascade and before this customization's pre-hook, so a field the
    * cascade derived is not missing there, and one it could not derive is reported with a precise
    * 422 rather than left to the DAL's NOT NULL check. A caller may still send a value; it is
@@ -175,7 +175,7 @@ public interface NeoHandler {
    *
    * <p>Consequently, declare only fields the <b>create callout cascade</b> derives. A field filled
    * only by this customization's own {@code handle()} would still be refused by the pre-check on
-   * {@code neo_create}, which runs first.</p>
+   * {@code etendo_create}, which runs first.</p>
    *
    * @return the property names resolved server-side on create; empty by default
    */
@@ -188,7 +188,7 @@ public interface NeoHandler {
    * keys that are not {@code ETGO_SF_FIELD} columns, so {@code NeoFieldFilter} does not know them
    * (ETP-5576, MCP observation 11).
    *
-   * <p><b>Why this exists.</b> {@code neo_get}/{@code neo_list} validate a caller's
+   * <p><b>Why this exists.</b> {@code etendo_get}/{@code etendo_list} validate a caller's
    * {@code fields:[…]} whitelist against what the entity can emit and report the rest in
    * {@code unknownFields} (IMP-18). That set came from the spec's fields only, so a key injected
    * here was reported unknown while the very same response carried its value — the
@@ -212,7 +212,7 @@ public interface NeoHandler {
    *
    * <p><b>Why this exists (ETP-4254).</b> The MCP catalog hides a spec whose every included
    * entity is handler-backed (no {@code AD_Tab}), because the generic CRUD path cannot serve
-   * it — that is how the dashboard's business widgets stay out of {@code neo_discover} and
+   * it — that is how the dashboard's business widgets stay out of {@code etendo_discover} and
    * out of the CRUD tool enums (gap G4, ETP-4284). But "no AD_Tab" alone is too broad: a
    * tab-less spec can still expose a genuine transactional action route — {@code
    * not-posted-documents} serves {@code post} / {@code bulk-post} — and hiding it would take
@@ -236,14 +236,14 @@ public interface NeoHandler {
   }
 
   /**
-   * Declares the named actions this handler serves through {@code neo_action} / the ACTION
+   * Declares the named actions this handler serves through {@code etendo_action} / the ACTION
    * sub-endpoint, with the parameters each accepts (ETP-5468).
    *
    * <p>For handler-served actions that have no AD button column behind them — the configuration
    * cannot describe them, so the handler is the only authority (same argument as
    * {@link #servesActions()} and {@link #reportParameters()}). A non-empty declaration makes the MCP
-   * layer publish the actions in {@code neo_schema(view:"actions")} and {@code neo_discover}, list
-   * the spec in the {@code neo_action}/{@code neo_schema} enums, and lets the handler judge each call
+   * layer publish the actions in {@code etendo_schema(view:"actions")} and {@code etendo_discover}, list
+   * the spec in the {@code etendo_action}/{@code etendo_schema} enums, and lets the handler judge each call
    * with {@link NeoActionContract#validate} before running it.</p>
    *
    * <p>Returns an empty map by default: the handler declares no named actions.</p>
@@ -258,7 +258,7 @@ public interface NeoHandler {
    * Names the actions this handler serves to the SPA but that an agent must never run
    * (ETP-5558), e.g. a bank-initiated payment that ends in an authorization only a person can give.
    *
-   * <p>Read by the MCP only: {@code neo_action} refuses them (405) before the handler runs, and
+   * <p>Read by the MCP only: {@code etendo_action} refuses them (405) before the handler runs, and
    * they are never advertised. REST and the SPA ignore it. The handler is the authority because it
    * is the one that serves them; a configuration row may add a second guard but must not be the
    * only one.</p>

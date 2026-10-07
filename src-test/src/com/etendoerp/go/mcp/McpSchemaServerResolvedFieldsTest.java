@@ -67,7 +67,7 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 /**
  * ETP-5368 — the wrapper's own server-resolved fields must reach {@code view:"create"}.
  *
- * <p>{@code C_BPartner_Location.C_Location_ID} is {@code NOT NULL}, so {@code neo_schema} named
+ * <p>{@code C_BPartner_Location.C_Location_ID} is {@code NOT NULL}, so {@code etendo_schema} named
  * {@code locationAddress} as the one field an agent MUST send. That instruction pointed at the
  * reuse-an-existing-C_Location mode, which needs an id no contacts endpoint can produce, while the
  * mode the SPA always uses — hand over the raw address fields — was not advertised at all, and
@@ -85,7 +85,7 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  *
  * @covers com.etendoerp.go.mcp.McpServerResolvedFields
  */
-@DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and neo_create")
+@DisplayName("ETP-5368 / ETP-5535 — server-resolved fields in view:\"create\" and etendo_create")
 class McpSchemaServerResolvedFieldsTest {
 
   private static final String ROUTER = "com/etendoerp/go/mcp/McpToolRouter.java";
@@ -243,7 +243,7 @@ class McpSchemaServerResolvedFieldsTest {
     }
   }
 
-  // ── ETP-5535: the neo_create mandatory pre-check does NOT skip declared fields ─────
+  // ── ETP-5535: the etendo_create mandatory pre-check does NOT skip declared fields ─────
 
   /** A customization that injects two keys on every GET record (ETP-5576). */
   private static final NeoHandler DECLARES_ENRICHED_KEYS = new NeoHandler() {
