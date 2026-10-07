@@ -87,6 +87,11 @@ import java.util.Set;
  *       {@code (551)} shows the balance on the side where it is positive. Main and comparison
  *       periods reset independently.</li>
  * </ul>
+ *
+ * <p>Deliberate deviation (ETP-5662): {@code reset} means "the clamp changed the value", per period,
+ * so the descendants of a KEPT P/N node stay visible ({@code 551} 5 shows {@code 5510} and
+ * {@code 55100000}). Classic flags reset whenever the condition fails, including on 0, and lets the
+ * reference period overwrite the main one, so with Compare To off it hides them. Totals are equal.
  */
 final class AccountReportTree {
 
