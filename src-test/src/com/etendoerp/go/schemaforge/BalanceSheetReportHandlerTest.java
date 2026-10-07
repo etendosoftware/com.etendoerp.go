@@ -22,17 +22,20 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
 
 import javax.inject.Named;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
@@ -56,6 +59,9 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * artifacts/balance-sheet/report-contract.json}'s {@code sql.query}/{@code sql.operandsQuery} plus
  * {@link AccountReportTree} (whose own roll-up/formula rules are covered by
  * {@code AccountReportTreeTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.BalanceSheetReportHandler
+ * @covers com.etendoerp.go.schemaforge.AbstractAccountTreeReportHandler
  */
 class BalanceSheetReportHandlerTest {
 
@@ -394,6 +400,78 @@ class BalanceSheetReportHandlerTest {
         "aggregated query must group by the new columns");
   }
 
+  /**
+   * One raw node row in the positional shape the node SQL returns: node_id, parent_id, depth,
+   * sort_path, group_name, value, name, elementlevel, isalwaysshown, accountsign, own_amt,
+   * own_amt_ref, showvaluecond, issummary. Character columns come back from Hibernate as
+   * {@link Character}, so the flags are passed that way.
+   */
+  private static Object[] rawNode(String id, String parent, String sortPath, String level,
+      String ownAmt, Character showValueCond, char isSummary) {
+    return new Object[] { id, parent, 0, sortPath, "Activo", id, "Name " + id, level, 'N', "D",
+        new BigDecimal(ownAmt), BigDecimal.ZERO, showValueCond, isSummary };
+  }
+
+  private static BigDecimal amountOf(JSONArray data,
+      String nodeId) throws Exception {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject row = data.getJSONObject(i);
+      if (nodeId.equals(row.getString("node_id"))) {
+        return new BigDecimal(row.get("amount").toString());
+      }
+    }
+    throw new AssertionError("row " + nodeId + " not in " + data);
+  }
+
+  /**
+   * Guards the positional {@code COL_SHOW_VALUE_COND = 12} / {@code COL_IS_SUMMARY = 13} mapping:
+   * raw rows go through the real {@code queryNodeRows}/{@code queryOperandRows} path and the
+   * clamp must show up in the response. With the two indexes swapped, {@code S} would not be
+   * clamped and {@code H} would read -1 instead of 2.
+   */
+  @Test
+  @DisplayName("maps showvaluecond/issummary by position so a P-summary node is clamped")
+  void mapsShowValueCondAndIsSummaryColumns() throws Exception {
+    List<Object[]> nodeRows = List.of(
+        rawNode("R", "", "1", "E", "0", null, 'Y'),
+        rawNode("H", "R", "1.1", "E", "0", null, 'Y'),
+        // P-summary with a negative raw value: clamped to 0, and its child shows 0 (cascade).
+        rawNode("S", "H", "1.1.1", "C", "0", 'P', 'Y'),
+        rawNode("K", "S", "1.1.1.1", "S", "-3", null, 'N'),
+        // P but NOT a summary: passes through, so issummary is really read from its own column.
+        rawNode("T", "H", "1.1.2", "C", "-2", 'P', 'N'),
+        rawNode("L", "H", "1.1.3", "C", "4", null, 'N'),
+        // Formula over S: reads S's RAW value (-3), not its clamped 0.
+        rawNode("F", "R", "1.2", "C", "0", null, 'Y'));
+    List<Object[]> operandRows = List.<Object[]>of(new Object[] { "F", "S", 1, 10 });
+
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      stubHappyPathObContextAndDal(contextMock, obDalMock, nodeRows, operandRows);
+
+      JSONObject body = new JSONObject();
+      body.put("yearId", "year1");
+      body.put("accountLevel", "S");
+      body.put("showOnlyAccountsWithValue", false);
+
+      NeoResponse response = handler.handle(context("POST", body));
+
+      assertEquals(200, response.getHttpStatus(), () -> describeFailure(response));
+      JSONArray data =
+          response.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(0, amountOf(data, "S").signum(), "P-summary with -3 must be clamped to 0");
+      assertEquals(0, amountOf(data, "K").signum(), "descendant of a reset node displays 0");
+      assertEquals(0, amountOf(data, "T").compareTo(new BigDecimal("-2")),
+          "a non-summary node is never clamped");
+      assertEquals(0, amountOf(data, "H").compareTo(new BigDecimal("2")),
+          "H = S clamped (0) + T (-2) + L (4)");
+      assertEquals(0, amountOf(data, "F").compareTo(new BigDecimal("-3")),
+          "the formula reads S's raw value through the operand query mapping");
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Test helpers
   // -------------------------------------------------------------------------
@@ -415,9 +493,20 @@ class BalanceSheetReportHandlerTest {
    *
    * @return the shared mocked {@link NativeQuery}, for assertions on bound parameters
    */
-  @SuppressWarnings("unchecked")
   private static NativeQuery<Object[]> stubHappyPathObContextAndDal(
       MockedStatic<OBContext> contextMock, MockedStatic<OBDal> obDalMock, List<Object[]> rows) {
+    return stubHappyPathObContextAndDal(contextMock, obDalMock, rows, null);
+  }
+
+  /**
+   * Same as {@link #stubHappyPathObContextAndDal(MockedStatic, MockedStatic, List)}, but when
+   * {@code operandRows} is not {@code null} the operands query ({@code c_elementvalue_operand})
+   * gets its own mocked query returning them, while the node query returns {@code rows}.
+   */
+  @SuppressWarnings("unchecked")
+  private static NativeQuery<Object[]> stubHappyPathObContextAndDal(
+      MockedStatic<OBContext> contextMock, MockedStatic<OBDal> obDalMock, List<Object[]> rows,
+      List<Object[]> operandRows) {
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("sessionClientId1");
 
@@ -437,6 +526,13 @@ class BalanceSheetReportHandlerTest {
     when(session.createNativeQuery(anyString())).thenReturn(query);
     when(query.setParameter(anyString(), any())).thenReturn(query);
     when(query.list()).thenReturn((List) rows);
+    if (operandRows != null) {
+      NativeQuery<Object[]> operandQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(contains(
+          "c_elementvalue_operand"))).thenReturn(operandQuery);
+      when(operandQuery.setParameter(anyString(), any())).thenReturn(operandQuery);
+      when(operandQuery.list()).thenReturn((List) operandRows);
+    }
 
     Year year = mock(Year.class);
 
