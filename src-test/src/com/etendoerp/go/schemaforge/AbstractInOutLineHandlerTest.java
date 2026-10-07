@@ -47,6 +47,8 @@ import org.openbravo.dal.service.OBDal;
  * <p>Group A tests cover {@code handle()} without DB access.
  * Group B tests cover the POST path of {@code afterHandle()} and ThreadLocal cleanup.
  * Group C tests cover the GET enrichment path of {@code afterHandle()}.
+ *
+ * @covers com.etendoerp.go.schemaforge.AbstractInOutLineHandler
  */
 public class AbstractInOutLineHandlerTest {
 
@@ -364,6 +366,53 @@ public class AbstractInOutLineHandlerTest {
       handler.afterHandle(afterCtx);
 
       Mockito.verify(dal, Mockito.never()).getSession();
+    }
+  }
+
+  /**
+   * A second or later partial shipment/receipt of an invoice line is linked only through the match
+   * table of its direction (M_MatchSI / M_MatchInv by the movement's IsSOTrx), never through
+   * C_InvoiceLine.M_InOutLine_ID. The GET enrichment must reach it there for both the source
+   * "ordered" quantity and the invoiced quantity, and must combine the invoiced arms with GREATEST
+   * (a completed first movement is linked by both the column and a match row).
+   */
+  @Test
+  public void afterHandle_get_lineDataReadsMatchTableOfMovementDirection() throws Exception {
+    GoodsReceiptLineHandler handler = new GoodsReceiptLineHandler();
+
+    JSONObject body = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", "line-partial"))));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      handler.afterHandle(ctx);
+
+      org.mockito.ArgumentCaptor<String> sqlCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("invoiced qty: sales branch must read M_MatchSI",
+          sql.contains("WHEN io.issotrx = 'Y' THEN (SELECT SUM(ABS(mt.qty)) FROM m_matchsi mt"));
+      assertTrue("invoiced qty: purchase branch must read M_MatchInv",
+          sql.contains("ELSE (SELECT SUM(ABS(mt.qty)) FROM m_matchinv mt"));
+      assertTrue("ordered qty: purchase branch must reach the source invoice line via M_MatchInv",
+          sql.contains("ELSE (SELECT MAX(mil.qtyinvoiced) FROM m_matchinv mt"));
+      assertTrue("column and match arms must be combined with GREATEST, never summed",
+          sql.contains("GREATEST(COALESCE(("));
     }
   }
 }

@@ -240,9 +240,14 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static String buildInvoiceStatusSql(String whereClause) {
     // Three detection paths per receipt line, to handle the full invoice lifecycle:
     //
-    // msi_qty   — via M_MatchSI: populated by m_inout_post after the receipt is posted.
+    // msi_qty   — via M_MatchInv (the purchase-side match table — a receipt is never matched in
+    //              M_MatchSI): written by m_inout_post when the receipt is completed, and by
+    //              InvoiceLineLinker for a second or later partial receipt of an invoice line,
+    //              which the m_inoutline_id column cannot hold (ETP-5576).
     // direct_qty — via c_invoiceline.m_inoutline_id: set by InvoiceLineLinker when the
     //              invoice was created directly from this receipt.
+    // The arms are combined with GREATEST, never added: the first receipt of an invoice line is
+    // linked by the column AND by the M_MatchInv row m_inout_post writes for it.
     // ol_qty    — via c_orderline_id fallback: covers invoices created from the purchase
     //              order (not from the receipt) where m_inoutline_id is never set.
     //              Each line's contribution is capped at movementqty to avoid over-stating
@@ -263,12 +268,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       + "  END "
       + "FROM m_inoutline iol "
       + "LEFT JOIN ("
-      + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
-      + "  FROM m_matchsi msi "
-      + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
-      + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-      + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
-      + "  GROUP BY msi.m_inoutline_id "
+      + InOutInvoiceLinks.matchedQtyPerInOutLineSql(InOutInvoiceLinks.MatchTable.PURCHASE)
       + ") msi_qty ON msi_qty.m_inoutline_id = iol.m_inoutline_id "
       + "LEFT JOIN ("
       + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
