@@ -42,6 +42,8 @@ import org.openbravo.model.ad.access.User;
 
 /**
  * Tests for {@link SupportIntegrationClient}.
+ *
+ * @covers com.etendoerp.go.support.SupportIntegrationClient
  */
 class SupportIntegrationClientTest {
 
