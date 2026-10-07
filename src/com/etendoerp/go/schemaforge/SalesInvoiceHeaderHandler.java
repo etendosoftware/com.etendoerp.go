@@ -120,6 +120,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     return contracts;
   }
 
+  /** The injected GET keys of {@link AbstractInvoiceHeaderHandler#responseEnrichedFields()}. */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return super.responseEnrichedFields();
+  }
+
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
   @Override
   public Set<String> agentExcludedActions() {

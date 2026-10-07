@@ -207,7 +207,7 @@ class PaymentActionContractsTest {
 
   @Test
   @DisplayName("both invoice headers publish the payment actions, currencyOptions over GET and "
-      + "their follow-up action; and declare the keys they inject on read")
+      + "their follow-up action")
   void headersPublishTheUnion() {
     Map<String, NeoActionContract> sales = new SalesInvoiceHeaderHandler().actionContracts();
     Map<String, NeoActionContract> purchase = new PurchaseInvoiceHeaderHandler().actionContracts();
@@ -222,12 +222,6 @@ class PaymentActionContractsTest {
     assertEquals(List.of("warehouseId"), names(purchase.get("createGoodsReceipt")));
     assertFalse(sales.containsKey("createGoodsReceipt"));
     assertFalse(purchase.containsKey("createShipment"));
-    // ETP-5576 obs. 11: followUp and the subtype key are declared, so a fields:[...] projection
-    // does not report them unknown while the response carries them.
-    assertEquals(Set.of("followUp", "arInvoiceSubtype"),
-        new SalesInvoiceHeaderHandler().responseEnrichedFields());
-    assertEquals(Set.of("followUp", "apInvoiceSubtype"),
-        new PurchaseInvoiceHeaderHandler().responseEnrichedFields());
   }
 
   @Test

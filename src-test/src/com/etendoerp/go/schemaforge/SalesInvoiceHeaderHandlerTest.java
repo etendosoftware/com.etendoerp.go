@@ -1394,4 +1394,16 @@ public class SalesInvoiceHeaderHandlerTest {
     }
     return buildArgs.get();
   }
+
+  /**
+   * ETP-5576 (MCP obs. 11): the keys this header injects on every GET record without a spec field
+   * behind them — {@code followUp} and the subtype key — are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @Test
+  public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
+    assertEquals(java.util.Set.of("followUp", "arInvoiceSubtype"),
+        new SalesInvoiceHeaderHandler().responseEnrichedFields());
+  }
 }

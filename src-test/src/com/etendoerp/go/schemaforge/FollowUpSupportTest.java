@@ -56,7 +56,6 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * @covers com.etendoerp.go.schemaforge.FollowUpSupport
  * @covers com.etendoerp.go.schemaforge.FollowUpFlow
- * @covers com.etendoerp.go.schemaforge.TargetCreator
  */
 class FollowUpSupportTest {
 
