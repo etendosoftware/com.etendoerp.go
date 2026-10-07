@@ -7955,3 +7955,42 @@ filters, so the agent can see whether a different one was the better choice:
 **The unknown-status 422 (IMP-3/IMP-17)** keeps its contract: `available` is still the list of bare
 names. It now also includes `namedFilters`, which holds the same names with their first-sentence
 descriptions, in the same shape as `available` in the response block.
+
+#### 4.12.28 MCP refuses a commercially blocked environment (ETP-5642)
+
+**The defect.** Once a demo trial expires (or a subscription's payment grace elapses),
+`TenantEnvironmentLifecycleService.evaluateAccess` answers `DEMO_TRIAL_EXPIRED` /
+`SUBSCRIPTION_REQUIRED`, and every environment surface built on `EnvironmentRequestAuthenticator`
+(NEO, Copilot, report selectors) plus the account endpoints acting on the session's tenant answer
+**402**. `McpServlet` resolves its identity on its own — cookie session, OAuth2, legacy JWT — and
+never asked: measured on 2026-10-06, an MCP client kept running `etendo_list` **and
+`etendo_update`** on an expired demo, through every scheme, for the owner and an invited user
+alike, while NEO answered 402 to the same token.
+
+**The rule now.** `McpServlet.doPost` evaluates the commercial decision once, right after
+`authenticate()` and before any JSON-RPC dispatch:
+
+| decision | answer |
+|---|---|
+| `ALLOWED` | served as before |
+| `null` — a tenant without lifecycle metadata | served: the controlled legacy transition, same as `EnvironmentRequestAuthenticator.bind()` |
+| `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` | HTTP **402** `{"error":"Environment access is not available: <DECISION>"}` |
+
+- **Every method is refused, `initialize` and `tools/list` included.** A tool catalog for an
+  environment that cannot be used is of no use to a client.
+- **A transport error, not an in-band tool error.** A tool result with `isError` reads as a
+  per-call failure an agent retries; a 402 ends the exchange. The wording is NEO's
+  (`EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX`), so the SPA recognizes the same decision.
+- **The decision is evaluated on the effective client.** A credential carrying the System wildcard
+  (`"0"`, e.g. an OAuth2 token) runs under its role's client; the check resolves it with the same
+  `McpSessionManager.resolveEffectiveClientId` the context setup uses, so it sees exactly the
+  tenant the call would touch. Evaluating `"0"` itself would read no lifecycle metadata, answer
+  `null` and let everything through.
+- The OAuth discovery hint is unaffected: `WWW-Authenticate` travels only on the 401 for a request
+  without credentials, and this check runs after the identity is resolved.
+
+**Still divergent from `EnvironmentRequestAuthenticator`** (declared, separate follow-up): the
+legacy JWT fallback in `McpServlet.authenticate` does not honour the `GoLegacyBearer` kill switch,
+and the cookie path does not run `GoSessionRoleReconciler` (ETP-5395). Moving `McpServlet` onto the
+shared authenticator would close both; it needs an `identify()` variant that keeps the commercial
+check, because MCP builds its own per-call `OBContext`.

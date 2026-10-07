@@ -18,14 +18,17 @@
 package com.etendoerp.go.mcp;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,6 +37,7 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.lang.reflect.Method;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -53,6 +57,8 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.usageevents.LogCapture;
 
@@ -65,6 +71,7 @@ import com.etendoerp.go.usageevents.LogCapture;
 public class McpServletTest {
 
   private McpServlet servlet;
+  private TenantEnvironmentLifecycleService lifecycleService;
   private HttpServletRequest request;
   private HttpServletResponse response;
   private StringWriter responseBody;
@@ -72,7 +79,9 @@ public class McpServletTest {
 
   @Before
   public void setUp() throws Exception {
-    servlet = new McpServlet();
+    // Mockito answers null by default: a tenant without lifecycle metadata, which is allowed.
+    lifecycleService = mock(TenantEnvironmentLifecycleService.class);
+    servlet = new McpServlet(lifecycleService);
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
     responseBody = new StringWriter();
@@ -497,6 +506,110 @@ public class McpServletTest {
     }
   }
 
+  // ── commercial access gate (ETP-5642) ───────────────────────────────────
+
+  private void stubAccessDecision(EnvironmentAccessPolicy.Decision decision) {
+    when(lifecycleService.evaluateAccess(eq("client1"), eq(true), any(Instant.class)))
+        .thenReturn(decision);
+  }
+
+  private void setToolsCallBody() throws Exception {
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 30)
+        .put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_list")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+  }
+
+  @Test
+  public void doPostRefusesExpiredDemoWith402BeforeAnyDispatch() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    stubAccessDecision(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED);
+    setToolsCallBody();
+
+    try (MockedConstruction<McpToolRouter> routerMock =
+        mockConstruction(McpToolRouter.class)) {
+      servlet.doPost(request, response);
+
+      verify(response).setStatus(402);
+      assertTrue(routerMock.constructed().isEmpty());
+    }
+    JSONObject body = new JSONObject(getResponseBody());
+    assertEquals("Environment access is not available: DEMO_TRIAL_EXPIRED",
+        body.getString("error"));
+    assertFalse(body.has("result"));
+  }
+
+  @Test
+  public void doPostRefusesSuspendedSubscriptionEvenForProtocolMethods() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    stubAccessDecision(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 31)
+        .put("method", "tools/list")
+        .toString());
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(402);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
+        new JSONObject(getResponseBody()).getString("error"));
+  }
+
+  @Test
+  public void doPostServesAnAllowedEnvironment() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    stubAccessDecision(EnvironmentAccessPolicy.Decision.ALLOWED);
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 32)
+        .put("method", "ping")
+        .toString());
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    verify(response, never()).setStatus(402);
+    assertEquals(32, new JSONObject(getResponseBody()).getInt("id"));
+  }
+
+  @Test
+  public void doPostServesATenantWithoutLifecycleMetadata() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    stubAccessDecision(null);
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 33)
+        .put("method", "ping")
+        .toString());
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    verify(response, never()).setStatus(402);
+  }
+
+  @Test
+  public void doPostEvaluatesTheRoleClientForASystemWildcardCredential() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "0", "org1", "neo:read");
+    setToolsCallBody();
+
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.resolveEffectiveClientId("0", "role1"))
+          .thenReturn("client1");
+      stubAccessDecision(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED);
+
+      servlet.doPost(request, response);
+    }
+
+    verify(lifecycleService).evaluateAccess(eq("client1"), eq(true), any(Instant.class));
+    verify(response).setStatus(402);
+  }
+
   @Test
   public void doPostPingReturnsEmptyResult() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
@@ -911,9 +1024,15 @@ public class McpServletTest {
     org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
     org.hibernate.Session session = mock(org.hibernate.Session.class);
     when(obDal.getSession()).thenReturn(session);
-    // McpSessionManager resolves the org first, then the client.
-    when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
-        .thenReturn(resolvedOrg, resolvedClient);
+    // McpSessionManager resolves the org first, then the client. A wildcard token's client is
+    // also looked up once before both, by doPost's commercial-access gate (ETP-5642).
+    if ("0".equals(tokenClient)) {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
+          .thenReturn(resolvedClient, resolvedOrg, resolvedClient);
+    } else {
+      when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
+          .thenReturn(resolvedOrg, resolvedClient);
+    }
 
     try (MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
              mockStatic(org.openbravo.dal.service.OBDal.class);
