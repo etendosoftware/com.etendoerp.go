@@ -40,21 +40,21 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 /**
  * The parent record of a child create, as selector context for FK-by-name resolution (ETP-5535).
  *
- * <p><b>The gap.</b> {@code neo_selectors} takes the header's values as {@code parentContext}, and
+ * <p><b>The gap.</b> {@code etendo_selectors} takes the header's values as {@code parentContext}, and
  * its tool description tells the agent to pass them for "line selectors that depend on header
- * values". {@code neo_create} and {@code neo_batch} have no such argument, and resolved FK names on
+ * values". {@code etendo_create} and {@code etendo_batch} have no such argument, and resolved FK names on
  * a child with context built from the tab and the child's own body only (IMP-22). A selector whose
  * validation rule reads a header value therefore saw it unset. Measured on
  * {@code sales-quotation/quotationLine}: the tax rule ({@code C_Tax_IsSOTrx_Date}) compares
  * {@code ValidFrom} against {@code COALESCE(@DateInvoiced@, @DateOrdered@)}, the line carries
  * neither date, the selector answered no rows, and {@code tax: "Entregas IVA 21%"} came back as
- * {@code not_found} — while {@code neo_selectors} with {@code recordContext.orderDate} matched it.</p>
+ * {@code not_found} — while {@code etendo_selectors} with {@code recordContext.orderDate} matched it.</p>
  *
  * <p><b>The fix is structural.</b> The parent is identified by the entity's parent scope
  * ({@link McpParentScope}), never by name, and its record is read with {@code OBDal#get}. Every
  * scalar and FK value it holds is handed to
  * {@link McpSelectorContextHelper#buildSelectorContextParams} as the {@code parentContext} an
- * agent would have passed to {@code neo_selectors}. The helper keeps deciding which keys mean
+ * agent would have passed to {@code etendo_selectors}. The helper keeps deciding which keys mean
  * anything to a selector, so nothing here knows which header field a given rule reads.</p>
  *
  * <p><b>Tenant boundary.</b> The MCP router runs tool calls in admin mode, so {@code OBDal#get}

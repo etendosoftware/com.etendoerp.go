@@ -61,7 +61,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * Unit tests for {@link ReconciliationAgentActions} (ETP-5468, front A) — the {@code neo_action}
+ * Unit tests for {@link ReconciliationAgentActions} (ETP-5468, front A) — the {@code etendo_action}
  * surface of {@code bank-reconciliation} — and the regression guarantees around it:
  *
  * <ul>
@@ -77,6 +77,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * <p>The support layer is mocked statically, so no DAL / OBContext is needed; one nested class
  * goes one level deeper (real {@code runPostAction}) to prove the SPA route and the agent action
  * hand the business method an identical body.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationAgentActions
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("ReconciliationAgentActions (ETP-5468)")

@@ -31,12 +31,10 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * NeoHandler that creates a Goods Receipt (ShipmentInOut) in Draft status
@@ -117,40 +115,14 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
   }
 
   /**
-   * Defensive fallback when DocumentNoHandlerLegacy fails to resolve the
-   * sequence. Goods Receipt document types are often configured with
-   * {@code IsDocNoControlled='N'} and no {@code DocNoSequence_ID}, so the
-   * listener returns an empty string. Resolves the next number directly from
-   * the table-level {@code DocumentNo_M_InOut} sequence using the receipt's
-   * own client (not {@code vars.getClient()}, which can differ under
-   * {@code OBContext.setAdminMode(true)} + NEO Headless), and reuses the OBDal
-   * JDBC connection so the sequence advance stays in the same transaction.
+   * Defensive fallback when DocumentNoHandlerLegacy fails to resolve the sequence. Goods Receipt
+   * document types are often configured with {@code IsDocNoControlled='N'} and no
+   * {@code DocNoSequence_ID}. The logic lives in
+   * {@link NeoCommercialDocumentFactory#ensureInOutDocumentNo} since ETP-5576, which reuses it for
+   * the follow-up documents created from invoices; this hook is kept so tests can still override it.
    */
   protected void ensureDocumentNo(ShipmentInOut receipt) {
-    String current = receipt.getDocumentNo();
-    if (StringUtils.isNotBlank(current) && !current.startsWith("<")) {
-      return;
-    }
-    String docNo = Utility.getDocumentNoConnection(
-        OBDal.getInstance().getConnection(false),
-        new DalConnectionProvider(false),
-        receipt.getClient().getId(),
-        "M_InOut",
-        true);
-    if (StringUtils.isBlank(docNo)) {
-      log.warn(
-          "Could not generate documentNo for goods receipt {} (docType={}, client={}). "
-              + "Configure DocNoSequence_ID on the document type or activate "
-              + "AD_Sequence 'DocumentNo_M_InOut' for the client.",
-          receipt.getId(),
-          receipt.getDocumentType() != null ? receipt.getDocumentType().getName() : "null",
-          receipt.getClient().getId());
-      return;
-    }
-    log.info("Generated documentNo='{}' for goods receipt {}", docNo, receipt.getId());
-    receipt.setDocumentNo(docNo);
-    OBDal.getInstance().save(receipt);
-    OBDal.getInstance().flush();
+    NeoCommercialDocumentFactory.ensureInOutDocumentNo(receipt, log);
   }
 
   private ShipmentInOut createReceiptHeader(Order order) {

@@ -56,13 +56,13 @@ import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
- * ETP-5184 — regression guard for the {@code neo_batch} NPE on entities carrying a
+ * ETP-5184 — regression guard for the {@code etendo_batch} NPE on entities carrying a
  * {@code Java_Qualifier}.
  *
  * <p><b>Defect guarded.</b> {@code executePostCreate} resolved the entity's {@link NeoHandler}
  * through {@code servlet.lookupHandler(javaQualifier)}. That call sits in the DEFAULT create path,
  * which {@link BatchService#forBatchOnly()} is documented to reach with a {@code null} servlet
- * ("only {@code handleWithHooks} touches the owning servlet"). So every {@code neo_batch} create on
+ * ("only {@code handleWithHooks} touches the owning servlet"). So every {@code etendo_batch} create on
  * an entity with a non-blank {@code Java_Qualifier} died with an NPE on {@code this.servlet} and
  * rolled the whole batch back. The fix resolves the handler through the static
  * {@code NeoServletSupport.lookupHandler} instead.</p>
@@ -75,6 +75,8 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
  * dies earlier on {@code this.servlet} (defect present), and
  * {@link #createWithQualifierFailsOnlyAtTheDalWriteNotOnTheServlet()} tells those two apart by
  * name.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoCrudHandler
  */
 class NeoCrudHandlerBatchQualifierTest {
 

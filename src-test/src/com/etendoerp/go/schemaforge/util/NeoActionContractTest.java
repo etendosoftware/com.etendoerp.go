@@ -55,11 +55,13 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
  * Unit tests for {@link NeoActionContract} (ETP-5468): the declaration a handler publishes for its
- * named actions — rendered by {@code neo_schema}, listed by {@code neo_discover} and used to judge
- * every {@code neo_action} call before the handler runs.
+ * named actions — rendered by {@code etendo_schema}, listed by {@code etendo_discover} and used to judge
+ * every {@code etendo_action} call before the handler runs.
  *
  * <p>Pure: only {@link NeoActionContract#resolve} touches the DAL, and it is driven with a static
  * {@link OBDal} mock and a mocked {@link NeoHandlerLookup}.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoActionContract
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("NeoActionContract (ETP-5468)")
@@ -104,7 +106,7 @@ class NeoActionContractTest {
   // ── rendering ──────────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("toJson — the neo_schema rendering")
+  @DisplayName("toJson — the etendo_schema rendering")
   class Rendering {
 
     @Test
@@ -114,7 +116,7 @@ class NeoActionContractTest {
       assertEquals("apply", json.getString("action"));
       assertEquals("Applies things.", json.getString("description"));
       assertTrue(json.getBoolean("mutating"));
-      assertEquals("neo_action", json.getString("invokeVia"));
+      assertEquals("etendo_action", json.getString("invokeVia"));
       assertFalse(catalog().get("list").toJson().getBoolean("mutating"));
     }
 

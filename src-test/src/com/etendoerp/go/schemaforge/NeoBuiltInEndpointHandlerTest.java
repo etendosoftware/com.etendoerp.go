@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,6 +51,7 @@ import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
@@ -447,7 +449,8 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Verifies successful GET handling for the fiscal models catalog endpoint.
+   * Verifies successful GET handling for the fiscal models catalog endpoint, with a role that
+   * holds the Tax Report window grant (ETP-5546: "Modelos Fiscales" access proxy).
    */
   @Test
   public void handleFiscalModelsCatalogGetWritesActiveModelsResponse() throws Exception {
@@ -456,7 +459,10 @@ public class NeoBuiltInEndpointHandlerTest {
     NeoResponse payload = NeoResponse.ok(new JSONObject());
 
     try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
-        Mockito.mockStatic(NeoFiscalModelsCatalogService.class)) {
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(true);
       catalogMock.when(NeoFiscalModelsCatalogService::getActiveModels).thenReturn(payload);
 
       boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
@@ -468,7 +474,32 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Verifies PUT saves the active-models JSON body and responds 204 (via a null NeoResponse).
+   * ETP-5546 — a role without the Tax Report window grant gets 403 from the fiscal models
+   * catalog GET, instead of reaching the service.
+   */
+  @Test
+  public void handleFiscalModelsCatalogGetDeniedWithoutWindowAccess() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "GET")).thenReturn(false);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+      catalogMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * Verifies PUT saves the active-models JSON body and responds 204 (via a null NeoResponse),
+   * with a role that holds the Tax Report window grant.
    */
   @Test
   public void handleFiscalModelsCatalogPutSavesAndFlushes() throws Exception {
@@ -480,8 +511,11 @@ public class NeoBuiltInEndpointHandlerTest {
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoRequestBodyParser> bodyParserMock =
              Mockito.mockStatic(NeoRequestBodyParser.class);
-         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
           .thenReturn("{\"303\":true,\"349\":false}");
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -497,6 +531,30 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
+   * ETP-5546 — a role without the Tax Report window grant gets 403 from the fiscal models
+   * catalog PUT, instead of reaching the service (write tier, not just GET).
+   */
+  @Test
+  public void handleFiscalModelsCatalogPutDeniedWithoutWindowAccess() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
+             Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(false);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "PUT", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+      catalogMock.verifyNoInteractions();
+    }
+  }
+
+  /**
    * Verifies PUT with an invalid JSON body returns 400, matching the service's
    * {@link IllegalArgumentException} contract.
    */
@@ -508,8 +566,11 @@ public class NeoBuiltInEndpointHandlerTest {
     try (MockedStatic<NeoFiscalModelsCatalogService> catalogMock =
              Mockito.mockStatic(NeoFiscalModelsCatalogService.class);
          MockedStatic<NeoRequestBodyParser> bodyParserMock =
-             Mockito.mockStatic(NeoRequestBodyParser.class)) {
+             Mockito.mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
 
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "PUT")).thenReturn(true);
       bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn("not-json");
       catalogMock.when(() -> NeoFiscalModelsCatalogService.saveActiveModels("not-json"))
           .thenThrow(new IllegalArgumentException("Invalid JSON body"));
@@ -531,12 +592,17 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
 
-    boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
-        "DELETE", request, response);
+    try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "DELETE")).thenReturn(true);
 
-    assertTrue(handled);
-    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
-        eq("Fiscal models catalog endpoint only supports GET and PUT"));
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("fiscal-models-catalog", null, null),
+          "DELETE", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+          eq("Fiscal models catalog endpoint only supports GET and PUT"));
+    }
   }
 
   /**

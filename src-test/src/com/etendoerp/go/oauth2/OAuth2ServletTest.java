@@ -74,6 +74,8 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
  * Unit tests for {@link OAuth2Servlet}.
  * Covers token endpoints, client CRUD, revocation, introspection,
  * authorization code flow, refresh token, and dynamic client registration.
+ *
+ * @covers com.etendoerp.go.oauth2.OAuth2Servlet
  */
 public class OAuth2ServletTest {
 
@@ -455,6 +457,90 @@ public class OAuth2ServletTest {
     assertEquals(3600, body.getInt("expires_in"));
     assertNotNull(body.getString("refresh_token"));
     assertEquals("neo:read", body.getString("scope"));
+  }
+
+  /**
+   * A client configured with the deprecated neo: scopes requesting the current etendo: name gets a
+   * token, and the token echoes the requested name (ETP-5602).
+   */
+  @Test
+  public void tokenClientCredentialsGrantsEtendoScopeFromLegacyClientScope() throws Exception {
+    JSONObject body = issueClientCredentialsToken("etendo:read", "neo:read neo:write");
+    assertNotNull(body.getString("access_token"));
+    assertEquals("etendo:read", body.getString("scope"));
+  }
+
+  /** A client re-saved with etendo: allowed scopes still serves a legacy neo: request. */
+  @Test
+  public void tokenClientCredentialsGrantsLegacyScopeFromEtendoAllowList() throws Exception {
+    JSONObject body = issueClientCredentialsToken("neo:read", "etendo:read");
+    assertNotNull(body.getString("access_token"));
+    assertEquals("neo:read", body.getString("scope"));
+  }
+
+  /** An etendo: allow-list does not widen access for a legacy request either. */
+  @Test
+  public void tokenClientCredentialsRejectsLegacyWriteForEtendoReadAllowList() throws Exception {
+    JSONObject body = issueClientCredentialsToken("neo:write", "etendo:read");
+    assertEquals("invalid_scope", body.getString("error"));
+  }
+
+  /** The reverse: a new-scope client still serves a legacy neo: request, echoed as requested. */
+  @Test
+  public void tokenClientCredentialsGrantsLegacyScopeFromEtendoWildcard() throws Exception {
+    JSONObject body = issueClientCredentialsToken("neo:process etendo:read", "etendo:*");
+    assertEquals("neo:process etendo:read", body.getString("scope"));
+  }
+
+  /** The alias never widens access: a neo:read client cannot obtain etendo:write. */
+  @Test
+  public void tokenClientCredentialsRejectsEtendoWriteForLegacyReadClient() throws Exception {
+    JSONObject body = issueClientCredentialsToken("etendo:write", "neo:read");
+    assertEquals("invalid_scope", body.getString("error"));
+  }
+
+  /** Unknown scopes of the new prefix are rejected like any other unknown scope. */
+  @Test
+  public void tokenClientCredentialsRejectsUnknownEtendoScope() throws Exception {
+    JSONObject body = issueClientCredentialsToken("etendo:admin", "etendo:*");
+    assertEquals("invalid_scope", body.getString("error"));
+  }
+
+  private JSONObject issueClientCredentialsToken(String requestedScope, String clientScopes)
+      throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("client_credentials");
+    when(req.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(req.getParameter("client_secret")).thenReturn("correct-secret");
+    when(req.getParameter("scope")).thenReturn(requestedScope);
+
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("client_secret_hash"))
+        .thenReturn(OAuth2Utils.hashSecret("correct-secret"));
+    when(findRs.getString("scopes")).thenReturn(clientScopes);
+    when(findRs.getString("redirect_uris")).thenReturn("[]");
+    when(findRs.getString("ad_client_id")).thenReturn("0");
+    when(findRs.getString("ad_user_id")).thenReturn("user-1");
+    when(findRs.getString("ad_role_id")).thenReturn("role-1");
+
+    PreparedStatement findPs = mock(PreparedStatement.class);
+    when(findPs.executeQuery()).thenReturn(findRs);
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findPs, insertPs);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doPost(req, resp.response);
+    }
+    return new JSONObject(resp.body());
   }
 
   @Test
@@ -1817,6 +1903,54 @@ public class OAuth2ServletTest {
 
     JSONObject body = new JSONObject(resp.body());
     assertEquals("invalid_client", body.getString("error"));
+  }
+
+  /**
+   * ETP-5602: the authorize step checks the request against the client's allow-list with the
+   * neo:/etendo: equivalence, in both directions, without widening access.
+   */
+  @Test
+  public void authorizeGetAcceptsScopeAliasesOfTheClientAllowList() throws Exception {
+    assertFalse(authorizeGet("neo:read", "etendo:read").contains("invalid_scope"));
+    assertFalse(authorizeGet("etendo:read", "neo:read").contains("invalid_scope"));
+    assertTrue(authorizeGet("neo:write", "etendo:read").contains("invalid_scope"));
+    assertTrue(authorizeGet("etendo:write", "neo:read").contains("invalid_scope"));
+  }
+
+  private String authorizeGet(String requestedScope, String clientScopes) throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("GET", "/authorize");
+    when(req.getParameter("response_type")).thenReturn("code");
+    when(req.getParameter("code_challenge")).thenReturn("challenge-value");
+    when(req.getParameter("code_challenge_method")).thenReturn("S256");
+    when(req.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(req.getParameter("redirect_uri")).thenReturn("https://example.com/cb");
+    when(req.getParameter("scope")).thenReturn(requestedScope);
+
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(rs.getString("scopes")).thenReturn(clientScopes);
+    when(rs.getString("redirect_uris")).thenReturn("[\"https://example.com/cb\"]");
+    when(rs.getString("ad_client_id")).thenReturn("0");
+    when(rs.getString("ad_user_id")).thenReturn("user-1");
+    when(rs.getString("ad_role_id")).thenReturn("role-1");
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      servlet.doGet(req, resp.response);
+    } catch (RuntimeException afterValidation) {
+      // Past the scope check the servlet resolves the PWA URL, which this unit test does not
+      // configure; reaching that point is the "accepted" outcome.
+      return "";
+    }
+    return resp.body();
   }
 
   // ===================== POST unknown path =====================

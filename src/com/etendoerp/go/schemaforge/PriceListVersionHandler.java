@@ -73,7 +73,7 @@ public class PriceListVersionHandler implements NeoHandler {
     log.warn("Rejected attempt to create a second PriceListVersion for price list '{}' "
         + "via NEO API; existing version: {}", priceList.getName(), existingVersionId);
     return NeoResponse.error(409,
-        "This price list already has a version. Etendo Go uses a single version per price list.");
+        "This price list already has a version. Etendo uses a single version per price list.");
   }
 
   @Override

@@ -19,9 +19,7 @@ package com.etendoerp.go.auth;
 
 import java.time.Instant;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -34,6 +32,7 @@ import org.openbravo.dal.core.OBContext;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -96,9 +95,6 @@ public class EnvironmentRequestAuthenticator {
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";
   private static final String BEARER_PREFIX = "Bearer ";
-  private static final String SCOPE_ALL = "neo:*";
-  private static final String SCOPE_READ = "neo:read";
-  private static final String SCOPE_WRITE = "neo:write";
 
   private final GoSessionAuthenticator sessionAuthenticator;
   private final TenantEnvironmentLifecycleService lifecycleService;
@@ -291,17 +287,10 @@ public class EnvironmentRequestAuthenticator {
   }
 
   private static boolean hasRequiredScope(String method, String scopes) {
-    if (scopes == null) {
-      return false;
-    }
-    Set<String> granted = new HashSet<>(Arrays.asList(scopes.split("\\s+")));
-    if (granted.contains(SCOPE_ALL)) {
-      return true;
-    }
     if ("GET".equalsIgnoreCase(method) || "HEAD".equalsIgnoreCase(method)) {
-      return granted.contains(SCOPE_READ);
+      return ApiScopes.grants(scopes, ApiScopes.READ);
     }
-    return granted.contains(SCOPE_WRITE);
+    return ApiScopes.grants(scopes, ApiScopes.WRITE);
   }
 
   // ------------------------------------------------------------------ phase 2: bind
