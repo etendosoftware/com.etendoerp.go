@@ -49,6 +49,13 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <p>The derived name is truncated to the {@code AD_User.Name} column length
  * ({@code NVARCHAR(60)}).
  *
+ * <p><b>Email of an Etendo user (ETP-5194).</b> This entity writes the same {@code AD_User} row
+ * as the {@code user} spec, and a user linked to a business partner is listed among its contact
+ * persons. On {@code PATCH}/{@code PUT}, an email change on the owner or on a user with an
+ * invitation of its own is refused with a 400 pointing to the {@code user} spec (see {@link
+ * UserEmailCorrection#rejectContactPathEmailChangeOnGoUser}), so it cannot bypass that spec's
+ * correction window. A real contact person's email stays freely editable and is never invited.
+ *
  * <p><b>ETP-4156.</b> This logic used to live in the app-shell's generic
  * {@code useEntity} hook, branching on hardcoded entity names
  * ({@code contact} / {@code adUser} / {@code user}), which violated the
@@ -118,6 +125,13 @@ public class ContactHandler extends AbstractPersonNameHandler {
     JSONObject body = ctx.getRequestBody();
     if (body == null) {
       return null;
+    }
+    if (!METHOD_POST.equals(method)) {
+      NeoResponse emailGuard =
+          UserEmailCorrection.rejectContactPathEmailChangeOnGoUser(body, ctx.getRecordId());
+      if (emailGuard != null) {
+        return emailGuard;
+      }
     }
     try {
       deriveName(ctx, body);

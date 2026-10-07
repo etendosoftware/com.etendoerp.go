@@ -18,10 +18,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +41,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
+import org.openbravo.model.common.currency.ConversionRate;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
@@ -66,12 +71,16 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  *           "currencyIso": "EUR",
  *           "iban": "ES12...",
  *           "isDefault": true,
- *           "pendingCount": 4
+ *           "pendingCount": 4,
+ *           "lastSyncDate": "2026-10-06T09:15:00Z"
  *         },
  *         ...
  *       ],
  *       "summary": {
  *         "totalBalance": 54321.00,
+ *         "totalBalanceCurrencyIso": "EUR",
+ *         "totalBalanceApproximate": true,
+ *         "missingRateCurrencies": ["GBP"],
  *         "byCurrency": [{"currencyIso": "EUR", "total": 32000.00}, ...],
  *         "pending": {
  *           "accountsWithPending": 3,
@@ -83,6 +92,30 @@ import com.etendoerp.go.schemaforge.util.NeoDateFormat;
  *   }
  * }
  * </pre>
+ *
+ * <p>{@code summary.totalBalance} is converted into the <b>login organization's</b> functional
+ * currency ({@code totalBalanceCurrencyIso}, resolved through
+ * {@link NeoConversionHelper#resolveOrgCurrencyId()}: org, then legal entity, then client)
+ * (ETP-5580). Balances are grouped per currency first and each foreign-currency subtotal is
+ * converted once with today's general {@code C_Conversion_Rate} ({@link #lookupRate}); the
+ * converted total is rounded to the org currency's standard precision. Both the target currency
+ * and the rate lookup are anchored on the login organization, while the accounts span its whole
+ * accessible tree: core {@code FinancialUtils.getConversionRate} walks from the login org UP to
+ * {@code 0}, so a rate defined only on a sibling or child organization is not found and that
+ * currency is reported as missing (fail-safe — it is excluded, never summed unconverted). Only
+ * the DIRECT direction (account currency to org currency) is looked up, consistent with core: if
+ * only the inverse rate (e.g. EUR to USD) is configured, USD is reported as missing.
+ * {@code totalBalanceApproximate} is {@code true} when at least one NON-ZERO subtotal was
+ * converted (the figure depends on a spot rate, not on booked amounts). A currency with no rate
+ * configured is left OUT of the total — never summed unconverted — and its ISO code is listed in
+ * {@code missingRateCurrencies}. A foreign currency whose subtotal is exactly zero contributes
+ * nothing whatever the rate, so it is skipped before any rate lookup: it never flags the total
+ * approximate and is never listed as missing (the warning would be noise). {@code byCurrency}
+ * still lists it, and keeps the exact,
+ * unconverted per-currency subtotals. When no org currency can be resolved at all, the summary
+ * falls back to the legacy raw sum with {@code totalBalanceApproximate = false} and
+ * {@code totalBalanceCurrencyIso} set to the first currency of {@code byCurrency} (JSON
+ * {@code null} when there are no active accounts).
  *
  * <p>Filters accounts by the current client and the user's accessible organization
  * tree through {@link OrganizationStructureProvider}. Pending counters for
@@ -96,6 +129,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   private static final String METHOD_GET = "GET";
   private static final String SQL_TYPE_VARCHAR = "varchar";
+  /** Scale used for converted totals when the org currency has no standard precision set. */
+  private static final int DEFAULT_CURRENCY_PRECISION = 2;
 
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
@@ -132,7 +167,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // and from the account detail page — so without this column there was nothing to echo
           // and every save through it 400'd with `missing_updated`, exactly as it did on
           // ChartOfAccountsHandler's own bypass-the-generic-service path.
-          + "       fa.updated "
+          + "       fa.updated, "
+          // Appended at the END for the same positional-read reason as the columns above
+          // (ETP-5582). Written by the PSD2 module after each successful sync; NULL until the
+          // account has synced once.
+          + "       fa.em_psd2_last_sync_date "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -288,7 +327,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
     JSONObject data = new JSONObject();
     data.put("accounts", buildAccountsArray(accounts, accountsWithTransactions));
-    data.put("summary", buildSummary(accounts));
+    data.put("summary", buildSummary(accounts, resolveOrgCurrency()));
     // Sibling of accounts/summary, not a per-account field (ETP-4896). It is the same catalog that
     // the W-spec defaults response carries (see the injectAccountDefaults method over in
     // FinancialAccountHandler), and this R spec is what the accounts list and the edit modal
@@ -364,6 +403,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // null, when there is no value — this row's serialiser distinguishes the two.
           String auditToken = NeoDateFormat.toAuditToken(rs.getTimestamp(24));
           row.updated = auditToken != null ? auditToken : "";
+          // Left null when the account never synced (ETP-5582): the UI shows "never synced".
+          row.lastSyncDate = rs.getTimestamp(25);
           rows.add(row);
         }
       }
@@ -454,6 +495,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       // transfer picker (useFinancialAccounts) read this flat name. Only the W spec's generic
       // CRUD, which derives its keys from the AD column, exposes it as `eTGOPendingCount`.
       json.put("pendingCount", account.pendingCount);
+      // Explicit JSONObject.NULL: a plain put(key, null) would REMOVE the key, and the UI needs
+      // to tell "never synced" (null) apart from an old response without the field (ETP-5582).
+      json.put("lastSyncDate", account.lastSyncDate != null
+          ? FinancialAccountBankConnectionSupport.formatInstant(account.lastSyncDate)
+          : JSONObject.NULL);
       json.put("dateTolerance", account.dateTolerance);
       json.put("amountTolerance", account.amountTolerance);
       // JSONObject.put(String, Object) with null REMOVES the key, which is exactly what we want:
@@ -467,11 +513,26 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     return arr;
   }
 
-  JSONObject buildSummary(List<AccountRow> accounts) throws JSONException {
+  /**
+   * Builds the sidebar summary over the active accounts (ETP-5580). Balances are grouped by
+   * currency first, then each group is converted ONCE into {@code orgCurrency} — never per
+   * account — so a rate lookup costs one call per distinct currency.
+   *
+   * <p>Total by construction: a missing rate excludes that currency (listed in
+   * {@code missingRateCurrencies}) instead of failing, and a {@code null} {@code orgCurrency}
+   * falls back to the legacy raw sum. Production callers must always pass the resolved org
+   * currency ({@link #resolveOrgCurrency()}); {@code null} is only for a genuinely unresolvable
+   * one.
+   *
+   * @param accounts the account rows (active and archived)
+   * @param orgCurrency the organization's functional currency, or {@code null} when unresolvable
+   * @return the summary JSON
+   * @throws JSONException if the JSON assembly fails
+   */
+  JSONObject buildSummary(List<AccountRow> accounts, OrgCurrency orgCurrency) throws JSONException {
     JSONObject summary = new JSONObject();
 
-    BigDecimal total = BigDecimal.ZERO;
-    Map<String, BigDecimal> byCurrency = new LinkedHashMap<>();
+    Map<String, CurrencyTotal> byCurrency = new LinkedHashMap<>();
     int accountsWithPending = 0;
 
     for (AccountRow account : accounts) {
@@ -480,20 +541,20 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       if (!account.active) {
         continue;
       }
-      total = total.add(account.currentBalance);
-      byCurrency.merge(account.currency.iso, account.currentBalance, BigDecimal::add);
+      byCurrency.computeIfAbsent(account.currency.iso, k -> new CurrencyTotal(account.currency))
+          .add(account.currentBalance);
       if (account.pendingCount > 0) {
         accountsWithPending++;
       }
     }
 
-    summary.put("totalBalance", total);
+    putTotalBalance(summary, byCurrency.values(), orgCurrency);
 
     JSONArray currencyArr = new JSONArray();
-    for (Map.Entry<String, BigDecimal> entry : byCurrency.entrySet()) {
+    for (CurrencyTotal entry : byCurrency.values()) {
       JSONObject c = new JSONObject();
-      c.put("currencyIso", entry.getKey());
-      c.put("total", entry.getValue());
+      c.put("currencyIso", entry.currency.iso);
+      c.put("total", entry.total);
       currencyArr.put(c);
     }
     summary.put("byCurrency", currencyArr);
@@ -506,6 +567,124 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     summary.put("pending", pending);
 
     return summary;
+  }
+
+  /**
+   * Writes {@code totalBalance}, {@code totalBalanceCurrencyIso}, {@code totalBalanceApproximate}
+   * and {@code missingRateCurrencies} into {@code summary} from the per-currency subtotals.
+   */
+  private void putTotalBalance(JSONObject summary, Collection<CurrencyTotal> subtotals,
+      OrgCurrency orgCurrency) throws JSONException {
+    if (orgCurrency == null) {
+      putRawTotal(summary, subtotals);
+      return;
+    }
+    BigDecimal total = BigDecimal.ZERO;
+    boolean approximate = false;
+    JSONArray missingRate = new JSONArray();
+    for (CurrencyTotal subtotal : subtotals) {
+      // A zero subtotal adds nothing at any rate (ETP-5580 QA BUG-1): skip it before the lookup,
+      // so a 0.00 foreign account neither flags the total "≈" nor shows up as a missing rate.
+      if (orgCurrency.matches(subtotal.currency) || subtotal.total.signum() == 0) {
+        total = total.add(subtotal.total);
+        continue;
+      }
+      BigDecimal converted = convertSubtotal(subtotal, orgCurrency);
+      if (converted == null) {
+        missingRate.put(subtotal.currency.iso);
+      } else {
+        total = total.add(converted);
+        approximate = true;
+      }
+    }
+    putTotalFields(summary, total.setScale(orgCurrency.precision, RoundingMode.HALF_UP),
+        orgCurrency.iso, approximate, missingRate);
+  }
+
+  /**
+   * Fallback for when no functional currency exists anywhere in the org/legal-entity/client
+   * chain: nothing to convert into, so keep the legacy raw sum, never flagged approximate, and
+   * label it with the first currency (JSON {@code null} when there are no active accounts).
+   */
+  private static void putRawTotal(JSONObject summary, Collection<CurrencyTotal> subtotals)
+      throws JSONException {
+    BigDecimal total = BigDecimal.ZERO;
+    for (CurrencyTotal subtotal : subtotals) {
+      total = total.add(subtotal.total);
+    }
+    Object iso = subtotals.isEmpty() ? JSONObject.NULL : subtotals.iterator().next().currency.iso;
+    putTotalFields(summary, total, iso, false, new JSONArray());
+  }
+
+  private static void putTotalFields(JSONObject summary, BigDecimal total, Object iso,
+      boolean approximate, JSONArray missingRate) throws JSONException {
+    summary.put("totalBalance", total);
+    summary.put("totalBalanceCurrencyIso", iso);
+    summary.put("totalBalanceApproximate", approximate);
+    summary.put("missingRateCurrencies", missingRate);
+  }
+
+  /**
+   * Converts one foreign-currency subtotal into {@code orgCurrency} at today's rate, rounded to
+   * the org currency's standard precision ({@code HALF_UP}).
+   *
+   * @return the converted amount, or {@code null} when no usable rate is configured
+   */
+  private BigDecimal convertSubtotal(CurrencyTotal subtotal, OrgCurrency orgCurrency) {
+    BigDecimal rate = lookupRate(subtotal.currency.id, orgCurrency.id);
+    if (rate == null) {
+      return null;
+    }
+    return subtotal.total.multiply(rate).setScale(orgCurrency.precision, RoundingMode.HALF_UP);
+  }
+
+  /**
+   * Resolves the current organization's functional currency (ETP-5580) through
+   * {@link NeoConversionHelper#resolveOrgCurrencyId()} — org, then legal entity, then client.
+   * Package-private seam so tests can stub it without an OB security context.
+   *
+   * @return the org currency, or {@code null} when none is configured in the hierarchy
+   */
+  OrgCurrency resolveOrgCurrency() {
+    String currencyId = NeoConversionHelper.resolveOrgCurrencyId();
+    if (currencyId == null) {
+      return null;
+    }
+    org.openbravo.model.common.currency.Currency currency = OBDal.getInstance()
+        .get(org.openbravo.model.common.currency.Currency.class, currencyId);
+    if (currency == null) {
+      return null;
+    }
+    Long precision = currency.getStandardPrecision();
+    return new OrgCurrency(currencyId, StringUtils.trimToEmpty(currency.getISOCode()),
+        precision != null ? precision.intValue() : DEFAULT_CURRENCY_PRECISION);
+  }
+
+  /**
+   * Today's general {@code C_Conversion_Rate} multiply rate from {@code fromCurrencyId} to
+   * {@code toCurrencyId}, looked up through core {@link FinancialUtils#getConversionRate} so the
+   * organization tree is walked up to {@code 0} (ETP-5580). Package-private seam so tests can
+   * stub the rate without the DAL.
+   *
+   * <p>Never throws for a missing rate: {@code FinancialUtils} already swallows lookup errors and
+   * returns {@code null}, and a zero rate is reported as {@code null} too.
+   *
+   * @param fromCurrencyId the source {@code C_Currency_ID}
+   * @param toCurrencyId the target {@code C_Currency_ID}
+   * @return the multiply rate, or {@code null} when no usable rate is configured
+   */
+  BigDecimal lookupRate(String fromCurrencyId, String toCurrencyId) {
+    OBDal dal = OBDal.getInstance();
+    OBContext context = OBContext.getOBContext();
+    ConversionRate rate = FinancialUtils.getConversionRate(new Date(),
+        dal.getProxy(org.openbravo.model.common.currency.Currency.class, fromCurrencyId),
+        dal.getProxy(org.openbravo.model.common.currency.Currency.class, toCurrencyId),
+        context.getCurrentOrganization(), context.getCurrentClient());
+    if (rate == null) {
+      return null;
+    }
+    BigDecimal multiplyRate = rate.getMultipleRateBy();
+    return multiplyRate != null && multiplyRate.signum() != 0 ? multiplyRate : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -566,6 +745,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
      * the loader; 0 both when nothing is pending and when the engine has not populated the row yet.
      */
     int pendingCount = 0;
+    /**
+     * Last successful bank sync ({@code EM_PSD2_Last_Sync_Date}, ETP-5582), written by the PSD2
+     * module. {@code null} when the account never synced. Set by the loader.
+     */
+    java.util.Date lastSyncDate = null;
     /** Days of margin allowed between bank line and transaction dates. Default 3. */
     int dateTolerance = 3;
     /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
@@ -621,6 +805,42 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     Currency(String id, String iso) {
       this.id = id;
       this.iso = iso;
+    }
+  }
+
+  /**
+   * The organization's functional currency (ETP-5580): the target of the summary total.
+   * {@code precision} is the currency's standard precision, used to round converted subtotals.
+   */
+  static class OrgCurrency {
+    final String id;
+    final String iso;
+    final int precision;
+
+    OrgCurrency(String id, String iso, int precision) {
+      this.id = id;
+      this.iso = iso;
+      this.precision = precision;
+    }
+
+    /** Whether {@code currency} is this org currency (by id, or by ISO code as a fallback). */
+    boolean matches(Currency currency) {
+      return StringUtils.equals(id, currency.id)
+          || (StringUtils.isNotEmpty(iso) && StringUtils.equals(iso, currency.iso));
+    }
+  }
+
+  /** Running per-currency subtotal of the active accounts' balances (ETP-5580). */
+  private static final class CurrencyTotal {
+    final Currency currency;
+    BigDecimal total = BigDecimal.ZERO;
+
+    CurrencyTotal(Currency currency) {
+      this.currency = currency;
+    }
+
+    void add(BigDecimal amount) {
+      total = total.add(amount);
     }
   }
 

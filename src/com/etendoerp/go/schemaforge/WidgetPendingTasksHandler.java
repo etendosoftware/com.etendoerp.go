@@ -58,8 +58,9 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private static final String FILTER_PAYMENTS_DUE = "paymentsDue";
   private static final String FILTER_PENDING_RECEPTION = "pendingReception";
   private static final String FILTER_PENDING_DELIVERY = "pendingDelivery";
-  private static final String COL_QTY_RESERVED = "qtyreserved";
-  private static final String COL_QTY_DELIVERED = "qtydelivered";
+  // ETP-5632 — stored computed columns on c_order (Computation_Mode='S') the list filters on.
+  private static final String COL_DELIVERY_STATUS_PURCHASE = "em_etgo_deliv_status_purchase";
+  private static final String COL_DELIVERY_STATUS_SALES = "em_etgo_delivery_status";
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -290,15 +291,13 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    *
    * <p>ETP-5487 — this used to count sales shipments (M_InOut) in Draft status, which did not
    * match the "Envios" filter used in the real Sales Orders window ("Estado doc. = Completado" AND
-   * "Estado de entrega &lt; 100"). The correct source is {@code C_Order}, filtered on the exact
-   * same criterion as the {@code DeliveryStatus} virtual AD column ({@code Computation_Mode='V'}
-   * on {@code C_Order}), reproduced below as native SQL: HQL/OBDal criteria cannot resolve a
-   * virtual computed column, so only re-running its own SQLLOGIC keeps the counter and the
-   * drill-down list (see {@code sales-order} custom {@code index.jsx}, {@code filter=pendingDelivery})
-   * from ever disagreeing.
+   * "Estado de entrega &lt; 100"). The correct source is {@code C_Order}, filtered on the
+   * stored computed column {@code em_etgo_delivery_status} (ETP-5632), the same column the
+   * "Estado de entrega" list column filters on in the drill-down (see {@code sales-order} custom
+   * {@code index.jsx}, {@code filter=pendingDelivery}), so counter and list cannot disagree.
    */
   private void addPendingSalesDeliveries(JSONArray data, String clientId) throws Exception {
-    long count = countOrdersPendingDelivery(clientId, "Y", COL_QTY_DELIVERED);
+    long count = countOrdersPendingDelivery(clientId, "Y", COL_DELIVERY_STATUS_SALES);
     if (count == 0) {
       return;
     }
@@ -319,12 +318,12 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    * <p>ETP-5487 — this used to count purchase shipments (M_InOut) in Draft status, which did not
    * match the "Recepciones" filter used in the real Purchase Orders window ("Estado doc. =
    * Completado" AND "Estado de recepcion &lt; 100"). The correct source is {@code C_Order},
-   * filtered on the exact same criterion as the {@code DeliveryStatusPurchase} virtual AD column
-   * ({@code Computation_Mode='V'} on {@code C_Order}), reproduced below as native SQL — see
-   * {@link #addPendingSalesDeliveries} for why this cannot be an HQL/OBDal criteria query.
+   * filtered on the stored computed column {@code em_etgo_deliv_status_purchase} (ETP-5632), the
+   * same column the "Estado de recepcion" list column filters on in the drill-down — see
+   * {@link #addPendingSalesDeliveries}.
    */
   private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
-    long count = countOrdersPendingDelivery(clientId, "N", COL_QTY_RESERVED);
+    long count = countOrdersPendingDelivery(clientId, "N", COL_DELIVERY_STATUS_PURCHASE);
     if (count == 0) {
       return;
     }
@@ -339,30 +338,22 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Counts completed ({@code docstatus='CO'}) {@code C_Order} rows whose delivery percentage is
-   * below 100, reproducing the exact SQLLOGIC of the core {@code DeliveryStatus} /
-   * {@code DeliveryStatusPurchase} virtual columns (id {@code 9E82E728716246B393C40D2CDCA0133A} /
-   * {@code 9B350DD4248848A7ACC12061D151E92D}) so this counter and the {@code AD_Column}'s own
-   * displayed value can never disagree. {@code deliveredQtyColumn} is always one of the two
-   * hardcoded literals in {@link #COL_QTY_DELIVERED}/{@link #COL_QTY_RESERVED} — never
-   * caller-supplied input — so string-building the column name here carries no injection risk.
+   * Counts completed ({@code docstatus='CO'}) {@code C_Order} rows whose delivery/reception
+   * percentage is below 100, reading the stored computed column the list filters on
+   * ({@code em_etgo_delivery_status} for sales, {@code em_etgo_deliv_status_purchase} for
+   * purchases). A NULL stored value counts as 0, i.e. still pending, matching the total
+   * behaviour of the computing function. {@code statusColumn} is always one of the two hardcoded
+   * constants {@link #COL_DELIVERY_STATUS_SALES}/{@link #COL_DELIVERY_STATUS_PURCHASE} — never
+   * caller-supplied input — so concatenating the column name carries no injection risk.
    */
   private long countOrdersPendingDelivery(String clientId, String isSalesTransaction,
-      String deliveredQtyColumn) throws Exception {
+      String statusColumn) throws Exception {
     String sql = "SELECT COUNT(*)"
         + " FROM c_order co"
         + " WHERE co.issotrx = :isSalesTransaction"
         + "   AND co.docstatus = 'CO'"
         + "   AND co.ad_client_id = :clientId"
-        + "   AND (coalesce((SELECT CASE"
-        + "                           WHEN sum(abs(ol.qtyordered)) = 0 OR co.iscancelled = 'Y'"
-        + "                                OR co.cancelledorder_id IS NOT NULL THEN 0"
-        + "                           ELSE round(coalesce(sum(abs(ol." + deliveredQtyColumn + ")), 0)"
-        + "                                 / sum(abs(ol.qtyordered)) * 100, 0)"
-        + "                         END"
-        + "                    FROM c_orderline ol"
-        + "                    WHERE ol.c_order_id = co.c_order_id"
-        + "                      AND ol.c_order_discount_id IS NULL), 0)) < 100";
+        + "   AND coalesce(co." + statusColumn + ", 0) < 100";
 
     NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
     query.setParameter(PARAM_CLIENT_ID, clientId);

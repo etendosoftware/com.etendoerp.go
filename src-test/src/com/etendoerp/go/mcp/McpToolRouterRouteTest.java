@@ -93,6 +93,10 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  *
  * @covers com.etendoerp.go.mcp.McpToolRouter
  * @covers com.etendoerp.go.mcp.McpRoutingException
+ * @covers com.etendoerp.go.mcp.McpNamedFilters
+ * @covers com.etendoerp.go.mcp.McpDiscoverTool
+ * @covers com.etendoerp.go.mcp.McpVectorSearchTool
+ * @covers com.etendoerp.go.mcp.McpIndentResponse
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -611,7 +615,7 @@ class McpToolRouterRouteTest {
       supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
           .thenReturn(true);
 
-      // ETP-4254: handleDiscover now loads the included entities once and feeds both the
+      // ETP-4254: McpDiscoverTool.handle now loads the included entities once and feeds both the
       // summary array and the spec-level readOnly marker from that single list.
       supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
           .thenReturn(Collections.emptyList());
@@ -631,6 +635,204 @@ class McpToolRouterRouteTest {
       JSONObject body = new JSONObject(text);
       assertEquals(1, body.getInt("count"));
     }
+
+    // ── IMP-53 (ETP-5639): etendo_discover({spec}) narrows the catalog ──────
+
+    private static final String OTHER_SPEC = "purchase-order";
+    private static final String HIDDEN_SPEC = "hidden-spec";
+
+    /**
+     * Stubs a W spec that the role can (or cannot) reach, with an empty entity list and a
+     * buildDiscoverSpec row carrying its name.
+     */
+    private SFSpec stubDiscoverableSpec(String name, boolean accessible) throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn(name + "-id");
+      when(spec.getName()).thenReturn(name);
+      when(spec.getSpecType()).thenReturn("W");
+      supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(eq(spec), eq("W")))
+          .thenReturn(accessible);
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(name + "-id"))
+          .thenReturn(Collections.emptyList());
+      JSONObject row = new JSONObject();
+      row.put("name", name);
+      supportMock.when(() -> McpToolRouterSupport.buildDiscoverSpec(
+          eq(spec), eq("W"), any(), any(), any())).thenReturn(row);
+      return spec;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void stubCatalog(SFSpec... specs) {
+      OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
+      when(specCriteria.list()).thenReturn(List.of(specs));
+      supportMock.when(() -> McpToolRouterSupport.buildEntitySummaryArray(anyList()))
+          .thenReturn(new JSONArray());
+    }
+
+    private JSONObject bodyOf(JSONObject result) throws Exception {
+      return new JSONObject(result.getJSONArray("content").getJSONObject(0).getString("text"));
+    }
+
+    @Test
+    @DisplayName("etendo_discover(spec) returns only the requested spec, same envelope")
+    void discoverWithSpecReturnsOnlyThatSpec() throws Exception {
+      SFSpec wanted = stubDiscoverableSpec(OTHER_SPEC, true);
+      SFSpec other = stubDiscoverableSpec(SPEC_NAME, true);
+      stubCatalog(other, wanted);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", OTHER_SPEC);
+      JSONObject result = router.route("etendo_discover", args, READ_SCOPES);
+
+      assertFalse(result.has("isError"), result.toString());
+      JSONObject body = bodyOf(result);
+      assertEquals(1, body.getInt("count"));
+      assertEquals(1, body.getJSONArray("specs").length());
+      assertEquals(OTHER_SPEC, body.getJSONArray("specs").getJSONObject(0).getString("name"));
+      // The narrowed answer pays only for the spec it returns.
+      supportMock.verify(() -> McpToolRouterSupport.buildDiscoverSpec(
+          eq(other), any(), any(), any(), any()), never());
+    }
+
+    @Test
+    @DisplayName("etendo_discover(spec:[a,b]) returns exactly the requested specs")
+    void discoverWithSpecArrayReturnsThoseSpecs() throws Exception {
+      SFSpec a = stubDiscoverableSpec(OTHER_SPEC, true);
+      SFSpec b = stubDiscoverableSpec(SPEC_NAME, true);
+      SFSpec c = stubDiscoverableSpec("third-spec", true);
+      stubCatalog(a, b, c);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", new JSONArray(List.of(SPEC_NAME, OTHER_SPEC)));
+      JSONObject body = bodyOf(router.route("etendo_discover", args, READ_SCOPES));
+
+      assertEquals(2, body.getInt("count"));
+      Set<String> names = new java.util.HashSet<>();
+      for (int i = 0; i < body.getJSONArray("specs").length(); i++) {
+        names.add(body.getJSONArray("specs").getJSONObject(i).getString("name"));
+      }
+      assertEquals(Set.of(SPEC_NAME, OTHER_SPEC), names);
+    }
+
+    @Test
+    @DisplayName("etendo_discover(spec) with an unknown name answers 422 carrying the reachable names")
+    void discoverWithUnknownSpecReturns422WithAvailable() throws Exception {
+      SFSpec visible = stubDiscoverableSpec(SPEC_NAME, true);
+      SFSpec hidden = stubDiscoverableSpec(HIDDEN_SPEC, false);
+      stubCatalog(visible, hidden);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", "no-such-spec");
+      JSONObject result = router.route("etendo_discover", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      JSONObject envelope = bodyOf(result);
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("validation_error", envelope.getString("error"));
+      assertEquals("spec", envelope.getString("field"));
+      assertTrue(envelope.getString("detail").contains("no-such-spec"));
+      JSONArray available = envelope.getJSONArray("available");
+      assertEquals(1, available.length(), "only the specs this role reaches are offered");
+      assertEquals(SPEC_NAME, available.getString(0));
+      assertTrue(envelope.has("hint"));
+      assertTrue(envelope.has("seeAlso"));
+    }
+
+    @Test
+    @DisplayName("etendo_discover(spec:[...]) with several unknown names lists them all, in request order")
+    void discoverWithSeveralUnknownSpecsNamesThemInRequestOrder() throws Exception {
+      SFSpec visible = stubDiscoverableSpec(SPEC_NAME, true);
+      stubCatalog(visible);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", new JSONArray(List.of("zeta-spec", SPEC_NAME, "alpha-spec")));
+      JSONObject envelope = bodyOf(router.route("etendo_discover", args, READ_SCOPES));
+
+      assertEquals(422, envelope.getInt("status"));
+      assertEquals("Unknown specs 'zeta-spec', 'alpha-spec' for etendo_discover",
+          envelope.getString("detail"));
+    }
+
+    @Test
+    @DisplayName("etendo_discover(spec) naming a spec the role cannot reach is refused like an unknown one")
+    void discoverWithInaccessibleSpecIsRefused() throws Exception {
+      SFSpec visible = stubDiscoverableSpec(SPEC_NAME, true);
+      SFSpec hidden = stubDiscoverableSpec(HIDDEN_SPEC, false);
+      stubCatalog(visible, hidden);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", HIDDEN_SPEC);
+      JSONObject envelope = bodyOf(router.route("etendo_discover", args, READ_SCOPES));
+
+      assertEquals(422, envelope.getInt("status"));
+      assertFalse(envelope.getJSONArray("available").toString().contains(HIDDEN_SPEC));
+    }
+
+    // ── IMP-53: _indentResponse, the per-call presentation flag ────────────
+
+    private String textOf(JSONObject result) throws Exception {
+      return result.getJSONArray("content").getJSONObject(0).getString("text");
+    }
+
+    @Test
+    @DisplayName("_indentResponse:true returns the JSON indented; the default stays compact")
+    void indentResponseIndentsOnlyWhenAsked() throws Exception {
+      stubCatalog(stubDiscoverableSpec(SPEC_NAME, true));
+
+      JSONObject indented = new JSONObject();
+      indented.put("_indentResponse", true);
+      String text = textOf(router.route("etendo_discover", indented, READ_SCOPES));
+      assertTrue(text.contains("\n  \""), "expected two-space indentation: " + text);
+
+      // The flag is per call: the next call without it is compact again.
+      String compact = textOf(router.route("etendo_discover", null, READ_SCOPES));
+      assertFalse(compact.contains("\n"), compact);
+    }
+
+    @Test
+    @DisplayName("_indentResponse:true indents the error body of that call too")
+    void indentResponseIndentsErrors() throws Exception {
+      stubCatalog(stubDiscoverableSpec(SPEC_NAME, true));
+
+      JSONObject args = new JSONObject();
+      args.put("spec", "no-such-spec");
+      args.put("_indentResponse", true);
+      JSONObject result = router.route("etendo_discover", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      assertTrue(textOf(result).contains("\n  \""), textOf(result));
+    }
+
+    @Test
+    @DisplayName("_indentResponse is stripped before routing: not an unknown argument, not forwarded")
+    void indentResponseIsStrippedBeforeRouting() throws Exception {
+      stubCatalog(stubDiscoverableSpec(SPEC_NAME, true));
+
+      JSONObject args = new JSONObject();
+      args.put("_indentResponse", false);
+      JSONObject result = router.route("etendo_discover", args, READ_SCOPES);
+
+      // etendo_discover declares only 'spec'; the guard would refuse the flag had it reached it.
+      assertFalse(result.has("isError"), result.toString());
+      assertFalse(args.has("_indentResponse"),
+          "the flag must be gone before any handler or telemetry reads the arguments");
+    }
+
+    @Test
+    @DisplayName("etendo_discover rejects an undeclared argument instead of ignoring it")
+    void discoverRejectsUnknownArgument() throws Exception {
+      stubCatalog();
+
+      JSONObject args = new JSONObject();
+      args.put("entity", "header");
+      JSONObject result = router.route("etendo_discover", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"), result.toString());
+      JSONObject envelope = bodyOf(result);
+      assertEquals("unknown_argument", envelope.getString("error"));
+      assertTrue(envelope.getJSONArray("available").toString().contains("spec"));
+    }
   }
 
   // ── etendo_list ──────────────────────────────────────────────────────────
@@ -638,6 +840,56 @@ class McpToolRouterRouteTest {
   @Nested
   @DisplayName("route — etendo_list")
   class ListTests {
+
+    /**
+     * IMP-50, W2: a named {@code status} plus {@code fields}. {@code handleList} itself needs
+     * {@code DefaultJsonDataService} (see the class javadoc), so the test runs the same steps it
+     * runs after the fetch, in its order — projection on the core-shaped body, flatten, attach —
+     * and then pins that order on the method source, so the composition tested is the one that
+     * ships.
+     */
+    @Test
+    @DisplayName("a named status with fields: namedFilters is top-level and survives projection")
+    void namedStatusBlockSurvivesProjection() throws Exception {
+      supportMock.when(() -> McpToolRouterSupport.flattenCoreResponse(any()))
+          .thenCallRealMethod();
+      String namedFilters = "[{\"name\":\"open\",\"description\":\"Owes a balance.\","
+          + "\"where\":\"e.open = true\"},{\"name\":\"closed\",\"where\":\"e.open = false\"}]";
+      JSONObject row = new JSONObject();
+      row.put("documentNo", "INV-1");
+      row.put("grandTotalAmount", 10);
+      JSONObject inner = new JSONObject();
+      inner.put("status", 0);
+      inner.put("data", new JSONArray().put(row));
+      JSONObject core = new JSONObject();
+      core.put("response", inner);
+      JSONObject filters = new JSONObject();
+      filters.put("status", "open");
+
+      McpFieldProjection.apply(core, Set.of("documentNo"));
+      JSONObject flat = McpToolRouterSupport.flattenCoreResponse(core);
+      McpNamedFilters.attachApplied(flat, namedFilters, filters);
+      JSONObject body = new JSONObject(McpToolRouter.wrapAsTextContent(flat)
+          .getJSONArray("content").getJSONObject(0).getString("text"));
+
+      JSONObject block = body.getJSONObject("namedFilters");
+      assertEquals("open", block.getString("applied"));
+      assertEquals("closed", block.getJSONArray("available").getJSONObject(0).getString("name"));
+      JSONObject projected = body.getJSONArray("data").getJSONObject(0);
+      assertEquals("INV-1", projected.getString("documentNo"));
+      assertFalse(projected.has("grandTotalAmount"), "projection still applies to the rows");
+      assertFalse(projected.has("namedFilters"), "the block is not a row column");
+
+      String handleList = McpSourceScanner.methodBody(
+          McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleList");
+      int projection = handleList.indexOf("McpQuerySupport.applyProjection(");
+      int flatten = handleList.indexOf("flattenCoreResponse(");
+      int attach = handleList.indexOf("McpNamedFilters.attachApplied(flat,");
+      assertTrue(projection >= 0 && flatten > projection && attach > flatten,
+          "handleList must project, then flatten, then attach the block to the flat body");
+      assertTrue(handleList.indexOf("wrapAsTextContent(flat)", attach) > attach,
+          "the body returned must be the one carrying the block");
+    }
 
     @Test
     @DisplayName("etendo_list missing entity argument returns error")
@@ -1095,6 +1347,38 @@ class McpToolRouterRouteTest {
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       assertTrue(text.contains("completed"));
+    }
+
+    @Test
+    @DisplayName("_indentResponse never reaches the process as a parameter (IMP-53)")
+    void processToolNeverReceivesIndentResponse() throws Exception {
+      SFSpec spec = mockSpec();
+      when(spec.getSpecType()).thenReturn("P");
+      setupSpecLookup(spec);
+      Process adProcess = mock(Process.class);
+      when(adProcess.getId()).thenReturn(PROCESS_ID);
+      when(spec.getProcess()).thenReturn(adProcess);
+      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(true);
+      JSONObject processBody = new JSONObject();
+      processBody.put("result", "completed");
+      // Two keys: jettison renders a one-key object on a single line even when indenting.
+      processBody.put("message", "done");
+      ArgumentCaptor<JSONObject> paramsCaptor = ArgumentCaptor.forClass(JSONObject.class);
+      processMock.when(() -> NeoProcessService.executeProcess(eq(adProcess),
+          paramsCaptor.capture())).thenReturn(NeoResponse.ok(processBody));
+
+      JSONObject parameters = new JSONObject();
+      parameters.put("docAction", "CO");
+      JSONObject args = new JSONObject();
+      args.put("parameters", parameters);
+      args.put("_indentResponse", true);
+      JSONObject result = router.route("complete_order", args, PROCESS_SCOPES);
+
+      assertFalse(result.has("isError"), result.toString());
+      assertFalse(paramsCaptor.getValue().has("_indentResponse"));
+      assertEquals("CO", paramsCaptor.getValue().getString("docAction"));
+      // A JSON NeoResponse body is a JSON tool result, so the flag applies to it.
+      assertTrue(result.getJSONArray("content").getJSONObject(0).getString("text").contains("\n"));
     }
 
     @Test

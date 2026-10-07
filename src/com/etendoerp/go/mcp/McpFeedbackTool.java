@@ -106,7 +106,7 @@ final class McpFeedbackTool {
           errorBody("rate_limited",
               "This session has already submitted " + MAX_PER_WINDOW + " feedback reports in the "
                   + "last hour. Nothing is wrong — send one consolidated report per task rather "
-                  + "than one per call.").toString(2));
+                  + "than one per call."));
     }
 
     try {
@@ -114,10 +114,11 @@ final class McpFeedbackTool {
       McpFeedbackVerdict.normalize(args);
     } catch (McpFeedbackVerdict.InvalidVerdictException e) {
       return McpToolRouter.wrapAsErrorContent(
-          errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()).toString(2));
+          errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()));
     }
 
-    log.info("etendo_feedback accepted for session {}", sessionKey);
+    // The INFO line, with the usage row id, is McpServlet's once the row exists (logReceived).
+    log.debug("etendo_feedback accepted for session {}", sessionKey);
     return McpToolRouter.wrapAsTextContent(acknowledgement());
   }
 
@@ -141,6 +142,69 @@ final class McpFeedbackTool {
   }
 
   /** @return true when this session is still within its window allowance. */
+  /**
+   * Log one {@code INFO} line for an accepted report, pointing at its {@code ETGO_MCP_USAGE} row.
+   *
+   * <p>The report itself stays in the database: its fields are agent-written free text that can
+   * carry tenant data, so the line holds only the row id, the session, tenant and client, the
+   * number of entries per section and the tool names involved (only names shaped like a tool
+   * name — anything else is free text and is left out).</p>
+   *
+   * @param row the feedback row just enqueued, whose payload is the normalized report
+   */
+  static void logReceived(McpUsageRow row) {
+    try {
+      log.info(receivedLogLine(row));
+    } catch (Exception e) { // NOSONAR — a log line must never fail the telemetry path.
+      log.debug("Could not log the etendo_feedback summary.", e);
+    }
+  }
+
+  /**
+   * @param row the feedback row
+   * @return {@code MCP feedback received: usageId=… session=… clientId=… client=… frictions=n
+   *         failures=n wasted=n suggestions=n tools=[…]}
+   * @throws JSONException if the stored payload is not the normalized report
+   */
+  static String receivedLogLine(McpUsageRow row) throws JSONException {
+    JSONObject report = new JSONObject(row.payload());
+    java.util.Set<String> tools = new java.util.TreeSet<>();
+    collectTools(report.optJSONArray("failures"), tools);
+    collectTools(report.optJSONArray("wastedCalls"), tools);
+    return "MCP feedback received: usageId=" + row.id()
+        + " session=" + row.sessionKey()
+        + " clientId=" + row.clientId()
+        + " client=" + (row.clientName() == null ? "unknown" : row.clientName())
+        + " frictions=" + count(report, "frictions")
+        + " failures=" + count(report, "failures")
+        + " wasted=" + count(report, "wastedCalls")
+        + " suggestions=" + count(report, "suggestions")
+        + " tools=" + tools;
+  }
+
+  /** What a tool name looks like; an entry not matching it is free text and is not logged. */
+  private static final java.util.regex.Pattern TOOL_NAME =
+      java.util.regex.Pattern.compile("[a-z][a-z0-9_]{0,63}");
+
+  private static int count(JSONObject report, String section) {
+    org.codehaus.jettison.json.JSONArray items = report.optJSONArray(section);
+    return items == null ? 0 : items.length();
+  }
+
+  private static void collectTools(org.codehaus.jettison.json.JSONArray items,
+      java.util.Set<String> tools) {
+    if (items == null) {
+      return;
+    }
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.optJSONObject(i);
+      String tool = item == null ? null : item.optString("tool", null);
+      if (tool != null && TOOL_NAME.matcher(tool).matches()) {
+        tools.add(tool);
+      }
+    }
+  }
+
   private static boolean accept(String sessionKey) {
     long now = System.currentTimeMillis();
     synchronized (WINDOWS) {
