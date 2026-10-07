@@ -246,12 +246,13 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     //              which the m_inoutline_id column cannot hold (ETP-5576).
     // direct_qty — via c_invoiceline.m_inoutline_id: set by InvoiceLineLinker when the
     //              invoice was created directly from this receipt.
-    // The arms are combined with GREATEST, never added: the first receipt of an invoice line is
-    // linked by the column AND by the M_MatchInv row m_inout_post writes for it.
     // ol_qty    — via c_orderline_id fallback: covers invoices created from the purchase
     //              order (not from the receipt) where m_inoutline_id is never set.
     //              Each line's contribution is capped at movementqty to avoid over-stating
     //              when the order invoice covers more units than this receipt delivered.
+    //
+    // The arms are combined with GREATEST, never added: the first receipt of an invoice line is
+    // linked by the column AND by the M_MatchInv row m_inout_post writes for it.
     return
       "SELECT iol.m_inout_id, "
       + "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 "

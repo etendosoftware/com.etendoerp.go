@@ -196,21 +196,23 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
     // movement only) or through the match table of the movement's direction (every further
     // partial movement — ETP-5576). The match arms are scalar subqueries, so they never multiply
     // rows; the invoiced quantity takes GREATEST of the two arms, never their sum, because the
-    // first movement is linked by both once completed.
+    // first movement is linked by both once completed. It is capped at ABS(movementqty), like the
+    // goods receipt header: core can write a match row (or the column arm can carry a whole
+    // invoice line) whose qty exceeds what this movement line actually moved.
     String sql =
         "SELECT il.m_inoutline_id,"
         + "  COALESCE(ol.qtyordered, src_il.qtyinvoiced, "
         + InOutInvoiceLinks.matchedSourceInvoiceQtyByMovementDirectionExpr(
             IOL_LINE_REF, IOL_IS_SO_TRX_REF) + ") AS ordered_qty,"
         + "  p.value, "
-        + "  GREATEST(COALESCE(("
+        + "  LEAST(GREATEST(COALESCE(("
         + "    SELECT SUM(ABS(cil.qtyinvoiced)) FROM c_invoiceline cil"
         + "    JOIN c_invoice ci ON ci.c_invoice_id = cil.c_invoice_id"
         + "    WHERE cil.m_inoutline_id = il.m_inoutline_id"
         + "      AND ci.docstatus NOT IN ('VO','CL','DR') AND ci.isactive = 'Y'"
         + "  ), 0), COALESCE("
         + InOutInvoiceLinks.matchedQtyByMovementDirectionExpr(IOL_LINE_REF, IOL_IS_SO_TRX_REF)
-        + ", 0)) "
+        + ", 0)), ABS(il.movementqty)) "
         + "FROM m_inoutline il "
         + "JOIN m_inout io ON io.m_inout_id = il.m_inout_id "
         + "LEFT JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id "

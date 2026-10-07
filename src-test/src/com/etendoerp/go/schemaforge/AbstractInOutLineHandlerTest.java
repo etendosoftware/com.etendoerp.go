@@ -373,8 +373,9 @@ public class AbstractInOutLineHandlerTest {
    * A second or later partial shipment/receipt of an invoice line is linked only through the match
    * table of its direction (M_MatchSI / M_MatchInv by the movement's IsSOTrx), never through
    * C_InvoiceLine.M_InOutLine_ID. The GET enrichment must reach it there for both the source
-   * "ordered" quantity and the invoiced quantity, and must combine the invoiced arms with GREATEST
-   * (a completed first movement is linked by both the column and a match row).
+   * "ordered" quantity and the invoiced quantity, must combine the invoiced arms with GREATEST
+   * (a completed first movement is linked by both the column and a match row), and must cap the
+   * result at the line's movement quantity (core can over-match, e.g. on "Add from order").
    */
   @Test
   public void afterHandle_get_lineDataReadsMatchTableOfMovementDirection() throws Exception {
@@ -413,6 +414,9 @@ public class AbstractInOutLineHandlerTest {
           sql.contains("ELSE (SELECT MAX(mil.qtyinvoiced) FROM m_matchinv mt"));
       assertTrue("column and match arms must be combined with GREATEST, never summed",
           sql.contains("GREATEST(COALESCE(("));
+      assertTrue("invoiced qty must be capped at the line's movement qty",
+          sql.contains("LEAST(GREATEST(COALESCE((")
+              && sql.contains(", 0)), ABS(il.movementqty)) "));
     }
   }
 }
