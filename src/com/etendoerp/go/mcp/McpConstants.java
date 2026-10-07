@@ -24,6 +24,14 @@ final class McpConstants {
   static final String PARAM_ENTITY = "entity";
   /** The spec-name argument every CRUD tool carries (ETP-4793 / IMP-17). */
   static final String PARAM_SPEC = "spec";
+  /**
+   * The per-call presentation flag every published tool declares (IMP-53). Not a business
+   * argument: {@code McpToolRouter.route} strips it before anything else reads the arguments.
+   */
+  static final String PARAM_INDENT_RESPONSE = "_indentResponse";
+  /** The one description {@link #PARAM_INDENT_RESPONSE} carries on every tool, kept short (ACE). */
+  static final String DESC_INDENT_RESPONSE =
+      "Optional. true returns the JSON indented for human reading; omit for compact output.";
   static final String PARAM_FIELDS = "fields";
   static final String PARAM_COLUMN = "column";
   static final String PARAM_FIELD = "field";
@@ -428,6 +436,13 @@ final class McpConstants {
   static final String TOOL_NEO_DEFAULTS = "etendo_defaults";
   /** @see #TOOL_NEO_LIST */
   static final String TOOL_NEO_SCHEMA = "etendo_schema";
+
+  /** Tool name for the catalog discovery tool. */
+  static final String TOOL_NEO_DISCOVER = "etendo_discover";
+  /** Tool name for the multi-operation write tool. */
+  static final String TOOL_NEO_BATCH = "etendo_batch";
+  /** Tool name for the document action / process tool. */
+  static final String TOOL_NEO_ACTION = "etendo_action";
 
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "etendo_widget";

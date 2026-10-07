@@ -445,9 +445,9 @@ final class McpToolRouterSupport {
    * the ~44 writable W specs stay unchanged, and the negative case is already carried by the
    * per-entity {@code readOnly} key inside {@code entities}.</p>
    *
-   * <p>IMP-9 / ETP-4601: {@code primaryEntity} is derived by the caller (handleDiscover) and
+   * <p>IMP-9 / ETP-4601: {@code primaryEntity} is derived by the caller (McpDiscoverTool.handle) and
    * passed in, not computed here, so this method stays DAL-free — resolving tab levels needs the
-   * live/admin OBContext that handleDiscover already runs in.</p>
+   * live/admin OBContext that McpDiscoverTool.handle already runs in.</p>
    *
    * @param spec             the spec to describe
    * @param specType         the spec type ({@code "W"}, {@code "P"} or {@code "R"})

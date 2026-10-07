@@ -2420,7 +2420,7 @@ had to infer which included entity was the header by calling `etendo_schema` on 
 surfaces that directly: each window spec that has entities carries a `primaryEntity` field naming the
 root entity.
 
-**Response fragment** (`handleDiscover` → `McpToolRouterSupport.buildDiscoverSpec`):
+**Response fragment** (`McpDiscoverTool.handle` → `McpToolRouterSupport.buildDiscoverSpec`):
 
 ```json
 {
@@ -2957,7 +2957,8 @@ was deferred to its own cycle.
 
 `McpParentScope` classifies every child entity as `RESOLVED` (a link field points at the parent
 tab's table, or `parent.field` declares one), `SAME_RECORD`, `UNPARENTED` (declared by
-`parent.mode`) or `UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
+`parent.mode`), `TAB_WHERE` (scoped by its tab where clause — ETP-5639, below) or
+`UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
 `configError` in `etendo_discover`, and every write verb still served it:
 `McpWriteRequestSupport.resolveParentFK` logged a WARN, dropped the `parentId` and let the create
 continue, and the mandatory-defaults pass then filled the link by itself.
@@ -2991,6 +2992,7 @@ at an intermediate record (a payment detail, a payment schedule) the agent has n
 | `RESOLVED` | written into the link field (unchanged) | unchanged |
 | `SAME_RECORD` | ignored — the parent is the record itself (unchanged) | unchanged |
 | `UNPARENTED` | **422 `parent_unresolvable`** | unchanged (such an entity advertises no write method anyway) |
+| `TAB_WHERE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
 | `UNRESOLVABLE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
 | header (`NOT_CHILD`) | `parentId` ignored (unchanged) | unchanged |
 
@@ -3013,6 +3015,37 @@ three carry `configError` in `etendo_discover`): `payment-in/finPaymentScheduleD
 only link column `M_Transaction_ID` points elsewhere). All three advertise every write method; with
 this change none of them can be created through MCP. Making any of them creatable again is an
 entity decision — a `parent.field` that is genuinely the link — not a change to this gate.
+
+**Update (ETP-5639).** None of the three is `UNRESOLVABLE` any more, and they stopped logging
+`Parent scope unresolvable` on every resolution (118 WARN/week in production):
+
+- `product/transactionAdjustments` declares `MCP_CONFIG`
+  `"parent": {"field": "inventoryTransaction", "entity": "transactions"}` —
+  `M_Costing_Transactions_HQL`'s id is the `M_Transaction` id, so the field is genuinely the link.
+  `entity` is declared because the tab's own parent (`averageCostTransactions`, over the HQL view)
+  is not an included entity of the spec, so it cannot be named; `transactions` (over
+  `M_Transaction`) holds the same ids, and naming it lets the `parent_required` refusal and
+  `etendo_schema` tell the agent where to find the parent.
+  This also fixes a silent read bug: the tab's where clause (`costAdjustmentLine != null`) has no
+  parent placeholder, so `etendo_list` with a `parentId` used to return the adjustments of **every**
+  transaction. Now the list gate adds `inventoryTransaction = parentId`. `create` stays off through
+  `verbs` (the tab is read-only in the UI). A `parent.reason` is published as
+  `parentOptionalReason` only when some verb really lets the parent be omitted (`parentRequiredFor`
+  shorter than the five verbs); next to a parent required on every verb it used to say the
+  opposite of the truth.
+- The payment Lines (`payment-in/finPaymentScheduleDetail`, `payment-out/lines`) reach `FIN_Payment`
+  in two hops (`FIN_Payment_Detail_ID` → `FIN_Payment`), which `parent.field` cannot express. Their
+  tab where clause carries the parent placeholder
+  (`... pd.finPayment.id = @FIN_Payment_ID@`), and `NeoParentTabFilterResolver.resolveTabWhere`
+  fills it from `parentId` on the MCP list as on REST (ETP-5542), so the reads were always scoped.
+  `McpParentScope` now recognises that shape as a scope of its own, **`TAB_WHERE`**: when no
+  parent-link column points at the parent tab's table but the tab's HQL where clause contains the
+  placeholder of the parent table's key column (`@<ParentTable>_ID@`, matched on the DAL and DB
+  table names), the entity is publishable, `etendo_list` requires `parentId` (`parentRequiredFor:
+  ["list"]`, no `parentField`), the clause does the filtering, and creates are refused with
+  `parent_unresolvable` because there is no field to write the parent into. No WARN, no
+  `configError`, no `parentProblem`. Structural rule (tab metadata only); `mode: unparented` would
+  have declared the reads global, which they are not.
 
 #### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
 
@@ -3751,8 +3784,9 @@ protected value came from a person, and there is nothing to warn about.
 
 `initialize` advertises the server as `serverInfo.name = "etendo-mcp"` with
 `title = "Etendo MCP"`, `websiteUrl` and one `icons` entry pointing at the public
-`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973). `protocolVersion` is still
-`2024-11-05`: the new fields are additive and older clients ignore them. None of this is what a
+`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973), and a one-sentence `description`
+(2025-11-25 `Implementation.description`). `protocolVersion` is negotiated — see *Protocol revision*
+below (ETP-5639); it used to be a fixed `2024-11-05`. None of this is what a
 client lists the server as — that is the alias chosen at registration (`claude mcp add <alias>`,
 `[mcp_servers.<alias>]`), and Claude does not render `serverInfo.icons` for custom connectors today.
 
@@ -7652,3 +7686,248 @@ named exactly "Entregas IVA 21%" belongs to another client and is not visible to
 record as context — on `etendo_batch` including `parentRef` ops, whose parent id is taken from the
 op's resolved `parentId()` rather than the body. The same input now answers `ambiguous_fk` with its candidates (substring match),
 and an unambiguous name resolves.
+
+#### 4.12.23 What the MCP server logs, and at which level (ETP-5639)
+
+Production logs are read in Datadog, so each MCP line below is one line, carries what is needed to
+act on it, and never carries agent-written free text or a request body.
+
+**Unknown JSON-RPC method → one `WARN`, no stack trace.** A client asking for a method the server
+does not offer — mostly MCP 2026-07-28 clients probing with `server/discover` before falling back to
+`initialize`, plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
+longer logged as `ERROR Error processing MCP message` with a full stack trace (~570 a week before
+this change). `McpServlet` has a dedicated `catch (McpMethodNotFoundException)`:
+
+```
+WARN McpServlet - MCP client called unsupported method 'server/discover' (client=claude-code)
+```
+
+The client name comes from the telemetry session when the client ran `initialize`, otherwise from
+`params._meta["io.modelcontextprotocol/clientInfo"].name` (which 2026-07-28 probes carry), otherwise
+`unknown` (`McpServlet.clientNameFor`). No telemetry row: only `tools/call` produces one. Every other
+failure keeps the `ERROR` with its stack trace.
+
+**A routing refusal is logged under its own code.** Every `McpRoutingException` the router catches
+leaves one `WARN` built from the refusal's error code (`McpRoutingException.logLine`):
+
+```
+WARN McpToolRouter - MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only on entity 'y' and cannot be written
+```
+
+It used to read `addressed something that does not exist` whatever the code, which mislabelled
+read-only fields, disabled methods, a missing `view` and a missing `parentId`. The agent-facing
+envelope is unchanged. The `parent_required` detail no longer reads "the id of the parent its parent
+record" when the parent entity cannot be named: it says "the id of its parent record".
+
+**The MCP tool-call telemetry line names its tenant.** `LogNeoTelemetrySink` prints
+`event=backend_mcp_tool_call_completed clientId=<AD_Client_ID> properties={...}` for MCP tool calls,
+so a failure seen in Datadog (`VECTOR_COLLECTION_NOT_FOUND`, `accounting_schema_unresolved`) can be
+traced to its tenant without a DB lookup. The id (never a name) rides on `NeoTelemetryEvent.getClientId()`,
+**not** in the properties: properties are what every sink receives, Mixpanel included, and the
+tenant id stays in our own log. Events emitted without a tenant keep the previous line unchanged.
+
+**An accepted `etendo_feedback` report leaves one `INFO` line pointing at its row.** The report stays
+in `ETGO_MCP_USAGE.Payload` (the source of truth); Datadog gets:
+
+```
+INFO McpFeedbackTool - MCP feedback received: usageId=<ETGO_MCP_USAGE_ID> session=<sessionKey> clientId=<AD_Client_ID> client=claude-code frictions=2 failures=1 wasted=0 suggestions=1 tools=[etendo_create]
+```
+
+Counts per section and the tool names named in `failures`/`wastedCalls` only — the report fields
+are agent-written free text that can carry tenant data, so none of it is logged, and a `tool` entry
+that does not look like a tool name is left out. To read the report, fetch the row by `usageId`.
+The id is minted when the row is built (`McpUsageRow.Builder`), not inside the asynchronous insert,
+so the line can name it; if the writer later drops the row (queue full, insert failed) the id points
+at nothing and the drop logs its own `WARN`. A rejected or rate-limited report logs no such line. The
+former `etendo_feedback accepted for session …` line is now `DEBUG`.
+
+**MCP WARN/ERROR lines on the request path carry `session=<Mcp-Session-Id>`** (`none` when the
+client sent no session header), so filtering Datadog by `session=<key>` puts a session's failures
+next to its feedback line. Covered: `McpServlet` (unsupported method, `Error processing MCP
+message`), `McpToolRouter` (routing refusal, role refusals, `Error routing MCP tool`, docs fetch
+failure, `etendo_batch` access denied / failure) and `McpWriteRequestSupport` (`Removed FK sentinel`).
+Not covered: authentication failures (logged before the session key is bound) and lines that are
+not per-request (configuration parsing, cached parent scopes, the telemetry writer thread). The
+production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key is in the message.
+
+#### 4.12.24 Protocol revision: 2025-11-25, negotiated (ETP-5639)
+
+The server speaks the four `initialize`-based revisions **`2024-11-05`, `2025-03-26`,
+`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. The stateless `2026-07-28`
+revision is not served (its `server/discover` probe answers `-32601`, which makes a dual-era client
+fall back to `initialize`; see §4.12.23).
+
+| Request | Behaviour |
+|---|---|
+| `initialize` with a supported `protocolVersion` | answered with that version; remembered for the session (`McpUsageTelemetry.ClientInfo.getProtocolVersion()`) |
+| `initialize` with an unknown or missing `protocolVersion` | answered with the latest, `2025-11-25` (lifecycle rule) |
+| any later POST without `MCP-Protocol-Version` | served, taken as `2025-03-26` (spec fallback) |
+| any later POST with a supported header | served as sent |
+| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose; it turns strict when the 2026-07-28 era is added, where era detection depends on the header |
+| notification (no `id`) | `202 Accepted` (was `204 No Content`) |
+| `GET /sws/mcp` | **`405 Method Not Allowed`**, `Allow: POST, OPTIONS` — a Streamable HTTP server without an SSE stream MUST. The informational JSON it used to answer is gone |
+| `GET /sws/mcp/.well-known/oauth-protected-resource` | unchanged — RFC 9728 metadata, `200` |
+| CORS preflight | `MCP-Protocol-Version` is in `Access-Control-Allow-Headers`, so a browser client (MCP Inspector) passes the preflight |
+
+The version currently changes nothing in the answers: every 2025 field the server returns is
+additive. It is validated and logged so that a client on an unexpected revision is visible.
+
+**SEP-1303 audit (input validation errors are tool errors).** Every failure inside `tools/call` —
+unknown tool, unknown argument, invalid filter, refused write, DAL validation — is caught by
+`McpToolRouter.route` and returned as a tool result with `isError: true`. Only two shapes still
+answer a JSON-RPC error: `tools/call` with no `params`, and with no `name` (both `-32603`). Those are
+malformed protocol messages, not tool input, so they are outside SEP-1303; mapping them to `-32602`
+(Invalid params) is a possible follow-up, not done here.
+
+#### 4.12.25 Tool annotations (ETP-5639)
+
+`tools/list` gives every tool an `annotations` object with all four hints of MCP 2025-03-26, so
+clients can decide which calls to confirm with the user. All four are explicit on every tool: the
+spec defaults (`readOnlyHint=false`, **`destructiveHint=true`**, `idempotentHint=false`,
+`openWorldHint=true`) would otherwise report `etendo_create` as destructive. `openWorldHint` is `false`
+everywhere — every tool stays inside the ERP.
+
+| Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
+|---|---|---|---|
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, every `generate_*` report | true | false | true |
+| `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback` | false | false | false |
+| `etendo_delete` | false | true | true |
+| `etendo_update`, `etendo_batch`, `etendo_action`, `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+
+Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
+and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
+could not reach them. An unclassified tool falls to the conservative last row.
+`McpToolAnnotationsTest` pins the read-only set and requires every fixed tool to be classified
+explicitly — a new fixed tool must be added to one of the sets.
+
+#### 4.12.26 Compact tool results and `etendo_discover({spec})` (ETP-5639, IMP-53)
+
+**Every MCP tool result is compact JSON.** The JSON a tool returns in `content[].text` used to be
+rendered with a two-space indent. Measured on 2026-10-06, `etendo_discover()` came to 76 541 bytes
+and 2 868 lines, and the same JSON without indentation is 45 051 bytes, so 41 % of the response was
+whitespace. Agent harnesses refused to show that result inline: one agent had to grep the file it
+was saved to, and another skipped discover, guessed an entity name, and got a 404. Results are now
+rendered with `JSONObject.toString()` at each place JSON becomes MCP text:
+`McpResponseSanitizer.render` (the JSON overloads of `wrapAsTextContent` / `wrapAsErrorContent`),
+the routing and unexpected-failure envelopes in `McpToolResponses`, the `etendo_feedback` refusals
+(which now go through the sanitising JSON overload too), and `resources/read` in `McpServlet`.
+**Only whitespace changes.** The keys, the values and the NEO REST output (`/sws/neo/*`) stay the
+same. A newline inside a string value still comes through as `\n`. Bodies that are text already
+(the `docs` passthrough, or a `NeoResponse` body a handler returns as a string) are passed on as
+they are. Because of this, the `resp_bytes` usage metric (`McpCallObservation` → `McpUsageLogger`) is
+about 40 % lower for JSON tools from ETP-5639 on, so values from before and after this change cannot
+be compared. The drop is whitespace, not a change in behaviour.
+
+**`_indentResponse` asks for the old, readable form, one call at a time.** Every published tool
+(`etendo_*`, `generate_*`, process tools, `docs`, `etendo_feedback` and the image tools) declares an
+optional boolean `_indentResponse`. When it is `true`, that call's JSON comes back indented by two
+spaces, as before ETP-5639, and so does its error body. When it is missing or `false`, the output is
+compact. It only changes how the JSON is rendered and is never a business argument:
+
+- `McpToolRouter.route` removes it from the arguments (`McpIndentResponse.take`) before anything
+  else reads them. The unknown-argument guard (IMP-40), the handlers, NEO (`fields`, `filters`,
+  process and report `parameters`) and the usage telemetry (`target_entity`, `fields_touched`)
+  never see it. It is also not in the `available` list of an `unknown_argument` refusal.
+- The mode lasts for the call only. `McpResponseSanitizer` holds it in a thread-local that `route`
+  sets and restores, and `McpResponseSanitizer.serialize` is the single place where it is applied.
+- Bodies that are already text (the `docs` passthrough, prose errors) are not affected.
+- A scope refusal (`McpAuthorizationService.authorizeToolCall`) does not produce a tool result. It
+  propagates out of `route` and `McpServlet` answers it as a JSON-RPC error, which is always compact
+  and ignores `_indentResponse`. The thread-local is reset in `route`'s `finally`, so the mode does
+  not carry over to the next request on that thread.
+- `McpIndentResponse.declare` adds the argument to every tool in `generateTools`, with one
+  shared description (`McpConstants.DESC_INDENT_RESPONSE`), so a new tool cannot miss it.
+
+**Catalog cost.** Each tool definition grows by 138 bytes in compact JSON. On the 28-tool catalog
+that `etendo-mcp-local` publishes for a full-scope role, `tools/list` grows by about 3.9 KB.
+Process tools add 138 bytes each.
+
+**`etendo_discover` takes an optional `spec`.** With it, the answer has the same envelope (`specs`,
+`count`, `guidance`, `app`) but holds only the named spec, so an agent that already knows which
+spec it needs gets only that spec's entities, `primaryEntity`, parent links and actions. The server
+also accepts a JSON array of names, although the input schema only declares a string. A missing or
+blank `spec` returns the whole catalog, as before.
+
+```json
+etendo_discover({"spec": "sales-order"})
+→ {"specs":[{"name":"sales-order",...}],"count":1,"guidance":{...}}
+```
+
+The server checks access against the whole catalog either way. A name the role cannot reach is
+refused in the same way as a name that does not exist (unknown, inactive, `SHOWINMCP = N`, or no
+window access), so a narrowed call reveals nothing the full catalog would not. An array is refused
+as a whole, and `detail` names every unknown entry in the order given, so one retry can fix them all:
+
+```json
+{"status":422,"error":"validation_error","detail":"Unknown spec 'sales-ordr' for etendo_discover",
+ "field":"spec","available":["purchase-order","sales-order",...],
+ "hint":"Retry with one of the names in 'available'. Omit 'spec' to get the whole catalog.",
+ "seeAlso":"docs(topic:\"reading records\")","tool":"etendo_discover",...}
+```
+
+This refusal includes `available`, which the `spec_not_found` refusal of the other tools leaves out on purpose. The agent
+called the catalog tool to learn the names, and the list of names is a small fraction of the full
+catalog. `etendo_discover` skips the single-spec gate that other tools use
+(`ToolRegistry.resolveSpecName` returns `null` for it), because that gate would answer 404 without
+the names and cannot read an array. Because `etendo_discover` now declares its arguments, the
+unknown-argument guard (IMP-40) covers it too: `etendo_discover({entity:"header"})` is refused
+with `unknown_argument` instead of being ignored. The tool annotations (§4.12.25) do not change:
+the tool is still read-only and idempotent.
+
+#### 4.12.27 Named filters can be found from the catalog and from the response (ETP-5639, IMP-50)
+
+A **named filter** is a business state that a human writes per entity in
+`ETGO_SF_ENTITY.NAMED_FILTERS`, as a JSON array of `{name, where, label?, description?}`. An agent
+uses one with `etendo_list(filters:{status:"<name>"})`, and `McpQuerySupport` adds the entry's HQL
+`where` to the query. The `where` is never shown to the agent.
+
+**Why this changed.** After `outstanding` was added to sales-invoice and purchase-invoice, three
+blind agents out of three still called `status:"pending"` first and missed the partially paid
+invoices. The `etendo_list` description only gave three example names. The real list was only in
+`etendo_schema view:"full"` (about 40 KB), which no agent called. Both fixes below are built from
+the data: shared code contains no spec, entity or filter name.
+
+**1. The catalog lists them.** The description of the `filters` argument of `etendo_list` ends with
+the filters configured on the entities of the specs that this role reaches. These are the same
+specs as in the tool's `spec` enum. Each entity gets one line, and each description is cut to its
+first sentence:
+
+```
+Configured named filters (spec/entity: name (meaning)):
+sales-invoice/header: completed (Fully paid invoices (payment complete).), pending (…), partial (…), outstanding (Every invoice that still owes a balance: unpaid plus partially paid.)
+```
+
+- `McpNamedFilterCatalog.summary` builds this text with one query on every `tools/list`. Nothing
+  caches it, so a `NAMED_FILTERS` change appears on the next catalog request and there is nothing
+  to invalidate. (`McpConfigCache` holds parsed `MCP_CONFIG` and tab hierarchy, not the catalog.)
+  MCP clients that keep their own copy of `tools/list` still need to fetch it again.
+- The summary stops at `McpNamedFilters.CATALOG_CAP` (1 500 characters). Past that limit it ends
+  with `… N more: call etendo_schema view:"full"`.
+- An entity with no named filters gets no line. A failed query only removes the summary; the rest
+  of the catalog is still returned.
+- The three hard-coded example names were removed from the fixed text.
+- **Cost, measured on the local configuration (2026-10-06):** two entities have filters
+  (`sales-invoice/header`, `purchase-invoice/header`, four filters each). The summary is 658
+  characters, and the `etendo_list` definition in `tools/list` grows by **597 bytes**: 820 bytes
+  for the new `filters` tail minus 223 bytes for the old example text.
+
+**2. The response names them when one is applied.** When `filters.status` names a configured
+filter, the `etendo_list` body gets a `namedFilters` block. The block lists the entity's other
+filters, so the agent can see whether a different one was the better choice:
+
+```json
+"namedFilters": {"applied":"pending","description":"Unpaid invoices with nothing collected yet (outstanding equals the total).",
+  "available":[{"name":"completed","description":"…"},{"name":"partial","description":"…"},{"name":"outstanding","description":"…"}]}
+```
+
+- The block is missing when no named filter was applied. That includes the case where `status` is
+  read as a plain column, on an entity without named filters.
+- It is added after `fields` projection and after flattening (`McpNamedFilters.attachApplied`). It
+  is not a row column, so `fields` does not remove it. `_indentResponse` controls how it is
+  rendered, like the rest of the body.
+- A read served by a read provider (`McpHookExecutor.runReadProvider`) returns before this point
+  and does not include the block.
+
+**The unknown-status 422 (IMP-3/IMP-17)** keeps its contract: `available` is still the list of bare
+names. It now also includes `namedFilters`, which holds the same names with their first-sentence
+descriptions, in the same shape as `available` in the response block.
