@@ -90,6 +90,16 @@ final class UserEmailCorrection {
       + "(for example, a business partner contact person): edit its email through spec "
       + "'contacts', entity 'contact'";
 
+  /**
+   * The refusal on the contacts path ({@code contacts/contact}, {@link ContactHandler}) when the
+   * {@code AD_User} behind a business partner's contact person is actually an Etendo user — the
+   * owner, or a user with an invitation of its own. Its email must go through the {@code user}
+   * spec's correction window, which re-derives {@code username} and re-invites. Kept verbatim —
+   * {@code backendErrors.js} translates it by exact match.
+   */
+  static final String MSG_CONTACT_IS_GO_USER = "This contact is an Etendo user: change its email "
+      + "through spec 'user', entity 'user'";
+
   private UserEmailCorrection() {
   }
 
@@ -198,6 +208,49 @@ final class UserEmailCorrection {
     } catch (Exception e) {
       log.error("UserEmailCorrection.rejectEmailChange error for user {}: {}", userId,
           e.getMessage(), e);
+      return NeoResponse.error(500, "Error validating email immutability: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Guards the contacts path (PR review, ETP-5194). The contacts spec's {@code contact} entity
+   * writes the same {@code AD_User} row as the {@code user} spec, and any user linked to a
+   * business partner (by MCP/REST or the classic backend) shows up as one of its contact persons.
+   * Without this, the email of an Etendo user — the owner, or a user with an invitation of its own
+   * — could be changed there without the correction window, the username re-derivation or the
+   * re-invite. A real contact person (never invited, not the owner) is unaffected: its email stays
+   * freely editable and it is never invited.
+   *
+   * <p>A no-op when the request does not touch {@code email}, has no record id, or keeps the
+   * persisted value (after trimming). Fails CLOSED: an unexpected error answers 500.
+   *
+   * @return a 400 {@link #MSG_CONTACT_IS_GO_USER} for an Etendo user, a 500 on error, otherwise
+   *     {@code null}
+   */
+  static NeoResponse rejectContactPathEmailChangeOnGoUser(JSONObject requestBody,
+      String userId) {
+    if (requestBody == null || StringUtils.isBlank(userId) || !requestBody.has(FIELD_EMAIL)) {
+      return null;
+    }
+    String incomingEmail = emailOf(requestBody);
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        User user = OBDal.getInstance().get(User.class, userId);
+        if (user == null
+            || Objects.equals(incomingEmail, StringUtils.trimToNull(user.getEmail()))) {
+          return null;
+        }
+        String clientId = user.getClient() != null ? user.getClient().getId() : null;
+        boolean goUser = OwnerSupport.isOwner(user.getId())
+            || CompanyInvitationEmailCorrection.hasInvitationForUser(clientId, user.getId());
+        return goUser ? NeoResponse.error(400, MSG_CONTACT_IS_GO_USER) : null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserEmailCorrection.rejectContactPathEmailChangeOnGoUser error for user {}: {}",
+          userId, e.getMessage(), e);
       return NeoResponse.error(500, "Error validating email immutability: " + e.getMessage());
     }
   }
