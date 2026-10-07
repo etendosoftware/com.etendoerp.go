@@ -2056,7 +2056,7 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 {
   "status": 422,
   "error": "ambiguous_fk",
-  "detail": "'businessPartner'='Acme' matched 3 records. Pick one of the candidates' ids, or narrow the search text.",
+  "detail": "'businessPartner'='Acme' matched 3 records. Pick one of the candidates and resend it by its id or its exact label, or narrow the search text.",
   "field": "businessPartner",
   "candidates": [
     { "id": "…", "name": "Acme Corp" },
@@ -2092,6 +2092,15 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 > a parent outside the caller's tenant, or a batch `$ref` still unresolved → the context is the
 > pre-ETP-5535 one (a failed read is logged at WARN).
 > `neo_update` is unchanged (tab + body context only).
+
+**Resending a candidate by its label (ETP-5535, CP-13).** The `candidates` of an `ambiguous_fk`
+are selector items labelled `"<name> - <category>"` (for example `Entregas IVA 21% - IVA Normal`),
+while the selector search matches the name only, so that label sent back used to answer `not_found`.
+When the plain search matches zero records and the value contains a `" - "` separator, the resolver
+re-queries the selector with each leading part before a separator and resolves the value to the id of
+the single candidate whose string property equals the whole value. Zero or several label matches stay
+`not_found`; unique matches, real ambiguity and the id probe are unchanged. It is shared code with no
+entity names, so it applies to `neo_create`, `neo_update` and `neo_batch` alike.
 
 If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `AD_Column` can be
 resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
