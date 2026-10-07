@@ -1846,9 +1846,10 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 
 - **Declaration.** `NeoHandler#actionContracts()` returns `Map<String, NeoActionContract>` (empty by
   default). `NeoActionContract` (`schemaforge/util`) carries the name, a description, whether it
-  mutates, and typed parameters (`string`, `boolean`, `date` = `yyyy-MM-dd`, `array` of
-  `string`/`object`, closed `enum`s). A non-empty declaration also makes the default
-  `servesActions()` answer `true`; handlers that declare nothing keep answering `false`.
+  mutates, and typed parameters (`string`, `boolean`, `number` = a JSON number or a numeric
+  string, `date` = `yyyy-MM-dd`, `array` of `string`/`object`, closed `enum`s). A non-empty
+  declaration also makes the default `servesActions()` answer `true`; handlers that declare nothing
+  keep answering `false`.
 - **Catalog.** `ToolRegistry` adds such R specs (role passing `hasReportSpecAccess(spec,"GET")`) to
   the **`etendo_schema` and `etendo_action` enums only** — never to `etendo_list`/`etendo_get`, which cannot
   serve them. `etendo_discover` reports such a spec with `isReport:true`, `callable:false` (it is not a
@@ -1888,7 +1889,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 | `pendingLines` | read | `dateFrom`, `dateTo`, `q` | `GET ?action=pendingLines` |
 | `candidates` | read | **`statementLineId`**, `kind` (transactions\|invoices), `docType` (receipts\|payments), `dateFrom`, `dateTo` | `GET ?action=candidates` |
 | `autoMatch` | read | — | `GET ?action=autoMatch` |
-| `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `glItemId`, `description` | `POST ?action=reconcileGroup` |
+| `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `actualPayment` (number), `conversionRate` (number), `convertedAmount` (number), `glItemId`, `description` | `POST ?action=reconcileGroup` |
 | `reconcileDifference` | write | **`statementLineId`**, `glItemId`, `description` | `POST ?action=reconcileDifference` |
 | `applySuggestions` | write | **`groups[{statementLineId, operationIds[], createPayment?}]`** | `POST ?action=applySuggestions` |
 | `undoReconciliation` | write | **`statementLineId`** | `POST ?action=reactivate` |
@@ -1899,9 +1900,95 @@ Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond
 a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
 because the account's difference GL item is the default — declaring it required would refuse calls
 the UI makes (the IMP-19 §4 reasoning); without either the handler answers `GL_ITEM_REQUIRED`.
-Multi-currency needs no parameter: conversion uses the same exchange rate as the UI, and
-`candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
-`applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
+Multi-currency needs no parameter by default: each foreign invoice is paid at its own exchange
+rate (document rate, else the general table), and `candidates` reports `amountBase`; to book what
+the bank actually moved, see *Explicit conversion* below. Rejecting an automatch group means not
+sending it — `applySuggestions` persists nothing for a group it did not receive, so there is no
+`reject` action.
+
+**Explicit conversion on `reconcileGroup` (ETP-5657).** Same body on the SPA route and on
+`etendo_action`. Three optional top-level fields make the invoice leg book what the bank actually
+moved, as Classic's Add Payment from Match Statement does, instead of each invoice's own rate. They
+are unsigned magnitudes (numbers or numeric strings); the line's sign gives the direction. They
+only describe the invoice leg, so they require a non-empty `invoices[]`.
+
+- `actualPayment`: the total to pay across the selected invoices, in the **invoice** currency.
+  Required as soon as either of the other two is sent.
+- `conversionRate`: the invoice → account rate.
+- `convertedAmount`: the amount in the **account** currency.
+
+With none of them the request behaves exactly as before (greedy allocation at each invoice's rate,
+`ReconciliationFlowSupport.createInvoicePayments`). With any of them,
+`ReconciliationWriteoffSupport.payInvoicesFromBody` routes to `ReconciliationConversionSupport`:
+
+- **Validation (400, literal messages the SPA maps to i18n keys), in this order.** Nothing is
+  written until all of it passes.
+  - sent without `invoices` (e.g. `operationIds` + `convertedAmount`), or combined with
+    `operationIds` or `writeoffDifference:true` → *"Conversion fields cannot be combined with
+    existing transactions or a write-off"*. Without invoices the fields would otherwise be ignored
+    and the call would answer 201 having booked nothing of what they state;
+  - every invoice/schedule id is loaded tenant-guarded BEFORE any amount is computed: a foreign or
+    unknown id, or a schedule of another invoice → the usual 404 `Invoice or payment schedule not
+    found: <invoiceId>`, no amount echoed (a schedule named twice is kept once). The
+    schedule-of-another-invoice refusal is shared with the default path
+    (`ReconciliationFlowSupport.loadInstallment`);
+  - the selected invoices do not share one currency, or it is the account's →
+    *"Conversion fields require all selected invoices to share one currency different from the
+    account currency"*;
+  - `actualPayment` absent while `conversionRate` or `convertedAmount` is sent →
+    *"actualPayment is required when conversionRate or convertedAmount is sent"*;
+  - `actualPayment` not a number, ≤ 0, or above the selected schedules' outstanding (at the invoice
+    currency's precision) → *"The amount to pay must be greater than zero and not exceed the
+    outstanding amount of the selected invoices"*;
+  - a `conversionRate` that is malformed or ≤ 0 → *"Invalid conversion rate format"* /
+    *"Conversion rate must be greater than zero"*; exactly 1 → *"A conversion rate other than 1 is
+    required when the invoice and account currencies differ"*, but **only when `convertedAmount` is
+    absent** (the rate then drives the conversion). With `convertedAmount` present the rate is
+    advisory and 1 is accepted — a 1:1 pegged pair must stay reconcilable. Same messages as the
+    two-step payment modal (`PaymentCurrencyConverter.parseRate` / `rateError`);
+  - the converted amount not a number, ≤ 0 or above `|line|` — **strict**, no tolerance, against
+    the line `resolveForMatch` resolved (the pending remainder of a partial line); above it, Core's
+    split would create a remainder of the opposite sign → *"The converted amount must be greater
+    than zero and not exceed the statement line amount"*;
+  - a paid invoice whose share of the converted amount rounds to 0 → *"The converted amount is too
+    small to allocate across the selected invoices"*.
+- **Precedence.** `convertedAmount` wins when present (the rate is then advisory: only the
+  preferred per-payment rate, and a rate of 1 is accepted). With only `conversionRate`, converted =
+  `round(actualPayment × rate)` at the account currency's precision, HALF_UP, and the rate must not
+  be 1. With only `actualPayment`, converted = `|line|` rounded down to the account currency's
+  precision (Classic's default). A rate/converted mismatch is never a 400. Amounts are rounded
+  HALF_UP to their currency's precision before being checked. **There is no deviation check —
+  neither here nor in the SPA (Classic parity):** a caller that sends a converted amount far from
+  what the invoices are worth books the whole gap as a realized exchange difference (e.g. 78.26 USD
+  worth 53.24 EUR settled for 27.75 EUR → a 25.49 EUR loss). The SPA only shows the invoices' own
+  rate and the resulting gain/loss as information. Classic's Add Payment has no such check either
+  (verified: a 10.00 EUR line against a 106.72 USD invoice is confirmed without a warning and posts
+  a 62.60 EUR loss).
+- **Allocation.** Invoices are filled in request order (the SPA sends invoice-date ascending):
+  `pay_i = min(remaining actualPayment, outstanding_i)`; an invoice that gets nothing gets no
+  payment. `convertedAmount` is split across the paid invoices by largest remainder, proportional
+  to `pay_i`, so Σ `txn_i` equals it exactly. Each payment's rate is the first candidate `r` with
+  `round(pay_i × r) == txn_i`: the typed rate verbatim, then `txn_i / pay_i` at 6, 8, 10 and 12
+  decimals, then `DECIMAL64` (`PaymentCurrencyConverter.consistentRate`) — e.g. 40.91 USD settled
+  for 27.87 EUR → 0.681252. Accounting recomputes amount × rate, so a rate that does not reproduce
+  the transaction would end in a Currency Balancing line. With several invoices the per-payment
+  rates therefore differ slightly from any single typed or derived rate: 21.34 + 21.34 USD converted
+  to 27.87 EUR (0.652999 overall) become 13.94 EUR at 0.653233 and 13.93 EUR at 0.652765.
+- **Persistence.** One `ReconciliationPaymentService.registerReconciliationPayment` per paid
+  invoice, rate and transaction amount stored verbatim, no write-off. Core stores
+  `FIN_Payment.financialTransactionAmount/ConvertRate`, the transaction's `foreign*` fields and both
+  `C_Conversion_Rate_Document` rows, and books the realized exchange difference on posting. The
+  invoice's own rate is never read in this mode, so an invoice without a configured rate is
+  reconcilable here. The rest of `reconcileGroup` is unchanged: Σ `txn_i` = line closes it; less
+  leaves the usual pending remainder, or the within-tolerance GL difference. Core's posting of these
+  payments has known cent-level effects outside this module: the invoice-currency source amount on
+  the customer/supplier account (430/400) is the account-currency amount ÷ the payment rate, so a
+  per-invoice balance in the invoice currency may not land on exactly zero; and a multi-invoice
+  match can still put one minor unit (0.01 EUR) on the currency-balancing account. Both were
+  verified to occur in Classic's Add Payment on the same data. The source amount is identical; the
+  balancing cent appears on the opposite side, because Classic makes one payment at a shared rate
+  while this mode makes one per invoice. Figures and the product rationale are in Iteration 6 of
+  schema_forge `docs/plans/ETP-4502-cross-domain.md`.
 
 The role gate, the SPA-shaped derived context and the flush-to-clean after a successful write
 (ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
