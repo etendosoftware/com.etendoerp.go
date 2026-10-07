@@ -276,6 +276,51 @@ public class NotPostedDocumentsHandlerTest {
     }
   }
 
+  /**
+   * ETP-5529: in a bulk post, only the row another posting process holds carries the
+   * {@code OtherPostingProcessActive} identity; a row that posted keeps a clean result.
+   */
+  @Test
+  public void handleBulkPostForwardsLockedDocumentKeyOnlyOnTheLockedRow() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+
+      when(service.post("318", "REC-LOCKED")).thenReturn(new DocumentPostingService.PostResult(false,
+          "Este registro está siendo contabilizado por otro proceso", List.of("OtherPostingProcessActive")));
+      when(service.post("318", "REC-OK"))
+          .thenReturn(new DocumentPostingService.PostResult(true, "Document posted"));
+
+      JSONObject locked = new JSONObject();
+      locked.put("tableId", "318");
+      locked.put("recordId", "REC-LOCKED");
+      JSONObject ok = new JSONObject();
+      ok.put("tableId", "318");
+      ok.put("recordId", "REC-OK");
+      JSONObject body = new JSONObject();
+      body.put("rows", new JSONArray().put(locked).put(ok));
+
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      JSONArray results = resp.getBody().getJSONArray("results");
+      JSONObject lockedResult = results.getJSONObject(0);
+      assertFalse(lockedResult.getBoolean("success"));
+      assertEquals("Este registro está siendo contabilizado por otro proceso", lockedResult.getString("message"));
+      assertEquals("OtherPostingProcessActive", lockedResult.getJSONArray("messageKeys").getString(0));
+      JSONObject okResult = results.getJSONObject(1);
+      assertTrue(okResult.getBoolean("success"));
+      assertFalse(okResult.has("messageKeys"));
+      assertEquals(1, resp.getBody().getInt("ok"));
+      assertEquals(2, resp.getBody().getInt("total"));
+    }
+  }
+
   /** A BP-only Invalid-Account failure with its identity. */
   private static DocumentPostingService.PostResult invalidAccountResult() {
     return new DocumentPostingService.PostResult(false, "Account could not be found. (Contact: Acme)",

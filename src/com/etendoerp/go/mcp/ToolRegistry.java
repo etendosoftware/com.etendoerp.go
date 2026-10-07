@@ -49,7 +49,6 @@ import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -137,11 +136,13 @@ public class ToolRegistry {
     // an AD_Image row and nothing else, and the same three tools serve every image-typed field in
     // the instance. Gated on write scope because they do write a row.
     if (permissions.canWrite) {
-      tools.add(buildRequestImageUploadTool());
-      tools.add(buildUploadImageTool());
-      tools.add(buildGetImageUploadTool());
+      tools.add(McpImageToolDefinitions.requestImageUpload());
+      tools.add(McpImageToolDefinitions.uploadImage());
+      tools.add(McpImageToolDefinitions.getImageUpload());
     }
 
+    // IMP-53: every published tool, whatever its kind, accepts the presentation flag.
+    tools.replaceAll(McpIndentResponse::declare);
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
   }
@@ -260,7 +261,8 @@ public class ToolRegistry {
       return;
     }
     if (permissions.canRead) {
-      tools.add(buildListTool(accessibleWindowSpecs));
+      tools.add(buildListTool(accessibleWindowSpecs,
+          McpNamedFilterCatalog.summary(accessibleWindowSpecs)));
       tools.add(buildGetTool(accessibleWindowSpecs));
       tools.add(buildSelectorsTool(accessibleWindowSpecs));
       tools.add(buildDefaultsTool(accessibleWindowSpecs));
@@ -326,6 +328,13 @@ public class ToolRegistry {
         || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)) {
       return null;
     }
+    // IMP-53: etendo_discover's optional 'spec' narrows the catalog, it does not address a spec.
+    // The handler checks each requested name against the specs this role reaches and refuses an
+    // unknown one with the reachable names, so it must not go through the single-spec gate (which
+    // would answer 404 without them, and cannot read an array of names).
+    if (McpConstants.TOOL_NEO_DISCOVER.equals(toolName)) {
+      return null;
+    }
 
     // CRUD tools carry spec in arguments
     if (isCrudTool(toolName)) {
@@ -377,16 +386,23 @@ public class ToolRegistry {
   // ── Discovery tool ─────────────────────────────────────────────────────
 
   private McpToolDefinition buildDiscoverTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    // IMP-53: optional. The full catalog runs to tens of KB; an agent that already knows the spec
+    // it needs pays only for that one.
+    props.put(McpConstants.PARAM_SPEC, stringProp(
+        "Optional spec name. Pass it to get only that spec's entities, parent links and actions "
+            + "instead of the whole catalog. An unknown name is refused with the names you can use."));
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", McpConstants.TYPE_OBJECT);
     schema.put(McpConstants.KEY_DESCRIPTION,
-        "Discover all available Etendo API specs and their entities");
-    schema.put(McpConstants.KEY_PROPERTIES, new HashMap<>());
+        "Discover the available Etendo API specs and their entities");
+    schema.put(McpConstants.KEY_PROPERTIES, props);
     return new McpToolDefinition(
-        "etendo_discover",
+        McpConstants.TOOL_NEO_DISCOVER,
         "List all available Etendo API specs the current user can access. "
             + "Returns spec names, types, entities, and available HTTP methods. "
-            + "Use this first to discover what specs and entities are available.",
+            + "Use this first to discover what specs and entities are available. "
+            + "Pass spec to get only that spec's entities, parent links and actions.",
         schema);
   }
 
@@ -658,7 +674,7 @@ public class ToolRegistry {
     ToolRegistry registry = new ToolRegistry();
     McpToolDefinition definition;
     switch (toolName) {
-      case McpConstants.TOOL_NEO_LIST: definition = registry.buildListTool(List.of()); break;
+      case McpConstants.TOOL_NEO_LIST: definition = registry.buildListTool(List.of(), null); break;
       case McpConstants.TOOL_NEO_GET: definition = registry.buildGetTool(List.of()); break;
       case McpConstants.TOOL_NEO_CREATE: definition = registry.buildCreateTool(List.of()); break;
       case McpConstants.TOOL_NEO_UPDATE: definition = registry.buildUpdateTool(List.of()); break;
@@ -666,6 +682,7 @@ public class ToolRegistry {
       case McpConstants.TOOL_NEO_SELECTORS: definition = registry.buildSelectorsTool(List.of()); break;
       case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
       case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DISCOVER: definition = registry.buildDiscoverTool(); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -679,7 +696,7 @@ public class ToolRegistry {
     return Optional.of(names);
   }
 
-  private McpToolDefinition buildListTool(List<String> specNames) {
+  private McpToolDefinition buildListTool(List<String> specNames, String namedFilterSummary) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use etendo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
@@ -688,10 +705,10 @@ public class ToolRegistry {
         "Filter criteria. Three shapes, combinable: (1) exact match {\"column\": value}; "
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
-            + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
-            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call etendo_schema with "
-            + "view:\"full\" to see the named filters available for a given spec; an unknown name "
-            + "returns the valid list."));
+            + "(3) named business filter {\"status\": \"<name>\"} — a hand-authored business "
+            + "state; an unknown name returns the valid list with what each one means."
+            + (namedFilterSummary == null ? ""
+                : " Configured named filters (spec/entity: name (meaning)):\n" + namedFilterSummary)));
     // IMP-40: etendo_discover already advertises "parentRequiredFor":["list",...] on every child
     // entity, and until now this tool had no argument that could satisfy it — so the only way to
     // scope a list to one parent was a filter on a field name the agent had to work out itself.
@@ -1257,70 +1274,6 @@ public class ToolRegistry {
     }
 
     return paramProps;
-  }
-
-  // ── Image upload tools (ETP-5184) ─────────────────────────────────────
-
-  /**
-   * Description of {@link McpConstants#TOOL_NEO_REQUEST_IMAGE_UPLOAD}.
-   *
-   * <p>Held as a constant because a test asserts it names the cheap path and the cap: the guidance
-   * an agent reads and the validation the server enforces must not be able to drift apart.
-   */
-  static final String REQUEST_IMAGE_UPLOAD_DESCRIPTION =
-      "Returns a single-use URL to upload an image to Etendo, plus a ready-to-run curl command. "
-      + "Prefer this over " + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " whenever you can run a shell "
-      + "command or the user can open a link: the image bytes never pass through the conversation, "
-      + "so it costs almost no tokens. After the upload succeeds you get an imageId — write it to "
-      + "any field of type 'image' with etendo_update. The URL works exactly once and expires in 10 "
-      + "minutes.";
-
-  /** Description of {@link McpConstants#TOOL_NEO_UPLOAD_IMAGE}. See above for why it is a constant. */
-  static final String UPLOAD_IMAGE_DESCRIPTION =
-      "Uploads an image inline as base64 and returns its imageId. Use only for images under 256 KB: "
-      + "base64 in a tool argument is model output, so ~100 KB of image costs ~100k tokens. If you "
-      + "can run a shell command, use " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + " instead. "
-      + "image/png or image/jpeg only; resize to max 1024 px on the long side before encoding.";
-
-  /** Description of {@link McpConstants#TOOL_NEO_GET_IMAGE_UPLOAD}. */
-  static final String GET_IMAGE_UPLOAD_DESCRIPTION =
-      "Looks up an upload ticket returned by " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD
-      + " and reports whether the file has arrived, plus the imageId once it has. Use it only when "
-      + "you did not see the output of the upload itself — the PUT already returns the imageId.";
-
-  private McpToolDefinition buildRequestImageUploadTool() {
-    Map<String, Object> props = new LinkedHashMap<>();
-    props.put("name", stringProp(
-        "Optional name for the stored image (defaults to 'image')."));
-    props.put("mime_type", enumProp(
-        "Optional expected type. Omit it and the type is detected from the uploaded bytes; if you "
-            + "do send it, it is cross-checked against them and a mismatch is rejected.",
-        NeoImageHelper.ALLOWED_MIME_TYPES));
-    return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD,
-        REQUEST_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, null));
-  }
-
-  private McpToolDefinition buildUploadImageTool() {
-    Map<String, Object> props = new LinkedHashMap<>();
-    props.put("data_base64", stringProp(
-        "The image file encoded as base64. A 'data:image/png;base64,' prefix is accepted and "
-            + "stripped. Hard limit: 256 KB decoded — over that the call is rejected and points you "
-            + "at " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
-    props.put("name", stringProp(
-        "Optional name for the stored image (defaults to 'image')."));
-    props.put("mime_type", enumProp(
-        "Optional. Cross-checked against the actual bytes; omit it and the type is detected.",
-        NeoImageHelper.ALLOWED_MIME_TYPES));
-    return new McpToolDefinition(McpConstants.TOOL_NEO_UPLOAD_IMAGE, UPLOAD_IMAGE_DESCRIPTION,
-        buildObjectSchema(props, List.of("data_base64")));
-  }
-
-  private McpToolDefinition buildGetImageUploadTool() {
-    Map<String, Object> props = new LinkedHashMap<>();
-    props.put("token", stringProp("The token returned by "
-        + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
-    return new McpToolDefinition(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
-        GET_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of("token")));
   }
 
   // ── Naming helpers ─────────────────────────────────────────────────────

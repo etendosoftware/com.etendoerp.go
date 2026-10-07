@@ -21,22 +21,31 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -61,10 +70,17 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
  *
  * <p>Both directions are covered on purpose: without the "owned" counterpart the regression would
  * also pass if the limit check stopped working altogether.
+ *
+ * <p>{@link ConversionRouting} covers the other decision of
+ * {@link ReconciliationWriteoffSupport#payInvoicesFromBody} (ETP-5657): a body carrying any
+ * explicit-conversion field goes to {@link ReconciliationConversionSupport}, any other body keeps
+ * the default path untouched.
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationWriteoffSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-@DisplayName("Write-off limit — tenant isolation")
+@DisplayName("Write-off support — tenant isolation and conversion routing")
 class ReconciliationWriteoffSupportTest {
 
   private static final String TENANT_CLIENT = "client-1";
@@ -171,5 +187,227 @@ class ReconciliationWriteoffSupportTest {
         "another tenant's pending amount must not be echoed back: " + body);
     assertFalse(body.contains("990"),
         "nor the difference derived from it: " + body);
+  }
+
+  // ── payInvoicesFromBody: explicit-conversion routing (ETP-5657) ──────────
+
+  @Nested
+  @DisplayName("payInvoicesFromBody — explicit-conversion routing")
+  class ConversionRouting {
+
+    private final NeoResponse conversionPath = NeoResponse.error(299, "conversion path");
+    private final NeoResponse defaultPath = NeoResponse.error(298, "default path");
+    private final FIN_FinancialAccount routedAccount = mock(FIN_FinancialAccount.class);
+    private final FIN_BankStatementLine routedLine = mock(FIN_BankStatementLine.class);
+    private final AtomicReference<ReconciliationConversionSupport.ConversionPaymentContext>
+        seenContext = new AtomicReference<>();
+    private final AtomicReference<ReconciliationConversionSupport.ExplicitConversion>
+        seenConversion = new AtomicReference<>();
+
+    private JSONArray oneInvoice() throws Exception {
+      return new JSONArray().put(new JSONObject().put("invoiceId", "INV-1")
+          .put("scheduleId", "SCH-1"));
+    }
+
+    /**
+     * Runs {@code payInvoicesFromBody} with both destinations stubbed to a sentinel, and asserts
+     * which one ran. {@code parse} is the real one, evaluated before the static mock opens: inside
+     * it, the class's private helpers are intercepted too, so {@code thenCallRealMethod} would not
+     * run the real parsing.
+     */
+    private NeoResponse route(JSONObject body, JSONArray invoiceSpecs, List<String> operationIds,
+        boolean expectConversion) throws Exception {
+      ReconciliationConversionSupport.ExplicitConversion parsed =
+          ReconciliationConversionSupport.parse(body);
+      try (MockedStatic<ReconciliationConversionSupport> conversion =
+          mockStatic(ReconciliationConversionSupport.class);
+          MockedStatic<ReconciliationFlowSupport> flow =
+              mockStatic(ReconciliationFlowSupport.class)) {
+        conversion.when(() -> ReconciliationConversionSupport.parse(body)).thenReturn(parsed);
+        conversion.when(() -> ReconciliationConversionSupport.payInvoices(any(), any()))
+            .thenAnswer(inv -> {
+              seenContext.set(inv.getArgument(0));
+              seenConversion.set(inv.getArgument(1));
+              return conversionPath;
+            });
+        flow.when(() -> ReconciliationFlowSupport.createInvoicePayments(any(), any(), any(),
+            any(), any(), any(), anyBoolean())).thenReturn(defaultPath);
+
+        NeoResponse response = ReconciliationWriteoffSupport.payInvoicesFromBody(routedAccount,
+            routedLine, invoiceSpecs, body, operationIds, BigDecimal.ZERO);
+
+        if (expectConversion) {
+          flow.verify(() -> ReconciliationFlowSupport.createInvoicePayments(any(), any(), any(),
+              any(), any(), any(), anyBoolean()), never());
+        } else {
+          conversion.verify(() -> ReconciliationConversionSupport.payInvoices(any(), any()),
+              never());
+        }
+        return response;
+      }
+    }
+
+    @Test
+    @DisplayName("a body with conversion fields is paid by ReconciliationConversionSupport")
+    void conversionFieldsRouteToTheConversionSupport() throws Exception {
+      JSONArray invoiceSpecs = oneInvoice();
+      List<String> operationIds = new ArrayList<>();
+      JSONObject body = new JSONObject().put("actualPayment", 40.91)
+          .put("convertedAmount", "27.87").put("paymentMethodId", "PM-1");
+
+      NeoResponse response = route(body, invoiceSpecs, operationIds, true);
+
+      assertSame(conversionPath, response);
+      ReconciliationConversionSupport.ConversionPaymentContext ctx = seenContext.get();
+      assertSame(routedAccount, ctx.account());
+      assertSame(routedLine, ctx.line());
+      assertSame(invoiceSpecs, ctx.invoiceSpecs());
+      assertSame(operationIds, ctx.operationIds(), "new transactions join the caller's list");
+      assertEquals("PM-1", ctx.paymentMethodId());
+      assertFalse(ctx.writeoffDifference());
+      assertEquals("40.91", seenConversion.get().actualPayment());
+      assertNull(seenConversion.get().conversionRate());
+      assertEquals("27.87", seenConversion.get().convertedAmount());
+    }
+
+    @Test
+    @DisplayName("one conversion field is enough; writeoffDifference is forwarded to be refused")
+    void oneFieldIsEnoughAndTheWriteoffFlagIsForwarded() throws Exception {
+      JSONObject body = new JSONObject().put("conversionRate", "0.68")
+          .put("writeoffDifference", true);
+
+      NeoResponse response = route(body, oneInvoice(), new ArrayList<>(), true);
+
+      assertSame(conversionPath, response);
+      assertTrue(seenContext.get().writeoffDifference());
+      assertNull(seenContext.get().paymentMethodId());
+      assertEquals("0.68", seenConversion.get().conversionRate());
+    }
+
+    @Test
+    @DisplayName("a body without conversion fields keeps the default path, arguments unchanged")
+    void noConversionFieldKeepsTheDefaultPath() throws Exception {
+      JSONArray invoiceSpecs = oneInvoice();
+      List<String> operationIds = new ArrayList<>(List.of("T1"));
+      JSONObject body = new JSONObject().put("paymentMethodId", "PM-1")
+          .put("writeoffDifference", false);
+      BigDecimal tolerance = new BigDecimal("0.01");
+      assertNull(ReconciliationConversionSupport.parse(body), "precondition: no conversion field");
+
+      try (MockedStatic<ReconciliationConversionSupport> conversion =
+          mockStatic(ReconciliationConversionSupport.class);
+          MockedStatic<ReconciliationFlowSupport> flow =
+              mockStatic(ReconciliationFlowSupport.class)) {
+        flow.when(() -> ReconciliationFlowSupport.createInvoicePayments(any(), any(), any(),
+            any(), any(), any(), anyBoolean())).thenReturn(defaultPath);
+
+        NeoResponse response = ReconciliationWriteoffSupport.payInvoicesFromBody(routedAccount,
+            routedLine, invoiceSpecs, body, operationIds, tolerance);
+
+        assertSame(defaultPath, response);
+        flow.verify(() -> ReconciliationFlowSupport.createInvoicePayments(routedAccount,
+            routedLine, invoiceSpecs, operationIds, tolerance, "PM-1", false));
+        conversion.verify(() -> ReconciliationConversionSupport.payInvoices(any(), any()),
+            never());
+      }
+    }
+
+    /**
+     * The same routing with the conversion class NOT mocked: its own first rule (no conversion
+     * together with existing transactions) answers, which only that path can produce.
+     */
+    @Test
+    @DisplayName("unmocked: the conversion path's own refusal is what comes back")
+    void unmockedConversionPathAnswersItsOwnRefusal() throws Exception {
+      JSONObject body = new JSONObject().put("actualPayment", "40.91");
+      List<String> operationIds = new ArrayList<>(List.of("T1"));
+
+      try (MockedStatic<ReconciliationFlowSupport> flow =
+          mockStatic(ReconciliationFlowSupport.class)) {
+        NeoResponse response = ReconciliationWriteoffSupport.payInvoicesFromBody(routedAccount,
+            routedLine, oneInvoice(), body, operationIds, BigDecimal.ZERO);
+
+        assertNotNull(response);
+        assertEquals(400, response.getHttpStatus());
+        assertEquals(ReconciliationConversionSupport.MSG_NOT_COMBINABLE,
+            response.getBody().getJSONObject("error").getString("message"));
+        flow.verifyNoInteractions();
+        assertEquals(List.of("T1"), operationIds);
+      }
+    }
+
+    @Test
+    @DisplayName("blank or JSON-null conversion fields count as absent → default path")
+    void blankOrNullFieldsKeepTheDefaultPath() throws Exception {
+      JSONObject body = new JSONObject().put("actualPayment", "  ")
+          .put("conversionRate", JSONObject.NULL).put("convertedAmount", "");
+
+      NeoResponse response = route(body, oneInvoice(), new ArrayList<>(), false);
+
+      assertSame(defaultPath, response);
+    }
+
+    /**
+     * Runs {@code payInvoicesFromBody} with NO selected invoice ({@code invoices} empty, or absent
+     * when {@code emptyArray} is false). The conversion class is not mocked, so the real
+     * {@code parse} decides; the default path and the payment seam are, to prove neither runs.
+     */
+    private NeoResponse withoutInvoices(JSONObject body, boolean emptyArray,
+        List<String> operationIds) throws Exception {
+      try (MockedStatic<ReconciliationFlowSupport> flow =
+          mockStatic(ReconciliationFlowSupport.class);
+          MockedStatic<ReconciliationPaymentService> payments =
+              mockStatic(ReconciliationPaymentService.class)) {
+        NeoResponse response = ReconciliationWriteoffSupport.payInvoicesFromBody(routedAccount,
+            routedLine, emptyArray ? new JSONArray() : null, body, operationIds, BigDecimal.ZERO);
+        flow.verifyNoInteractions();
+        payments.verifyNoInteractions();
+        return response;
+      }
+    }
+
+    /**
+     * The conversion fields only describe the invoice leg: sent with no invoice (an agent's
+     * {@code operationIds + convertedAmount}) they are refused instead of silently ignored, which
+     * would answer 201 having booked nothing of what was asked.
+     */
+    @ParameterizedTest(name = "{0} with invoices {1}")
+    @CsvSource({
+        "actualPayment,   empty",
+        "actualPayment,   absent",
+        "conversionRate,  empty",
+        "conversionRate,  absent",
+        "convertedAmount, empty",
+        "convertedAmount, absent" })
+    @DisplayName("conversion fields with no selected invoice → 400 not combinable, nothing runs")
+    void conversionFieldsWithoutInvoicesAreRefused(String field, String invoices)
+        throws Exception {
+      JSONObject body = new JSONObject().put(field, "27.87");
+      List<String> operationIds = new ArrayList<>(List.of("T1"));
+
+      NeoResponse response = withoutInvoices(body, "empty".equals(invoices), operationIds);
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("Conversion fields cannot be combined with existing transactions or a "
+          + "write-off", response.getBody().getJSONObject("error").getString("message"));
+      assertEquals(List.of("T1"), operationIds, "the caller's operations are left untouched");
+    }
+
+    @ParameterizedTest(name = "invoices {0}")
+    @ValueSource(strings = { "empty", "absent" })
+    @DisplayName("no selected invoice and no conversion field is still a no-op")
+    void noInvoiceAndNoConversionFieldIsANoOp(String invoices) throws Exception {
+      JSONObject body = new JSONObject().put("paymentMethodId", "PM-1")
+          .put("writeoffDifference", false)
+          // Blank and JSON-null conversion fields count as absent, so they do not refuse either.
+          .put("actualPayment", "  ").put("convertedAmount", JSONObject.NULL);
+      List<String> operationIds = new ArrayList<>(List.of("T1"));
+
+      NeoResponse response = withoutInvoices(body, "empty".equals(invoices), operationIds);
+
+      assertNull(response);
+      assertEquals(List.of("T1"), operationIds);
+    }
   }
 }

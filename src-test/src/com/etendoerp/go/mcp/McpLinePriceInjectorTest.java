@@ -387,13 +387,13 @@ class McpLinePriceInjectorTest {
 
   /** The Kinds the parameterized test below asserts abstain on, plus the one that does not. */
   private static final Set<String> KINDS_WITHOUT_A_PARENT_FIELD =
-      Set.of("NOT_CHILD", "SAME_RECORD", "UNPARENTED", "UNRESOLVABLE");
+      Set.of("NOT_CHILD", "SAME_RECORD", "UNPARENTED", "TAB_WHERE", "UNRESOLVABLE");
   private static final Set<String> KINDS_WITH_A_PARENT_FIELD = Set.of("RESOLVED");
 
   @Test
   @DisplayName("Every McpParentScope.Kind is classified by this suite")
   void aNewKindMustBeClassifiedByThisSuite() {
-    // Tripwire, not a behaviour test. The @EnumSource below selects Kinds by name, so a SIXTH
+    // Tripwire, not a behaviour test. The @EnumSource below selects Kinds by name, so a SEVENTH
     // Kind added to McpParentScope would be skipped in silence: the suite would stay green while
     // covering strictly less. Whoever adds one must decide which side it falls on — a Kind that
     // carries a parent field belongs with RESOLVED and needs its own happy-path coverage; one that
@@ -401,7 +401,7 @@ class McpLinePriceInjectorTest {
     Set<String> classified = new HashSet<>(KINDS_WITHOUT_A_PARENT_FIELD);
     classified.addAll(KINDS_WITH_A_PARENT_FIELD);
 
-    assertEquals(5, McpParentScope.Kind.values().length,
+    assertEquals(6, McpParentScope.Kind.values().length,
         "a new McpParentScope.Kind must be classified as carrying a parent field or not, and "
             + "added to the @EnumSource names list of abstainsForEveryKindWithoutAParentField "
             + "when it does not");
@@ -412,7 +412,7 @@ class McpLinePriceInjectorTest {
 
   @ParameterizedTest
   @EnumSource(value = McpParentScope.Kind.class,
-      names = { "NOT_CHILD", "SAME_RECORD", "UNPARENTED", "UNRESOLVABLE" })
+      names = { "NOT_CHILD", "SAME_RECORD", "UNPARENTED", "TAB_WHERE", "UNRESOLVABLE" })
   @DisplayName("Abstains for every parent Kind that carries no link field")
   void abstainsForEveryKindWithoutAParentField(McpParentScope.Kind kind) throws Exception {
     McpParentScope.Scope resolved = scope(kind, null);
@@ -431,7 +431,7 @@ class McpLinePriceInjectorTest {
   @ValueSource(strings = { "", "   " })
   @DisplayName("A blank parent field is never even looked up on the line entity")
   void aBlankParentFieldIsNeverLookedUp(String parentField) throws Exception {
-    // Pins the isBlank half of the parent-field guard. The four Kinds that are not RESOLVED
+    // Pins the isBlank half of the parent-field guard. The five Kinds that are not RESOLVED
     // carry no parent field, and asking the DAL entity for a property under a blank name is a
     // question that must not be asked at all: production's Entity.hasProperty(null) happens to
     // answer false, so only the short-circuit itself distinguishes the guard from its absence.

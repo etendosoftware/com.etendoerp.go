@@ -48,6 +48,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -71,7 +72,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *       or {@code accountId} (reads) and the parameters passed through untouched;</li>
  *   <li>the role gate (write actions need report-spec POST access → 403 otherwise);</li>
  *   <li>CA12: the SPA's {@code ?action=} contexts (no endpoint type) never reach the new
- *       dispatcher and keep hitting their route with the very same context.</li>
+ *       dispatcher and keep hitting their route with the very same context;</li>
+ *   <li>ETP-5657: {@code reconcileGroup}'s optional explicit-conversion numbers
+ *       ({@code actualPayment}, {@code conversionRate}, {@code convertedAmount}) accept numbers and
+ *       numeric strings and refuse any other shape with a 422.</li>
  * </ul>
  *
  * <p>The support layer is mocked statically, so no DAL / OBContext is needed; one nested class
@@ -917,6 +921,114 @@ class ReconciliationAgentActionsTest {
       Mockito.verify(handler).doRollbackAndClose();
       Mockito.verify(handler).reactivate(Mockito.argThat(b -> ACC_ID.equals(
           b.optString("financialAccountId")) && LINE_ID.equals(b.optString("statementLineId"))));
+    }
+  }
+
+  // ── ETP-5657: explicit-conversion params on reconcileGroup ─────────────
+
+  @Nested
+  @DisplayName("reconcileGroup explicit-conversion params (ETP-5657)")
+  class ExplicitConversionParams {
+
+    private final List<String> conversionParams =
+        List.of("actualPayment", "conversionRate", "convertedAmount");
+
+    private JSONObject reconcileGroupWith(String param, Object value) throws Exception {
+      return new JSONObject().put("statementLineId", LINE_ID)
+          .put("invoices", new JSONArray().put(
+              new JSONObject().put("invoiceId", "I1").put("scheduleId", "S1")))
+          .put(param, value);
+    }
+
+    @Test
+    @DisplayName("the three fields are declared as optional numbers")
+    void declaredAsOptionalNumbers() throws Exception {
+      JSONObject parameters = ReconciliationAgentActions.CONTRACTS.get("reconcileGroup").toJson()
+          .getJSONObject("parameters");
+      JSONObject props = parameters.getJSONObject("properties");
+      List<String> required = strings(parameters.getJSONArray("required"));
+      for (String param : conversionParams) {
+        assertTrue(props.has(param), param + " must be declared");
+        assertEquals(NeoActionContract.TYPE_NUMBER, props.getJSONObject(param).getString("type"),
+            param);
+        assertFalse(required.contains(param), param + " must stay optional");
+      }
+    }
+
+    @ParameterizedTest(name = "{0} = {1}")
+    @CsvSource({
+        "actualPayment,   number",
+        "actualPayment,   numeric string",
+        "conversionRate,  number",
+        "conversionRate,  numeric string",
+        "convertedAmount, number",
+        "convertedAmount, numeric string" })
+    @DisplayName("a number or a numeric string passes through to the SPA route untouched")
+    void numbersAndNumericStringsAreAccepted(String param, String shape) throws Exception {
+      Object value = "number".equals(shape) ? (Object) 40.91 : (Object) " 40.91 ";
+
+      NeoResponse response = handler.handle(actionContext("reconcileGroup", ACC_ID,
+          reconcileGroupWith(param, value)));
+
+      assertSame(sentinels.get(Route.RECONCILE_GROUP), response);
+      JSONObject body = onlyCallOf(Route.RECONCILE_GROUP).getRequestBody();
+      assertEquals(String.valueOf(value), String.valueOf(body.get(param)), param);
+    }
+
+    @Test
+    @DisplayName("all three together pass through")
+    void allThreeTogether() throws Exception {
+      JSONObject params = reconcileGroupWith("actualPayment", 40.91)
+          .put("conversionRate", "0.681252").put("convertedAmount", 27.87);
+
+      NeoResponse response = handler.handle(actionContext("reconcileGroup", ACC_ID, params));
+
+      assertSame(sentinels.get(Route.RECONCILE_GROUP), response);
+      JSONObject body = onlyCallOf(Route.RECONCILE_GROUP).getRequestBody();
+      assertEquals("40.91", String.valueOf(body.get("actualPayment")));
+      assertEquals("0.681252", body.getString("conversionRate"));
+      assertEquals("27.87", String.valueOf(body.get("convertedAmount")));
+    }
+
+    @ParameterizedTest(name = "{0} = {1}")
+    @CsvSource({
+        "actualPayment,   boolean",
+        "actualPayment,   word",
+        "actualPayment,   blank",
+        "actualPayment,   array",
+        "conversionRate,  boolean",
+        "conversionRate,  word",
+        "conversionRate,  blank",
+        "conversionRate,  array",
+        "convertedAmount, boolean",
+        "convertedAmount, word",
+        "convertedAmount, blank",
+        "convertedAmount, array" })
+    @DisplayName("any other shape → 422 naming the field and the expected type")
+    void wrongTypeIsRefused(String param, String shape) throws Exception {
+      Object value;
+      switch (shape) {
+        case "boolean":
+          value = Boolean.TRUE;
+          break;
+        case "word":
+          value = "forty";
+          break;
+        case "blank":
+          value = "  ";
+          break;
+        default:
+          value = new JSONArray().put("40.91");
+      }
+
+      NeoResponse response = handler.handle(actionContext("reconcileGroup", ACC_ID,
+          reconcileGroupWith(param, value)));
+
+      assertEquals(422, response.getHttpStatus());
+      JSONObject error = response.getBody().getJSONObject("error");
+      assertEquals(param, error.getString("field"));
+      assertEquals(NeoActionContract.TYPE_NUMBER, error.getString("expectedType"));
+      assertNoRouteCalled();
     }
   }
 }
