@@ -5409,7 +5409,10 @@ is how the PGC mirror accounts (`551` under Activo / `(551)` under Pasivo) show 
 whichever side it is positive, so the balance sheet balances. Precondition: the tenant must have its
 `C_ElementValue_Operand` rows (data-fix `R39-elementvalue-operand-backfill`), otherwise the mirror
 has no formula to pick the value up. Mirrored by hand in `report-grouping.js` (SPA) and the two
-`sql.query` copies in the report contracts.
+`sql.query` copies in the report contracts. `isGroupStart` is computed over the report's roots, not
+its visible rows, so a report with 2+ groups keeps the first visible group's header even when only
+one group has visible rows; this deviates from Classic (which prints those rows headerless) on
+purpose, display only.
 
 `generate_report_journal_entries`'s response nests one object per journal entry
 (`fact_acct_group_id`) with header fields (`entry_no`, `dateacct` as `yyyy-MM-dd`,
