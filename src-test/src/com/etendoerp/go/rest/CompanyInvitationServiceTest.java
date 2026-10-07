@@ -49,6 +49,11 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
 
+/**
+ * Unit tests for {@link CompanyInvitationService}.
+ *
+ * @covers com.etendoerp.go.rest.CompanyInvitationService
+ */
 class CompanyInvitationServiceTest {
 
   @Test
@@ -911,6 +916,11 @@ class CompanyInvitationServiceTest {
   /** Runs resendInvitation for a source invitation whose status makes it ineligible. */
   private JSONObject runResendInvitationWithExistingStatus(String status, Date expiresAt)
       throws Exception {
+    return runResendInvitationWithExistingStatus(status, expiresAt, true);
+  }
+
+  private JSONObject runResendInvitationWithExistingStatus(String status, Date expiresAt,
+      boolean userHasOwnInvitation) throws Exception {
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("client-1");
     OBContext obContext = mock(OBContext.class);
@@ -931,6 +941,8 @@ class CompanyInvitationServiceTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
           "user@example.com")).thenReturn(latest);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.existsInvitationForUser("client-1",
+          "user-1")).thenReturn(userHasOwnInvitation);
 
       CompanyInvitationService service = new CompanyInvitationService();
       return service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
@@ -973,9 +985,23 @@ class CompanyInvitationServiceTest {
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       dalHelperMock.when(() -> CompanyInvitationDalHelper.findLatestInvitation("client-1",
           "user@example.com")).thenReturn(latest);
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.existsInvitationForUser("client-1",
+          "user-1")).thenReturn(true);
 
       CompanyInvitationService service = new CompanyInvitationService(sender);
       return service.resendInvitation(obContext, "user-1", "https://app.test", "en_US");
     }
   }
+
+  // ─── ETP-5194: resend never invites a contact ─────────────────────────────────
+
+  @Test
+  @DisplayName("resendInvitation never invites a contact that only shares an invitee's email")
+  void resendInvitationRejectsAUserWithNoInvitationOfItsOwn() throws Exception {
+    JSONObject response = runResendInvitationWithExistingStatus("EXPIRED", null, false);
+
+    assertTrue(response.optBoolean("error"));
+    assertEquals("NO_INVITATION_TO_RESEND", response.optString("code"));
+  }
+
 }
