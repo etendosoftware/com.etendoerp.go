@@ -66,6 +66,8 @@ import org.openbravo.model.common.enterprise.Organization;
  * seconds, which swapped which interval column has to be written and which ones have to stay empty.
  * That inversion is what the assertions below pin down; the corrective half of the same ticket
  * ({@code realignCadence}) is covered by {@link OnboardingCostingScheduleRealignTest}.
+ *
+ * @covers com.etendoerp.go.onboarding.OnboardingCostingScheduleService
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class OnboardingCostingScheduleServiceTest {
@@ -184,6 +186,7 @@ public class OnboardingCostingScheduleServiceTest {
           request.getNumRepetitions());
       assertEquals("SCH", request.getStatus());
       assertEquals("Process Scheduler", request.getChannel());
+      assertEquals("Automatic cost calculation (Etendo onboarding)", request.getDescription());
       assertTrue(request.isSecurityBasedOnRole());
       assertTrue(request.isActive());
       assertEquals(OB_CONTEXT, request.getOpenbravoContext());

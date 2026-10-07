@@ -40,6 +40,7 @@ import org.openbravo.dal.core.OBContext;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
@@ -91,8 +92,8 @@ public class McpServlet extends HttpServlet {
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
   // catalog and authorizes each operation by the user's role and window access.
-  private static final String LEGACY_JWT_FALLBACK_SCOPES =
-      "neo:read neo:write neo:process neo:report";
+  private static final String LEGACY_JWT_FALLBACK_SCOPES = String.join(" ",
+      ApiScopes.READ, ApiScopes.WRITE, ApiScopes.PROCESS, ApiScopes.REPORT);
 
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
@@ -198,8 +199,9 @@ public class McpServlet extends HttpServlet {
       }
     } finally {
       // Servlet threads are pooled: a leaked session key would attribute one client's calls to
-      // another client's session.
+      // another client's session — and a leaked tenant would attribute it to another company.
       McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentTenant();
     }
   }
 
@@ -245,7 +247,7 @@ public class McpServlet extends HttpServlet {
       boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
       String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
 
-      // B3/D31: a neo_feedback call IS a tool call, so it produces exactly ONE row — this one —
+      // B3/D31: a etendo_feedback call IS a tool call, so it produces exactly ONE row — this one —
       // discriminated by row_type and carrying the report. It therefore inherits the session,
       // tenant, timestamp and client columns, and lands in the same sequence as the calls that
       // provoked it. The payload is stored only when the tool accepted the verdict; a rejected or
@@ -253,9 +255,15 @@ public class McpServlet extends HttpServlet {
       boolean isFeedback = McpConstants.TOOL_NEO_FEEDBACK.equals(toolName);
       String payload = (isFeedback && !failed) ? McpFeedbackTool.payloadFor(arguments) : null;
 
+      // ETP-5594: the tenant the call ran under (resolved from the role when the token carries the
+      // "0" wildcard), falling back to the token's own values when no context was ever entered.
+      McpUsageTelemetry.Tenant tenant = McpUsageTelemetry.currentTenant();
+      String identityClient = identity != null ? identity.clientId : null;
+      String identityOrg = identity != null ? identity.orgId : null;
+
       McpUsageLogger.enqueue(McpUsageRow.builder()
-          .clientId(identity != null ? identity.clientId : null)
-          .orgId(identity != null ? identity.orgId : null)
+          .clientId(tenant != null ? tenant.getClientId() : identityClient)
+          .orgId(tenant != null ? tenant.getOrgId() : identityOrg)
           .userId(identity != null ? identity.userId : null)
           .sessionKey(sessionKey)
           .toolName(toolName)
@@ -347,8 +355,7 @@ public class McpServlet extends HttpServlet {
       JSONObject meta = new JSONObject();
       meta.put("resource", mcpResourceUrl);
       meta.put("authorization_servers", new JSONArray().put(oauth2Url));
-      meta.put("scopes_supported", new JSONArray()
-          .put(LEGACY_JWT_FALLBACK_SCOPES).put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
+      meta.put("scopes_supported", new JSONArray(ApiScopes.ADVERTISED));
       meta.put("bearer_methods_supported", new JSONArray().put("header"));
       response.getWriter().write(meta.toString());
     } catch (JSONException e) {
@@ -438,9 +445,9 @@ public class McpServlet extends HttpServlet {
       case USE_SESSION:
         return sessionIdentity(request, response, sessionAuth.getRecord());
       case CSRF_REJECTED:
-        log.warn("Forbidden MCP request: CSRF validation failed");
+        log.warn("Forbidden MCP request: {}", sessionAuth.getRefusalMessage());
         sendJsonError(request, response, HttpServletResponse.SC_FORBIDDEN,
-            "CSRF validation failed");
+            sessionAuth.getRefusalMessage());
         return null;
       case SESSION_INVALID:
         log.warn("Unauthorized MCP request: invalid or expired session");

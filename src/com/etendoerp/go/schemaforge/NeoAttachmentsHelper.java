@@ -51,6 +51,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
@@ -149,6 +151,46 @@ public final class NeoAttachmentsHelper {
     } catch (Exception e) {
       log.error("Attachments list failed for {}/{}", tableName, recordId, e);
       return NeoResponse.error(500, "Internal error listing attachments");
+    }
+  }
+
+  // ── Count ───────────────────────────────────────────────────────────────────
+
+  /**
+   * Counts the attachments bound to the given record with exactly the same
+   * criteria as {@link #handleList} (table + record, organization filter off),
+   * so the number always equals the length of the list the Attachments tab
+   * would show — including the one marked as "main".
+   *
+   * <p>Runs a {@code COUNT} query instead of loading the entities: the React
+   * Attachments tab loads its full list lazily (ETP-4564) and only needs this
+   * number to show the tab badge as soon as a record opens (ETP-5526).</p>
+   *
+   * @param tableName the AD_Table.name (case-insensitive, e.g. {@code "C_Order"})
+   * @param recordId  the record's primary key (string; all AD IDs are VARCHAR)
+   * @return a NeoResponse wrapping {@code { "count": N }}
+   */
+  public static NeoResponse handleCount(String tableName, String recordId) {
+    if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
+    }
+    try {
+      String tableId = resolveTableId(tableName);
+
+      OBCriteria<Attachment> criteria = OBDal.getInstance().createCriteria(Attachment.class);
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_TABLE + ".id", tableId));
+      criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
+      criteria.setFilterOnReadableOrganization(false);
+
+      JSONObject body = new JSONObject();
+      body.put("count", criteria.count());
+      return NeoResponse.ok(body);
+    } catch (OBException e) {
+      log.warn("Attachments count failed: {}", e.getMessage());
+      return NeoResponse.error(404, e.getMessage());
+    } catch (Exception e) {
+      log.error("Attachments count failed for {}/{}", tableName, recordId, e);
+      return NeoResponse.error(500, "Internal error counting attachments");
     }
   }
 
@@ -325,6 +367,13 @@ public final class NeoAttachmentsHelper {
       if (tabId == null) {
         return NeoResponse.error(400,
             "Could not resolve a standard tab for table '" + tableName + "'");
+      }
+
+      // ETP-5309: an unsaved record (the SPA's literal id "new") used to reach the core,
+      // whose OBSecurityException came back as a raw 500. Answer a clean 404 instead.
+      if (!recordExists(tableId, recordId)) {
+        return NeoResponse.error(404, "Record '" + recordId + "' does not exist in table '"
+            + tableName + "'. Save it before attaching files.");
       }
 
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
@@ -643,6 +692,30 @@ public final class NeoAttachmentsHelper {
     String tableId = rows.get(0);
     TABLE_ID_CACHE.put(key, tableId);
     return tableId;
+  }
+
+  /**
+   * Whether the record an attachment would be bound to exists (ETP-5309). Mirrors the
+   * lookup {@link AttachImplementationManager} itself performs in {@code checkReadableAccess}
+   * — by the table's DAL entity, in admin mode — so it only answers existence; readable
+   * access is still enforced by the core on upload. A table with no DAL entity is not
+   * checked here, exactly as the core skips it.
+   *
+   * @param tableId  the AD_Table.id
+   * @param recordId the record's primary key
+   * @return {@code false} only when the table has an entity and no row with that id
+   */
+  static boolean recordExists(String tableId, String recordId) {
+    Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+    if (entity == null) {
+      return true;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(entity.getName(), recordId) != null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**

@@ -15,6 +15,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
 /**
@@ -33,6 +34,7 @@ class NeoBuiltInEndpointHandler {
   private static final String ATTACHMENTS_SEGMENT_ZIP = "zip";
   private static final String ATTACHMENTS_SEGMENT_MAIN = "main";
   private static final String ATTACHMENTS_SEGMENT_CONFIG = "config";
+  private static final String ATTACHMENTS_SEGMENT_COUNT = "count";
   private static final String DESCRIPTION_FIELD = "description";
   private static final String IS_MAIN_FIELD = "isMain";
   private static final String MARK_AS_MAIN_PARAM = "markAsMain";
@@ -154,9 +156,18 @@ class NeoBuiltInEndpointHandler {
    * <p>GET returns the persisted active-models JSON object (empty object when nothing
    * has been saved yet for the current client). PUT replaces it and responds 204,
    * matching the favorites/filters built-in endpoint convention.
+   *
+   * <p>ETP-5546: "Modelos Fiscales" access is represented by the role's grant on the Tax
+   * Report window (ETP-5116 proxy) — gate both verbs on it before reaching the service, same
+   * window id {@link NeoAttachmentAuthorizer#TAX_REPORT_WINDOW_ID} the attachment authorizer
+   * already proxies through.
    */
   private void handleFiscalModelsCatalogEndpoint(String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!NeoAccessHelper.hasWindowAccess(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, method)) {
+      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "Access denied");
+      return;
+    }
     if (METHOD_GET.equals(method)) {
       servlet.writeResponse(response, NeoFiscalModelsCatalogService.getActiveModels());
       return;
@@ -283,14 +294,14 @@ class NeoBuiltInEndpointHandler {
    * <ul>
    *   <li>{@code GET    /attachments/config}                        — the upload policy
    *       (max size + accepted types) enforced by the upload endpoint below</li>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments
-   *       (excludes the one marked as "main")</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments</li>
    *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload;
    *       {@code ?markAsMain=true} marks the uploaded file as main atomically</li>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip
-   *       (excludes the one marked as "main")</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}/main}   — look up the attachment
    *       marked as this record's main document, or {@code {}} if none</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/count}  — {@code {count: N}}, the
+   *       number of items the list above returns, without loading them (ETP-5526)</li>
    *   <li>{@code GET    /attachments/file/{attachmentId}}           — download single file</li>
    *   <li>{@code DELETE /attachments/file/{attachmentId}}           — delete attachment</li>
    *   <li>{@code PATCH  /attachments/file/{attachmentId}}           — update description</li>
@@ -326,32 +337,14 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
-   * Handles {@code /attachments/{tableName}/{recordId}[/zip|/main]}.
+   * Handles {@code /attachments/{tableName}/{recordId}[/zip|/main|/count]}.
    */
   private void handleAttachmentsRecordSubresource(String[] segments, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     String tableName = segments[0];
     String recordId = segments[1];
-    boolean isZip = segments.length >= 3 && ATTACHMENTS_SEGMENT_ZIP.equals(segments[2]);
-    boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
-
-    if (isZip) {
-      if (!"GET".equals(method)) {
-        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Attachments zip endpoint only supports GET");
-        return;
-      }
-      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId, response);
-      return;
-    }
-
-    if (isMain) {
-      if (!"GET".equals(method)) {
-        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Attachments main endpoint only supports GET");
-        return;
-      }
-      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
+    if (segments.length >= 3 && isGetOnlySubresource(segments[2])) {
+      handleAttachmentsGetOnlySubresource(segments[2], tableName, recordId, method, response);
       return;
     }
 
@@ -373,6 +366,39 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Attachments record endpoint supports GET (list) and POST (upload)");
+  }
+
+  /**
+   * Whether {@code segment} names one of the read-only record sub-resources
+   * ({@code zip}, {@code main}, {@code count}). Any other third segment keeps
+   * falling through to the record list/upload handling.
+   */
+  private static boolean isGetOnlySubresource(String segment) {
+    return ATTACHMENTS_SEGMENT_ZIP.equals(segment)
+        || ATTACHMENTS_SEGMENT_MAIN.equals(segment)
+        || ATTACHMENTS_SEGMENT_COUNT.equals(segment);
+  }
+
+  /**
+   * Handles the GET-only record sub-resources
+   * {@code /attachments/{tableName}/{recordId}/zip|main|count}; any other verb gets
+   * {@code 405 "Attachments <subresource> endpoint only supports GET"}.
+   */
+  private void handleAttachmentsGetOnlySubresource(String subresource, String tableName,
+      String recordId, String method, HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Attachments " + subresource + " endpoint only supports GET");
+      return;
+    }
+    if (ATTACHMENTS_SEGMENT_ZIP.equals(subresource)) {
+      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId, response);
+    } else if (ATTACHMENTS_SEGMENT_MAIN.equals(subresource)) {
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
+    } else {
+      // count — same (servlet-level) authorization as the list GET: reads are not tier-checked.
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleCount(tableName, recordId));
+    }
   }
 
   /**

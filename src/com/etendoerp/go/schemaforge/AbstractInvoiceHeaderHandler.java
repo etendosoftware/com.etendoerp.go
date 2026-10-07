@@ -23,6 +23,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -83,6 +84,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
+  /** {@code C_Invoice.Posted} value of a posted (booked) invoice. */
+  private static final String POSTED_YES = "Y";
   private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
   static final String FIELD_AEATSII_IS_AUTHORIZATION = "aeatsiiIsauthorization";
   static final String FIELD_AEATSII_AUTHORIZATION_NO = "aeatsiiAuthorizationno";
@@ -166,6 +169,57 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return the subclass's injected {@link TotalDiscountService}
    */
   protected abstract TotalDiscountService getTotalDiscountService();
+
+  // ---------------------------------------------------------------------------
+  // Follow-up document: goods shipment / goods receipt for the pending quantities (ETP-5576)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Follow-up documents of this invoice entity (ETP-5576): the generic, identity-free
+   * {@link FollowUpSupport}, fed by {@link #followUpFlows()}. Subclasses plug
+   * {@code followUp.actionHandler()} into their dispatch chain and call
+   * {@code followUp.annotate(dataArr)} on GET.
+   */
+  protected final FollowUpSupport followUp = new FollowUpSupport(this::followUpFlows);
+
+  /**
+   * The follow-ups this invoice entity offers, in the order the UI should offer them — the ONE
+   * binding point. Default: none. The sales handler registers the goods shipment, the purchase
+   * handler the goods receipt — each an {@link InvoicePendingResolver} with
+   * {@link #isStandardInvoiceDocType} as its eligibility classifier, composed with the shared
+   * {@link InOutFollowUpCreator} — one {@link FollowUpFlow} line each.
+   */
+  protected List<FollowUpFlow> followUpFlows() {
+    return Collections.emptyList();
+  }
+
+  /**
+   * {@code true} when {@code docTypeId} is a standard invoice (FAC) for THIS handler's own
+   * {@link #classifyDocType} — the rule behind {@code arInvoiceSubtype}/{@code apInvoiceSubtype},
+   * so credit notes, returns and rectificatives never qualify.
+   *
+   * <p><b>Fails CLOSED</b>, unlike {@link #resolveSubtype}, which fails open to {@code FAC} for
+   * the display annotation and is left as it is: this predicate gates a WRITE (creating a
+   * follow-up document), so a blank id, an unknown id or a lookup error answers {@code false}
+   * (ETP-5576 review W5). An error is logged, never swallowed silently.
+   */
+  protected boolean isStandardInvoiceDocType(String docTypeId) {
+    if (StringUtils.isBlank(docTypeId)) {
+      return false;
+    }
+    try {
+      DocumentType dt = OBDal.getInstance().get(DocumentType.class, docTypeId);
+      if (dt == null) {
+        log.warn("Document type {} not found; not eligible for a follow-up document", docTypeId);
+        return false;
+      }
+      return SUBTYPE_FAC.equals(classifyDocType(dt));
+    } catch (Exception e) {
+      log.error("Could not classify document type {}; not eligible for a follow-up document",
+          docTypeId, e);
+      return false;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Validation
@@ -1018,6 +1072,12 @@ public abstract class AbstractInvoiceHeaderHandler {
    * conversion-rate row left over from an earlier foreign-currency state is deleted instead
    * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
    *
+   * <p>ETP-5547: only runs for the requests {@link #shouldSyncConversionRateDocument(NeoContext)}
+   * accepts. Action POSTs on a processed invoice ({@code registerPayment}, {@code cloneRecord},
+   * SII/TBAI, post/unpost…) change neither the invoice's rate nor its total, and used to rewrite
+   * the SOURCE invoice's rate row anyway — on a posted invoice that UPDATE was rejected by Core
+   * and aborted the whole request transaction.
+   *
    * <p>Call unconditionally at the top of each subclass's {@code afterHandle()}, alongside
    * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
    *
@@ -1028,16 +1088,77 @@ public abstract class AbstractInvoiceHeaderHandler {
    * the line's own record ID, not the invoice's) must resolve the parent invoice ID themselves
    * and call the {@code String}-based overload directly instead.
    *
-   * @param context the current NeoContext; only {@code getHttpMethod()}/{@code getRecordId()}/
+   * @param context the current NeoContext; only {@code getHttpMethod()}/{@code getEndpointType()}/
+   *                {@code getFieldName()}/{@code getRequestBody()}/{@code getRecordId()}/
    *                {@code getPreviousResult()} are used
    */
   protected static void autoCreateOrUpdateConversionRateDocument(NeoContext context) {
-    String method = context.getHttpMethod();
-    if (!"PATCH".equals(method) && !"PUT".equals(method) && !"POST".equals(method)) {
+    if (!shouldSyncConversionRateDocument(context)) {
       return;
     }
     String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
     autoCreateOrUpdateConversionRateDocument(invoiceId);
+  }
+
+  /**
+   * Decides whether a header request may have changed the invoice's rate or grand total, and so
+   * whether the {@code C_Conversion_Rate_Document} row must be re-synced (ETP-5547).
+   *
+   * <ul>
+   *   <li>Non-write methods (GET, DELETE) → never.</li>
+   *   <li>{@link NeoEndpointType#CRUD} POST/PUT/PATCH → always: this is where the rate, the
+   *       currency and the header fields are edited.</li>
+   *   <li>{@link NeoEndpointType#ACTION} → only the "Complete" document action (it recalculates
+   *       the total-discount line right before completing, see
+   *       {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete}) and actions run on
+   *       a still-draft invoice (the generic AD processes {@code createLinesFrom*},
+   *       {@code copyFrom}, {@code calculatePromotions}, {@code explode}… add or reprice lines,
+   *       which moves the grand total). Every custom action on a processed invoice
+   *       ({@code registerPayment}, {@code cloneRecord}, {@code aeatsiiSend},
+   *       {@code tbaiXmlgenerator}, {@code createShipment}, {@code post}/{@code unpost},
+   *       {@code currencyOptions}) leaves both untouched and is skipped.</li>
+   *   <li>Any other endpoint type (SELECTOR, CALLOUT, DEFAULTS…) → never.</li>
+   * </ul>
+   *
+   * @param context the current NeoContext
+   * @return {@code true} when the rate row must be re-synced for this request
+   */
+  static boolean shouldSyncConversionRateDocument(NeoContext context) {
+    if (context == null || !NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return false;
+    }
+    NeoEndpointType endpointType = context.getEndpointType();
+    if (NeoEndpointType.CRUD.equals(endpointType)) {
+      return true;
+    }
+    if (!NeoEndpointType.ACTION.equals(endpointType)) {
+      return false;
+    }
+    return InvoiceCalloutHelper.isInvoiceCompleteAction(context)
+        || isDraftInvoice(context.getRecordId());
+  }
+
+  /**
+   * {@code true} when the invoice exists and is not processed yet. Never throws: it runs from
+   * {@code afterHandle()} outside the sync's own try/catch, so a failed read (e.g. on a transaction
+   * the action already aborted) answers "not a draft" — skip the sync — instead of failing the
+   * post-hook.
+   */
+  private static boolean isDraftInvoice(String invoiceId) {
+    if (StringUtils.isBlank(invoiceId)) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      return invoice != null && !Boolean.TRUE.equals(invoice.isProcessed());
+    } catch (Exception e) {
+      log.debug("[ETP-5547] Could not read invoice {} to decide the rate-doc sync: {}",
+          invoiceId, e.getMessage());
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
@@ -1046,6 +1167,13 @@ public abstract class AbstractInvoiceHeaderHandler {
    * and no-op conditions as {@link #autoCreateOrUpdateConversionRateDocument(NeoContext)} — this
    * is the shared core both overloads (and {@link InvoiceLineHandler}) funnel into, so there is
    * exactly one upsert implementation for {@code C_Conversion_Rate_Document}.
+   *
+   * <p>ETP-5547: no-op when the invoice is posted ({@code Posted = 'Y'}). Core's
+   * {@code c_conversion_rate_document_trg} rejects any INSERT/UPDATE/DELETE of the rate row of a
+   * posted invoice with {@code @20501@} — the rate a document was booked with is immutable — so
+   * there is nothing this method may legitimately do there. The write itself also runs under a
+   * savepoint ({@link ConversionRateDocumentSync}), so any other failure is contained instead of
+   * aborting the caller's transaction.
    *
    * @param invoiceId the invoice's primary key, already resolved by the caller; no-op if blank
    */
@@ -1075,6 +1203,12 @@ public abstract class AbstractInvoiceHeaderHandler {
         // C_Conversion_Rate_Document table via raw JDBC, so there's no cascade-refresh/duplicate-
         // insert risk (the ETP-4015 symptom that motivated the heavier clear()+reload there).
         OBDal.getInstance().getSession().refresh(invoice);
+        if (POSTED_YES.equals(invoice.getPosted())) {
+          // ETP-5547: a posted invoice's rate row is immutable (Core trigger, @20501@).
+          log.debug("[ETP-5547] Skipping C_Conversion_Rate_Document sync for posted invoice {}",
+              invoiceId);
+          return;
+        }
         String orgId = invoice.getOrganization().getId();
         String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
         if (orgCurrencyId == null) {

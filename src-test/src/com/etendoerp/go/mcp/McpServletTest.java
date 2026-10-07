@@ -57,6 +57,8 @@ import com.etendoerp.go.session.GoSessionRecord;
 /**
  * Unit tests for {@link McpServlet} covering CORS, authentication, JSON-RPC
  * dispatch, error handling, GET endpoints, and inner classes.
+ *
+ * @covers com.etendoerp.go.mcp.McpServlet
  */
 public class McpServletTest {
 
@@ -181,7 +183,7 @@ public class McpServletTest {
     assertEquals("role1", identity.roleId);
     assertEquals("client1", identity.clientId);
     assertEquals("org1", identity.orgId);
-    assertEquals("neo:read neo:write neo:process neo:report", identity.scopes);
+    assertEquals("etendo:read etendo:write etendo:process etendo:report", identity.scopes);
   }
 
   /**
@@ -244,7 +246,10 @@ public class McpServletTest {
     assertEquals("https://example.com/mcp", meta.getString("resource"));
     assertEquals("https://example.com/oauth2",
         meta.getJSONArray("authorization_servers").getString(0));
-    assertTrue(meta.has("scopes_supported"));
+    // Only the current etendo: scopes are advertised; the deprecated neo: aliases are accepted
+    // but never listed (ETP-5602). Each scope is its own array entry.
+    assertEquals("[\"etendo:read\",\"etendo:write\",\"etendo:process\",\"etendo:report\","
+        + "\"etendo:*\"]", meta.getJSONArray("scopes_supported").toString());
     assertTrue(meta.has("bearer_methods_supported"));
   }
 
@@ -720,5 +725,96 @@ public class McpServletTest {
     JSONObject rpcResponse = new JSONObject(getResponseBody());
     JSONObject result = rpcResponse.getJSONObject("result");
     assertEquals(0, result.length());
+  }
+
+  // ── Telemetry tenant (ETP-5594) ─────────────────────────────────────────
+
+  /**
+   * Run one {@code tools/call} through the real {@link McpSessionManager}, with the role's client
+   * and default org resolved to {@code resolvedClient} / {@code resolvedOrg}, and return the row
+   * handed to {@link McpUsageLogger}.
+   */
+  private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,
+      String resolvedOrg, String resolvedClient, boolean routerThrows) throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", tokenClient, tokenOrg, "neo:read");
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 1)
+        .put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_list")
+            .put("arguments", new JSONObject().put("spec", "sales-order")))
+        .toString());
+
+    org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    when(obDal.getSession()).thenReturn(session);
+    // McpSessionManager resolves the org first, then the client.
+    when(session.doReturningWork(org.mockito.ArgumentMatchers.any()))
+        .thenReturn(resolvedOrg, resolvedClient);
+
+    try (MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
+             mockStatic(org.openbravo.dal.service.OBDal.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedStatic<com.smf.securewebservices.utils.SecureWebServicesUtils> swsMock =
+             mockStatic(com.smf.securewebservices.utils.SecureWebServicesUtils.class);
+         MockedStatic<McpUsageLogger> loggerMock = mockStatic(McpUsageLogger.class);
+         MockedConstruction<McpToolRouter> routerMock = mockConstruction(McpToolRouter.class,
+             (router, ctx) -> {
+               if (routerThrows) {
+                 when(router.route(anyString(), org.mockito.ArgumentMatchers.any(),
+                     org.mockito.ArgumentMatchers.any()))
+                     .thenThrow(new IllegalStateException("boom"));
+               } else {
+                 when(router.route(anyString(), org.mockito.ArgumentMatchers.any(),
+                     org.mockito.ArgumentMatchers.any())).thenReturn(new JSONObject());
+               }
+             })) {
+      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(obDal);
+      swsMock.when(() -> com.smf.securewebservices.utils.SecureWebServicesUtils.createContext(
+          anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.any(), anyString()))
+          .thenReturn(mock(OBContext.class));
+      loggerMock.when(McpUsageLogger::isEnabled).thenReturn(true);
+
+      servlet.doPost(request, response);
+
+      org.mockito.ArgumentCaptor<McpUsageRow> row =
+          org.mockito.ArgumentCaptor.forClass(McpUsageRow.class);
+      loggerMock.verify(() -> McpUsageLogger.enqueue(row.capture()));
+      return row.getValue();
+    }
+  }
+
+  @Test
+  public void toolsCallTelemetryRecordsTheTenantTheCallRanUnderNotTheTokenWildcard()
+      throws Exception {
+    McpUsageRow row = recordedRowForToolsCall("0", "0", "realOrg", "realClient", false);
+
+    assertEquals("realClient", row.clientId());
+    assertEquals("realOrg", row.orgId());
+    assertEquals("user1", row.userId());
+  }
+
+  @Test
+  public void failedToolsCallTelemetryStillRecordsTheEffectiveTenant() throws Exception {
+    McpUsageRow row = recordedRowForToolsCall("0", "0", "realOrg", "realClient", true);
+
+    assertEquals(McpUsageRow.OUTCOME_ERROR, row.outcome());
+    assertEquals("realClient", row.clientId());
+    assertEquals("realOrg", row.orgId());
+  }
+
+  @Test
+  public void toolsCallTelemetryKeepsAConcreteTokenTenant() throws Exception {
+    McpUsageRow row = recordedRowForToolsCall("client1", "org1", null, null, false);
+
+    assertEquals("client1", row.clientId());
+    assertEquals("org1", row.orgId());
+  }
+
+  @Test
+  public void doPostUnbindsTheEffectiveTenantSoAPooledThreadCannotLeakIt() throws Exception {
+    recordedRowForToolsCall("0", "0", "realOrg", "realClient", false);
+
+    assertNull(McpUsageTelemetry.currentTenant());
   }
 }

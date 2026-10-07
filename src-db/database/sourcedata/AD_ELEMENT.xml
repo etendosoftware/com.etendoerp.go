@@ -176,6 +176,20 @@
 <!--0AA7190EABF94B91AEA41BB48037BB6E-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--0AA7190EABF94B91AEA41BB48037BB6E--></AD_ELEMENT>
 
+<!--0C385651E2D74881B72F0A92AAC6044C--><AD_ELEMENT>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <AD_ELEMENT_ID><![CDATA[0C385651E2D74881B72F0A92AAC6044C]]></AD_ELEMENT_ID>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <COLUMNNAME><![CDATA[Status]]></COLUMNNAME>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <NAME><![CDATA[Status]]></NAME>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <PRINTNAME><![CDATA[Status]]></PRINTNAME>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <DESCRIPTION><![CDATA[Review status of the row: empty while pending, R once reviewed. Further states are added to the ETGO_MCP_USAGE_STATUS_CHK check.]]></DESCRIPTION>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <HELP><![CDATA[Review status of the row: empty while pending, R once reviewed. Further states are added to the ETGO_MCP_USAGE_STATUS_CHK check.]]></HELP>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--0C385651E2D74881B72F0A92AAC6044C-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--0C385651E2D74881B72F0A92AAC6044C--></AD_ELEMENT>
+
 <!--0FE597BFB29B414D80CBE99C44CD0B99--><AD_ELEMENT>
 <!--0FE597BFB29B414D80CBE99C44CD0B99-->  <AD_ELEMENT_ID><![CDATA[0FE597BFB29B414D80CBE99C44CD0B99]]></AD_ELEMENT_ID>
 <!--0FE597BFB29B414D80CBE99C44CD0B99-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -250,8 +264,8 @@
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <COLUMNNAME><![CDATA[EM_Etgo_Total_Discount]]></COLUMNNAME>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <NAME><![CDATA[Total Discount %]]></NAME>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <PRINTNAME><![CDATA[Total Discount %]]></PRINTNAME>
-<!--135A414766ED4B68BEFDC2CAFB34AA71-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo GO.]]></DESCRIPTION>
-<!--135A414766ED4B68BEFDC2CAFB34AA71-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo GO interface. Etendo GO uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed exclusively by Etendo GO — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
+<!--135A414766ED4B68BEFDC2CAFB34AA71-->  <DESCRIPTION><![CDATA[Total discount percentage applied to this document by Etendo.]]></DESCRIPTION>
+<!--135A414766ED4B68BEFDC2CAFB34AA71-->  <HELP><![CDATA[Stores the total discount percentage set by the user in the Etendo app. Etendo uses this value to insert a negative discount line on the document and to restore the discount panel when the document is reopened. This field is managed automatically by the Etendo app — do not edit it manually in Classic, as doing so will not recalculate the discount line.]]></HELP>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--135A414766ED4B68BEFDC2CAFB34AA71-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--135A414766ED4B68BEFDC2CAFB34AA71--></AD_ELEMENT>
@@ -405,6 +419,19 @@
 <!--1DAED343C394493CB463ADCBFFAE98DC-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--1DAED343C394493CB463ADCBFFAE98DC-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--1DAED343C394493CB463ADCBFFAE98DC--></AD_ELEMENT>
+
+<!--1E994F4C2A2D49B7BF18F55D53B28578--><AD_ELEMENT>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <AD_ELEMENT_ID><![CDATA[1E994F4C2A2D49B7BF18F55D53B28578]]></AD_ELEMENT_ID>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <COLUMNNAME><![CDATA[Lease_Until]]></COLUMNNAME>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <NAME><![CDATA[Lease Until]]></NAME>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <PRINTNAME><![CDATA[Lease Until]]></PRINTNAME>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <DESCRIPTION><![CDATA[When the current lease expires.]]></DESCRIPTION>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--1E994F4C2A2D49B7BF18F55D53B28578-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--1E994F4C2A2D49B7BF18F55D53B28578--></AD_ELEMENT>
 
 <!--1EB83349EF7B4B1582D4DB762596DE99--><AD_ELEMENT>
 <!--1EB83349EF7B4B1582D4DB762596DE99-->  <AD_ELEMENT_ID><![CDATA[1EB83349EF7B4B1582D4DB762596DE99]]></AD_ELEMENT_ID>
@@ -596,8 +623,8 @@
 <!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <COLUMNNAME><![CDATA[EM_ETGO_Invoice_Status]]></COLUMNNAME>
 <!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <NAME><![CDATA[Invoice Status (GO)]]></NAME>
 <!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <PRINTNAME><![CDATA[Invoice Status]]></PRINTNAME>
-<!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <DESCRIPTION><![CDATA[Invoiced percentage of this order, excluding the Total Discount line, maintained by Etendo GO.]]></DESCRIPTION>
-<!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Reproduces the classic InvoiceStatus formula (qty invoiced / qty ordered, excluding lines linked to a legacy discount schema), with one addition: it also excludes the Total Discount line (dummy product ETGO_DTO) that Etendo GO's Total Discount feature inserts, so a document with a header-level discount reports its real percentage instead of one diluted by that extra line (ETP-5317).]]></HELP>
+<!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <DESCRIPTION><![CDATA[Invoiced percentage of this order, excluding the Total Discount line, maintained by Etendo.]]></DESCRIPTION>
+<!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Reproduces the classic InvoiceStatus formula (qty invoiced / qty ordered, excluding lines linked to a legacy discount schema), with one addition: it also excludes the Total Discount line (dummy product ETGO_DTO) that Etendo's Total Discount feature inserts, so a document with a header-level discount reports its real percentage instead of one diluted by that extra line (ETP-5317).]]></HELP>
 <!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--2F99F84A8A054E83B5D49B0B14D0DBF9-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--2F99F84A8A054E83B5D49B0B14D0DBF9--></AD_ELEMENT>
@@ -968,6 +995,19 @@
 <!--4566C642222F4012A3F46FC118EF1237-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--4566C642222F4012A3F46FC118EF1237--></AD_ELEMENT>
 
+<!--463FB92366B544AD932A7427C3BB03BE--><AD_ELEMENT>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <AD_ELEMENT_ID><![CDATA[463FB92366B544AD932A7427C3BB03BE]]></AD_ELEMENT_ID>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <COLUMNNAME><![CDATA[Synced_At]]></COLUMNNAME>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <NAME><![CDATA[Synced At]]></NAME>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <PRINTNAME><![CDATA[Synced At]]></PRINTNAME>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <DESCRIPTION><![CDATA[When the fingerprint was last propagated.]]></DESCRIPTION>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--463FB92366B544AD932A7427C3BB03BE-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--463FB92366B544AD932A7427C3BB03BE--></AD_ELEMENT>
+
 <!--46D1DB924C404F77A227EE392FFE4309--><AD_ELEMENT>
 <!--46D1DB924C404F77A227EE392FFE4309-->  <AD_ELEMENT_ID><![CDATA[46D1DB924C404F77A227EE392FFE4309]]></AD_ELEMENT_ID>
 <!--46D1DB924C404F77A227EE392FFE4309-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -988,8 +1028,8 @@
 <!--47915D4E603A4695AA4AC509CFD0686F-->  <COLUMNNAME><![CDATA[EM_ETGO_Deliv_Status_Purchase]]></COLUMNNAME>
 <!--47915D4E603A4695AA4AC509CFD0686F-->  <NAME><![CDATA[Delivery Status Purchase (GO)]]></NAME>
 <!--47915D4E603A4695AA4AC509CFD0686F-->  <PRINTNAME><![CDATA[Delivery Status Purchase]]></PRINTNAME>
-<!--47915D4E603A4695AA4AC509CFD0686F-->  <DESCRIPTION><![CDATA[Received percentage of this purchase order, excluding the Total Discount line, maintained by Etendo GO.]]></DESCRIPTION>
-<!--47915D4E603A4695AA4AC509CFD0686F-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Reproduces the classic DeliveryStatusPurchase formula (qty reserved / qty ordered, excluding lines linked to a legacy discount schema), with one addition: it also excludes the Total Discount line (dummy product ETGO_DTO) that Etendo GO's Total Discount feature inserts, so a document with a header-level discount reports its real percentage instead of one diluted by that extra line (ETP-5317).]]></HELP>
+<!--47915D4E603A4695AA4AC509CFD0686F-->  <DESCRIPTION><![CDATA[Received percentage of this purchase order, excluding the Total Discount line, maintained by Etendo.]]></DESCRIPTION>
+<!--47915D4E603A4695AA4AC509CFD0686F-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Reproduces the classic DeliveryStatusPurchase formula (qty reserved / qty ordered, excluding lines linked to a legacy discount schema), with one addition: it also excludes the Total Discount line (dummy product ETGO_DTO) that Etendo's Total Discount feature inserts, so a document with a header-level discount reports its real percentage instead of one diluted by that extra line (ETP-5317).]]></HELP>
 <!--47915D4E603A4695AA4AC509CFD0686F-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--47915D4E603A4695AA4AC509CFD0686F-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--47915D4E603A4695AA4AC509CFD0686F--></AD_ELEMENT>
@@ -1120,6 +1160,19 @@
 <!--53F2C7AEDECE485FB17BBF23F392D512-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--53F2C7AEDECE485FB17BBF23F392D512--></AD_ELEMENT>
 
+<!--54CC3EE099554F059800DD6201E54E1F--><AD_ELEMENT>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <AD_ELEMENT_ID><![CDATA[54CC3EE099554F059800DD6201E54E1F]]></AD_ELEMENT_ID>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <COLUMNNAME><![CDATA[Last_Error]]></COLUMNNAME>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <NAME><![CDATA[Last Error]]></NAME>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <PRINTNAME><![CDATA[Last Error]]></PRINTNAME>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <DESCRIPTION><![CDATA[Error of the last failed propagation, if any.]]></DESCRIPTION>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--54CC3EE099554F059800DD6201E54E1F-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--54CC3EE099554F059800DD6201E54E1F--></AD_ELEMENT>
+
 <!--5511133B8F834B649BE9B93A38833A59--><AD_ELEMENT>
 <!--5511133B8F834B649BE9B93A38833A59-->  <AD_ELEMENT_ID><![CDATA[5511133B8F834B649BE9B93A38833A59]]></AD_ELEMENT_ID>
 <!--5511133B8F834B649BE9B93A38833A59-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -1202,6 +1255,19 @@
 <!--59EA76D4354947ABA9D85BBAE9E713F7-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--59EA76D4354947ABA9D85BBAE9E713F7--></AD_ELEMENT>
 
+<!--59F83EC98D614086BA964CE745D933C2--><AD_ELEMENT>
+<!--59F83EC98D614086BA964CE745D933C2-->  <AD_ELEMENT_ID><![CDATA[59F83EC98D614086BA964CE745D933C2]]></AD_ELEMENT_ID>
+<!--59F83EC98D614086BA964CE745D933C2-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--59F83EC98D614086BA964CE745D933C2-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--59F83EC98D614086BA964CE745D933C2-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--59F83EC98D614086BA964CE745D933C2-->  <COLUMNNAME><![CDATA[Etgo_Tpl_Role_Lease_ID]]></COLUMNNAME>
+<!--59F83EC98D614086BA964CE745D933C2-->  <NAME><![CDATA[Template Role Sync Lease]]></NAME>
+<!--59F83EC98D614086BA964CE745D933C2-->  <PRINTNAME><![CDATA[Template Role Sync Lease]]></PRINTNAME>
+<!--59F83EC98D614086BA964CE745D933C2-->  <DESCRIPTION><![CDATA[Primary key of the template role sync lease (ETP-5565).]]></DESCRIPTION>
+<!--59F83EC98D614086BA964CE745D933C2-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--59F83EC98D614086BA964CE745D933C2-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--59F83EC98D614086BA964CE745D933C2--></AD_ELEMENT>
+
 <!--5BA3D7CE04BB42B98B89EF2774DB9D92--><AD_ELEMENT>
 <!--5BA3D7CE04BB42B98B89EF2774DB9D92-->  <AD_ELEMENT_ID><![CDATA[5BA3D7CE04BB42B98B89EF2774DB9D92]]></AD_ELEMENT_ID>
 <!--5BA3D7CE04BB42B98B89EF2774DB9D92-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -1280,8 +1346,8 @@
 <!--5F245BDAACE34275BC981D2990C85FF4-->  <COLUMNNAME><![CDATA[EM_ETGO_Sale_Price]]></COLUMNNAME>
 <!--5F245BDAACE34275BC981D2990C85FF4-->  <NAME><![CDATA[Sale Price]]></NAME>
 <!--5F245BDAACE34275BC981D2990C85FF4-->  <PRINTNAME><![CDATA[Sale Price]]></PRINTNAME>
-<!--5F245BDAACE34275BC981D2990C85FF4-->  <DESCRIPTION><![CDATA[Sales unit price (PriceStd) of the default sales price-list version, maintained by Etendo GO.]]></DESCRIPTION>
-<!--5F245BDAACE34275BC981D2990C85FF4-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the standard price of the sales-side (IsSOPriceList=Y) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
+<!--5F245BDAACE34275BC981D2990C85FF4-->  <DESCRIPTION><![CDATA[Sales unit price (PriceStd) of the default sales price-list version, maintained by Etendo.]]></DESCRIPTION>
+<!--5F245BDAACE34275BC981D2990C85FF4-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the standard price of the sales-side (IsSOPriceList=Y) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
 <!--5F245BDAACE34275BC981D2990C85FF4-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--5F245BDAACE34275BC981D2990C85FF4-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--5F245BDAACE34275BC981D2990C85FF4--></AD_ELEMENT>
@@ -1350,8 +1416,8 @@
 <!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <COLUMNNAME><![CDATA[Tool_Name]]></COLUMNNAME>
 <!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <NAME><![CDATA[Tool Name]]></NAME>
 <!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <PRINTNAME><![CDATA[Tool Name]]></PRINTNAME>
-<!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <DESCRIPTION><![CDATA[MCP tool that was invoked (neo_create, neo_list, ...).]]></DESCRIPTION>
-<!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <HELP><![CDATA[MCP tool that was invoked (neo_create, neo_list, ...).]]></HELP>
+<!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <DESCRIPTION><![CDATA[MCP tool that was invoked (etendo_create, etendo_list, ...).]]></DESCRIPTION>
+<!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <HELP><![CDATA[MCP tool that was invoked (etendo_create, etendo_list, ...).]]></HELP>
 <!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--6573CD0AEFAC4A1B86B0EC3C8DFA9878-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--6573CD0AEFAC4A1B86B0EC3C8DFA9878--></AD_ELEMENT>
@@ -1758,8 +1824,8 @@
 <!--869CDED1C0014C678F687937A0CE32A1-->  <COLUMNNAME><![CDATA[EM_ETGO_Cost]]></COLUMNNAME>
 <!--869CDED1C0014C678F687937A0CE32A1-->  <NAME><![CDATA[Cost]]></NAME>
 <!--869CDED1C0014C678F687937A0CE32A1-->  <PRINTNAME><![CDATA[Cost]]></PRINTNAME>
-<!--869CDED1C0014C678F687937A0CE32A1-->  <DESCRIPTION><![CDATA[Current cost of the product recorded by the costing engine (M_Costing), maintained by Etendo GO.]]></DESCRIPTION>
-<!--869CDED1C0014C678F687937A0CE32A1-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the standard (STA) or average (AVA) M_Costing row of the product currently in force: rows whose starting date has already been reached come first, then the most recent starting date, preferring the organization-wide row on ties. A future-dated cost is only shown when no cost has started yet. Recomputed whenever a cost row of the product changes, so a future-dated cost that reaches its starting date is picked up on the next change to that product's costing (same behavior as the purchase and sale price columns). Feeds list views, sorting and filtering without a per-row fetch. Empty when the product has no cost.]]></HELP>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <DESCRIPTION><![CDATA[Current cost of the product recorded by the costing engine (M_Costing), maintained by Etendo.]]></DESCRIPTION>
+<!--869CDED1C0014C678F687937A0CE32A1-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the standard (STA) or average (AVA) M_Costing row of the product currently in force: rows whose starting date has already been reached come first, then the most recent starting date, preferring the organization-wide row on ties. A future-dated cost is only shown when no cost has started yet. Recomputed whenever a cost row of the product changes, so a future-dated cost that reaches its starting date is picked up on the next change to that product's costing (same behavior as the purchase and sale price columns). Feeds list views, sorting and filtering without a per-row fetch. Empty when the product has no cost.]]></HELP>
 <!--869CDED1C0014C678F687937A0CE32A1-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--869CDED1C0014C678F687937A0CE32A1-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--869CDED1C0014C678F687937A0CE32A1--></AD_ELEMENT>
@@ -1801,7 +1867,7 @@
 <!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <NAME><![CDATA[Pending Count]]></NAME>
 <!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <PRINTNAME><![CDATA[Pending Count]]></PRINTNAME>
 <!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <DESCRIPTION><![CDATA[Number of items still awaiting reconciliation on this financial account.]]></DESCRIPTION>
-<!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Counts unmatched bank-statement lines for bank and card accounts, plus unreconciled processed transactions for cash accounts, so list views can sort and filter on it without a per-request aggregate query.]]></HELP>
+<!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Counts unmatched bank-statement lines for bank and card accounts, plus unreconciled processed transactions for cash accounts, so list views can sort and filter on it without a per-request aggregate query.]]></HELP>
 <!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--8B6A446D1C10413BAC6CE4832F0EE09E-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--8B6A446D1C10413BAC6CE4832F0EE09E--></AD_ELEMENT>
@@ -1973,6 +2039,19 @@
 <!--96B47A1CCC7B4482889362B31DBEC5BE-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--96B47A1CCC7B4482889362B31DBEC5BE--></AD_ELEMENT>
 
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6--><AD_ELEMENT>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <AD_ELEMENT_ID><![CDATA[97E824E8A6AB4C3AA114AC8B7573B4A6]]></AD_ELEMENT_ID>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <COLUMNNAME><![CDATA[Personal_Roles]]></COLUMNNAME>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <NAME><![CDATA[Personal Roles]]></NAME>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <PRINTNAME><![CDATA[Personal Roles]]></PRINTNAME>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <DESCRIPTION><![CDATA[Personal roles inheriting the template at the last propagation.]]></DESCRIPTION>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--97E824E8A6AB4C3AA114AC8B7573B4A6--></AD_ELEMENT>
+
 <!--995CAC20291940D093C5354DF0C45916--><AD_ELEMENT>
 <!--995CAC20291940D093C5354DF0C45916-->  <AD_ELEMENT_ID><![CDATA[995CAC20291940D093C5354DF0C45916]]></AD_ELEMENT_ID>
 <!--995CAC20291940D093C5354DF0C45916-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -1986,6 +2065,19 @@
 <!--995CAC20291940D093C5354DF0C45916-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--995CAC20291940D093C5354DF0C45916-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--995CAC20291940D093C5354DF0C45916--></AD_ELEMENT>
+
+<!--99AC6657713E40CB8F6250CFB5A687AB--><AD_ELEMENT>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <AD_ELEMENT_ID><![CDATA[99AC6657713E40CB8F6250CFB5A687AB]]></AD_ELEMENT_ID>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <COLUMNNAME><![CDATA[Holder]]></COLUMNNAME>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <NAME><![CDATA[Holder]]></NAME>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <PRINTNAME><![CDATA[Holder]]></PRINTNAME>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <DESCRIPTION><![CDATA[Application task currently holding the lease.]]></DESCRIPTION>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--99AC6657713E40CB8F6250CFB5A687AB-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--99AC6657713E40CB8F6250CFB5A687AB--></AD_ELEMENT>
 
 <!--9A972325A8604251867B1043E6D3A022--><AD_ELEMENT>
 <!--9A972325A8604251867B1043E6D3A022-->  <AD_ELEMENT_ID><![CDATA[9A972325A8604251867B1043E6D3A022]]></AD_ELEMENT_ID>
@@ -2077,7 +2169,7 @@
 <!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <COLUMNNAME><![CDATA[ETGO_Account_ID]]></COLUMNNAME>
 <!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <NAME><![CDATA[EtendoGo Account]]></NAME>
 <!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <PRINTNAME><![CDATA[EtendoGo Account]]></PRINTNAME>
-<!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <DESCRIPTION><![CDATA[EtendoGo platform user account]]></DESCRIPTION>
+<!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <DESCRIPTION><![CDATA[Etendo platform user account]]></DESCRIPTION>
 <!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <HELP><![CDATA[]]></HELP>
 <!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--A2B3C4D5E6F7A8B9C0D1E2F3A4B5C6D7-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
@@ -2147,8 +2239,8 @@
 <!--A694B3B6F0BB479185614A657A32A4A8-->  <COLUMNNAME><![CDATA[EM_ETGO_Delivery_Status]]></COLUMNNAME>
 <!--A694B3B6F0BB479185614A657A32A4A8-->  <NAME><![CDATA[Delivery Status (GO)]]></NAME>
 <!--A694B3B6F0BB479185614A657A32A4A8-->  <PRINTNAME><![CDATA[Delivery Status]]></PRINTNAME>
-<!--A694B3B6F0BB479185614A657A32A4A8-->  <DESCRIPTION><![CDATA[Delivered percentage of this sales order, excluding the Total Discount line, maintained by Etendo GO.]]></DESCRIPTION>
-<!--A694B3B6F0BB479185614A657A32A4A8-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Reproduces the classic DeliveryStatus formula (qty delivered / qty ordered, excluding lines linked to a legacy discount schema), with one addition: it also excludes the Total Discount line (dummy product ETGO_DTO) that Etendo GO's Total Discount feature inserts, so a document with a header-level discount reports its real percentage instead of one diluted by that extra line (ETP-5317).]]></HELP>
+<!--A694B3B6F0BB479185614A657A32A4A8-->  <DESCRIPTION><![CDATA[Delivered percentage of this sales order, excluding the Total Discount line, maintained by Etendo.]]></DESCRIPTION>
+<!--A694B3B6F0BB479185614A657A32A4A8-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Reproduces the classic DeliveryStatus formula (qty delivered / qty ordered, excluding lines linked to a legacy discount schema), with one addition: it also excludes the Total Discount line (dummy product ETGO_DTO) that Etendo's Total Discount feature inserts, so a document with a header-level discount reports its real percentage instead of one diluted by that extra line (ETP-5317).]]></HELP>
 <!--A694B3B6F0BB479185614A657A32A4A8-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--A694B3B6F0BB479185614A657A32A4A8-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--A694B3B6F0BB479185614A657A32A4A8--></AD_ELEMENT>
@@ -2337,7 +2429,7 @@
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <COLUMNNAME><![CDATA[EM_ETGO_Show_Acct_Fields]]></COLUMNNAME>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <NAME><![CDATA[Show Accounting Fields]]></NAME>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <PRINTNAME><![CDATA[Show Accounting Fields]]></PRINTNAME>
-<!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in Etendo GO, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
+<!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <HELP><![CDATA[Controls whether this role can see accounting-sensitive fields and tabs in the Etendo app, such as the Posted status pill on invoice windows and the Cuentas contables (Accounting) tab on the financial account edit form.]]></HELP>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--AD51EBDF1A414F80B502C4FCCE422DB4--></AD_ELEMENT>
@@ -2407,10 +2499,23 @@
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <NAME><![CDATA[Payment Intent]]></NAME>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <PRINTNAME><![CDATA[Payment Intent]]></PRINTNAME>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <DESCRIPTION><![CDATA[Serialized request describing the payment to create once the bank confirms the transfer.]]></DESCRIPTION>
-<!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <HELP><![CDATA[JSON snapshot of the Etendo Go payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo Go does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from Etendo Go.]]></HELP>
+<!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <HELP><![CDATA[JSON snapshot of the Etendo payment request (invoice, installment, amount, payment method, financial account, date, conversion rate, credit sources and overpayment handling) captured when a bank transfer is initiated. Etendo does not create the payment up front: it is built from this snapshot only once Salt Edge reports a resolutive status. Written and consumed automatically; it has no meaning for payments not initiated from the Etendo app.]]></HELP>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--AEBEE9FDF2794A408CFB3D5A0C20F83B--></AD_ELEMENT>
+
+<!--AF92650CF95D40E592D822BE0E882D46--><AD_ELEMENT>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <AD_ELEMENT_ID><![CDATA[AF92650CF95D40E592D822BE0E882D46]]></AD_ELEMENT_ID>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <COLUMNNAME><![CDATA[Fingerprint]]></COLUMNNAME>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <NAME><![CDATA[Fingerprint]]></NAME>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <PRINTNAME><![CDATA[Fingerprint]]></PRINTNAME>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <DESCRIPTION><![CDATA[md5 of the template role's active access grants last propagated.]]></DESCRIPTION>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--AF92650CF95D40E592D822BE0E882D46-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--AF92650CF95D40E592D822BE0E882D46--></AD_ELEMENT>
 
 <!--AFD8AD4FDA4D4591A2CE4F22BD2B5B2C--><AD_ELEMENT>
 <!--AFD8AD4FDA4D4591A2CE4F22BD2B5B2C-->  <AD_ELEMENT_ID><![CDATA[AFD8AD4FDA4D4591A2CE4F22BD2B5B2C]]></AD_ELEMENT_ID>
@@ -2644,6 +2749,19 @@
 <!--C2DBF4B55F71482D9B4518370B23D48B-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--C2DBF4B55F71482D9B4518370B23D48B-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--C2DBF4B55F71482D9B4518370B23D48B--></AD_ELEMENT>
+
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B--><AD_ELEMENT>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <AD_ELEMENT_ID><![CDATA[C2DCD0BC7C0A4E82B91617C43F9A564B]]></AD_ELEMENT_ID>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <COLUMNNAME><![CDATA[Etgo_Tpl_Role_Sync_ID]]></COLUMNNAME>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <NAME><![CDATA[Template Role Sync]]></NAME>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <PRINTNAME><![CDATA[Template Role Sync]]></PRINTNAME>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <DESCRIPTION><![CDATA[Primary key of the template role sync state (ETP-5565).]]></DESCRIPTION>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--C2DCD0BC7C0A4E82B91617C43F9A564B--></AD_ELEMENT>
 
 <!--C3BB432E40754B08B5955287EC66957D--><AD_ELEMENT>
 <!--C3BB432E40754B08B5955287EC66957D-->  <AD_ELEMENT_ID><![CDATA[C3BB432E40754B08B5955287EC66957D]]></AD_ELEMENT_ID>
@@ -3069,6 +3187,19 @@
 <!--DCDAF03508C34E1186929521857B7DB8-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--DCDAF03508C34E1186929521857B7DB8--></AD_ELEMENT>
 
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3--><AD_ELEMENT>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <AD_ELEMENT_ID><![CDATA[DFC8C51225ED4672B3E8F3EFBAE446B3]]></AD_ELEMENT_ID>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <COLUMNNAME><![CDATA[Algo_Version]]></COLUMNNAME>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <NAME><![CDATA[Algorithm Version]]></NAME>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <PRINTNAME><![CDATA[Algorithm Version]]></PRINTNAME>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <DESCRIPTION><![CDATA[Version of the fingerprint and sweep rule that stored this row.]]></DESCRIPTION>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--DFC8C51225ED4672B3E8F3EFBAE446B3--></AD_ELEMENT>
+
 <!--DFF446A6E3834DDD92069E839CBA318F--><AD_ELEMENT>
 <!--DFF446A6E3834DDD92069E839CBA318F-->  <AD_ELEMENT_ID><![CDATA[DFF446A6E3834DDD92069E839CBA318F]]></AD_ELEMENT_ID>
 <!--DFF446A6E3834DDD92069E839CBA318F-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -3117,7 +3248,7 @@
 <!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <COLUMNNAME><![CDATA[EM_ETGO_Personal_Owner_ID]]></COLUMNNAME>
 <!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <NAME><![CDATA[Personal Role Owner]]></NAME>
 <!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <PRINTNAME><![CDATA[Personal Role Owner]]></PRINTNAME>
-<!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <HELP><![CDATA[Etendo GO internal marker: the user this personal composition role was created for. Set once on creation, never changed; demote restores the role by it. Foreign key with on delete set null: a deleted user's role loses its owner (ETP-5502).]]></HELP>
+<!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <HELP><![CDATA[Etendo internal marker: the user this personal composition role was created for. Set once on creation, never changed; demote restores the role by it. Foreign key with on delete set null: a deleted user's role loses its owner (ETP-5502).]]></HELP>
 <!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--E22BD5B8E71F45828A93107E3B1FBDF9-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--E22BD5B8E71F45828A93107E3B1FBDF9--></AD_ELEMENT>
@@ -3270,8 +3401,8 @@
 <!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <COLUMNNAME><![CDATA[EM_ETGO_Tbai_Status]]></COLUMNNAME>
 <!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <NAME><![CDATA[TicketBAI Status]]></NAME>
 <!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <PRINTNAME><![CDATA[TicketBAI Status]]></PRINTNAME>
-<!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <DESCRIPTION><![CDATA[Outcome of the latest TicketBAI submission of this invoice, maintained by Etendo GO.]]></DESCRIPTION>
-<!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the ESTADO of the most recent TBAI_SyncInvoice row of the invoice, so the fiscal status can be listed, sorted and filtered without a per-row fetch. 'Pendiente' means no resolved submission yet.]]></HELP>
+<!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <DESCRIPTION><![CDATA[Outcome of the latest TicketBAI submission of this invoice, maintained by Etendo.]]></DESCRIPTION>
+<!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the ESTADO of the most recent TBAI_SyncInvoice row of the invoice, so the fiscal status can be listed, sorted and filtered without a per-row fetch. 'Pendiente' means no resolved submission yet.]]></HELP>
 <!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--EFBC19F2F9384CC6A59C28A03A4C632D-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--EFBC19F2F9384CC6A59C28A03A4C632D--></AD_ELEMENT>
@@ -3330,6 +3461,20 @@
 <!--F3D4B409501149A4B6A28C6035D0F9D0-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--F3D4B409501149A4B6A28C6035D0F9D0--></AD_ELEMENT>
 
+<!--F484806DDAFC49E4A16795D3544DAA22--><AD_ELEMENT>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <AD_ELEMENT_ID><![CDATA[F484806DDAFC49E4A16795D3544DAA22]]></AD_ELEMENT_ID>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <COLUMNNAME><![CDATA[Reviewed_By]]></COLUMNNAME>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <NAME><![CDATA[Reviewed By]]></NAME>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <PRINTNAME><![CDATA[Reviewed By]]></PRINTNAME>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <DESCRIPTION><![CDATA[Free-text name or handle of whoever reviewed the row. Not a reference to a user.]]></DESCRIPTION>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <HELP><![CDATA[Free-text name or handle of whoever reviewed the row. Not a reference to a user.]]></HELP>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
+<!--F484806DDAFC49E4A16795D3544DAA22-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
+<!--F484806DDAFC49E4A16795D3544DAA22--></AD_ELEMENT>
+
 <!--F4D1830B8A1F4FDAB8F3930848838D96--><AD_ELEMENT>
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <AD_ELEMENT_ID><![CDATA[F4D1830B8A1F4FDAB8F3930848838D96]]></AD_ELEMENT_ID>
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <AD_CLIENT_ID><![CDATA[0]]></AD_CLIENT_ID>
@@ -3338,8 +3483,8 @@
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <COLUMNNAME><![CDATA[EM_ETGO_Stock]]></COLUMNNAME>
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <NAME><![CDATA[Stock]]></NAME>
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <PRINTNAME><![CDATA[Stock]]></PRINTNAME>
-<!--F4D1830B8A1F4FDAB8F3930848838D96-->  <DESCRIPTION><![CDATA[Total on-hand stock (SUM of QtyOnHand across all locators/warehouses), maintained by Etendo GO.]]></DESCRIPTION>
-<!--F4D1830B8A1F4FDAB8F3930848838D96-->  <HELP><![CDATA[Read-only aggregate kept up to date by the Etendo GO stored-computed-column engine. Sums M_Storage_Detail.QtyOnHand for the product so the figure can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
+<!--F4D1830B8A1F4FDAB8F3930848838D96-->  <DESCRIPTION><![CDATA[Total on-hand stock (SUM of QtyOnHand across all locators/warehouses), maintained by Etendo.]]></DESCRIPTION>
+<!--F4D1830B8A1F4FDAB8F3930848838D96-->  <HELP><![CDATA[Read-only aggregate kept up to date by the Etendo stored-computed-column engine. Sums M_Storage_Detail.QtyOnHand for the product so the figure can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--F4D1830B8A1F4FDAB8F3930848838D96-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--F4D1830B8A1F4FDAB8F3930848838D96--></AD_ELEMENT>
@@ -3522,8 +3667,8 @@
 <!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <COLUMNNAME><![CDATA[EM_ETGO_Purchase_Price]]></COLUMNNAME>
 <!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <NAME><![CDATA[Purchase Price]]></NAME>
 <!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <PRINTNAME><![CDATA[Purchase Price]]></PRINTNAME>
-<!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <DESCRIPTION><![CDATA[Purchase unit price (PriceStd) of the default purchase price-list version, maintained by Etendo GO.]]></DESCRIPTION>
-<!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo GO stored-computed-column engine. Resolves the standard price of the purchase-side (IsSOPriceList=N) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
+<!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <DESCRIPTION><![CDATA[Purchase unit price (PriceStd) of the default purchase price-list version, maintained by Etendo.]]></DESCRIPTION>
+<!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <HELP><![CDATA[Read-only value kept up to date by the Etendo stored-computed-column engine. Resolves the standard price of the purchase-side (IsSOPriceList=N) default price-list version whose ValidFrom is on or before today, so it can feed list views, sorting and filtering without a per-row fetch.]]></HELP>
 <!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <AD_MODULE_ID><![CDATA[94E1B433CF55451EABB764750AC5902A]]></AD_MODULE_ID>
 <!--FE75405A35724F9F810CE0AC5B2CAA9A-->  <ISGLOSSARY><![CDATA[N]]></ISGLOSSARY>
 <!--FE75405A35724F9F810CE0AC5B2CAA9A--></AD_ELEMENT>

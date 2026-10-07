@@ -32,7 +32,7 @@ import org.codehaus.jettison.json.JSONObject;
  * {@code function_response.response}: it means "a pointer to an attached part, resolvable by
  * {@code display_name}". Openbravo's {@code DataToJsonConverter#toJsonObject} puts it on
  * <em>every</em> serialised record ({@code JsonConstants.REF}, line 169 of that class), so every
- * row of a {@code neo_list} / {@code neo_get} carried one. Gemini tried to resolve the pointer,
+ * row of a {@code etendo_list} / {@code etendo_get} carried one. Gemini tried to resolve the pointer,
  * found no such part, and rejected the <em>whole</em> request with HTTP 400 {@code INVALID_ARGUMENT}
  * — "The referenced name {@code BusinessPartner/BC8D…} in function_response.response does not match
  * to a display_name in the function_response.parts". The failure is on the tool <em>result</em>, so
@@ -42,14 +42,14 @@ import org.codehaus.jettison.json.JSONObject;
  * <p><b>What is and is not stripped.</b> Only the key spelled exactly {@code $ref} is removed.
  * A key that merely <em>contains</em> a {@code $} is harmless and must be kept — the FK identifier
  * columns are all spelled {@code xxx$_identifier}, and they were verified to pass. Likewise a
- * <em>value</em> of the form {@code "$ref:<opId>"} (the {@code neo_batch} placeholder,
+ * <em>value</em> of the form {@code "$ref:<opId>"} (the {@code etendo_batch} placeholder,
  * {@link com.etendoerp.go.schemaforge.BatchService#REF_PREFIX}) is untouched: this class only ever
  * looks at key names.
  *
  * <p><b>Why removing it is lossless.</b> {@code encodeReference} builds the value as
  * {@code entityName + "/" + id}, and both halves are already present on the same row as
  * {@code _entityName} and {@code id}. The construction rule is now declared once — in
- * {@code neo_schema}'s hint and in the {@code docs} preamble — instead of being paid for on every
+ * {@code etendo_schema}'s hint and in the {@code docs} preamble — instead of being paid for on every
  * row of every response, which is also why this is an Agent Context Economy win, not just a fix.
  *
  * <p><b>MCP surface only.</b> The stripping happens in the MCP content wrappers

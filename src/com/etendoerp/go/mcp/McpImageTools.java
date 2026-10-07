@@ -35,20 +35,20 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageUploadTickets;
 
 /**
- * The MCP image-upload tools (ETP-5184): {@code neo_request_image_upload} (primary),
- * {@code neo_upload_image} (base64 fallback) and {@code neo_get_image_upload} (status lookup).
+ * The MCP image-upload tools (ETP-5184): {@code etendo_request_image_upload} (primary),
+ * {@code etendo_upload_image} (base64 fallback) and {@code etendo_get_image_upload} (status lookup).
  *
  * <p><b>Why two write tools and not one.</b> A tool argument is model <i>output</i>, generated token
  * by token; no MCP client elides argument content, and there is no way to mark an argument as
  * not-for-the-LLM. So base64 in an argument always costs output tokens — roughly 1.4 characters per
  * token, i.e. ~100k tokens for a 100 KB image. The only way not to pay is to not put the bytes in
- * the argument at all: {@code neo_request_image_upload} hands back a single-use URL, and whoever
+ * the argument at all: {@code etendo_request_image_upload} hands back a single-use URL, and whoever
  * holds the file PUTs it there over plain HTTP. The base64 tool stays because it is one code path
  * away (both end at {@link NeoImageHelper#createImage}) and it is the only option for a caller that
  * holds the bytes in memory with no shell — hence its deliberately low 256 KB cap, so nobody
  * discovers the token cost by paying it.
  *
- * <p>Neither tool wires the image to a record. That stays an explicit {@code neo_update} of the
+ * <p>Neither tool wires the image to a record. That stays an explicit {@code etendo_update} of the
  * image field, which is what keeps both tools generic across every {@code image}-typed field
  * (product, organization logo, anything enabled later) and keeps the audit trail obvious.
  */
@@ -95,7 +95,7 @@ final class McpImageTools {
       + "conversation and there is no size problem. Only fall back to "
       + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " for an image under 256 KB.";
 
-  // ── neo_request_image_upload ──────────────────────────────────────────
+  // ── etendo_request_image_upload ──────────────────────────────────────────
 
   /**
    * Issues an upload ticket for the current MCP session and returns the URL to PUT the file to.
@@ -143,7 +143,7 @@ final class McpImageTools {
         + "needed, the URL itself is the credential, and it works exactly once. The response of "
         + "that PUT carries the imageId; if you miss it, call "
         + McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD + " with this token. Then write the imageId to "
-        + "the image field with neo_update. Do not read the file into this conversation.");
+        + "the image field with etendo_update. Do not read the file into this conversation.");
     return result;
   }
 
@@ -224,7 +224,7 @@ final class McpImageTools {
     }
   }
 
-  // ── neo_upload_image ──────────────────────────────────────────────────
+  // ── etendo_upload_image ──────────────────────────────────────────────────
 
   /**
    * Creates an {@code AD_Image} row from an inline base64 payload.
@@ -248,7 +248,7 @@ final class McpImageTools {
       Image image = NeoImageHelper.createImage(name, mimeType, data);
       JSONObject result = NeoImageHelper.describeImage(image, data);
       result.put(McpConstants.KEY_HINT, "The image row exists but is not attached to anything yet. "
-          + "Write this imageId to the image field of the record you want it on, with neo_update.");
+          + "Write this imageId to the image field of the record you want it on, with etendo_update.");
       return result;
     } catch (NeoImageHelper.ImageValidationException e) {
       return errorEnvelope(McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
@@ -273,7 +273,7 @@ final class McpImageTools {
     }
   }
 
-  // ── neo_get_image_upload ──────────────────────────────────────────────
+  // ── etendo_get_image_upload ──────────────────────────────────────────────
 
   /**
    * Reads the status of a ticket this session owns.
@@ -312,7 +312,7 @@ final class McpImageTools {
     result.put("expiresAt", ticket.getExpiresAt().toString());
     if (completed && ticket.getImageId() != null) {
       result.put("imageId", ticket.getImageId());
-      result.put(McpConstants.KEY_HINT, "Write this imageId to the image field with neo_update.");
+      result.put(McpConstants.KEY_HINT, "Write this imageId to the image field with etendo_update.");
     } else {
       result.put(KEY_UPLOAD_URL, buildUploadUrl(token));
       result.put(McpConstants.KEY_HINT,

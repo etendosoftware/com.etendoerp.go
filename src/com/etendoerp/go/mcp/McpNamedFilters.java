@@ -26,7 +26,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * Pure (DAL-free) parser for the per-entity <b>named filters</b> that {@code neo_list} exposes as
+ * Pure (DAL-free) parser for the per-entity <b>named filters</b> that {@code etendo_list} exposes as
  * {@code {status: "<name>"}} business queries (ETP-4601).
  *
  * <p>Named filters are hand-authored in {@code decisions.json} per Schema Forge spec, carried through
@@ -109,6 +109,23 @@ final class McpNamedFilters {
       }
     }
     return out;
+  }
+
+  /**
+   * Named business filters (ETP-4601): advertise the spec's hand-authored status filters, each
+   * keyed by name, so the agent can discover them instead of guessing. Only the
+   * name/label/description are exposed — the HQL where fragment stays server-side. Nothing is
+   * added when the entity declares none.
+   *
+   * @param entitySchema the {@code etendo_schema} full response being built
+   * @param json         the entity's {@code NAMED_FILTERS} JSON, may be {@code null}
+   * @throws JSONException if the descriptors cannot be added
+   */
+  static void publishInto(JSONObject entitySchema, String json) throws JSONException {
+    JSONArray namedFilters = describe(json);
+    if (namedFilters.length() > 0) {
+      entitySchema.put("namedFilters", namedFilters);
+    }
   }
 
   /**

@@ -159,7 +159,7 @@ public class NeoImageUploadTickets {
      *
      * <p>Two callers rely on it. {@link NeoImageUploadTickets#issue} counts only a session's own
      * pending tickets against {@link NeoImageUploadTickets#MAX_PENDING_PER_SESSION}, and the
-     * {@code neo_get_image_upload} status lookup filters {@link NeoImageUploadTickets#peek} through
+     * {@code etendo_get_image_upload} status lookup filters {@link NeoImageUploadTickets#peek} through
      * it, so one session cannot observe another's upload by guessing a token. All three identifiers
      * must match, compared with {@link java.util.Objects#equals} (so {@code null} equals
      * {@code null}).

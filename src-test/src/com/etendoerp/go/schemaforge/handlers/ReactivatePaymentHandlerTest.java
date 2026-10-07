@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -30,6 +31,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.Savepoint;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -42,14 +46,25 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
@@ -57,10 +72,15 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentPropDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.PisDeferredPaymentService;
+import com.etendoerp.go.schemaforge.ReconciliationHandler;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
 /**
@@ -72,8 +92,24 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * behavior is pre-existing and only re-verified at the {@code @Named} qualifier level here.
  * The Remove action ({@code eTPRRemovePayment}) is fully covered below — it is the new
  * behavior fixing the "cannot be deleted, see Linked Items" FK violation on applied payments.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandler
  */
 public class ReactivatePaymentHandlerTest {
+
+  /**
+   * The tenant re-check reads the thread's {@link OBContext}; a context another test class left on
+   * the shared worker thread made every own payment look foreign (404). Start and end clean.
+   */
+  @Before
+  public void clearContextBefore() {
+    OBContext.setOBContext((OBContext) null);
+  }
+
+  @After
+  public void clearContextAfter() {
+    OBContext.setOBContext((OBContext) null);
+  }
 
   private static NeoContext getCtx(String recordId, String method) {
     return NeoContext.builder()
@@ -1297,6 +1333,589 @@ public class ReactivatePaymentHandlerTest {
       new ReactivatePaymentHandler().handle(actionCtx("etprReactivatePayment", "pay-ok"));
 
       verify(payment, never()).setStatus(anyString());
+    }
+  }
+
+  // ── ETP-5558 (a1a863f83): the handler re-checks the payment belongs to the tenant ──
+
+  /**
+   * Runs {@code fieldName} on another tenant's ETGOERR-flagged payment, called on the handler
+   * directly — as if the action path's guard had been bypassed. The caller keeps the
+   * {@link NeoButtonActionHelper} and {@link PaymentRemovalUtil} static mocks open around it.
+   */
+  private static NeoResponse runOnForeignPayment(String fieldName, FIN_Payment[] paymentOut,
+      OBDal[] dalOut) {
+    Client other = mock(Client.class);
+    when(other.getId()).thenReturn("client-other");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getClient()).thenReturn(other);
+    when(payment.getStatus()).thenReturn("ETGOERR");
+    paymentOut[0] = payment;
+
+    try (MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<FIN_Utility> util = Mockito.mockStatic(FIN_Utility.class)) {
+      OBDal instance = mock(OBDal.class);
+      dalOut[0] = instance;
+      dal.when(OBDal::getInstance).thenReturn(instance);
+      OBContext session = mock(OBContext.class);
+      when(session.getReadableClients()).thenReturn(new String[] { "client-own" });
+      when(session.getReadableOrganizations()).thenReturn(new String[] { "org-own" });
+      ctx.when(OBContext::getOBContext).thenReturn(session);
+      when(instance.get(FIN_Payment.class, "pay-foreign")).thenReturn(payment);
+      util.when(() -> FIN_Utility.invoicePaymentStatus(payment)).thenReturn("PPM");
+      return new ReactivatePaymentHandler().handle(actionCtx(fieldName, "pay-foreign"));
+    }
+  }
+
+  private static void assertForeignPaymentRefused(String fieldName) {
+    FIN_Payment[] payment = new FIN_Payment[1];
+    OBDal[] dal = new OBDal[1];
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class)) {
+      NeoResponse result = runOnForeignPayment(fieldName, payment, dal);
+
+      assertEquals(fieldName, 404, result.getHttpStatus());
+      try {
+        assertEquals("Payment not found: pay-foreign",
+            result.getBody().getJSONObject("error").getString("message"));
+      } catch (JSONException e) {
+        throw new AssertionError(e);
+      }
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any()), never());
+      removal.verifyNoInteractions();
+      verify(payment[0], never()).setStatus(anyString());
+      verify(dal[0], never()).save(Mockito.any());
+    }
+  }
+
+  @Test
+  public void reactivateRefusesAnotherTenantsPayment() {
+    // Also covers clearTransferErrorFlag: the ETGOERR flag of a foreign payment is never cleared.
+    assertForeignPaymentRefused("etprReactivatePayment");
+  }
+
+  @Test
+  public void confirmRefusesAnotherTenantsPayment() {
+    assertForeignPaymentRefused("aPRMProcessPayment");
+  }
+
+  @Test
+  public void removeRefusesAnotherTenantsPayment() {
+    assertForeignPaymentRefused("eTPRRemovePayment");
+  }
+
+  // ── ETP-5558: an agent's Eliminar gets the UI's gate (RPVOID, pisLocked) ──
+
+  private static NeoContext mcpRemoveCtx(String recordId) {
+    return NeoContext.builder()
+        .specName("payment-in")
+        .entityName("finPayment")
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("eTPRRemovePayment")
+        .recordId(recordId)
+        .mcpOrigin(true)
+        .build();
+  }
+
+  /** A processed payment of the tenant, with no details, in {@code status}. */
+  private static FIN_Payment processedPayment(String id, String status) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn(id);
+    when(payment.getStatus()).thenReturn(status);
+    when(payment.isProcessed()).thenReturn(true);
+    when(payment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
+    return payment;
+  }
+
+  /**
+   * Runs Eliminar on {@code payment} with {@code withTransfer} as the payments that have a bank
+   * transfer; the predicate itself ({@code isLifecycleLockedByTransfer}) is the real one.
+   */
+  private static NeoResponse runRemove(NeoContext ctx, FIN_Payment payment,
+      Set<String> withTransfer, MockedStatic<PaymentRemovalUtil> removal,
+      MockedStatic<PisDeferredPaymentService> pis) {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, payment.getId())).thenReturn(payment);
+      pis.when(() -> PisDeferredPaymentService.paymentsWithBankTransfer(Mockito.anyCollection()))
+          .thenReturn(withTransfer);
+      removal.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
+          .thenReturn(Collections.emptySet());
+      return new ReactivatePaymentHandler().handle(ctx);
+    }
+  }
+
+  private static String errorMessage(NeoResponse response) throws JSONException {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  @Test
+  public void mcpRemoveRefusesVoidPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-void", "RPVOID");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-void"), payment, Set.of(), removal, pis);
+
+      assertEquals(422, result.getHttpStatus());
+      assertTrue(errorMessage(result).contains("RPVOID"));
+      removal.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void mcpRemoveRefusesPaymentLockedByItsBankTransfer() throws Exception {
+    FIN_Payment payment = processedPayment("pay-pis", "RPPC");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-pis"), payment, Set.of("pay-pis"),
+          removal, pis);
+
+      assertEquals(422, result.getHttpStatus());
+      assertTrue(errorMessage(result).contains("pisLocked"));
+      removal.verifyNoInteractions();
+      pis.verify(() -> PisDeferredPaymentService.paymentsWithBankTransfer(Set.of("pay-pis")));
+    }
+  }
+
+  /** The transfer the bank refused (ETGOERR) is not a lock, exactly as {@code pisLocked} says. */
+  @Test
+  public void mcpRemoveProceedsOnPaymentWhoseTransferWasRejected() throws Exception {
+    FIN_Payment payment = processedPayment("pay-err", "ETGOERR");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-err"), payment, Set.of("pay-err"),
+          removal, pis);
+
+      assertEquals(200, result.getHttpStatus());
+      removal.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /** A processed payment of the tenant is reactivated and removed, as the UI's trash icon does. */
+  @Test
+  public void mcpRemoveReactivatesAndRemovesProcessedPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-ok", "RPPC");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(mcpRemoveCtx("pay-ok"), payment, Set.of(), removal, pis);
+
+      assertEquals(200, result.getHttpStatus());
+      removal.verify(() -> PaymentRemovalUtil.reactivate("pay-ok", "R"));
+      removal.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /** REST keeps its behaviour: the SPA withholds the button, the handler does not gate it. */
+  @Test
+  public void restRemoveIsNotGatedOnVoidOrLockedPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-void", "RPVOID");
+    try (MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      NeoResponse result = runRemove(removeActionCtx("pay-void"), payment, Set.of("pay-void"),
+          removal, pis);
+
+      assertEquals(200, result.getHttpStatus());
+      removal.verify(() -> PaymentRemovalUtil.remove(payment));
+      pis.verify(() -> PisDeferredPaymentService.paymentsWithBankTransfer(
+          Mockito.anyCollection()), never());
+    }
+  }
+
+  // ── ETP-5558: an action named by its DB column reaches the same branch ──
+  //
+  // etendo_schema publishes each button as {name: <property>, action: <DB column>}, and the button
+  // lookup accepts either spelling. Matched on the property name alone, the column spelling skipped
+  // this handler: Reactivate ran without action=RE and Eliminar without the agent's gate.
+
+  private static final String ENTITY_ID = "entity-payment";
+
+  /** An ACTION context carrying the SF entity, as the action path builds it. */
+  private static NeoContext buttonCtx(String fieldName, String recordId, boolean mcpOrigin) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getId()).thenReturn(ENTITY_ID);
+    return NeoContext.builder()
+        .specName("payment-in")
+        .entityName("finPayment")
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName(fieldName)
+        .recordId(recordId)
+        .sfEntity(entity)
+        .mcpOrigin(mcpOrigin)
+        .build();
+  }
+
+  /** Makes {@code columnName} resolve to the button whose DAL property is {@code propertyName}. */
+  private static void stubButton(MockedStatic<NeoButtonActionHelper> buttons,
+      MockedStatic<ModelProvider> models, String columnName, String propertyName) {
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("FIN_Payment");
+    Column column = mock(Column.class);
+    when(column.getTable()).thenReturn(table);
+    when(column.getDBColumnName()).thenReturn(columnName);
+    buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, columnName))
+        .thenReturn(column);
+
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(propertyName);
+    Entity dal = mock(Entity.class);
+    when(dal.getPropertyByColumnName(columnName)).thenReturn(property);
+    ModelProvider provider = mock(ModelProvider.class);
+    when(provider.getEntityByTableName("FIN_Payment")).thenReturn(dal);
+    models.when(ModelProvider::getInstance).thenReturn(provider);
+  }
+
+  /**
+   * Runs {@code columnName} on an own payment and returns the parameters the handler passed on to
+   * the button, which must still be called by the name the caller used.
+   */
+  private static JSONObject paramsSentForColumn(String columnName, String propertyName) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getStatus()).thenReturn("RPAP");
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctx = Mockito.mockStatic(OBContext.class)) {
+      stubButton(buttons, models, columnName, propertyName);
+      OBDal instance = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(instance);
+      when(instance.get(FIN_Payment.class, "pay-1")).thenReturn(payment);
+      buttons.when(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any())).thenReturn(NeoResponse.ok(new JSONObject()));
+
+      NeoResponse result = new ReactivatePaymentHandler()
+          .handle(buttonCtx(columnName, "pay-1", true));
+
+      assertNotNull(result);
+      ArgumentCaptor<JSONObject> params = ArgumentCaptor.forClass(JSONObject.class);
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          Mockito.eq("pay-1"), Mockito.eq(columnName), params.capture()));
+      return params.getValue();
+    }
+  }
+
+  @Test
+  public void reactivateByColumnNameInjectsActionRe() throws JSONException {
+    JSONObject params = paramsSentForColumn("EM_Etpr_Reactivate_Payment", "etprReactivatePayment");
+
+    assertEquals("RE", params.getString("action"));
+  }
+
+  @Test
+  public void confirmByColumnNameInjectsActionP() throws JSONException {
+    JSONObject params = paramsSentForColumn("EM_APRM_Process_Payment", "aPRMProcessPayment");
+
+    assertEquals("P", params.getString("action"));
+    assertEquals("pay-1", params.getString("Fin_Payment_ID"));
+  }
+
+  /** The lowercase column spelling no longer bypasses the agent's refusal on a void payment. */
+  @Test
+  public void mcpRemoveByColumnNameRefusesVoidPayment() throws Exception {
+    FIN_Payment payment = processedPayment("pay-void", "RPVOID");
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<PaymentRemovalUtil> removal = Mockito.mockStatic(PaymentRemovalUtil.class);
+        MockedStatic<PisDeferredPaymentService> pis = Mockito.mockStatic(
+            PisDeferredPaymentService.class, Mockito.CALLS_REAL_METHODS)) {
+      stubButton(buttons, models, "em_etpr_remove_payment", "eTPRRemovePayment");
+
+      NeoResponse result = runRemove(buttonCtx("em_etpr_remove_payment", "pay-void", true),
+          payment, Set.of(), removal, pis);
+
+      assertEquals(422, result.getHttpStatus());
+      assertTrue(errorMessage(result).contains("RPVOID"));
+      removal.verifyNoInteractions();
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any()), never());
+    }
+  }
+
+  /** A name that is no button of the entity leaves the request to the default path, as before. */
+  @Test
+  public void unknownActionWithEntityIsLeftToDefaultPath() {
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+      buttons.when(() -> NeoButtonActionHelper.findButtonColumn(ENTITY_ID, "somethingElse"))
+          .thenReturn(null);
+
+      assertNull(new ReactivatePaymentHandler()
+          .handle(buttonCtx("somethingElse", "pay-1", true)));
+    }
+  }
+
+  /** A button this handler does not own, named by its column, is left to the default path too. */
+  @Test
+  public void otherButtonByColumnNameIsLeftToDefaultPath() {
+    try (MockedStatic<NeoButtonActionHelper> buttons =
+             Mockito.mockStatic(NeoButtonActionHelper.class);
+        MockedStatic<ModelProvider> models = Mockito.mockStatic(ModelProvider.class)) {
+      stubButton(buttons, models, "Posted", "posted");
+
+      assertNull(new ReactivatePaymentHandler().handle(buttonCtx("Posted", "pay-1", true)));
+      buttons.verify(() -> NeoButtonActionHelper.executeButtonActionCore(Mockito.any(),
+          anyString(), anyString(), Mockito.any()), never());
+    }
+  }
+  // ── ETP-5547: Reactivate of a reconciled (RPPC) payment ──────────────────────────────────
+
+  private static final String REACTIVATE_ACTION = "etprReactivatePayment";
+  private static final String NORMALIZE_METHOD = "normalizeReactivatedMatchGroup";
+  private static final String ETP5547_PAYMENT = "pay-5547";
+  private static final String ETP5547_LINE = "bsl-5547";
+  private static final String STATUS_RECONCILED = "RPPC";
+  private static final String STATUS_WITHDRAWN_NOT_CLEARED = "PWNC";
+
+  /**
+   * A stateful payment / transaction / bank-statement-line triple. The delegated reactivation
+   * ({@code NeoButtonActionHelper.executeButtonActionCore}, statically mocked) flips
+   * {@link #reactivated} when it succeeds, and the mocks answer from that flag the way the
+   * database would afterwards: the payment is no longer processed, its transaction no longer
+   * belongs to a reconciliation, and the statement line lost its transaction pointer.
+   */
+  private static final class ReactivateScenario {
+    final FIN_Payment payment = mock(FIN_Payment.class);
+    final FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    final FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    final OBDal dal = mock(OBDal.class);
+    final Connection conn = mock(Connection.class);
+    final Savepoint savepoint = mock(Savepoint.class);
+    final org.hibernate.Session session = mock(org.hibernate.Session.class);
+    final PreparedStatement statusPs = mock(PreparedStatement.class);
+    final OBContext obContext = mock(OBContext.class);
+    final org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+    boolean reactivated;
+    String status;
+    String statusAtDelegation;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ReactivateScenario wireScenario(MockedStatic<OBDal> obDalMock,
+      MockedStatic<OBContext> ctxMock, MockedStatic<NeoButtonActionHelper> actionMock,
+      String initialStatus, boolean reconciled, boolean reactivationSucceeds) throws Exception {
+    ReactivateScenario sc = new ReactivateScenario();
+    sc.status = initialStatus;
+    obDalMock.when(OBDal::getInstance).thenReturn(sc.dal);
+    // ReconciledPaymentReactivation.writeStatus: raw JDBC UPDATE of fin_payment.status, stamped
+    // with the context user, then mirrored onto the entity (setStatus below keeps sc.status).
+    ctxMock.when(OBContext::getOBContext).thenReturn(sc.obContext);
+    when(sc.obContext.getUser()).thenReturn(sc.user);
+    when(sc.user.getId()).thenReturn("user-5547");
+    when(sc.conn.prepareStatement(anyString())).thenReturn(sc.statusPs);
+    when(sc.dal.getConnection()).thenReturn(sc.conn);
+    when(sc.dal.getSession()).thenReturn(sc.session);
+    when(sc.conn.setSavepoint()).thenReturn(sc.savepoint);
+
+    when(sc.payment.getId()).thenReturn(ETP5547_PAYMENT);
+    // ETP-5558: the handler re-checks the payment is the tenant's before reactivating it.
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-5547");
+    when(sc.payment.getClient()).thenReturn(client);
+    when(sc.obContext.getReadableClients()).thenReturn(new String[] { "client-5547" });
+    when(sc.payment.getStatus()).thenAnswer(inv -> sc.status);
+    Mockito.doAnswer(inv -> {
+      sc.status = inv.getArgument(0);
+      return null;
+    }).when(sc.payment).setStatus(anyString());
+    when(sc.payment.isProcessed()).thenAnswer(inv -> !sc.reactivated);
+    when(sc.dal.get(FIN_Payment.class, ETP5547_PAYMENT)).thenReturn(sc.payment);
+
+    when(sc.trx.getFinPayment()).thenReturn(sc.payment);
+    when(sc.trx.getReconciliation()).thenAnswer(
+        inv -> reconciled && !sc.reactivated ? mock(FIN_Reconciliation.class) : null);
+    List<FIN_BankStatementLine> lines = reconciled
+        ? Collections.singletonList(sc.line)
+        : Collections.<FIN_BankStatementLine>emptyList();
+    when(sc.trx.getFINBankStatementLineList()).thenReturn(lines);
+    when(sc.payment.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(sc.trx));
+
+    // Criteria restrictions are not evaluated by a mock: answer as the DB would for
+    // "this payment's transaction that belongs to a reconciliation".
+    OBCriteria<FIN_FinaccTransaction> trxCrit = mock(OBCriteria.class, Mockito.RETURNS_SELF);
+    when(trxCrit.uniqueResult()).thenAnswer(
+        inv -> reconciled && !sc.reactivated ? sc.trx : null);
+    when(trxCrit.list()).thenAnswer(inv -> reconciled && !sc.reactivated
+        ? Collections.singletonList(sc.trx)
+        : Collections.emptyList());
+    when(sc.dal.createCriteria(FIN_FinaccTransaction.class)).thenReturn(trxCrit);
+
+    when(sc.line.getId()).thenReturn(ETP5547_LINE);
+    when(sc.line.getFinancialAccountTransaction()).thenAnswer(
+        inv -> reconciled && !sc.reactivated ? sc.trx : null);
+    when(sc.dal.get(FIN_BankStatementLine.class, ETP5547_LINE)).thenReturn(sc.line);
+
+    actionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+        any(), anyString(), anyString(), any())).thenAnswer(inv -> {
+          sc.statusAtDelegation = sc.status;
+          if (!reactivationSucceeds) {
+            return NeoResponse.error(500, "Process failed");
+          }
+          sc.reactivated = true;
+          return NeoResponse.ok(new JSONObject());
+        });
+    return sc;
+  }
+
+  /** Did any constructed ReconciliationHandler get asked to normalize {@code line}? */
+  private static boolean normalized(MockedConstruction<ReconciliationHandler> handlers,
+      FIN_BankStatementLine line) {
+    return handlers.constructed().stream()
+        .flatMap(h -> Mockito.mockingDetails(h).getInvocations().stream())
+        .anyMatch(inv -> NORMALIZE_METHOD.equals(inv.getMethod().getName())
+            && inv.getArguments().length == 1 && inv.getArguments()[0] == line);
+  }
+
+  /** Did any constructed ReconciliationHandler get asked to normalize anything at all? */
+  private static boolean normalizedAnything(MockedConstruction<ReconciliationHandler> handlers) {
+    return handlers.constructed().stream()
+        .flatMap(h -> Mockito.mockingDetails(h).getInvocations().stream())
+        .anyMatch(inv -> NORMALIZE_METHOD.equals(inv.getMethod().getName()));
+  }
+
+  /**
+   * Classic's un-match ({@code APRM_MatchingUtility.unmatch}) leaves the bank statement line
+   * clean and re-joins lines Core split for a 1:N match. GO's Reactivate of a reconciled payment
+   * left the line fragmented and still flagged as matched. After a successful reactivate the line
+   * loses its matching leftovers and goes through
+   * {@code ReconciliationHandler.normalizeReactivatedMatchGroup}.
+   */
+  @Test
+  public void testReactivateOfReconciledPaymentNormalizesItsBankStatementLine() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, true);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertNotNull(result);
+      assertTrue("a successful reactivate must stay successful", result.getHttpStatus() < 300);
+      assertTrue("the matched bank statement line must be normalized after the reactivate",
+          normalized(reconHandlers, sc.line));
+      verify(sc.line).setMatchingtype(null);
+      verify(sc.line).setMatchedDocument(null);
+    }
+  }
+
+  /**
+   * Core restores the invoice's paid amounts only when the payment's status matches its method's
+   * paid level. For an RDNC/PWNC method an RPPC payment never matched, so it returned to draft
+   * while its invoice still read as paid. Like Core's unmatch, the payment must be moved to that
+   * level BEFORE the reactivation runs.
+   */
+  @Test
+  public void testReactivateOfReconciledPaymentAlignsStatusBeforeDelegating() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, true);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+
+      new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertEquals(STATUS_WITHDRAWN_NOT_CLEARED, sc.statusAtDelegation);
+    }
+  }
+
+  /** A payment that was never reconciled has no bank statement line to clean up. */
+  @Test
+  public void testReactivateOfNonReconciledPaymentDoesNotNormalizeAnyLine() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc =
+          wireScenario(obDalMock, ctxMock, actionMock, STATUS_WITHDRAWN_NOT_CLEARED, false, true);
+
+      new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertFalse(normalizedAnything(reconHandlers));
+      verify(sc.payment, never()).setStatus(anyString());
+      verify(sc.line, never()).setMatchingtype(Mockito.<String>any());
+    }
+  }
+
+  /**
+   * A reactivate that answers an error (no exception) must leave a reconciled payment as it was:
+   * the line untouched and the status back to RPPC, not stuck at the "not cleared" level it was
+   * moved to beforehand. This goes through {@code finish}, which sees the payment still processed.
+   */
+  @Test
+  public void testFailedReactivateOfReconciledPaymentLeavesItReconciled() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, false);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertNotNull(result);
+      assertTrue(result.getHttpStatus() >= 400);
+      assertFalse(normalizedAnything(reconHandlers));
+      assertEquals(STATUS_RECONCILED, sc.status);
+    }
+  }
+
+  /**
+   * The delegated reactivate THROWS: the handler answers 500 and goes through
+   * {@code finishAfterFailure} — the aborted transaction is rolled back first, then the status
+   * prepare applied is written back to RPPC; the statement line is never touched.
+   */
+  @Test
+  public void testThrowingReactivateOfReconciledPaymentRollsBackAndLeavesItReconciled()
+      throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<FIN_Utility> utilMock = Mockito.mockStatic(FIN_Utility.class);
+         MockedStatic<NeoButtonActionHelper> actionMock = Mockito.mockStatic(NeoButtonActionHelper.class);
+         MockedConstruction<ReconciliationHandler> reconHandlers =
+             Mockito.mockConstruction(ReconciliationHandler.class)) {
+      ReactivateScenario sc = wireScenario(obDalMock, ctxMock, actionMock, STATUS_RECONCILED, true, false);
+      utilMock.when(() -> FIN_Utility.invoicePaymentStatus(sc.payment))
+          .thenReturn(STATUS_WITHDRAWN_NOT_CLEARED);
+      actionMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+          any(), anyString(), anyString(), any()))
+          .thenThrow(new IllegalStateException("process blew up"));
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(actionCtx(REACTIVATE_ACTION, ETP5547_PAYMENT));
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+      verify(sc.dal).rollbackAndClose();
+      assertEquals(STATUS_RECONCILED, sc.status);
+      assertFalse(normalizedAnything(reconHandlers));
+      verify(sc.line, never()).setMatchingtype(Mockito.<String>any());
     }
   }
 

@@ -40,11 +40,11 @@ import org.openbravo.model.ad.ui.Tab;
  * IMP-45 — a callout that was held back by ETP-4784's protected-fields rule now says so.
  *
  * <h2>The failure being reported</h2>
- * <p>{@code neo_defaults} tells an agent to use its result as the starting point for
- * {@code neo_create}, and {@code neo_create} repeats the advice. Follow it literally and every
+ * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
+ * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
  * value handed over becomes a value the caller <em>sent</em>, which ETP-4784 protects from being
  * recomputed by a callout that knows the record's real context. The measured case:
- * {@code neo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no business
+ * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no business
  * partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} — the agent
  * has pinned the wrong one and the 201 says nothing.</p>
  *
@@ -54,6 +54,9 @@ import org.openbravo.model.ad.ui.Tab;
  * re-proposing the value already on the record, or on an {@code $_identifier} companion of a field
  * already reported under its own name, is noise the agent must learn to ignore, and then it will
  * ignore the real one too. Hence the no-false-positive cases here outnumber the positive one.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsService
  */
 @DisplayName("IMP-45 — supersededDefaults is recorded where the callout is held back")
 class NeoSupersededDefaultsTest {
@@ -238,7 +241,7 @@ class NeoSupersededDefaultsTest {
   /**
    * <b>The REST path must not read it, and that is a decision rather than an oversight.</b> There
    * the protected value came from a form a person filled in, so there is nothing to warn about;
-   * the MCP path is the one that invites an agent to re-send what {@code neo_defaults} handed it.
+   * the MCP path is the one that invites an agent to re-send what {@code etendo_defaults} handed it.
    * A reader added in {@code NeoCrudHandler} would put an agent-facing diagnostic into every React
    * create response.
    */

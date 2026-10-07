@@ -62,7 +62,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * Unit tests for {@link BankStatementAgentActions} (ETP-5469, ETP-5447) — the {@code neo_action}
+ * Unit tests for {@link BankStatementAgentActions} (ETP-5469, ETP-5447) — the {@code etendo_action}
  * surface of {@code bank-statements} — and the ACTION branch of {@link BankStatementsHandler#handle}
  * (the per-contract details and the flush loop: {@code BankStatementAgentActionsContractTest}):
  *
@@ -79,6 +79,8 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  *
  * <p>The nine handler methods are stubbed on a spy, so no DAL is needed; {@code OBDal} is mocked
  * statically only for the flush.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.BankStatementAgentActions
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("BankStatementAgentActions (ETP-5469, ETP-5447)")

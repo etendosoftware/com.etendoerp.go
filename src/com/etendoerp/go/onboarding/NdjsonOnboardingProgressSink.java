@@ -96,6 +96,9 @@ public class NdjsonOnboardingProgressSink implements OnboardingProgressSink {
       result.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
+      if (writer instanceof OnboardingStreamWriter) {
+        ((OnboardingStreamWriter) writer).recordResult(success, message, code);
+      }
       // The final result line is what the UI waits for. If the flush failed the client
       // never received it (broken pipe swallowed by PrintWriter) — the UI will report a
       // false failure even though the backend finished. Make that explicit.

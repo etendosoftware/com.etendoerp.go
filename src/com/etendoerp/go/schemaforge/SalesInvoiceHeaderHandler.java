@@ -20,7 +20,12 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Collections;
+import java.util.List;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -32,6 +37,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
@@ -61,6 +67,9 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentHandler}</li>
  *   <li>{@code Em_Aeatsii_Send} → {@link SiiSendHandler}</li>
  *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
+ *   <li>{@code createShipment} → {@link FollowUpActionHandler} with a {@link FollowUpFlow} of
+ *       {@link InvoicePendingResolver} + {@link InOutFollowUpCreator} ({@code SALES}): the draft
+ *       goods shipment for the still-pending quantities (ETP-5576)</li>
  * </ul>
  */
 @Named("salesInvoiceHeaderHandler")
@@ -86,9 +95,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   private TotalDiscountService totalDiscountService;
 
   @Inject
-  private CreateInvoiceShipmentHandler createInvoiceShipmentHandler;
-
-  @Inject
   private DocumentPostingService postingService;
 
   @Inject
@@ -97,6 +103,25 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
+  }
+
+  /**
+   * The actions this header serves through its delegates, declared for agents (ETP-5558): the
+   * invoice payment actions and {@code currencyOptions}. Published by the MCP next to the AD
+   * buttons; REST and the SPA do not read it.
+   */
+  @Override
+  public Map<String, NeoActionContract> actionContracts() {
+    Map<String, NeoActionContract> contracts =
+        new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(true));
+    contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
+    return contracts;
+  }
+
+  /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
+  @Override
+  public Set<String> agentExcludedActions() {
+    return PaymentActionHandlerSupport.AGENT_EXCLUDED_ACTIONS;
   }
 
   @Override
@@ -134,7 +159,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       }
     }
     return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
-        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, createInvoiceShipmentHandler);
+        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, followUp.actionHandler());
   }
 
   /**
@@ -196,6 +221,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         // is payable), and forcing it negative made the grid contradict the detail page.
         applyTotalDiscountToRecord(rec);
       }
+      // ETP-5576: followUp.{available, <key>}, one batch query per flow per page.
+      followUp.annotate(dataArr);
       if (context.getRecordId() != null) {
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
@@ -298,11 +325,25 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     return totalDiscountService;
   }
 
+  /** {@inheritDoc} A sales invoice is followed by a goods shipment (ETP-5576). */
+  @Override
+  protected List<FollowUpFlow> followUpFlows() {
+    return Collections.singletonList(FollowUpFlow.of(FollowUpTarget.GOODS_SHIPMENT,
+        new InvoicePendingResolver(InOutTargetBuilder.Direction.SALES,
+            this::isStandardInvoiceDocType),
+        new InOutFollowUpCreator(InOutTargetBuilder.Direction.SALES, InvoiceInOutMapping::map,
+            InvoiceInOutMapping.linker(InOutTargetBuilder.Direction.SALES))));
+  }
+
   /**
-   * Injects {@code linkedShipments} into the invoice detail record.
-   * Finds all sales shipments (M_InOut) whose lines are referenced by the invoice's
-   * C_InvoiceLine.M_InOutLine_ID. Covers invoices created directly from a shipment
-   * (standalone or via-order), where the native process always populates M_InOutLine_ID.
+   * Injects {@code linkedShipments} into the invoice detail record: every sales goods movement
+   * (M_InOut) linked to one of the invoice's lines.
+   *
+   * <p>"Linked" is {@link InOutInvoiceLinks#linkedInOutLineIdsSql}: the
+   * {@code C_InvoiceLine.M_InOutLine_ID} column, the {@code M_MatchSI} match table, and the
+   * pre-existing order-line fallback for invoice lines without a direct link. Before ETP-5576
+   * the match table was not read, so the second and later partial shipments of an invoice line —
+   * which the column cannot hold — never showed up.
    *
    * <p>Joins C_DocType to expose {@code isReturn}, the actual discriminator between a
    * regular delivery and a customer return: M_InOut.MovementType is NOT usable for this
@@ -310,23 +351,20 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    * (shipments AND returns alike) or 'V+' for purchase-side, never branching on
    * C_DocType.IsReturn. ETP-4534.</p>
    */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedShipments(JSONObject rec, String invoiceId) {
     String sql =
         "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype, dt.isreturn " +
-        "FROM c_invoiceline il " +
-        "JOIN m_inoutline iol ON (" +
-        "  iol.m_inoutline_id = il.m_inoutline_id " +
-        "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)" +
-        ") " +
+        "FROM (" + InOutInvoiceLinks.linkedInOutLineIdsSql(InOutInvoiceLinks.MatchTable.SALES) + ") lk " +
+        "JOIN m_inoutline iol ON iol.m_inoutline_id = lk.m_inoutline_id " +
         "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id " +
         "JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id " +
-        "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' " +
-        "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') " +
+        "WHERE io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') " +
         "  AND io.issotrx = 'Y'";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, invoiceId, InOutInvoiceLinks.LINKED_INOUT_LINES_PARAMS);
       JSONArray shipments = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

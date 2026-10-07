@@ -413,7 +413,7 @@ public class ReconciliationHandler implements NeoHandler {
           + " ORDER BY inv.dateinvoiced ASC, inv.documentno ASC";
 
   /**
-   * The actions an agent can run through {@code neo_action} (ETP-5468) — see
+   * The actions an agent can run through {@code etendo_action} (ETP-5468) — see
    * {@link ReconciliationAgentActions}. Declaring them also makes {@link #servesActions()} true.
    */
   @Override
@@ -423,7 +423,7 @@ public class ReconciliationHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    // ETP-5468: purely additive. Only neo_action produces an ACTION context for this spec; the
+    // ETP-5468: purely additive. Only etendo_action produces an ACTION context for this spec; the
     // SPA's ?action= calls arrive as report-spec requests with no endpoint type and never enter
     // this branch, so their routing below is untouched.
     if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {

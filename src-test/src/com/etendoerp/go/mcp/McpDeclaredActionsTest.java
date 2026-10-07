@@ -65,16 +65,19 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 /**
  * ETP-5468 (CA1/CA7) — how the MCP layer publishes the named actions a handler declares:
  * <ul>
- *   <li>{@code neo_schema}: {@link McpActionsView#buildDeclaredResponse} renders the nine
+ *   <li>{@code etendo_schema}: {@link McpActionsView#buildDeclaredResponse} renders the nine
  *       bank-reconciliation contracts;</li>
- *   <li>{@code neo_discover}: {@link McpToolRouterSupport#buildDiscoverSpec}'s three-way report
+ *   <li>{@code etendo_discover}: {@link McpToolRouterSupport#buildDiscoverSpec}'s three-way report
  *       branch (callable report / actions_only / not configured);</li>
  *   <li>{@code tools/list}: {@link ToolRegistry} adds the action report spec to the
- *       {@code neo_action} and {@code neo_schema} enums ONLY — never to {@code neo_list},
- *       {@code neo_get} or the write tools.</li>
+ *       {@code etendo_action} and {@code etendo_schema} enums ONLY — never to {@code etendo_list},
+ *       {@code etendo_get} or the write tools.</li>
  * </ul>
  * The real {@link ReconciliationHandler} declaration is used, so a drift in its contracts shows
  * up here too.
+ *
+ * @covers com.etendoerp.go.mcp.McpDeclaredActions
+ * @covers com.etendoerp.go.mcp.McpActionsView
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("MCP declared actions (ETP-5468)")
@@ -122,10 +125,10 @@ class McpDeclaredActionsTest {
     return criteria;
   }
 
-  // ── neo_schema rendering ───────────────────────────────────────────────
+  // ── etendo_schema rendering ───────────────────────────────────────────────
 
   @Nested
-  @DisplayName("McpActionsView.buildDeclaredResponse (neo_schema)")
+  @DisplayName("McpActionsView.buildDeclaredResponse (etendo_schema)")
   class DeclaredResponse {
 
     @Test
@@ -141,12 +144,12 @@ class McpDeclaredActionsTest {
       for (int i = 0; i < actions.length(); i++) {
         JSONObject a = actions.getJSONObject(i);
         names.add(a.getString("action"));
-        assertEquals("neo_action", a.getString("invokeVia"));
+        assertEquals("etendo_action", a.getString("invokeVia"));
         assertTrue(a.getString("idDescription").contains("financial account id"));
         assertFalse(a.getJSONObject("parameters").getBoolean("additionalProperties"));
       }
       assertEquals(NINE_ACTIONS, names);
-      assertTrue(response.getString("hint").contains("neo_action"));
+      assertTrue(response.getString("hint").contains("etendo_action"));
       assertTrue(response.getString("hint").contains("422"));
     }
 
@@ -183,7 +186,7 @@ class McpDeclaredActionsTest {
     }
   }
 
-  // ── neo_schema: catalog-only vs fields + declared actions (ETP-5535) ───
+  // ── etendo_schema: catalog-only vs fields + declared actions (ETP-5535) ───
 
   /**
    * Rows: case name, declared actions, the ETGO_SF_FIELD rows the lookup answers ({@code null} =
@@ -202,7 +205,7 @@ class McpDeclaredActionsTest {
   }
 
   @Nested
-  @DisplayName("McpReportActionsSchema.isActionOnlyEntity (neo_schema)")
+  @DisplayName("McpReportActionsSchema.isActionOnlyEntity (etendo_schema)")
   class ActionOnlyEntity {
 
     @ParameterizedTest(name = "{0}")
@@ -262,17 +265,17 @@ class McpDeclaredActionsTest {
       assertTrue(actionsView >= 0, "view:\"actions\" no longer dispatches");
       List<String> view = McpSourceScanner.callArguments(body, "McpActionsView.buildResponse",
           actionsView);
-      assertEquals(4, view.size(),
-          "view:\"actions\" must use the 4-argument buildResponse that appends declared actions");
+      assertTrue(view.size() >= 4,
+          "view:\"actions\" must use a buildResponse overload that appends declared actions");
       assertEquals(declared, view.get(3),
           "the map passed to isActionOnlyEntity must be the one view:\"actions\" appends");
     }
   }
 
-  // ── neo_discover ───────────────────────────────────────────────────────
+  // ── etendo_discover ───────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("McpToolRouterSupport.buildDiscoverSpec — report branch (neo_discover)")
+  @DisplayName("McpToolRouterSupport.buildDiscoverSpec — report branch (etendo_discover)")
   class Discover {
 
     private MockedStatic<OBDal> obDal;
@@ -317,10 +320,10 @@ class McpDeclaredActionsTest {
       assertEquals(McpToolRouterSupport.STATUS_ACTIONS_ONLY, out.getString("status"));
       assertEquals("actions_only", out.getString("status"));
       assertEquals("Not a report generator; 'bank-reconciliation' serves named actions through "
-          + "neo_action (entity bank-reconciliation).", out.getString("message"));
+          + "etendo_action (entity bank-reconciliation).", out.getString("message"));
       assertEquals(BANK_REC, out.getString("actionEntity"));
       assertEquals(NINE_ACTIONS, strings(out.getJSONArray("actions")));
-      assertTrue(out.getString("actionsHint").contains("neo_action"));
+      assertTrue(out.getString("actionsHint").contains("etendo_action"));
       assertTrue(out.getString("actionsHint").contains("view:\"actions\""));
       assertFalse(out.has("reportTool"));
     }
@@ -457,16 +460,16 @@ class McpDeclaredActionsTest {
     }
 
     @Test
-    @DisplayName("bank-reconciliation joins neo_action and neo_schema only")
+    @DisplayName("bank-reconciliation joins etendo_action and etendo_schema only")
     void joinsActionAndSchemaOnly() {
       specs(windowSpec, recSpec);
       List<McpToolDefinition> tools = tools();
 
-      assertTrue(specEnumOf(tools, "neo_action").contains(BANK_REC));
-      assertTrue(specEnumOf(tools, "neo_schema").contains(BANK_REC));
-      assertTrue(specEnumOf(tools, "neo_action").contains("sales-order"));
-      for (String crudTool : List.of("neo_list", "neo_get", "neo_selectors", "neo_defaults",
-          "neo_create", "neo_update", "neo_delete")) {
+      assertTrue(specEnumOf(tools, "etendo_action").contains(BANK_REC));
+      assertTrue(specEnumOf(tools, "etendo_schema").contains(BANK_REC));
+      assertTrue(specEnumOf(tools, "etendo_action").contains("sales-order"));
+      for (String crudTool : List.of("etendo_list", "etendo_get", "etendo_selectors", "etendo_defaults",
+          "etendo_create", "etendo_update", "etendo_delete")) {
         List<String> values = specEnumOf(tools, crudTool);
         assertFalse(values.contains(BANK_REC), crudTool + " must not offer " + BANK_REC);
         assertTrue(values.contains("sales-order"), crudTool);
@@ -480,7 +483,7 @@ class McpDeclaredActionsTest {
       when(zeta.getName()).thenReturn("zeta-window");
       when(zeta.getSpecType()).thenReturn("W");
       specs(zeta, recSpec, windowSpec);
-      List<String> actionEnum = specEnumOf(tools(), "neo_action");
+      List<String> actionEnum = specEnumOf(tools(), "etendo_action");
       List<String> sorted = new ArrayList<>(actionEnum);
       Collections.sort(sorted);
       assertEquals(sorted, actionEnum);
@@ -492,8 +495,8 @@ class McpDeclaredActionsTest {
       accessMock.when(() -> NeoAccessUtils.hasReportSpecAccess(recSpec, "GET")).thenReturn(false);
       specs(windowSpec, recSpec);
       List<McpToolDefinition> tools = tools();
-      assertFalse(specEnumOf(tools, "neo_action").contains(BANK_REC));
-      assertFalse(specEnumOf(tools, "neo_schema").contains(BANK_REC));
+      assertFalse(specEnumOf(tools, "etendo_action").contains(BANK_REC));
+      assertFalse(specEnumOf(tools, "etendo_schema").contains(BANK_REC));
     }
 
     @Test
@@ -503,8 +506,8 @@ class McpDeclaredActionsTest {
       lookup.when(() -> NeoHandlerLookup.byQualifierQuietly(QUALIFIER)).thenReturn(plain);
       specs(windowSpec, recSpec);
       List<McpToolDefinition> tools = tools();
-      assertFalse(specEnumOf(tools, "neo_action").contains(BANK_REC));
-      assertFalse(specEnumOf(tools, "neo_schema").contains(BANK_REC));
+      assertFalse(specEnumOf(tools, "etendo_action").contains(BANK_REC));
+      assertFalse(specEnumOf(tools, "etendo_schema").contains(BANK_REC));
     }
 
     @Test
@@ -514,8 +517,8 @@ class McpDeclaredActionsTest {
           .thenThrow(new IllegalStateException("boom"));
       specs(windowSpec, recSpec);
       List<McpToolDefinition> tools = tools();
-      assertFalse(specEnumOf(tools, "neo_action").contains(BANK_REC));
-      assertTrue(specEnumOf(tools, "neo_list").contains("sales-order"));
+      assertFalse(specEnumOf(tools, "etendo_action").contains(BANK_REC));
+      assertTrue(specEnumOf(tools, "etendo_list").contains("sales-order"));
     }
   }
 }

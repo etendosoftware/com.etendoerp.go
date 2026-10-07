@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigInteger;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
@@ -37,6 +38,7 @@ import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 
@@ -81,13 +83,17 @@ final class FinancialAccountCountrySupport {
 
   /**
    * The {@code countryIbanRules} catalog (≤45 countries with IBAN metadata, out of 243) is static
-   * master data shared by every client, so a single cached entry is enough — unlike
-   * {@code FinancialAccountBankConnectionHandler.PROVIDERS_CACHE}, which is keyed per client
-   * because Salt Edge providers differ by API key. 24h TTL mirrors that same cache: editing a
-   * Country's IBAN metadata takes up to a day to reach the SPA, accepted for the same reason.
+   * master data shared by every client, so it is not keyed per client — unlike
+   * {@code FinancialAccountBankConnectionHandler.PROVIDERS_CACHE}, which is because Salt Edge
+   * providers differ by API key. It IS keyed per language (ETP-5579): each rule's {@code name} is
+   * translated, so a single entry would serve whichever language filled it first to everyone.
+   * The key space is bounded by the active AD_Language rows (~100), but only a handful are in real
+   * use; a language evicted or not yet cached costs one ~45-row rebuild. 24h TTL mirrors that same
+   * cache: editing a Country's IBAN metadata takes up to a day to reach the SPA, accepted for the
+   * same reason.
    */
   private static final Cache<String, String> IBAN_RULES_CACHE = CacheBuilder.newBuilder()
-      .maximumSize(1)
+      .maximumSize(32)
       .expireAfterWrite(24, TimeUnit.HOURS)
       .build();
   private static final String IBAN_RULES_CACHE_KEY = "countryIbanRules";
@@ -259,13 +265,16 @@ final class FinancialAccountCountrySupport {
 
   /**
    * The ≤45 countries that carry IBAN metadata, as {@code [{ id, iso, name, ibanPrefix,
-   * ibanLength }, …]} ordered by name — everything the SPA needs to validate an IBAN against a
-   * chosen country inline, without a second round-trip per keystroke. {@code name} is the
-   * base-language name for message text only; the SPA should keep using the translated label from
-   * the {@code C_Country_ID} selector for display.
+   * ibanLength }, …]} ordered by base name — everything the SPA needs to validate an IBAN against
+   * a chosen country inline, without a second round-trip per keystroke. {@code name} is translated
+   * to the OBContext language (ETP-5579): the New Account form shows it as the country chip label.
+   * <p>Ordering contract: rules are ordered by the BASE (untranslated) name, not by {@code name}.
+   * Today no consumer renders them as a list (the SPA only looks rules up by id/iso); any consumer
+   * that does must sort client-side by {@code name}.
    */
   static JSONArray buildIbanRules() throws JSONException {
-    String cached = IBAN_RULES_CACHE.getIfPresent(IBAN_RULES_CACHE_KEY);
+    String cacheKey = ibanRulesCacheKey();
+    String cached = IBAN_RULES_CACHE.getIfPresent(cacheKey);
     if (cached != null) {
       return new JSONArray(cached);
     }
@@ -273,9 +282,16 @@ final class FinancialAccountCountrySupport {
     // Never cache an empty result, mirroring FinancialAccountBankConnectionHandler#cachedProviders:
     // an empty catalog is more likely a transient DAL hiccup than a real "no countries" state.
     if (rules.length() > 0) {
-      IBAN_RULES_CACHE.put(IBAN_RULES_CACHE_KEY, rules.toString());
+      IBAN_RULES_CACHE.put(cacheKey, rules.toString());
     }
     return rules;
+  }
+
+  /** Per-language cache key (ETP-5579), keyed on the same OBContext language IdentifierProvider
+   *  translates with. Without a request language the identifier is resolved untranslated, so it
+   *  shares the language-less entry. */
+  private static String ibanRulesCacheKey() {
+    return IBAN_RULES_CACHE_KEY + ":" + Objects.toString(NeoLanguage.currentCode(), "");
   }
 
   /** Test-only: {@link #IBAN_RULES_CACHE} is a static field shared for the whole JVM/test run, so
@@ -299,7 +315,10 @@ final class FinancialAccountCountrySupport {
       JSONObject rule = new JSONObject();
       rule.put(KEY_ID, country.getId());
       rule.put(KEY_ISO, country.getISOCountryCode());
-      rule.put(KEY_NAME, country.getName());
+      // ETP-5579: getIdentifier(), NOT getName() — getName() never consults C_Country_Trl, so the
+      // New Account chip showed "Spain" to an es_ES user. Same reasoning as ETP-5022 in
+      // ContactsLocationAddressHandler; Country's identifier is the single Name column.
+      rule.put(KEY_NAME, country.getIdentifier());
       rule.put(KEY_IBAN_PREFIX, country.getIBANCode());
       rule.put(KEY_IBAN_LENGTH, country.getIBANLength());
       rules.put(rule);

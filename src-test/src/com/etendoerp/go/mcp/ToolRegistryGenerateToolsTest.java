@@ -69,6 +69,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * tool building, and resolveSpecName.
  * <p>
  * Pure unit tests with MockedStatic for OBDal and NeoAccessUtils.
+ *
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -217,17 +219,17 @@ class ToolRegistryGenerateToolsTest {
   class ScopePermissionTests {
 
     @Test
-    @DisplayName("neo:read scope includes neo_discover when no specs exist")
+    @DisplayName("neo:read scope includes etendo_discover when no specs exist")
     void readScopeIncludesDiscover() {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields neo_discover + docs + neo_widget + neo_vector_search +
-      // neo_feedback when no specs exist. These are built-in read tools
+      // Read access always yields etendo_discover + docs + etendo_widget + etendo_vector_search +
+      // etendo_feedback when no specs exist. These are built-in read tools
       // (ETP-4284 / ETP-5123 / ETP-5306).
-      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
@@ -236,36 +238,36 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_feedback is exposed at neo:read scope, not only at write scopes")
+    @DisplayName("etendo_feedback is exposed at neo:read scope, not only at write scopes")
     void feedbackToolIsReadScoped() {
       SFSpec spec = createWindowSpecWithWindow(SPEC_SALES_ORDER, WINDOW_ID);
       accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
       mockSpecCriteria(List.of(spec));
 
-      // ETP-5306: neo_feedback is deliberately gated on neo:read and NOT on neo:write. A
+      // ETP-5306: etendo_feedback is deliberately gated on neo:read and NOT on neo:write. A
       // read-only session must still be able to report back, otherwise the feedback corpus is
       // biased towards write-heavy sessions — and the failure mode of "tightening" this to
       // neo:write is silent: no error is raised anywhere, feedback from every read-only session
       // simply stops arriving. This test is the only thing that fails if that happens.
       List<String> readNames = toolNames(registry.generateTools(scopesOf("neo:read")));
       assertTrue(readNames.contains(McpConstants.TOOL_NEO_FEEDBACK),
-          "neo_feedback must be available to a read-only session: " + readNames);
+          "etendo_feedback must be available to a read-only session: " + readNames);
 
       // The wildcard scope implies read, so it must carry the tool too.
       List<String> wildcardNames = toolNames(registry.generateTools(scopesOf("neo:*")));
       assertTrue(wildcardNames.contains(McpConstants.TOOL_NEO_FEEDBACK),
-          "neo_feedback must be available under neo:*: " + wildcardNames);
+          "etendo_feedback must be available under neo:*: " + wildcardNames);
     }
 
     @Test
-    @DisplayName("no read scope excludes neo_discover")
+    @DisplayName("no read scope excludes etendo_discover")
     void noReadScopeExcludesDiscover() {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
       List<String> names = toolNames(tools);
-      assertFalse(names.contains("neo_discover"));
+      assertFalse(names.contains("etendo_discover"));
       // Write scope alone still yields the three built-in image-upload tools (ETP-5184): they are
       // type-driven rather than spec-driven, and they write an AD_Image row, which is exactly what
       // neo:write grants. Nothing read-only survives here.
@@ -300,9 +302,9 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
         List<String> names = toolNames(tools);
 
-        assertTrue(names.contains("neo_discover"));
-        assertTrue(names.contains("neo_list"));
-        assertTrue(names.contains("neo_create"));
+        assertTrue(names.contains("etendo_discover"));
+        assertTrue(names.contains("etendo_list"));
+        assertTrue(names.contains("etendo_create"));
         assertTrue(names.contains("complete_order"));
         assertTrue(names.contains("generate_print_invoice"));
       }
@@ -336,11 +338,11 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
       List<String> names = toolNames(tools);
 
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_get"));
-      assertTrue(names.contains("neo_selectors"));
-      assertTrue(names.contains("neo_defaults"));
-      assertTrue(names.contains("neo_schema"));
+      assertTrue(names.contains("etendo_list"));
+      assertTrue(names.contains("etendo_get"));
+      assertTrue(names.contains("etendo_selectors"));
+      assertTrue(names.contains("etendo_defaults"));
+      assertTrue(names.contains("etendo_schema"));
     }
 
     /**
@@ -362,12 +364,12 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search +
-      // neo_feedback) are present.
-      assertFalse(names.contains("neo_list"));
-      assertFalse(names.contains("neo_get"));
-      assertFalse(names.contains("neo_create"));
-      assertTrue(names.contains("neo_discover"));
+      // read-scope baseline tools (etendo_discover + docs + etendo_widget + etendo_vector_search +
+      // etendo_feedback) are present.
+      assertFalse(names.contains("etendo_list"));
+      assertFalse(names.contains("etendo_get"));
+      assertFalse(names.contains("etendo_create"));
+      assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
@@ -384,7 +386,7 @@ class ToolRegistryGenerateToolsTest {
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
-      assertTrue(toolNames(tools).contains("neo_list"));
+      assertTrue(toolNames(tools).contains("etendo_list"));
     }
 
     @Test
@@ -398,12 +400,12 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search +
-      // neo_feedback) are present.
-      assertFalse(names.contains("neo_list"));
-      assertFalse(names.contains("neo_get"));
-      assertFalse(names.contains("neo_create"));
-      assertTrue(names.contains("neo_discover"));
+      // read-scope baseline tools (etendo_discover + docs + etendo_widget + etendo_vector_search +
+      // etendo_feedback) are present.
+      assertFalse(names.contains("etendo_list"));
+      assertFalse(names.contains("etendo_get"));
+      assertFalse(names.contains("etendo_create"));
+      assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
@@ -421,14 +423,14 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
       List<String> names = toolNames(tools);
 
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_get"));
-      assertTrue(names.contains("neo_selectors"));
-      assertTrue(names.contains("neo_defaults"));
-      assertTrue(names.contains("neo_schema"));
-      assertFalse(names.contains("neo_create"));
-      assertFalse(names.contains("neo_update"));
-      assertFalse(names.contains("neo_delete"));
+      assertTrue(names.contains("etendo_list"));
+      assertTrue(names.contains("etendo_get"));
+      assertTrue(names.contains("etendo_selectors"));
+      assertTrue(names.contains("etendo_defaults"));
+      assertTrue(names.contains("etendo_schema"));
+      assertFalse(names.contains("etendo_create"));
+      assertFalse(names.contains("etendo_update"));
+      assertFalse(names.contains("etendo_delete"));
     }
 
     @Test
@@ -441,11 +443,11 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
       List<String> names = toolNames(tools);
 
-      assertFalse(names.contains("neo_discover"));
-      assertFalse(names.contains("neo_list"));
-      assertTrue(names.contains("neo_create"));
-      assertTrue(names.contains("neo_update"));
-      assertTrue(names.contains("neo_delete"));
+      assertFalse(names.contains("etendo_discover"));
+      assertFalse(names.contains("etendo_list"));
+      assertTrue(names.contains("etendo_create"));
+      assertTrue(names.contains("etendo_update"));
+      assertTrue(names.contains("etendo_delete"));
     }
 
     @Test
@@ -458,15 +460,34 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read", "neo:write"));
       List<String> names = toolNames(tools);
 
-      assertTrue(names.contains("neo_discover"));
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_get"));
-      assertTrue(names.contains("neo_create"));
-      assertTrue(names.contains("neo_update"));
-      assertTrue(names.contains("neo_delete"));
-      assertTrue(names.contains("neo_selectors"));
-      assertTrue(names.contains("neo_defaults"));
-      assertTrue(names.contains("neo_schema"));
+      assertTrue(names.contains("etendo_discover"));
+      assertTrue(names.contains("etendo_list"));
+      assertTrue(names.contains("etendo_get"));
+      assertTrue(names.contains("etendo_create"));
+      assertTrue(names.contains("etendo_update"));
+      assertTrue(names.contains("etendo_delete"));
+      assertTrue(names.contains("etendo_selectors"));
+      assertTrue(names.contains("etendo_defaults"));
+      assertTrue(names.contains("etendo_schema"));
+    }
+
+    @Test
+    @DisplayName("etendo: scopes register the same tools as their neo: aliases (ETP-5602)")
+    void etendoScopesMatchTheirNeoAliases() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:read"))),
+          toolNames(registry.generateTools(scopesOf("etendo:read"))));
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:write"))),
+          toolNames(registry.generateTools(scopesOf("etendo:write"))));
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:*"))),
+          toolNames(registry.generateTools(scopesOf("etendo:*"))));
+      assertEquals(toolNames(registry.generateTools(scopesOf("neo:read", "neo:write"))),
+          toolNames(registry.generateTools(scopesOf("neo:read", "etendo:write"))));
+      assertFalse(toolNames(registry.generateTools(scopesOf("etendo:read")))
+          .contains("etendo_create"));
     }
 
     @Test
@@ -482,7 +503,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       McpToolDefinition listTool = tools.stream()
-          .filter(t -> "neo_list".equals(t.getName()))
+          .filter(t -> "etendo_list".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(listTool);
@@ -507,13 +528,13 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. What remains is the read-scope baseline
-      // (neo_discover + docs + neo_widget + neo_vector_search + neo_feedback) plus the three
+      // (etendo_discover + docs + etendo_widget + etendo_vector_search + etendo_feedback) plus the three
       // write-scope image-upload tools (ETP-5184), which are built-in and not gated on any spec.
-      assertFalse(names.contains("neo_list"));
-      assertFalse(names.contains("neo_create"));
-      assertFalse(names.contains("neo_update"));
-      assertFalse(names.contains("neo_delete"));
-      assertTrue(names.contains("neo_discover"));
+      assertFalse(names.contains("etendo_list"));
+      assertFalse(names.contains("etendo_create"));
+      assertFalse(names.contains("etendo_update"));
+      assertFalse(names.contains("etendo_delete"));
+      assertTrue(names.contains("etendo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
@@ -901,9 +922,9 @@ class ToolRegistryGenerateToolsTest {
         List<String> names = toolNames(tools);
 
         // discover + 8 CRUD + 1 process + 1 report = 11
-        assertTrue(names.contains("neo_discover"));
-        assertTrue(names.contains("neo_list"));
-        assertTrue(names.contains("neo_create"));
+        assertTrue(names.contains("etendo_discover"));
+        assertTrue(names.contains("etendo_list"));
+        assertTrue(names.contains("etendo_create"));
         assertTrue(names.contains("complete_order"));
         assertTrue(names.contains("generate_print_invoice"));
       }
@@ -925,7 +946,7 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // Good spec should still produce CRUD tools
-      assertTrue(names.contains("neo_list"));
+      assertTrue(names.contains("etendo_list"));
     }
   }
 
@@ -941,14 +962,14 @@ class ToolRegistryGenerateToolsTest {
       JSONObject args = new JSONObject();
       args.put("spec", SPEC_SALES_ORDER);
 
-      String result = ToolRegistry.resolveSpecName("neo_list", args);
+      String result = ToolRegistry.resolveSpecName("etendo_list", args);
       assertEquals(SPEC_SALES_ORDER, result);
     }
 
     @Test
     @DisplayName("CRUD tool with null arguments returns null")
     void crudToolNullArgsReturnsNull() {
-      String result = ToolRegistry.resolveSpecName("neo_get", null);
+      String result = ToolRegistry.resolveSpecName("etendo_get", null);
       assertNull(result);
     }
 
@@ -958,7 +979,7 @@ class ToolRegistryGenerateToolsTest {
       JSONObject args = new JSONObject();
       args.put("entity", "Header");
 
-      String result = ToolRegistry.resolveSpecName("neo_create", args);
+      String result = ToolRegistry.resolveSpecName("etendo_create", args);
       assertNull(result);
     }
 
@@ -993,15 +1014,15 @@ class ToolRegistryGenerateToolsTest {
     @Test
     @DisplayName("all CRUD tool names return true")
     void allCrudToolNamesReturnTrue() {
-      assertTrue(ToolRegistry.isCrudTool("neo_discover"));
-      assertTrue(ToolRegistry.isCrudTool("neo_list"));
-      assertTrue(ToolRegistry.isCrudTool("neo_get"));
-      assertTrue(ToolRegistry.isCrudTool("neo_create"));
-      assertTrue(ToolRegistry.isCrudTool("neo_update"));
-      assertTrue(ToolRegistry.isCrudTool("neo_delete"));
-      assertTrue(ToolRegistry.isCrudTool("neo_selectors"));
-      assertTrue(ToolRegistry.isCrudTool("neo_defaults"));
-      assertTrue(ToolRegistry.isCrudTool("neo_schema"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_discover"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_list"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_get"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_create"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_update"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_delete"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_selectors"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_defaults"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_schema"));
     }
 
     @Test
@@ -1029,20 +1050,20 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_generate_amortization_plan returns true (ETP-4232)")
+    @DisplayName("etendo_generate_amortization_plan returns true (ETP-4232)")
     void generateAmortizationPlanIsCrudTool() {
       assertTrue(ToolRegistry.isCrudTool(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN));
     }
   }
 
-  // ── neo_generate_amortization_plan tool (ETP-4232) ────────────────────────
+  // ── etendo_generate_amortization_plan tool (ETP-4232) ────────────────────────
 
   @Nested
-  @DisplayName("generateTools — neo_generate_amortization_plan (ETP-4232)")
+  @DisplayName("generateTools — etendo_generate_amortization_plan (ETP-4232)")
   class GenerateAmortizationPlanToolTests {
 
     @Test
-    @DisplayName("neo:process scope registers neo_generate_amortization_plan even with no window specs")
+    @DisplayName("neo:process scope registers etendo_generate_amortization_plan even with no window specs")
     void processScopeRegistersAmortizationTool() {
       mockSpecCriteria(Collections.emptyList());
 
@@ -1050,22 +1071,22 @@ class ToolRegistryGenerateToolsTest {
 
       List<String> names = toolNames(tools);
       assertTrue(names.contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN),
-          "neo_generate_amortization_plan must be registered with neo:process scope");
+          "etendo_generate_amortization_plan must be registered with neo:process scope");
     }
 
     @Test
-    @DisplayName("neo:read scope does NOT register neo_generate_amortization_plan")
+    @DisplayName("neo:read scope does NOT register etendo_generate_amortization_plan")
     void readScopeDoesNotRegisterAmortizationTool() {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       assertFalse(toolNames(tools).contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN),
-          "neo_generate_amortization_plan must NOT be registered with read-only scope");
+          "etendo_generate_amortization_plan must NOT be registered with read-only scope");
     }
 
     @Test
-    @DisplayName("neo:* scope registers neo_generate_amortization_plan")
+    @DisplayName("neo:* scope registers etendo_generate_amortization_plan")
     void wildcardScopeRegistersAmortizationTool() {
       SFSpec windowSpec = createWindowSpec(SPEC_SALES_ORDER);
       when(windowSpec.getADWindow()).thenReturn(null);
@@ -1077,7 +1098,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_generate_amortization_plan tool has assetId as required property")
+    @DisplayName("etendo_generate_amortization_plan tool has assetId as required property")
     @SuppressWarnings("unchecked")
     void amortizationToolHasAssetIdRequired() {
       mockSpecCriteria(Collections.emptyList());
@@ -1101,7 +1122,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("resolveSpecName returns null for neo_generate_amortization_plan (CRUD tool)")
+    @DisplayName("resolveSpecName returns null for etendo_generate_amortization_plan (CRUD tool)")
     void resolveSpecNameReturnNullForAmortizationTool() throws Exception {
       JSONObject args = new JSONObject();
       args.put("assetId", "ASSET-001");
@@ -1159,7 +1180,7 @@ class ToolRegistryGenerateToolsTest {
   class ToolSchemaTests {
 
     @Test
-    @DisplayName("neo_discover has empty properties and no required fields")
+    @DisplayName("etendo_discover has empty properties and no required fields")
     @SuppressWarnings("unchecked")
     void discoverToolSchema() {
       mockSpecCriteria(Collections.emptyList());
@@ -1167,7 +1188,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       McpToolDefinition discover = tools.stream()
-          .filter(t -> "neo_discover".equals(t.getName()))
+          .filter(t -> "etendo_discover".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(discover);
@@ -1180,7 +1201,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_list has required spec and entity fields")
+    @DisplayName("etendo_list has required spec and entity fields")
     @SuppressWarnings("unchecked")
     void listToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1190,7 +1211,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       McpToolDefinition listTool = tools.stream()
-          .filter(t -> "neo_list".equals(t.getName()))
+          .filter(t -> "etendo_list".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(listTool);
@@ -1203,7 +1224,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_get has required spec, entity, and id fields")
+    @DisplayName("etendo_get has required spec, entity, and id fields")
     @SuppressWarnings("unchecked")
     void getToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1213,7 +1234,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       McpToolDefinition getTool = tools.stream()
-          .filter(t -> "neo_get".equals(t.getName()))
+          .filter(t -> "etendo_get".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(getTool);
@@ -1226,7 +1247,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_create has required spec, entity, and fields")
+    @DisplayName("etendo_create has required spec, entity, and fields")
     @SuppressWarnings("unchecked")
     void createToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1236,7 +1257,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
       McpToolDefinition createTool = tools.stream()
-          .filter(t -> "neo_create".equals(t.getName()))
+          .filter(t -> "etendo_create".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(createTool);
@@ -1249,7 +1270,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_delete has required spec, entity, and id fields")
+    @DisplayName("etendo_delete has required spec, entity, and id fields")
     @SuppressWarnings("unchecked")
     void deleteToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1259,7 +1280,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
       McpToolDefinition deleteTool = tools.stream()
-          .filter(t -> "neo_delete".equals(t.getName()))
+          .filter(t -> "etendo_delete".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(deleteTool);
@@ -1272,7 +1293,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_selectors has required spec, entity, and column fields")
+    @DisplayName("etendo_selectors has required spec, entity, and column fields")
     @SuppressWarnings("unchecked")
     void selectorsToolRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1282,7 +1303,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       McpToolDefinition selectorsTool = tools.stream()
-          .filter(t -> "neo_selectors".equals(t.getName()))
+          .filter(t -> "etendo_selectors".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(selectorsTool);
@@ -1295,7 +1316,7 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo_list includes optional filters, limit, offset, orderBy properties")
+    @DisplayName("etendo_list includes optional filters, limit, offset, orderBy properties")
     @SuppressWarnings("unchecked")
     void listToolOptionalProperties() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1305,7 +1326,7 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       McpToolDefinition listTool = tools.stream()
-          .filter(t -> "neo_list".equals(t.getName()))
+          .filter(t -> "etendo_list".equals(t.getName()))
           .findFirst()
           .orElse(null);
       assertNotNull(listTool);
@@ -1563,14 +1584,14 @@ class ToolRegistryGenerateToolsTest {
     }
   }
 
-  // ── neo_action registration ──────────────────────────────────────────────
+  // ── etendo_action registration ──────────────────────────────────────────────
 
   @Nested
-  @DisplayName("generateTools — neo_action tool")
+  @DisplayName("generateTools — etendo_action tool")
   class NeoActionToolTests {
 
     @Test
-    @DisplayName("write scope registers neo_action alongside write CRUD tools")
+    @DisplayName("write scope registers etendo_action alongside write CRUD tools")
     void writeScopeRegistersNeoAction() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
@@ -1579,11 +1600,11 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
       List<String> names = toolNames(tools);
 
-      assertTrue(names.contains("neo_action"), "neo_action should be registered with write scope");
+      assertTrue(names.contains("etendo_action"), "etendo_action should be registered with write scope");
     }
 
     @Test
-    @DisplayName("read-only scope does not register neo_action")
+    @DisplayName("read-only scope does not register etendo_action")
     void readScopeDoesNotRegisterNeoAction() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
@@ -1592,11 +1613,11 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
       List<String> names = toolNames(tools);
 
-      assertFalse(names.contains("neo_action"), "neo_action should NOT be registered with read-only scope");
+      assertFalse(names.contains("etendo_action"), "etendo_action should NOT be registered with read-only scope");
     }
 
     @Test
-    @DisplayName("neo_action tool has required fields: spec, entity, id, action")
+    @DisplayName("etendo_action tool has required fields: spec, entity, id, action")
     @SuppressWarnings("unchecked")
     void neoActionToolHasRequiredFields() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
@@ -1606,10 +1627,10 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
       McpToolDefinition actionTool = tools.stream()
-          .filter(t -> "neo_action".equals(t.getName()))
+          .filter(t -> "etendo_action".equals(t.getName()))
           .findFirst()
           .orElse(null);
-      assertNotNull(actionTool, "neo_action tool should be present");
+      assertNotNull(actionTool, "etendo_action tool should be present");
 
       Map<String, Object> schema = actionTool.getInputSchema();
       List<String> required = (List<String>) schema.get("required");
@@ -1620,31 +1641,31 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(required.contains("action"));
 
       Map<String, Object> props = (Map<String, Object>) schema.get("properties");
-      assertTrue(props.containsKey("parameters"), "neo_action should have optional parameters prop");
+      assertTrue(props.containsKey("parameters"), "etendo_action should have optional parameters prop");
     }
 
     @Test
-    @DisplayName("isCrudTool returns true for neo_action")
+    @DisplayName("isCrudTool returns true for etendo_action")
     void isCrudToolReturnsTrueForNeoAction() {
-      assertTrue(ToolRegistry.isCrudTool("neo_action"));
+      assertTrue(ToolRegistry.isCrudTool("etendo_action"));
     }
 
     @Test
-    @DisplayName("neo:* scope registers neo_action")
+    @DisplayName("neo:* scope registers etendo_action")
     void wildcardScopeRegistersNeoAction() {
       SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
       when(spec.getADWindow()).thenReturn(null);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
-      assertTrue(toolNames(tools).contains("neo_action"));
+      assertTrue(toolNames(tools).contains("etendo_action"));
     }
   }
 
   // ── write-tool spec enum split (ETP-4254) ─────────────────────────────────
 
   /**
-   * ETP-4254 AC#1: the write tools (neo_create/neo_update/neo_delete) get their own, narrower
+   * ETP-4254 AC#1: the write tools (etendo_create/etendo_update/etendo_delete) get their own, narrower
    * spec enum. A monitor/log spec — every included entity configured read-only — stays fully
    * readable but must not be offered as a write target.
    *
@@ -1657,7 +1678,7 @@ class ToolRegistryGenerateToolsTest {
 
     private static final String SPEC_MONITOR = "monitor-verifactu";
     private static final String SPEC_FINANCIAL_ACCOUNT = "financial-account";
-    private static final String NEO_DELETE = "neo_delete";
+    private static final String NEO_DELETE = "etendo_delete";
 
     @SuppressWarnings("unchecked")
     private List<String> specEnumOf(List<McpToolDefinition> tools, String toolName) {
@@ -1706,12 +1727,12 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools =
             registry.generateTools(scopesOf("neo:read", "neo:write"));
 
-        List<String> readEnum = specEnumOf(tools, "neo_list");
+        List<String> readEnum = specEnumOf(tools, "etendo_list");
         assertTrue(readEnum.contains(SPEC_SALES_ORDER));
         assertTrue(readEnum.contains(SPEC_MONITOR),
             "a read-only monitor spec must stay readable");
 
-        for (String writeTool : List.of("neo_create", "neo_update", "neo_delete")) {
+        for (String writeTool : List.of("etendo_create", "etendo_update", "etendo_delete")) {
           List<String> writeEnum = specEnumOf(tools, writeTool);
           assertTrue(writeEnum.contains(SPEC_SALES_ORDER), writeTool + " must keep sales-order");
           assertFalse(writeEnum.contains(SPEC_MONITOR),
@@ -1758,14 +1779,14 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools =
             registry.generateTools(scopesOf("neo:read", "neo:write"));
 
-        assertTrue(specEnumOf(tools, "neo_list").contains("sales-quotation"));
-        assertTrue(specEnumOf(tools, "neo_list").contains("purchase-order"));
-        assertFalse(specEnumOf(tools, "neo_create").contains("sales-quotation"));
-        assertFalse(specEnumOf(tools, "neo_update").contains("sales-quotation"));
-        assertFalse(specEnumOf(tools, "neo_delete").contains("sales-quotation"));
-        assertTrue(specEnumOf(tools, "neo_create").contains("purchase-order"));
-        assertTrue(specEnumOf(tools, "neo_update").contains("purchase-order"));
-        assertTrue(specEnumOf(tools, "neo_delete").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "etendo_list").contains("sales-quotation"));
+        assertTrue(specEnumOf(tools, "etendo_list").contains("purchase-order"));
+        assertFalse(specEnumOf(tools, "etendo_create").contains("sales-quotation"));
+        assertFalse(specEnumOf(tools, "etendo_update").contains("sales-quotation"));
+        assertFalse(specEnumOf(tools, "etendo_delete").contains("sales-quotation"));
+        assertTrue(specEnumOf(tools, "etendo_create").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "etendo_update").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "etendo_delete").contains("purchase-order"));
       }
     }
 
@@ -1773,10 +1794,10 @@ class ToolRegistryGenerateToolsTest {
      * The {@code buildActionTool} judgement call (ETP-4254): button actions are served by the
      * {@code /action/*} sub-endpoint, which is deliberately NOT gated by the
      * {@code ETGO_SF_ENTITY} method flags, so a read-only-CRUD monitor may still legitimately
-     * expose an action. neo_action therefore keeps the READ enum.
+     * expose an action. etendo_action therefore keeps the READ enum.
      */
     @Test
-    @DisplayName("neo_action keeps the read enum — actions are not gated by the method flags")
+    @DisplayName("etendo_action keeps the read enum — actions are not gated by the method flags")
     void actionToolKeepsTheReadEnum() {
       SFSpec writable = createWindowSpec(SPEC_SALES_ORDER);
       when(writable.getADWindow()).thenReturn(null);
@@ -1789,7 +1810,7 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools =
             registry.generateTools(scopesOf("neo:read", "neo:write"));
 
-        List<String> actionEnum = specEnumOf(tools, "neo_action");
+        List<String> actionEnum = specEnumOf(tools, "etendo_action");
         assertTrue(actionEnum.contains(SPEC_SALES_ORDER));
         assertTrue(actionEnum.contains(SPEC_MONITOR),
             "a read-only-CRUD spec may still expose button actions");
@@ -1822,9 +1843,9 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools =
             registry.generateTools(scopesOf("neo:read", "neo:write"));
 
-        assertFalse(specEnumOf(tools, "neo_create").contains(SPEC_MONITOR));
-        assertTrue(specEnumOf(tools, "neo_update").contains(SPEC_MONITOR));
-        assertFalse(specEnumOf(tools, "neo_delete").contains(SPEC_MONITOR));
+        assertFalse(specEnumOf(tools, "etendo_create").contains(SPEC_MONITOR));
+        assertTrue(specEnumOf(tools, "etendo_update").contains(SPEC_MONITOR));
+        assertFalse(specEnumOf(tools, "etendo_delete").contains(SPEC_MONITOR));
       }
     }
 
@@ -1849,27 +1870,27 @@ class ToolRegistryGenerateToolsTest {
             registry.generateTools(scopesOf("neo:read", "neo:write"));
         List<String> names = toolNames(tools);
 
-        assertTrue(names.contains("neo_list"), "reads must still be available");
-        assertFalse(names.contains("neo_create"));
-        assertFalse(names.contains("neo_update"));
-        assertFalse(names.contains("neo_delete"));
-        // neo_action is not gated by the method flags, so it stays registered.
-        assertTrue(names.contains("neo_action"));
-        // ETP-5335: neo_batch used to stay registered here too — it has no spec enum to narrow,
+        assertTrue(names.contains("etendo_list"), "reads must still be available");
+        assertFalse(names.contains("etendo_create"));
+        assertFalse(names.contains("etendo_update"));
+        assertFalse(names.contains("etendo_delete"));
+        // etendo_action is not gated by the method flags, so it stays registered.
+        assertTrue(names.contains("etendo_action"));
+        // ETP-5335: etendo_batch used to stay registered here too — it has no spec enum to narrow,
         // since its operations name their spec inline. It is now published only while
         // BATCH_TOOL_ENABLED is on, because it was a second create implementation that had
-        // drifted from neo_create in both directions. The assertion follows the flag rather than
+        // drifted from etendo_create in both directions. The assertion follows the flag rather than
         // hardcoding today's value, so flipping it back on does not fail a test that was never
         // about the flag.
-        assertEquals(McpConstants.batchToolEnabled(), names.contains("neo_batch"),
-            "neo_batch must be published exactly while its flag is on");
+        assertEquals(McpConstants.batchToolEnabled(), names.contains("etendo_batch"),
+            "etendo_batch must be published exactly while its flag is on");
       }
     }
 
     /**
      * Stubs a financial-account spec whose entity enables every CRUD verb, grants GET/POST/PUT and
      * sets DELETE window access to {@code deleteGranted}, then generates the catalog. A second,
-     * always-deletable spec keeps {@code neo_delete} registered so the denied case asserts on the
+     * always-deletable spec keeps {@code etendo_delete} registered so the denied case asserts on the
      * enum rather than on the tool's absence.
      */
     private List<McpToolDefinition> generateWithFinancialAccountDelete(boolean deleteGranted) {
@@ -1899,40 +1920,40 @@ class ToolRegistryGenerateToolsTest {
     }
 
     /**
-     * CA4 (ETP-5474): a spec whose entity enables DELETE is offered by {@code neo_delete} when the
+     * CA4 (ETP-5474): a spec whose entity enables DELETE is offered by {@code etendo_delete} when the
      * role holds DELETE access on its window.
      */
     @Test
-    @DisplayName("neo_delete offers a DELETE-enabled spec when the role may delete on its window")
+    @DisplayName("etendo_delete offers a DELETE-enabled spec when the role may delete on its window")
     void testDeleteEnumIncludesSpecWhenDeleteAccessGranted() {
       List<McpToolDefinition> tools = generateWithFinancialAccountDelete(true);
 
       assertTrue(specEnumOf(tools, NEO_DELETE).contains(SPEC_FINANCIAL_ACCOUNT),
-          "financial-account must be a neo_delete target when DELETE access is granted");
+          "financial-account must be a etendo_delete target when DELETE access is granted");
     }
 
     /**
-     * CA4 (ETP-5474): the same spec is withheld from {@code neo_delete} — while staying readable
+     * CA4 (ETP-5474): the same spec is withheld from {@code etendo_delete} — while staying readable
      * and updatable — when the role lacks DELETE access on its window.
      */
     @Test
-    @DisplayName("neo_delete withholds a DELETE-enabled spec when the role may not delete on its window")
+    @DisplayName("etendo_delete withholds a DELETE-enabled spec when the role may not delete on its window")
     void testDeleteEnumExcludesSpecWhenDeleteAccessDenied() {
       List<McpToolDefinition> tools = generateWithFinancialAccountDelete(false);
 
       assertFalse(specEnumOf(tools, NEO_DELETE).contains(SPEC_FINANCIAL_ACCOUNT),
-          "financial-account must not be a neo_delete target without DELETE access");
+          "financial-account must not be a etendo_delete target without DELETE access");
       assertTrue(specEnumOf(tools, NEO_DELETE).contains(SPEC_SALES_ORDER),
-          "the other deletable spec keeps neo_delete registered");
-      assertTrue(specEnumOf(tools, "neo_list").contains(SPEC_FINANCIAL_ACCOUNT));
-      assertTrue(specEnumOf(tools, "neo_update").contains(SPEC_FINANCIAL_ACCOUNT));
+          "the other deletable spec keeps etendo_delete registered");
+      assertTrue(specEnumOf(tools, "etendo_list").contains(SPEC_FINANCIAL_ACCOUNT));
+      assertTrue(specEnumOf(tools, "etendo_update").contains(SPEC_FINANCIAL_ACCOUNT));
     }
   }
 
-  // ── neo_widget tool (business widgets, gap G4 / ETP-4284) ─────────────────
+  // ── etendo_widget tool (business widgets, gap G4 / ETP-4284) ─────────────────
 
   @Nested
-  @DisplayName("generateTools — neo_widget tool (ETP-4284)")
+  @DisplayName("generateTools — etendo_widget tool (ETP-4284)")
   class NeoWidgetToolTests {
 
     /** The 9 widget enum values the tool must expose, in canonical order. */
@@ -1948,18 +1969,18 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("neo:read scope registers neo_widget even with no specs")
+    @DisplayName("neo:read scope registers etendo_widget even with no specs")
     void readScopeRegistersWidgetTool() {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       assertTrue(toolNames(tools).contains(McpConstants.TOOL_NEO_WIDGET),
-          "neo_widget must be registered as a read tool");
+          "etendo_widget must be registered as a read tool");
     }
 
     @Test
-    @DisplayName("neo:* scope registers neo_widget")
+    @DisplayName("neo:* scope registers etendo_widget")
     void wildcardScopeRegistersWidgetTool() {
       mockSpecCriteria(Collections.emptyList());
 
@@ -1969,42 +1990,42 @@ class ToolRegistryGenerateToolsTest {
     }
 
     @Test
-    @DisplayName("write-only scope (no read) does NOT register neo_widget")
+    @DisplayName("write-only scope (no read) does NOT register etendo_widget")
     void writeOnlyScopeDoesNotRegisterWidgetTool() {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
       assertFalse(toolNames(tools).contains(McpConstants.TOOL_NEO_WIDGET),
-          "neo_widget must NOT be registered without read access");
+          "etendo_widget must NOT be registered without read access");
     }
 
     @Test
-    @DisplayName("neo_widget exposes the 9 widget enum values")
+    @DisplayName("etendo_widget exposes the 9 widget enum values")
     @SuppressWarnings("unchecked")
     void widgetToolHasNineEnumValues() {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
       McpToolDefinition widgetTool = findWidgetTool(tools);
-      assertNotNull(widgetTool, "neo_widget tool must be present");
+      assertNotNull(widgetTool, "etendo_widget tool must be present");
 
       Map<String, Object> schema = widgetTool.getInputSchema();
       Map<String, Object> props = (Map<String, Object>) schema.get("properties");
       assertNotNull(props);
       Map<String, Object> widgetProp = (Map<String, Object>) props.get(McpConstants.PARAM_WIDGET);
-      assertNotNull(widgetProp, "neo_widget must declare a 'widget' property");
+      assertNotNull(widgetProp, "etendo_widget must declare a 'widget' property");
 
       List<String> enumValues = (List<String>) widgetProp.get("enum");
       assertNotNull(enumValues, "widget property must declare an enum");
-      assertEquals(9, enumValues.size(), "neo_widget must expose exactly 9 widgets");
+      assertEquals(9, enumValues.size(), "etendo_widget must expose exactly 9 widgets");
       for (String widget : EXPECTED_WIDGETS) {
         assertTrue(enumValues.contains(widget), "enum must contain widget '" + widget + "'");
       }
     }
 
     @Test
-    @DisplayName("neo_widget requires the 'widget' argument and accepts optional 'params'")
+    @DisplayName("etendo_widget requires the 'widget' argument and accepts optional 'params'")
     @SuppressWarnings("unchecked")
     void widgetToolRequiresWidgetAndAcceptsParams() {
       mockSpecCriteria(Collections.emptyList());
@@ -2023,7 +2044,7 @@ class ToolRegistryGenerateToolsTest {
 
       Map<String, Object> props = (Map<String, Object>) schema.get("properties");
       assertTrue(props.containsKey(McpConstants.PARAM_PARAMS),
-          "neo_widget must declare an optional 'params' property");
+          "etendo_widget must declare an optional 'params' property");
     }
 
     /**
@@ -2055,10 +2076,10 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
         McpToolDefinition listTool = tools.stream()
-            .filter(t -> "neo_list".equals(t.getName()))
+            .filter(t -> "etendo_list".equals(t.getName()))
             .findFirst()
             .orElse(null);
-        assertNotNull(listTool, "neo_list must still be produced for the window spec");
+        assertNotNull(listTool, "etendo_list must still be produced for the window spec");
 
         Map<String, Object> props =
             (Map<String, Object>) listTool.getInputSchema().get("properties");
@@ -2074,12 +2095,12 @@ class ToolRegistryGenerateToolsTest {
     /**
      * ETP-4254 regression guard: a tab-less spec that still serves an {@code /action} route
      * ({@code not-posted-documents}' {@code post} / {@code bulk-post}) is NOT catalog-excluded,
-     * so it must reach {@code accessibleWindowSpecs} — the enum {@code neo_action} is built
+     * so it must reach {@code accessibleWindowSpecs} — the enum {@code etendo_action} is built
      * from. Collapsing "handler-only" and "catalog-excluded" into one rule silently removed
      * that action from the agent.
      */
     @Test
-    @DisplayName("handler-only spec with an /action route DOES reach the neo_action enum")
+    @DisplayName("handler-only spec with an /action route DOES reach the etendo_action enum")
     @SuppressWarnings("unchecked")
     void actionServingHandlerOnlySpecReachesActionEnum() {
       SFSpec actionSpec = createWindowSpec("not-posted-documents");
@@ -2094,10 +2115,10 @@ class ToolRegistryGenerateToolsTest {
         List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
         McpToolDefinition actionTool = tools.stream()
-            .filter(t -> "neo_action".equals(t.getName()))
+            .filter(t -> "etendo_action".equals(t.getName()))
             .findFirst()
             .orElse(null);
-        assertNotNull(actionTool, "neo_action must be produced for an action-serving spec");
+        assertNotNull(actionTool, "etendo_action must be produced for an action-serving spec");
 
         Map<String, Object> props =
             (Map<String, Object>) actionTool.getInputSchema().get("properties");
@@ -2105,7 +2126,7 @@ class ToolRegistryGenerateToolsTest {
         List<String> enumValues = (List<String>) specProp.get("enum");
         assertNotNull(enumValues);
         assertTrue(enumValues.contains("not-posted-documents"),
-            "a tab-less spec that serves /action must remain callable through neo_action");
+            "a tab-less spec that serves /action must remain callable through etendo_action");
       }
     }
 
@@ -2125,23 +2146,23 @@ class ToolRegistryGenerateToolsTest {
         List<String> names = toolNames(tools);
 
         // No CRUD tools — the only spec is handler-only, so it is skipped. Only the
-        // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
-        assertFalse(names.contains("neo_list"));
-        assertFalse(names.contains("neo_get"));
-        assertTrue(names.contains("neo_discover"));
+        // read-scope baseline tools (etendo_discover + docs + etendo_widget) are present.
+        assertFalse(names.contains("etendo_list"));
+        assertFalse(names.contains("etendo_get"));
+        assertTrue(names.contains("etendo_discover"));
         assertTrue(names.contains("docs"));
         assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       }
     }
 
     @Test
-    @DisplayName("isCrudTool returns true for neo_widget (spec resolution skipped)")
+    @DisplayName("isCrudTool returns true for etendo_widget (spec resolution skipped)")
     void isCrudToolReturnsTrueForNeoWidget() {
       assertTrue(ToolRegistry.isCrudTool(McpConstants.TOOL_NEO_WIDGET));
     }
 
     @Test
-    @DisplayName("resolveSpecName returns null for neo_widget (no spec arg)")
+    @DisplayName("resolveSpecName returns null for etendo_widget (no spec arg)")
     void resolveSpecNameReturnsNullForNeoWidget() throws Exception {
       JSONObject args = new JSONObject();
       args.put(McpConstants.PARAM_WIDGET, "kpis");
@@ -2186,6 +2207,147 @@ class ToolRegistryGenerateToolsTest {
         assertNotNull(text, "widget '" + widget + "' must have a description");
         assertFalse(text.isBlank(), "widget '" + widget + "' description must not be blank");
       }
+    }
+  }
+  // ── the catalogue against real MCP_CONFIG.verbs (ETP-5558) ────────────────
+
+  /**
+   * ETP-5558 — a spec whose every entity hides a write verb through {@code MCP_CONFIG.verbs} is not
+   * offered by that write tool. Unlike {@link WriteCatalogTests}, nothing in
+   * {@link McpToolRouterSupport} is stubbed: {@code hasEntityWithMethod} reads the real verbs JSON
+   * through {@link McpMethodPolicy}. Only the DAL lookups and window access are mocked.
+   *
+   * <p>Live context: an agent's {@code etendo_delete} offered {@code payment-in}; it was a stale client
+   * schema — the catalogue against DB 5416 excludes payment-in and payment-out from all three write
+   * enums. This locks that in.</p>
+   */
+  @Nested
+  @DisplayName("generateTools — write enums with real MCP_CONFIG.verbs (ETP-5558)")
+  class VerbsCatalogueTests {
+
+    private static final String SPEC_PAYMENT_IN = "payment-in";
+    private static final String HIDE_ALL = "{\"verbs\":{\"create\":false,\"update\":false,"
+        + "\"delete\":false,\"reason\":\"Payments are registered from the invoice\","
+        + "\"instead\":\"etendo_action(spec:'sales-invoice', entity:'header', "
+        + "action:'registerPayment')\"}}";
+    private int seq;
+
+    @BeforeEach
+    void resetConfig() {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+    }
+
+    @AfterEach
+    void clearConfig() {
+      McpConfigCache.invalidateAll();
+    }
+
+    /** An AD_Tab-backed entity with every ETGO_SF_ENTITY method flag on. */
+    private SFEntity entity(SFSpec spec, String mcpConfig) {
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getId()).thenReturn("ent-" + (++seq));
+      when(entity.getName()).thenReturn("entity-" + seq);
+      when(entity.getETGOSFSpec()).thenReturn(spec);
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(tab.getTabLevel()).thenReturn(seq == 1 ? 0L : 1L);
+      when(entity.getADTab()).thenReturn(tab);
+      when(entity.get(McpEntityConfig.PROPERTY_MCP_CONFIG)).thenReturn(mcpConfig);
+      when(entity.isGet()).thenReturn(true);
+      when(entity.isPost()).thenReturn(true);
+      when(entity.isPut()).thenReturn(true);
+      when(entity.isPatch()).thenReturn(true);
+      when(entity.isDelete()).thenReturn(true);
+      return entity;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<McpToolDefinition> catalogue(String... entityConfigs) {
+      SFSpec spec = createWindowSpec(SPEC_PAYMENT_IN);
+      when(spec.getId()).thenReturn("spec-payment-in");
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+      List<SFEntity> entities = new java.util.ArrayList<>();
+      for (String config : entityConfigs) {
+        entities.add(entity(spec, config));
+      }
+      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+      when(entityCriteria.list()).thenReturn(entities);
+      return registry.generateTools(scopesOf("neo:read", "neo:write"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> specEnumOf(List<McpToolDefinition> tools, String toolName) {
+      McpToolDefinition tool = tools.stream().filter(t -> toolName.equals(t.getName()))
+          .findFirst().orElse(null);
+      if (tool == null) {
+        return List.of();
+      }
+      Map<String, Object> props = (Map<String, Object>) tool.getInputSchema().get("properties");
+      List<String> values = (List<String>) ((Map<String, Object>) props.get("spec")).get("enum");
+      return values == null ? List.of() : values;
+    }
+
+    @Test
+    @DisplayName("every entity hiding create, update and delete: absent from all three write enums")
+    void hiddenEverywhereIsAbsent() {
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, HIDE_ALL);
+
+      assertTrue(specEnumOf(tools, "etendo_list").contains(SPEC_PAYMENT_IN),
+          "still readable");
+      for (String writeTool : List.of("etendo_create", "etendo_update", "etendo_delete")) {
+        assertFalse(specEnumOf(tools, writeTool).contains(SPEC_PAYMENT_IN),
+            writeTool + " must not offer a spec whose every entity hides the verb");
+      }
+    }
+
+    @Test
+    @DisplayName("one entity leaving create enabled puts the spec back in etendo_create only")
+    void oneEntityLeavingCreate() {
+      String createOnly = "{\"verbs\":{\"update\":false,\"delete\":false,"
+          + "\"reason\":\"lines are edited from the header\"}}";
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, createOnly);
+
+      assertTrue(specEnumOf(tools, "etendo_create").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "etendo_update").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "etendo_delete").contains(SPEC_PAYMENT_IN));
+    }
+
+    @Test
+    @DisplayName("one entity leaving update enabled puts the spec back in etendo_update only")
+    void oneEntityLeavingUpdate() {
+      String updateOnly = "{\"verbs\":{\"create\":false,\"delete\":false,"
+          + "\"reason\":\"r\"}}";
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, updateOnly);
+
+      assertFalse(specEnumOf(tools, "etendo_create").contains(SPEC_PAYMENT_IN));
+      assertTrue(specEnumOf(tools, "etendo_update").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "etendo_delete").contains(SPEC_PAYMENT_IN));
+    }
+
+    @Test
+    @DisplayName("one entity with no verbs section puts the spec back in etendo_delete")
+    void oneEntityLeavingDelete() {
+      String deleteOnly = "{\"verbs\":{\"create\":false,\"update\":false,"
+          + "\"reason\":\"r\"}}";
+      List<McpToolDefinition> tools = catalogue(HIDE_ALL, deleteOnly);
+
+      assertFalse(specEnumOf(tools, "etendo_create").contains(SPEC_PAYMENT_IN));
+      assertFalse(specEnumOf(tools, "etendo_update").contains(SPEC_PAYMENT_IN));
+      assertTrue(specEnumOf(tools, "etendo_delete").contains(SPEC_PAYMENT_IN));
+    }
+
+    @Test
+    @DisplayName("etendo_defaults no longer advertises itself for payments")
+    void defaultsDescriptionDropsPayments() {
+      McpToolDefinition defaults = catalogue(HIDE_ALL).stream()
+          .filter(t -> "etendo_defaults".equals(t.getName())).findFirst().orElse(null);
+      assertNotNull(defaults);
+      // The wording lives in the view parameter's description, next to the tool's own.
+      String advertised = defaults.getDescription() + " " + defaults.getInputSchema();
+      assertFalse(advertised.contains("payments"), advertised);
+      assertTrue(advertised.contains("compliance-heavy specs (invoices, orders)"), advertised);
     }
   }
 }

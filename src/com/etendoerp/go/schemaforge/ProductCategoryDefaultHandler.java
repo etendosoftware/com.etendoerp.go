@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -48,8 +50,9 @@ import org.openbravo.model.common.plm.ProductCategory;
  * ensures this GO-specific behavior does not affect Etendo Classic / Enterprise users that
  * operate directly on the AD windows.
  *
- * <p>ETP-4967: also hides any category flagged {@code em_etgo_issystemcategory = 'Y'} from GET
- * responses — see {@link #afterHandle}.
+ * <p>ETP-4967: also hides any category flagged {@code em_etgo_issystemcategory = 'Y'}. Since
+ * ETP-5009 a list read excludes them in the query ({@link #readPredicates}); a read by id is still
+ * hidden by {@link #afterHandle}.
  */
 @Named("productCategoryDefaultHandler")
 public class ProductCategoryDefaultHandler implements NeoHandler {
@@ -61,7 +64,14 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_PUT = "PUT";
-  private static final String METHOD_GET = "GET";
+  /**
+   * ETP-5009: excludes categories flagged {@code EM_Etgo_IsSystemCategory = 'Y'} (DAL property
+   * {@code etgoIssystemcategory}, Yes/No mapped as {@code Boolean}). Same expression as
+   * {@code ProductCategorySystemFlagSelectorPolicy}; {@code is null} covers rows from before the
+   * column existed. A server-side constant: nothing in it comes from the request.
+   */
+  static final String EXCLUDE_SYSTEM_CATEGORY_PREDICATE =
+      "e.etgoIssystemcategory = false or e.etgoIssystemcategory is null";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -148,15 +158,30 @@ public class ProductCategoryDefaultHandler implements NeoHandler {
   }
 
   /**
-   * ETP-4967: strips categories flagged {@code em_etgo_issystemcategory = 'Y'} (see
-   * {@link SystemCategoryIds}) from GET responses before they reach the UI, so an internal
-   * category like "Discounts" never shows up in the "Categoría del producto" window. Delegates
-   * the actual envelope-extraction/filter-loop to {@link DiscountLineFilter#filterFieldFromResponse}
-   * (generalized from its original discount-line use) rather than duplicating that logic here.
+   * ETP-5009: keeps system-flagged categories out of every list read of the "Categoría del
+   * producto" window — REST list and count, the {@code ?_distinct=} filter values, MCP
+   * {@code etendo_list} — in the query itself, instead of post-filtering a page core had already
+   * cut and counted.
+   */
+  @Override
+  public List<String> readPredicates(NeoContext context) {
+    return List.of(EXCLUDE_SYSTEM_CATEGORY_PREDICATE);
+  }
+
+  /**
+   * ETP-4967: strips a category flagged {@code em_etgo_issystemcategory = 'Y'} (see
+   * {@link SystemCategoryIds}) from a single-record GET, so an internal category like
+   * "Discounts" cannot be opened in the "Categoría del producto" window. Delegates the actual
+   * envelope-extraction/filter-loop to {@link DiscountLineFilter#filterFieldFromResponse}.
+   *
+   * <p>ETP-5009: single-record reads only — a list read is restricted in the query by
+   * {@link #readPredicates}, while core resolves a read by id with its own {@code id = :id} query
+   * and ignores the where clause, so this post-filter is still what hides the record there — on
+   * the path id and on the query-string {@code ?id=} alike ({@link NeoContext#isReadById}).
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!METHOD_GET.equals(context.getHttpMethod())) {
+    if (!context.isReadById()) {
       return null;
     }
     String clientId = resolveContextClientId(context);
