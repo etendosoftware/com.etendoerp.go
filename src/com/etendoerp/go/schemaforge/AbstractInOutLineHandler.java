@@ -24,6 +24,7 @@ import java.sql.ResultSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -59,6 +60,8 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
   private static final String FIELD_ORDER_QUANTITY    = "orderQuantity";
   private static final String FIELD_PRODUCT_CODE      = "productCode";
   private static final String FIELD_INVOICED_QUANTITY = "invoicedQuantity";
+  private static final Set<String> RESPONSE_ENRICHED_FIELDS =
+      Set.of(FIELD_INVOICED_QUANTITY, FIELD_PRODUCT_CODE);
 
   /** SQL references of {@link #fetchLineData}: the movement line and its movement's IsSOTrx. */
   private static final String IOL_LINE_REF      = "il.m_inoutline_id";
@@ -95,6 +98,18 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
     // see NeoHandlerUtils#injectDefaultLocatorOnPost's Javadoc for the full rationale.
     NeoHandlerUtils.injectDefaultLocatorOnPost(context, log);
     return null;
+  }
+
+  /**
+   * The keys {@link #afterHandle} adds to every GET line without a spec field behind them:
+   * {@code invoicedQuantity} and {@code productCode}. {@code orderQuantity} is not listed — it is
+   * a spec field ({@code QuantityOrder}) whose value is overwritten, so it is already emittable.
+   * Declared so an MCP {@code fields:[…]} projection does not report them in
+   * {@code unknownFields} while the same response carries them (ETP-5576).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return RESPONSE_ENRICHED_FIELDS;
   }
 
   /**

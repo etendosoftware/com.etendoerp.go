@@ -414,6 +414,8 @@ public class AbstractInOutLineHandlerTest {
           sql.contains("ELSE (SELECT MAX(mil.qtyinvoiced) FROM m_matchinv mt"));
       assertTrue("column and match arms must be combined with GREATEST, never summed",
           sql.contains("GREATEST(COALESCE(("));
+      assertEquals("the injected keys are declared, so fields:[...] does not call them unknown",
+          java.util.Set.of("invoicedQuantity", "productCode"), handler.responseEnrichedFields());
       assertTrue("invoiced qty must be capped at the line's movement qty",
           sql.contains("LEAST(GREATEST(COALESCE((")
               && sql.contains(", 0)), ABS(il.movementqty)) "));
