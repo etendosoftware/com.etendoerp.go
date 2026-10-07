@@ -441,7 +441,7 @@ final class AccountReportTree {
       visit(root, 0, true, false, false, ctx);
     }
 
-    forceFirstGroupStartWhenMultipleGroups(out);
+    forceFirstGroupStartWhenMultipleGroups(out, roots);
 
     return out;
   }
@@ -499,13 +499,17 @@ final class AccountReportTree {
    * actually has more than one distinct group. A single-group report (Profit &amp; Loss) never has
    * more than one, so this is a no-op for it.
    */
-  private static void forceFirstGroupStartWhenMultipleGroups(List<OutputRow> out) {
+  private static void forceFirstGroupStartWhenMultipleGroups(List<OutputRow> out,
+      List<Node> roots) {
     if (out.isEmpty()) {
       return;
     }
+    // ETP-5662: counted over the report's ROOTS, not the visible rows, so a single visible group
+    // (e.g. only Pasivo after ShowValueCond) still gets its header. Deliberately differs from
+    // Classic; display only.
     Set<String> groups = new HashSet<>();
-    for (OutputRow r : out) {
-      groups.add(r.group);
+    for (Node root : roots) {
+      groups.add(root.row.groupName);
     }
     if (groups.size() > 1) {
       out.set(0, out.get(0).withGroupStart(true));

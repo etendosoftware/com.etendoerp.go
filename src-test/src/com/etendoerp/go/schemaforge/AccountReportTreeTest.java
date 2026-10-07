@@ -401,6 +401,8 @@ class AccountReportTreeTest {
     assertEquals(0, amt(rows, "M5510").compareTo(BigDecimal.ONE));
     assertEquals(0, amt(rows, "M551").compareTo(BigDecimal.ONE));
     assertEquals(0, amt(rows, "555").compareTo(BigDecimal.ONE.negate()));
+    assertTrue(rows.get(0).isGroupStart,
+        "only Pasivo is visible, yet its group header must still be drawn");
   }
 
   @Test
