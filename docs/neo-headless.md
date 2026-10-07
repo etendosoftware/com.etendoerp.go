@@ -2628,7 +2628,7 @@ through `NeoHandler#responseEnrichedFields()`, and the MCP unions them into the 
 `NeoExtensionDispatcher.resolveOnly`, surface `READ`). The invoice headers declare `followUp`
 (from `FollowUpSupport.responseFields()`, only when a flow is registered) and their subtype key. It
 is read by the projection validator only: nothing is filtered, renamed or made writable by it. The
-other keys the invoice headers inject on read (`linkedShipments`, `invoiceStatus`, …) are not
+other keys the invoice headers inject on read (`linkedShipments` / `linkedReceipts`, `docTypeLocked`, `isRectificative`, …) are not
 declared yet and are still reported if requested explicitly.
 
 #### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
