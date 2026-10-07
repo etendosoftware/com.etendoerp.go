@@ -20,12 +20,22 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.dal.core.OBContext;
+
+import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
  * Unit tests for {@link SelectorQueryBuilder} search-filter construction.
@@ -33,6 +43,9 @@ import org.junit.jupiter.api.Test;
  * Focused on the blank-property / custom-HQL selector support: when the searchable
  * fragment already carries its own alias (e.g. {@code bp.name} from
  * {@code clause_left_part}), it must not be double-prefixed.
+ *
+ * @covers com.etendoerp.go.schemaforge.SelectorQueryBuilder
+ * @covers com.etendoerp.go.schemaforge.SelectorOrgFilter
  */
 class SelectorQueryBuilderTest {
 
@@ -58,8 +71,40 @@ class SelectorQueryBuilderTest {
         SelectorOrgFilter.resolveSearchableExpression("e", "bp.name"));
     assertEquals("bp.searchKey",
         SelectorOrgFilter.resolveSearchableExpression("bp", "bp.searchKey"));
-    assertEquals("contact.businessPartner.name",
-        SelectorOrgFilter.resolveSearchableExpression("e", "contact.businessPartner.name"));
+  }
+
+  /**
+   * A dotted DAL path from {@code SelectorField.property} is relative to the entity, not
+   * alias-qualified: on the rich path it must be prefixed, or it binds to the outer query inside
+   * the de-dup subquery (ETP-5670).
+   */
+  @Test
+  @DisplayName("resolveRichSearchableExpression prefixes alias for a dotted relative DAL path")
+  void testResolveRichExprDottedRelativePath() {
+    assertEquals("e.contact.businessPartner.name",
+        SelectorOrgFilter.resolveRichSearchableExpression("e",
+            SearchableFragment.relativePath("contact.businessPartner.name")));
+    assertEquals("e.product.name",
+        SelectorOrgFilter.resolveRichSearchableExpression("e",
+            SearchableFragment.relativePath("product.name")));
+  }
+
+  /** A bare relative DAL path keeps today's single prefix. */
+  @Test
+  @DisplayName("resolveRichSearchableExpression prefixes alias once for a bare relative path")
+  void testResolveRichExprBareRelativePath() {
+    assertEquals("e.name",
+        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.relativePath("name")));
+  }
+
+  /** A clause_left_part fragment keeps the custom rule on the rich path: dotted stays as written. */
+  @Test
+  @DisplayName("resolveRichSearchableExpression leaves a clause_left_part fragment unchanged")
+  void testResolveRichExprClauseLeftPart() {
+    assertEquals("bp.name",
+        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.clauseLeftPart("bp.name")));
+    assertEquals("e.searchKey",
+        SelectorOrgFilter.resolveRichSearchableExpression("e", SearchableFragment.clauseLeftPart("searchKey")));
   }
 
   /** Blank fragment is returned as-is (caller is responsible for filtering). */
@@ -124,6 +169,30 @@ class SelectorQueryBuilderTest {
         "dotted fragment should stay as-is: " + result);
   }
 
+  /** Rich path: relative DAL paths are qualified, clause_left_part fragments are kept. */
+  @Test
+  @DisplayName("appendRichSearchFilter qualifies relative paths and keeps clause fragments")
+  void testAppendRichFilterQualifiesRelativePaths() {
+    StringBuilder hql = new StringBuilder();
+    SelectorOrgFilter.appendRichSearchFilter(hql, Arrays.asList(
+        SearchableFragment.relativePath("product.name"),
+        SearchableFragment.relativePath("name"),
+        SearchableFragment.clauseLeftPart("bp.searchKey")), "e", "mi", false);
+    assertEquals(" WHERE (lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(e.name as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search)", hql.toString());
+  }
+
+  /** Rich path: no-op when search is blank, like the custom path. */
+  @Test
+  @DisplayName("appendRichSearchFilter no-op when search is blank")
+  void testAppendRichFilterBlankSearch() {
+    StringBuilder hql = new StringBuilder("e.active = true");
+    SelectorOrgFilter.appendRichSearchFilter(hql,
+        Collections.singletonList(SearchableFragment.relativePath("product.name")), "e", " ", true);
+    assertEquals("e.active = true", hql.toString());
+  }
+
   /** No-op when search is blank. */
   @Test
   @DisplayName("appendCustomSearchFilter no-op when search is blank")
@@ -155,6 +224,62 @@ class SelectorQueryBuilderTest {
     assertTrue(result.contains(" AND ("), "should append with AND: " + result);
     assertFalse(result.contains(" WHERE (lower"),
         "should not introduce a second WHERE: " + result);
+  }
+
+  // --------------------------------------------------------------------
+  // buildRichQueryWhereClause / buildCustomHqlFromClause — search wiring (ETP-5670)
+  // --------------------------------------------------------------------
+
+  /**
+   * Runs {@code body} with no OBContext and an entity unknown to the model, so the org and client
+   * filters add nothing and the produced HQL holds only the search predicate.
+   */
+  private static String withoutOrgFilters(java.util.function.Supplier<String> body) {
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(anyString())).thenReturn(null);
+    try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+      mp.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      ctx.when(OBContext::getOBContext).thenReturn(null);
+      return body.get();
+    }
+  }
+
+  /** Rich path: dotted DAL paths from SelectorField.property are qualified with {@code e.}. */
+  @Test
+  @DisplayName("buildRichQueryWhereClause qualifies dotted search properties with the alias")
+  void testRichWhereClauseQualifiesDottedSearchProperties() {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductByPriceAndWarehouse", "product.name")
+        .isRich(true).valueProperty("product.id")
+        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("product.name"),
+            SearchableFragment.relativePath("product.searchKey")))
+        .build();
+
+    String where = withoutOrgFilters(() -> SelectorQueryBuilder.buildRichQueryWhereClause(
+        meta, "p", "e.active = true", "e", null).getHql());
+
+    assertEquals("as e where e.active = true AND (lower(COALESCE(cast(e.product.name as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(e.product.searchKey as string), '')) LIKE :search)", where);
+  }
+
+  /** Custom-HQL path: unchanged — a dotted fragment is used as written, whatever its origin. */
+  @Test
+  @DisplayName("buildCustomHqlFromClause keeps dotted search fragments as written")
+  void testCustomFromClauseKeepsDottedFragments() {
+    SelectorMeta meta = new SelectorMeta.Builder("BusinessPartner", "name")
+        .isRich(true).isCustomQuery(true).entityAlias("bp")
+        .searchableProperties(Arrays.asList(SearchableFragment.relativePath("contact.name"),
+            SearchableFragment.clauseLeftPart("bp.searchKey"),
+            SearchableFragment.relativePath("name")))
+        .build();
+
+    String from = withoutOrgFilters(() -> SelectorQueryBuilder.buildCustomHqlFromClause(
+        " FROM BusinessPartner bp", "bp", meta, null, "mi", null).getHql());
+
+    assertEquals(" FROM BusinessPartner bp WHERE ("
+        + "lower(COALESCE(cast(contact.name as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(bp.searchKey as string), '')) LIKE :search"
+        + " OR lower(COALESCE(cast(bp.name as string), '')) LIKE :search)", from);
   }
 
   // --------------------------------------------------------------------
