@@ -95,6 +95,8 @@ import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.OrgCurrency;
  *   <li>{@code handle()} returns 405 on non-GET and never touches the loaders.</li>
  *   <li>{@code buildPayload()} envelope shape matches the contract the UI hook consumes.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountsPageHandler
  */
 // Silent runner: the strict runner inspects mocks/spies after the class runs to
 // report unnecessary stubbings, but clearMocks() (below) wipes the inline mock
@@ -116,6 +118,8 @@ public class FinancialAccountsPageHandlerTest {
 
   /** The GO locale loadAccounts() reads off the OBContext to localize the country (ETP-5579). */
   private static final String GO_LANGUAGE = "es_ES";
+
+  private static final java.time.Instant SYNC_OLD = java.time.Instant.parse("2026-10-01T08:00:00Z");
 
   private FinancialAccountsPageHandler handler;
 
@@ -1229,6 +1233,8 @@ public class FinancialAccountsPageHandlerTest {
     // Column 23: fa.swiftcode (ETP-4896 QA follow-up), appended last for the same positional
     // reason. First row has a BIC, second has none (a Cash account, or a Bank account without one).
     when(rs.getString(23)).thenReturn("BBVAESMM", null);
+    // Column 25 (em_psd2_last_sync_date): first row synced once, second never (SQL NULL).
+    when(rs.getTimestamp(25)).thenReturn(java.sql.Timestamp.from(SYNC_OLD), null);
 
     List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
@@ -1248,6 +1254,8 @@ public class FinancialAccountsPageHandlerTest {
     assertEquals("España", first.country.name);
     assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
     assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
+    assertEquals("first row maps column 25 into lastSyncDate", SYNC_OLD,
+        first.lastSyncDate.toInstant());
 
     AccountRow second = rows.get(1);
     assertEquals("acc-2", second.id);
@@ -1260,6 +1268,7 @@ public class FinancialAccountsPageHandlerTest {
         second.pendingCount);
     assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
         "", second.swiftCode);
+    assertNull("a null column 25 leaves lastSyncDate null (never synced)", second.lastSyncDate);
 
     verify(ps).setString(1, GO_LANGUAGE);
     verify(ps).setString(2, CLIENT_ID);
@@ -1833,5 +1842,28 @@ public class FinancialAccountsPageHandlerTest {
       default:
         return "0";
     }
+  }
+
+  // ── lastSyncDate ──────────────────────────────────────────────────────────
+
+  private static AccountRow syncedAccount(String id, boolean connected, boolean active,
+      java.time.Instant lastSync) {
+    AccountRow row = account(id, id, "B", BigDecimal.TEN, "EUR");
+    row.bankConnected = connected;
+    row.active = active;
+    row.lastSyncDate = lastSync != null ? java.util.Date.from(lastSync) : null;
+    return row;
+  }
+
+  /** The account JSON carries the ISO instant, and an explicit JSON null when never synced. */
+  @Test
+  public void testBuildAccountsArraySerialisesLastSyncDateAsInstantOrNull() throws Exception {
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(
+        syncedAccount("a", true, true, SYNC_OLD),
+        syncedAccount("b", true, true, null)), Collections.emptySet());
+
+    assertEquals(SYNC_OLD.toString(), arr.getJSONObject(0).getString("lastSyncDate"));
+    assertTrue("the key must stay present", arr.getJSONObject(1).has("lastSyncDate"));
+    assertTrue(arr.getJSONObject(1).isNull("lastSyncDate"));
   }
 }
