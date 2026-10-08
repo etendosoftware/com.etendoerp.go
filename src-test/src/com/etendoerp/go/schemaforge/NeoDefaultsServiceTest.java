@@ -85,6 +85,11 @@ import com.etendoerp.sequences.SequenceUtils;
  * <p>Covers resolveDefaults, injectMandatoryDefaults, findMissingMandatoryFields,
  * buildVariablesSecureApp, resolveFirstOrgForClient, CalloutCascadeResult, and
  * parseSQLExpression. Also retains the original NeoCommercialLinePolicy tests.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsService
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsSqlHelper
+ * @covers com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService
+ * @covers com.etendoerp.go.schemaforge.NeoSequencePreviewHelper
  */
 public class NeoDefaultsServiceTest {
 
@@ -951,6 +956,9 @@ public class NeoDefaultsServiceTest {
     when(sfFieldSeq.getDefaultValue()).thenReturn(null);
     when(adColumnSeq.getDBColumnName()).thenReturn("Value");
     when(adColumnSeq.isUseAutomaticSequence()).thenReturn(true);
+    Table seqTable = mock(Table.class);
+    when(seqTable.getDBTableName()).thenReturn("M_Product");
+    when(adColumnSeq.getTable()).thenReturn(seqTable);
 
     when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
     when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfFieldSeq));
@@ -976,7 +984,8 @@ public class NeoDefaultsServiceTest {
              mockStatic(NeoDefaultsCascadeHelper.class);
          MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
-         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
@@ -987,14 +996,17 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "Value"))
           .thenReturn("searchKey");
-      // SequenceUtils.isSequence returns true for this column
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumnSeq)).thenReturn(true);
+      // The DAL model (Property.isSequence, precomputed at model load) flags the column as a
+      // transactional sequence; the preview must come from it, not from a per-column
+      // SequenceConfig query.
+      stubModelSequenceProperty(modelMock, "M_Product", "Value", true);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
       assertEquals(200, response.getHttpStatus());
       JSONObject defaults = response.getBody().getJSONObject("defaults");
       assertEquals("<5000>", defaults.getString("searchKey"));
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
     }
   }
 
@@ -2453,17 +2465,18 @@ public class NeoDefaultsServiceTest {
   }
 
   @Test
-  public void testIsSequenceFieldBySequenceUtils() throws Exception {
-    Column col = mock(Column.class);
-    when(col.getDBColumnName()).thenReturn("SomeCustomField");
-    when(col.isUseAutomaticSequence()).thenReturn(false);
+  public void testIsSequenceFieldFollowsModelNotSequenceUtils() throws Exception {
+    // The runtime model is the source of truth: a stale/divergent SequenceUtils answer must
+    // neither be consulted nor change the result.
+    Column col = metadataColumn("SomeCustomField", "C_Thing", "10", false);
 
-    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class)) {
+    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
       seqMock.when(() -> SequenceUtils.isSequence(col)).thenReturn(true);
+      stubModelSequenceProperty(modelMock, "C_Thing", "SomeCustomField", false);
 
-      boolean result = (boolean) invokePrivate("isSequenceField",
-          new Class<?>[]{ Column.class }, col);
-      assertTrue("SequenceUtils.isSequence=true should make it a sequence field", result);
+      assertFalse("Model isSequence=false wins over SequenceUtils", isSequenceField(col));
+      seqMock.verify(() -> SequenceUtils.isSequence(any()), never());
     }
   }
 
@@ -5805,6 +5818,232 @@ public class NeoDefaultsServiceTest {
         selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
             any(), anyString(), any(), anyInt(), anyInt(), any()), never());
       }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveFieldDefault — per-column metadata work on create is answered from
+  // the in-memory DAL model, never from a per-column DB round trip
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Column mock carrying the metadata resolveFieldDefault reads: table name, base reference,
+   * mandatory flag, and no AD default / link-to-parent / automatic sequence.
+   */
+  private static Column metadataColumn(String dbColumnName, String tableName, String refId,
+      boolean mandatory) {
+    Column col = mock(Column.class);
+    Table table = mock(Table.class);
+    Reference reference = mock(Reference.class);
+    when(col.getDBColumnName()).thenReturn(dbColumnName);
+    when(col.getTable()).thenReturn(table);
+    when(table.getDBTableName()).thenReturn(tableName);
+    when(reference.getId()).thenReturn(refId);
+    when(col.getReference()).thenReturn(reference);
+    when(col.isMandatory()).thenReturn(mandatory);
+    when(col.isLinkToParentColumn()).thenReturn(false);
+    when(col.isUseAutomaticSequence()).thenReturn(false);
+    when(col.getDefaultValue()).thenReturn(null);
+    return col;
+  }
+
+  /** Stubs the runtime model so {@code tableName.dbColumnName} reports the given isSequence. */
+  private static void stubModelSequenceProperty(MockedStatic<ModelProvider> modelMock,
+      String tableName, String dbColumnName, boolean isSequence) {
+    ModelProvider mp = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(prop.isSequence()).thenReturn(isSequence);
+    modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+    when(mp.getEntityByTableName(tableName)).thenReturn(entity);
+    when(entity.getPropertyByColumnName(dbColumnName, false)).thenReturn(prop);
+  }
+
+  private static Object resolveCreateDefault(Column col) {
+    return NeoDefaultsService.resolveFieldDefault(new NeoDefaultsService.FieldDefaultRequest(
+        col, null, mock(VariablesSecureApp.class), null, "", null));
+  }
+
+  private static boolean isSequenceField(Column col) throws Exception {
+    return (boolean) invokePrivate("isSequenceField", new Class<?>[]{Column.class}, col);
+  }
+
+  @Test
+  public void testIsSequenceFieldReadsTransactionalSequenceFromModelWithoutQuery()
+      throws Exception {
+    Column identifier = metadataColumn("EM_Etgo_Identifier", "C_BPartner",
+        "B82E1C56F57749AD97DD9924624F08D3", false);
+    Column plain = metadataColumn("Description", "C_BPartner", "14", false);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      stubModelSequenceProperty(modelMock, "C_BPartner", "EM_Etgo_Identifier", true);
+      Entity entity = ModelProvider.getInstance().getEntityByTableName("C_BPartner");
+      Property plainProp = mock(Property.class);
+      when(entity.getPropertyByColumnName("Description", false)).thenReturn(plainProp);
+
+      assertTrue(isSequenceField(identifier));
+      assertFalse(isSequenceField(plain));
+
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
+      dalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void testIsSequenceFieldKeepsDocumentNoAndAutomaticValueRules() throws Exception {
+    Column documentNo = metadataColumn("DocumentNo", "C_Order", "10", true);
+    Column autoValue = metadataColumn("Value", "M_Product", "10", true);
+    when(autoValue.isUseAutomaticSequence()).thenReturn(true);
+    Column manualValue = metadataColumn("Value", "M_Product", "10", true);
+    // A column whose table has no runtime entity (e.g. a view) is not a sequence by model.
+    Column noEntity = metadataColumn("Name", "Some_View", "10", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class)) {
+      stubModelSequenceProperty(modelMock, "C_Order", "DocumentNo", false);
+      ModelProvider mp = ModelProvider.getInstance();
+      Entity productEntity = mock(Entity.class);
+      Property valueProp = mock(Property.class);
+      when(mp.getEntityByTableName("M_Product")).thenReturn(productEntity);
+      when(productEntity.getPropertyByColumnName("Value", false)).thenReturn(valueProp);
+
+      assertTrue("DocumentNo is a sequence field by name", isSequenceField(documentNo));
+      assertTrue("Value with automatic sequence is a sequence field", isSequenceField(autoValue));
+      assertFalse("Value without automatic sequence is not", isSequenceField(manualValue));
+      assertFalse("No runtime entity means no model sequence", isSequenceField(noEntity));
+
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
+    }
+  }
+
+  @Test
+  public void testMandatoryBooleanWithoutAdDefaultSkipsDbDefaultAndGetsFalse() throws Exception {
+    // C_BPartner.IsProspect: mandatory YesNo, no AD default, DB DEFAULT 'Y'. Classic stores N
+    // (YesNoUIDefinition / DAL entity default); the safe-type fallback gives false.
+    Column isProspect = metadataColumn("IsProspect", "C_BPartner", "20", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_BPartner", "IsProspect", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("Y");
+
+      assertNull(resolveCreateDefault(isProspect));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+
+      JSONObject body = new JSONObject();
+      NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, "potentialCustomer", isProspect);
+      assertEquals(Boolean.FALSE, body.get("potentialCustomer"));
+    }
+  }
+
+  @Test
+  public void testMandatoryNumericWithoutAdDefaultSkipsDbDefault() throws Exception {
+    Column line = metadataColumn("Line", "C_OrderLine", "11", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_OrderLine", "Line", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("10");
+
+      assertNull(resolveCreateDefault(line));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  @Test
+  public void testNonMandatoryColumnWithoutAdDefaultTouchesNoDatabase() throws Exception {
+    // An optional column with a DB-level default but no AD/ETGO_SF_FIELD default is stored
+    // NULL by classic (Hibernate writes explicit NULLs). NEO must not inject the DB default,
+    // and must reach that answer without any DB round trip (no SequenceConfig, no catalog).
+    Column optional = metadataColumn("IsTaxExempt", "C_BPartner", "10", false);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_BPartner", "IsTaxExempt", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("N");
+
+      assertNull(resolveCreateDefault(optional));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
+      dalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void testMandatoryNonSafeTypeColumnStillUsesDbDefault() throws Exception {
+    // Mandatory string/list column with no AD default: the safe-type fallback cannot fill it,
+    // so the DB-level default remains the last resort (ETP-3660 rationale).
+    Column status = metadataColumn("Status", "C_Thing", "17", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "Status", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Thing", "Status"))
+          .thenReturn("DR");
+
+      assertEquals("DR", resolveCreateDefault(status));
+    }
+  }
+
+  @Test
+  public void testNonMandatoryColumnWithContextDefaultIsStillResolved() throws Exception {
+    // Optional columns keep their genuine AD default expressions (e.g. @C_Currency_ID@).
+    Column currency = metadataColumn("C_Currency_ID", "C_Thing", "19", false);
+    when(currency.getDefaultValue()).thenReturn("@C_Currency_ID@");
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "C_Currency_ID", false);
+      utilityMock.when(() -> Utility.getDefault(any(), any(), eq("C_Currency_ID"),
+          eq("@C_Currency_ID@"), anyString(), anyString())).thenReturn("CUR-EUR");
+
+      assertEquals("CUR-EUR", resolveCreateDefault(currency));
+    }
+  }
+
+  @Test
+  public void testResolveDbColumnDefaultReadsIndexedCatalog() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn("'DR'::character varying");
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      assertEquals("DR", NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "DocStatus"));
+
+      org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      assertTrue(sql.getValue().contains("pg_attrdef"));
+      assertTrue(sql.getValue().contains("to_regclass"));
+      assertFalse(sql.getValue().contains("information_schema"));
+      verify(ps).setString(1, "C_Order");
+      verify(ps).setString(2, "DocStatus");
     }
   }
 }

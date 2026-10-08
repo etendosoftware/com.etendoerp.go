@@ -25,8 +25,6 @@ import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.service.db.DalConnectionProvider;
 
-import com.etendoerp.sequences.SequenceUtils;
-
 /**
  * Sequence/DocumentNo preview helpers extracted from {@link NeoDefaultsService} to keep that
  * class within its method-count budget.
@@ -55,7 +53,7 @@ final class NeoSequencePreviewHelper {
   static @Nullable String resolveSequencePreviewForColumn(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, String docTypeTargetId, String docTypeId) {
     String preview;
-    if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
+    if (NeoDefaultsService.isModelSequenceColumn(adColumn)) {
       preview = NeoDefaultsService.resolveTransactionalSequencePreview(adColumn);
     } else {
       preview = resolveSequencePreviewWithDocType(

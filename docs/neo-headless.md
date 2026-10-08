@@ -264,7 +264,19 @@ strict order:
    (`NeoMandatoryDefaultsService.injectMandatoryDefaults`, before step 2 runs).
 2. **Inject generic mandatory-column defaults** (`injectDefaultsForActiveColumns`) — plain
    `AD_Column` defaults, session context, parent-tab values — for any column the client did not
-   submit.
+   submit. Every active, non-key, non-audit column of the table is visited (ETP-4274), but the
+   per-column work is metadata only, answered in memory — classic computes no defaults at save
+   time and NEO must not turn this pass into per-row DB traffic (ETP-5676):
+   - **Sequence detection** reads the runtime model (`Property.isSequence()`, precomputed at
+     model load) plus the DocumentNo / `Value` + `IsUsedSequence` name rules — never a
+     per-column `SequenceConfig` query.
+   - **The DB-level `DEFAULT`** (`NeoDefaultsSqlHelper.resolveDbColumnDefault`, an indexed
+     `pg_attrdef` read) is the last resort only for a **mandatory** column with no
+     `AD_Column`/`ETGO_SF_FIELD` default, no preference and no doctype, whose reference is not
+     boolean or numeric. Optional columns are left `NULL`, as classic stores them. Mandatory
+     YesNo and numeric columns get `false`/`0` from the safe-type fallback, matching classic's
+     DAL entity default — **not** the DB default: `C_BPartner.IsProspect` (DB `DEFAULT 'Y'`,
+     no AD default) is created `N`, as in classic.
 3. **Run the callout cascade** (`NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate`),
    passing the *step-1 snapshot* as `protectedFields` — never a snapshot taken after step 2.
 

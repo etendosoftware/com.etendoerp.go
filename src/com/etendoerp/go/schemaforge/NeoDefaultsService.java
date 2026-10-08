@@ -35,6 +35,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Sequence;
@@ -47,7 +48,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
-import com.etendoerp.sequences.SequenceUtils;
 
 /**
  * Service for resolving default values when creating a new record via NEO Headless.
@@ -1137,7 +1137,13 @@ public class NeoDefaultsService {
     if (docTypeId != null) {
       return docTypeId;
     }
-    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null) {
+    // Last resort, for a NOT NULL column the safe-type fallback cannot fill (ETP-3660). Never
+    // for an optional column (classic stores NULL: Hibernate writes explicit NULLs) nor for a
+    // boolean/numeric one: those end up false/0 via injectSafeTypeDefault, matching classic's
+    // DAL entity default — not the DB DEFAULT (e.g. C_BPartner.IsProspect 'Y').
+    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null
+        && Boolean.TRUE.equals(adColumn.isMandatory())
+        && !NeoDefaultsCascadeHelper.hasSafeTypeDefault(adColumn)) {
       String dbDefault = NeoDefaultsSqlHelper.resolveDbColumnDefault(
           adColumn.getTable().getDBTableName(), dbColumnName);
       if (dbDefault != null) {
@@ -1149,12 +1155,16 @@ public class NeoDefaultsService {
 
   /**
    * Check if a column is a sequence/DocumentNo field.
-   * Uses SequenceUtils.isSequence() from Etendo core for the reference-based check,
-   * plus the classic DocumentNo/Value detection.
+   *
+   * <p>The reference-based check reads the runtime DAL model ({@link Property#isSequence()},
+   * computed once at model load from the column's reference and reference value), the same flag
+   * the save path uses to fire the sequence generator. It replaces
+   * {@code SequenceUtils.isSequence(Column)}, which ran one {@code SequenceConfig} query per
+   * column on every create (~105 per M_Product row). Plus the classic DocumentNo/Value
+   * detection, unchanged.</p>
    */
-  private static boolean isSequenceField(Column adColumn) {
-    // Check via Etendo's SequenceUtils (reference-based sequence configuration)
-    if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
+  static boolean isSequenceField(Column adColumn) {
+    if (isModelSequenceColumn(adColumn)) {
       return true;
     }
     // Classic fallback: DocumentNo or Value with automatic sequence
@@ -1165,8 +1175,38 @@ public class NeoDefaultsService {
   }
 
   /**
+   * True when the runtime model flags the column as a transactional/non-transactional sequence
+   * ({@link Property#isSequence()}). In-memory only: no DB round trip.
+   *
+   * <p>Equivalence with {@code SequenceUtils.isSequence}: that method checks the reference value
+   * when present and otherwise the base reference; the model checks either. They differ only
+   * for a column whose base reference carries a sequence configuration while its reference value
+   * does not — the model answers true, which is what the save-time generator follows. No such
+   * column exists today (the only sequence-referenced column, {@code EM_Etgo_Identifier}, has no
+   * reference value). A table without a runtime entity (a view) is never a model sequence.</p>
+   */
+  static boolean isModelSequenceColumn(Column adColumn) {
+    Table table = adColumn.getTable();
+    if (table == null || table.getDBTableName() == null) {
+      return false;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntityByTableName(table.getDBTableName());
+      if (entity == null) {
+        return false;
+      }
+      Property prop = entity.getPropertyByColumnName(adColumn.getDBColumnName(), false);
+      return prop != null && prop.isSequence();
+    } catch (RuntimeException e) {
+      log.debug("Could not read model sequence flag for {}: {}", adColumn.getDBColumnName(),
+          e.getMessage());
+      return false;
+    }
+  }
+
+  /**
    * Preview for transactional sequences (new AD_Sequence mechanism, detected via
-   * SequenceUtils.isSequence). Looks up the sequence by column + current organization and
+   * isModelSequenceColumn). Looks up the sequence by column + current organization and
    * returns the current nextAssignedNumber without consuming it.
    */
   static String resolveTransactionalSequencePreview(Column adColumn) {
