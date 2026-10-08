@@ -1138,9 +1138,11 @@ public class NeoDefaultsService {
       return docTypeId;
     }
     // Last resort, for a NOT NULL column the safe-type fallback cannot fill (ETP-3660). Never
-    // for an optional column (classic stores NULL: Hibernate writes explicit NULLs) nor for a
-    // boolean/numeric one: those end up false/0 via injectSafeTypeDefault, matching classic's
-    // DAL entity default — not the DB DEFAULT (e.g. C_BPartner.IsProspect 'Y').
+    // for an optional column: NEO does not pre-fill it, and the DB DEFAULT still applies at
+    // INSERT (entities are mapped dynamic-insert, so a null property is left out of the
+    // statement). Nor for a boolean/numeric one: those end up false/0 via injectSafeTypeDefault,
+    // matching the generated entity's setDefaultValue — not the DB DEFAULT (e.g.
+    // C_BPartner.IsProspect 'Y' is created N, as in classic).
     if (!colUpper.endsWith("_ID") && adColumn.getTable() != null
         && Boolean.TRUE.equals(adColumn.isMandatory())
         && !NeoDefaultsCascadeHelper.hasSafeTypeDefault(adColumn)) {
@@ -1184,6 +1186,10 @@ public class NeoDefaultsService {
    * does not — the model answers true, which is what the save-time generator follows. No such
    * column exists today (the only sequence-referenced column, {@code EM_Etgo_Identifier}, has no
    * reference value). A table without a runtime entity (a view) is never a model sequence.</p>
+   *
+   * <p>Unlike the former {@code OBCriteria<SequenceConfig>} lookup, the model applies no active or
+   * client filter (inactive {@code SequenceConfig} rows count) and is cached until restart. Both
+   * match what the save-time generator follows, which reads the same model.</p>
    */
   static boolean isModelSequenceColumn(Column adColumn) {
     Table table = adColumn.getTable();

@@ -781,6 +781,8 @@ public class NeoDefaultsCascadeHelper {
     return filtered;
   }
 
+  // injectSafeTypeDefault / hasSafeTypeDefault are the single owners of these reference
+  // constants: callers ask hasSafeTypeDefault instead of repeating the reference ids.
   /** Amount (12), Number (22), Integer (11) and Quantity (29) references: safe default 0. */
   private static final Set<String> NUMERIC_SAFE_TYPE_REFERENCES = Set.of("22", "29", "12", "11");
   /** YesNo reference: safe default false. */
