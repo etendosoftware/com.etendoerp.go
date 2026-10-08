@@ -35,7 +35,6 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
-import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Sequence;
@@ -1166,7 +1165,7 @@ public class NeoDefaultsService {
    * detection, unchanged.</p>
    */
   static boolean isSequenceField(Column adColumn) {
-    if (isModelSequenceColumn(adColumn)) {
+    if (NeoSequencePreviewHelper.isModelSequenceColumn(adColumn)) {
       return true;
     }
     // Classic fallback: DocumentNo or Value with automatic sequence
@@ -1176,44 +1175,11 @@ public class NeoDefaultsService {
             && Boolean.TRUE.equals(adColumn.isUseAutomaticSequence()));
   }
 
-  /**
-   * True when the runtime model flags the column as a transactional/non-transactional sequence
-   * ({@link Property#isSequence()}). In-memory only: no DB round trip.
-   *
-   * <p>Equivalence with {@code SequenceUtils.isSequence}: that method checks the reference value
-   * when present and otherwise the base reference; the model checks either. They differ only
-   * for a column whose base reference carries a sequence configuration while its reference value
-   * does not — the model answers true, which is what the save-time generator follows. No such
-   * column exists today (the only sequence-referenced column, {@code EM_Etgo_Identifier}, has no
-   * reference value). A table without a runtime entity (a view) is never a model sequence.</p>
-   *
-   * <p>Unlike the former {@code OBCriteria<SequenceConfig>} lookup, the model applies no active or
-   * client filter (inactive {@code SequenceConfig} rows count) and is cached until restart. Both
-   * match what the save-time generator follows, which reads the same model.</p>
-   */
-  static boolean isModelSequenceColumn(Column adColumn) {
-    Table table = adColumn.getTable();
-    if (table == null || table.getDBTableName() == null) {
-      return false;
-    }
-    try {
-      Entity entity = ModelProvider.getInstance().getEntityByTableName(table.getDBTableName());
-      if (entity == null) {
-        return false;
-      }
-      Property prop = entity.getPropertyByColumnName(adColumn.getDBColumnName(), false);
-      return prop != null && prop.isSequence();
-    } catch (RuntimeException e) {
-      log.debug("Could not read model sequence flag for {}: {}", adColumn.getDBColumnName(),
-          e.getMessage());
-      return false;
-    }
-  }
 
   /**
    * Preview for transactional sequences (new AD_Sequence mechanism, detected via
-   * isModelSequenceColumn). Looks up the sequence by column + current organization and
-   * returns the current nextAssignedNumber without consuming it.
+   * NeoSequencePreviewHelper#isModelSequenceColumn). Looks up the sequence by column + current
+   * organization and returns the current nextAssignedNumber without consuming it.
    */
   static String resolveTransactionalSequencePreview(Column adColumn) {
     try {
