@@ -921,12 +921,6 @@ public final class NeoAttachmentsHelper {
     return json;
   }
 
-  /**
-   * Projects the uploader. {@code name} is the AD user name, which is a technical
-   * login (it may carry the {@code +client} suffixes used to disambiguate logins),
-   * so the e-mail is exposed alongside it and preferred by the UI when present.
-   * {@code name} stays as the fallback for users with no e-mail on record.
-   */
   private static Object userToJson(User user) throws JSONException {
     if (user == null) {
       return JSONObject.NULL;
@@ -934,9 +928,6 @@ public final class NeoAttachmentsHelper {
     JSONObject json = new JSONObject();
     json.put("id", user.getId());
     json.put("name", user.getName());
-    if (StringUtils.isNotBlank(user.getEmail())) {
-      json.put("email", user.getEmail());
-    }
     return json;
   }
 

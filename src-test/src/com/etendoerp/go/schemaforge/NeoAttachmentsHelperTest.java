@@ -1873,41 +1873,22 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
-   * ETP-5526 (CP-17) — "Subido por" showed the AD username, which in a
-   * multi-client instance is a technical login such as
-   * {@code isaias.battaglia+70@smfconsulting.es+lapaulina}. The projection must
-   * carry the e-mail so the UI can show it, while keeping {@code name}.
+   * The uploader projection is {@code id} and {@code name} only. The user's
+   * e-mail is deliberately not part of the attachments payload: exposing a
+   * personal e-mail through a per-record listing is a platform-wide decision,
+   * not something this endpoint takes on its own.
    */
   @Test
-  public void userToJsonExposesEmailAlongsideName() throws Exception {
+  public void userToJsonProjectsIdAndNameOnly() throws Exception {
     User user = mock(User.class);
     when(user.getId()).thenReturn("U1");
-    when(user.getName()).thenReturn("isaias.battaglia+70@smfconsulting.es+lapaulina");
-    when(user.getEmail()).thenReturn("isaias.battaglia@smfconsulting.es");
+    when(user.getName()).thenReturn("Openbravo");
 
     JSONObject json = (JSONObject) invokePrivateStatic("userToJson",
         new Class<?>[]{ User.class }, user);
 
     assertEquals("U1", json.getString("id"));
-    assertEquals("isaias.battaglia@smfconsulting.es", json.getString("email"));
-    assertEquals("isaias.battaglia+70@smfconsulting.es+lapaulina", json.getString("name"));
-  }
-
-  /**
-   * ETP-5526 (CP-17) — a user with no e-mail on record omits the key entirely,
-   * so the UI falls back to {@code name}.
-   */
-  @Test
-  public void userToJsonOmitsEmailWhenBlank() throws Exception {
-    User user = mock(User.class);
-    when(user.getId()).thenReturn("U1");
-    when(user.getName()).thenReturn("Openbravo");
-    when(user.getEmail()).thenReturn("  ");
-
-    JSONObject json = (JSONObject) invokePrivateStatic("userToJson",
-        new Class<?>[]{ User.class }, user);
-
-    assertFalse(json.has("email"));
     assertEquals("Openbravo", json.getString("name"));
+    assertFalse(json.has("email"));
   }
 }
