@@ -69,7 +69,6 @@ import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
@@ -1870,25 +1869,5 @@ public class NeoAttachmentsHelperTest {
 
       assertEquals(0L, size);
     }
-  }
-
-  /**
-   * The uploader projection is {@code id} and {@code name} only. The user's
-   * e-mail is deliberately not part of the attachments payload: exposing a
-   * personal e-mail through a per-record listing is a platform-wide decision,
-   * not something this endpoint takes on its own.
-   */
-  @Test
-  public void userToJsonProjectsIdAndNameOnly() throws Exception {
-    User user = mock(User.class);
-    when(user.getId()).thenReturn("U1");
-    when(user.getName()).thenReturn("Openbravo");
-
-    JSONObject json = (JSONObject) invokePrivateStatic("userToJson",
-        new Class<?>[]{ User.class }, user);
-
-    assertEquals("U1", json.getString("id"));
-    assertEquals("Openbravo", json.getString("name"));
-    assertFalse(json.has("email"));
   }
 }

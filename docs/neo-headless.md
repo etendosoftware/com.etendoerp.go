@@ -1149,11 +1149,6 @@ path rebuilt from `c_file.path`, which is `NULL` for attachments stored the "old
 every size read as 0 (ETP-5526). Any backend failure degrades to `0` rather than breaking the
 listing.
 
-`uploadedBy` is `{ "id", "name" }`, or `null` when the row has no creator. `name` is the AD
-username, which in a multi-client instance is a technical login (`user+70@domain+client`); the
-endpoint does not expose the user's e-mail, and clients must render `name` as-is. Making that
-login readable is a platform-wide concern, not something this endpoint resolves.
-
 Includes whichever attachment is currently marked as the record's "main" document (see below) —
 since ETP-4855 a file attached from the preview must also be visible in the Attachments tab.
 Returns `400` if `tableName` or `recordId` is missing, `404` if `tableName` does not resolve to a
