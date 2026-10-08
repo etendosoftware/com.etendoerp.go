@@ -89,6 +89,8 @@ final class McpFkResolver {
   private static final String KEY_FIELD = "field";
   private static final int SELECTOR_LIMIT = 10;
   private static final String LABEL_SEPARATOR = " - ";
+  /** Caps how many label separators are probed, so one failed resolution stays cheap. */
+  private static final int MAX_LABEL_SEPARATOR_PROBES = 3;
 
   /** @return {@code true} when {@code value} already looks like a 32-char hex Etendo id. */
   static boolean looksLikeId(String value) {
@@ -289,13 +291,17 @@ final class McpFkResolver {
    * without a label separator behave exactly as before. The label is split at each {@code " - "}
    * separator, the leading part is searched, and the candidate whose string value equals the whole
    * value is taken, provided exactly one does.
+   * <p>
+   * At most {@link #MAX_LABEL_SEPARATOR_PROBES} separators are probed, so a caller-supplied value
+   * carrying many separators cannot turn one failed resolution into an unbounded number of selector
+   * queries. A real label is split by its leading parts, well within that budget.
    *
    * @return the matched record id, or {@code null} when no single candidate carries that label
    */
   private static String resolveByExactLabel(Column column, String key, String search,
       Map<String, String> contextParams) {
     int sep = search.indexOf(LABEL_SEPARATOR);
-    while (sep > 0) {
+    for (int probes = 0; sep > 0 && probes < MAX_LABEL_SEPARATOR_PROBES; probes++) {
       NeoResponse response = NeoSelectorService.querySelectorByColumn(column, key,
           search.substring(0, sep), SELECTOR_LIMIT, 0, contextParams);
       JSONArray items = response.getHttpStatus() >= 400 || response.getBody() == null ? null

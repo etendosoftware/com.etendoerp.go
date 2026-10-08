@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -302,6 +303,31 @@ class McpFkResolverTest {
           assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
           assertEquals(label, body.getString(KEY));
         }
+      }
+    }
+
+    @Test
+    @DisplayName("a value with many separators cannot run an unbounded number of selector queries")
+    void labelProbesAreCapped() throws Exception {
+      // Seven separators: without the cap this would be one plain search plus seven label probes.
+      String label = "A - B - C - D - E - F - G - H";
+      JSONObject body = bodyWith(label);
+      Column column = mock(Column.class);
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
+            anyInt(), anyInt(), any())).thenReturn(selectorHits());
+
+        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+
+        assertNotNull(error);
+        assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
+        // One plain search for the whole value, then at most three label probes.
+        selector.verify(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(),
+            anyString(), anyInt(), anyInt(), any()), times(4));
       }
     }
 

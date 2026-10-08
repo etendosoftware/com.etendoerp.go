@@ -2565,8 +2565,10 @@ while the selector search matches the name only, so that label sent back used to
 When the plain search matches zero records and the value contains a `" - "` separator, the resolver
 re-queries the selector with each leading part before a separator and resolves the value to the id of
 the single candidate whose string property equals the whole value. Zero or several label matches stay
-`not_found`; unique matches, real ambiguity and the id probe are unchanged. It is shared code with no
-entity names, so it applies to `neo_create`, `neo_update` and `neo_batch` alike.
+`not_found`; unique matches, real ambiguity and the id probe are unchanged. At most the first three
+separators are probed, so a value carrying many of them cannot turn one failed resolution into an
+unbounded number of selector queries. It is shared code with no entity names, so it applies to
+`etendo_create`, `etendo_update` and `etendo_batch` alike.
 
 If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `AD_Column` can be
 resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
