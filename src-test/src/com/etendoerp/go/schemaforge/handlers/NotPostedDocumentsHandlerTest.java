@@ -18,9 +18,11 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -32,6 +34,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Named;
 
@@ -39,10 +42,13 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.hibernate.query.Query;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.domain.Reference;
@@ -65,6 +71,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * to {@code NoPostedDocumentDS.getData}) still requires a live OBDal session and is excluded.
  * The {@code setPostingService(...)} package-private seam allows injection of a mock
  * {@link DocumentPostingService} so post / bulk-post paths can be exercised without a database.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.NotPostedDocumentsHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NotPostedDocumentsHandlerTest {
@@ -109,7 +117,7 @@ public class NotPostedDocumentsHandlerTest {
   /**
    * ETP-4254: this spec is tab-less, so the MCP catalog rule would hide it as "handler-only"
    * unless the handler declares its {@code post} / {@code bulk-post} action surface. Losing the
-   * declaration removes the spec from neo_discover AND from neo_action — a silent regression
+   * declaration removes the spec from etendo_discover AND from etendo_action — a silent regression
    * with no other failing test, which is why it is asserted here.
    */
   @Test
@@ -268,6 +276,51 @@ public class NotPostedDocumentsHandlerTest {
     }
   }
 
+  /**
+   * ETP-5529: in a bulk post, only the row another posting process holds carries the
+   * {@code OtherPostingProcessActive} identity; a row that posted keeps a clean result.
+   */
+  @Test
+  public void handleBulkPostForwardsLockedDocumentKeyOnlyOnTheLockedRow() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+
+      when(service.post("318", "REC-LOCKED")).thenReturn(new DocumentPostingService.PostResult(false,
+          "Este registro está siendo contabilizado por otro proceso", List.of("OtherPostingProcessActive")));
+      when(service.post("318", "REC-OK"))
+          .thenReturn(new DocumentPostingService.PostResult(true, "Document posted"));
+
+      JSONObject locked = new JSONObject();
+      locked.put("tableId", "318");
+      locked.put("recordId", "REC-LOCKED");
+      JSONObject ok = new JSONObject();
+      ok.put("tableId", "318");
+      ok.put("recordId", "REC-OK");
+      JSONObject body = new JSONObject();
+      body.put("rows", new JSONArray().put(locked).put(ok));
+
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      JSONArray results = resp.getBody().getJSONArray("results");
+      JSONObject lockedResult = results.getJSONObject(0);
+      assertFalse(lockedResult.getBoolean("success"));
+      assertEquals("Este registro está siendo contabilizado por otro proceso", lockedResult.getString("message"));
+      assertEquals("OtherPostingProcessActive", lockedResult.getJSONArray("messageKeys").getString(0));
+      JSONObject okResult = results.getJSONObject(1);
+      assertTrue(okResult.getBoolean("success"));
+      assertFalse(okResult.has("messageKeys"));
+      assertEquals(1, resp.getBody().getInt("ok"));
+      assertEquals(2, resp.getBody().getInt("total"));
+    }
+  }
+
   /** A BP-only Invalid-Account failure with its identity. */
   private static DocumentPostingService.PostResult invalidAccountResult() {
     return new DocumentPostingService.PostResult(false, "Account could not be found. (Contact: Acme)",
@@ -412,8 +465,8 @@ public class NotPostedDocumentsHandlerTest {
 
   /**
    * The 5 document types globally excluded by product decision (ETP-4452) must resolve to their
-   * real {@code tableId} via {@link NotPostedDocumentsHandler#DOCUMENT_TYPE_TO_TABLE_ID} (the
-   * defensive fix) AND be dropped from the grid because their table is in
+   * real {@code tableId} via {@link NotPostedDocumentsHandler#tableIdForLabel} (the
+   * defensive fix; ETP-5591 replaced the old label → table map) AND be dropped from the grid because their table is in
    * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS} (the exclusion, ETP-4948:
    * extracted out of this handler into a shared utility). Before the fix these labels were absent
    * from the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
@@ -465,21 +518,21 @@ public class NotPostedDocumentsHandlerTest {
 
   /**
    * Defensive-fix regression guard: even without going through
-   * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS}, {@code DOCUMENT_TYPE_TO_TABLE_ID}
+   * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS}, {@code tableIdForLabel}
    * must resolve the real table id for these 5 labels — verified directly on the map so a future
    * exclusion-policy change does not silently regress the {@code tableId} mapping bug.
    */
   @Test
   public void documentTypeToTableIdMapsAllFiveGloballyExcludedLabels() {
-    assertEquals("325", NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Bill of Materials Production"));
+    assertEquals("325", NotPostedDocumentsHandler.tableIdForLabel("Bill of Materials Production"));
     assertEquals("30721072789F410E9606D2235CB2A226",
-        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Doubtful Debt"));
+        NotPostedDocumentsHandler.tableIdForLabel("Doubtful Debt"));
     assertEquals("082F967CDF7245EB9A150941F326C45C",
-        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Landed Cost"));
+        NotPostedDocumentsHandler.tableIdForLabel("Landed Cost"));
     assertEquals("55A984C314FD4C4FB5E7C32DE36BB07B",
-        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Landed Cost Cost"));
+        NotPostedDocumentsHandler.tableIdForLabel("Landed Cost Cost"));
     assertEquals("D022B92163074E5E82449C8E0B5AFDF6",
-        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Cost Adjustment"));
+        NotPostedDocumentsHandler.tableIdForLabel("Cost Adjustment"));
   }
 
   @Test
@@ -540,7 +593,7 @@ public class NotPostedDocumentsHandlerTest {
   @Test
   public void testDocumentTypeToTableIdMapsInternalConsumption() {
     assertEquals("800168",
-        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Internal Consumption"));
+        NotPostedDocumentsHandler.tableIdForLabel("Internal Consumption"));
   }
 
   @Test
@@ -581,7 +634,23 @@ public class NotPostedDocumentsHandlerTest {
 
       assertEquals("org-1", result.get("_org"));
       JSONArray statuses = new JSONArray(result.get("accounting_status"));
-      assertEquals(5, statuses.length()); // N, E, C, i, p
+      assertEquals(6, statuses.length()); // N, E, C, i, p, NC (ETP-5591)
+    }
+  }
+
+  /** ETP-5591 — "Cost Not Calculated" is selectable and reaches the datasource as its UUID. */
+  @Test
+  public void buildDsParamsTranslatesCostNotCalculatedKey() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      mockOrgContext(ctxMock, "org-1");
+      Map<String, String> params = new HashMap<>();
+      params.put("accountingStatus", "NC");
+
+      Map<String, String> result = new NotPostedDocumentsHandler().buildDsParams(params);
+
+      JSONArray statuses = new JSONArray(result.get("accounting_status"));
+      assertEquals(1, statuses.length());
+      assertEquals("EF3E057A84CD4BE88A9EF57BE9598DA3", statuses.getString(0));
     }
   }
 
@@ -835,5 +904,236 @@ public class NotPostedDocumentsHandlerTest {
 
       assertEquals(0, result.length());
     }
+  }
+
+  // ── ETP-5591 — documentTypeCode, accountingStatus, financialAccountId ─────────
+
+  /** Every label the datasource emits must resolve to a table through its code. */
+  @Test
+  public void everyDatasourceLabelResolvesToATableThroughItsCode() {
+    for (Map.Entry<String, String> e
+        : NotPostedDocumentsHandler.DS_LABEL_TO_DOCUMENT_TYPE_CODE.entrySet()) {
+      assertNotNull("no tableId for label " + e.getKey(),
+          NotPostedDocumentsHandler.tableIdForLabel(e.getKey()));
+    }
+  }
+
+  @Test
+  public void tableIdForLabelReturnsNullForUnknownOrNullLabel() {
+    assertNull(NotPostedDocumentsHandler.tableIdForLabel("Some Future Document Type"));
+    assertNull(NotPostedDocumentsHandler.tableIdForLabel(null));
+  }
+
+  @Test
+  public void buildRowEmitsDocumentTypeCodeAndNullStatusPlaceholder() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Return Material Receipt");
+    row.put("documentId", "doc-1");
+
+    JSONObject result = handler.buildRow(row);
+
+    assertEquals("RMR", result.getString("documentTypeCode"));
+    assertEquals("319", result.getString("tableId"));
+    assertEquals(JSONObject.NULL, result.get("accountingStatus"));
+    // The raw datasource label is kept untouched.
+    assertEquals("Return Material Receipt", result.getString("documentType"));
+  }
+
+  @Test
+  public void buildRowSetsNullDocumentTypeCodeForUnmappedLabel() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Some Future Document Type");
+    row.put("documentId", "doc-9");
+
+    assertEquals(JSONObject.NULL, handler.buildRow(row).get("documentTypeCode"));
+  }
+
+  /**
+   * ETP-5591 regression guard — "T" was a filter option, but "Transaction" rows had no
+   * label → table entry, so their tableId was null and the row "Post" failed client-side (the
+   * same bug ETP-5075 and ETP-5445 fixed for other types).
+   */
+  @Test
+  public void buildRowResolvesTableIdForTransaction() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Transaction");
+    row.put("documentId", "trx-1");
+
+    JSONObject result = handler.buildRow(row);
+
+    assertNotNull(result);
+    assertEquals("4D8C3B3C31D1410DA046140C9F024D17", result.get("tableId"));
+    assertEquals("T", result.get("documentTypeCode"));
+  }
+
+  /** Handler whose state loader is stubbed per table and records every call. */
+  private static class StubStateHandler extends NotPostedDocumentsHandler {
+    final Map<String, Map<String, AccountingState>> byTable = new HashMap<>();
+    final Map<String, Set<String>> calls = new HashMap<>();
+    String failingTable;
+
+    @Override
+    Map<String, AccountingState> loadAccountingStates(String tableId, Set<String> ids) {
+      calls.put(tableId, ids);
+      if (tableId.equals(failingTable)) {
+        throw new IllegalStateException("boom");
+      }
+      return byTable.getOrDefault(tableId, Collections.emptyMap());
+    }
+  }
+
+  private static JSONObject gridRow(String tableId, String documentId) throws Exception {
+    JSONObject j = new JSONObject();
+    j.put("tableId", tableId != null ? tableId : JSONObject.NULL);
+    j.put("documentId", documentId);
+    j.put("accountingStatus", JSONObject.NULL);
+    return j;
+  }
+
+  @Test
+  public void enrichWithAccountingStateMergesStatusAndAccountPerRow() throws Exception {
+    StubStateHandler handler = new StubStateHandler();
+    handler.byTable.put("318", Map.of(
+        "inv-1", new NotPostedDocumentsHandler.AccountingState("E", null),
+        "inv-2", new NotPostedDocumentsHandler.AccountingState("p", null)));
+    handler.byTable.put("4D8C3B3C31D1410DA046140C9F024D17", Map.of(
+        "trx-1", new NotPostedDocumentsHandler.AccountingState("N", "acc-1")));
+    JSONObject inv1 = gridRow("318", "inv-1");
+    JSONObject inv2 = gridRow("318", "inv-2");
+    JSONObject trx = gridRow("4D8C3B3C31D1410DA046140C9F024D17", "trx-1");
+    JSONObject unknown = gridRow(null, "x-1");
+
+    handler.enrichWithAccountingState(List.of(inv1, inv2, trx, unknown));
+
+    assertEquals("E", inv1.get("accountingStatus"));
+    assertEquals("p", inv2.get("accountingStatus"));
+    assertFalse(inv1.has("financialAccountId"));
+    assertEquals("N", trx.get("accountingStatus"));
+    assertEquals("acc-1", trx.get("financialAccountId"));
+    // A row without tableId is never queried and keeps its null status.
+    assertEquals(JSONObject.NULL, unknown.get("accountingStatus"));
+    // One lookup per distinct table, carrying all of that table's ids.
+    assertEquals(2, handler.calls.size());
+    assertEquals(Set.of("inv-1", "inv-2"), handler.calls.get("318"));
+  }
+
+  @Test
+  public void enrichWithAccountingStateNeverFailsTheGridWhenATableCannotBeRead() throws Exception {
+    StubStateHandler handler = new StubStateHandler();
+    handler.failingTable = "318";
+    handler.byTable.put("319", Map.of(
+        "io-1", new NotPostedDocumentsHandler.AccountingState("i", null)));
+    JSONObject inv = gridRow("318", "inv-1");
+    JSONObject io = gridRow("319", "io-1");
+
+    handler.enrichWithAccountingState(List.of(inv, io));
+
+    assertEquals(JSONObject.NULL, inv.get("accountingStatus"));
+    assertEquals("i", io.get("accountingStatus"));
+  }
+
+  @Test
+  public void enrichWithAccountingStateLeavesRowsMissingFromTheLookupUntouched() throws Exception {
+    StubStateHandler handler = new StubStateHandler();
+    JSONObject inv = gridRow("318", "gone-1");
+
+    handler.enrichWithAccountingState(List.of(inv));
+
+    assertEquals(JSONObject.NULL, inv.get("accountingStatus"));
+  }
+
+  @Test
+  public void loadAccountingStatesReturnsEmptyForTableWithoutStatusColumn() {
+    Entity entity = mock(Entity.class);
+    when(entity.hasProperty(NotPostedDocumentsHandler.ACCOUNTING_STATUS_PROPERTY)).thenReturn(false);
+    ModelProvider provider = mock(ModelProvider.class);
+    when(provider.getEntityByTableId("999")).thenReturn(entity);
+    try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      mp.when(ModelProvider::getInstance).thenReturn(provider);
+
+      assertTrue(new NotPostedDocumentsHandler()
+          .loadAccountingStates("999", Set.of("a")).isEmpty());
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void loadAccountingStatesReturnsEmptyForUnknownTable() {
+    ModelProvider provider = mock(ModelProvider.class);
+    try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class)) {
+      mp.when(ModelProvider::getInstance).thenReturn(provider);
+
+      assertTrue(new NotPostedDocumentsHandler()
+          .loadAccountingStates("nope", Set.of("a")).isEmpty());
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private Map<String, NotPostedDocumentsHandler.AccountingState> runLoader(String entityName,
+      List<Object[]> dbRows, String[] capturedHql) {
+    Entity entity = mock(Entity.class);
+    when(entity.hasProperty(NotPostedDocumentsHandler.ACCOUNTING_STATUS_PROPERTY)).thenReturn(true);
+    when(entity.getName()).thenReturn(entityName);
+    ModelProvider provider = mock(ModelProvider.class);
+    when(provider.getEntityByTableId("t1")).thenReturn(entity);
+    Query<Object[]> query = mock(Query.class);
+    when(query.setParameterList(eq("ids"), anyCollection())).thenReturn(query);
+    when(query.list()).thenReturn(dbRows);
+    Session session = mock(Session.class);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenAnswer(inv -> {
+      capturedHql[0] = inv.getArgument(0);
+      return query;
+    });
+    OBDal dal = mock(OBDal.class);
+    when(dal.getSession()).thenReturn(session);
+    try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      mp.when(ModelProvider::getInstance).thenReturn(provider);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      return new NotPostedDocumentsHandler().loadAccountingStates("t1", Set.of("d1", "d2"));
+    }
+  }
+
+  @Test
+  public void loadAccountingStatesReadsTheBulkPostingStatusColumn() {
+    String[] hql = new String[1];
+    Map<String, NotPostedDocumentsHandler.AccountingState> states = runLoader("Invoice",
+        List.of(new Object[] { "d1", "E" }, new Object[] { "d2", "N" }), hql);
+
+    assertEquals("select e.id, e.etblkpAccountingstatus from Invoice e where e.id in (:ids)",
+        hql[0]);
+    assertEquals("E", states.get("d1").status());
+    assertNull(states.get("d1").financialAccountId());
+    assertEquals("N", states.get("d2").status());
+  }
+
+  @Test
+  public void loadAccountingStatesAlsoReadsTheAccountOfATransaction() {
+    String[] hql = new String[1];
+    Map<String, NotPostedDocumentsHandler.AccountingState> states = runLoader(
+        "FIN_Finacc_Transaction", List.<Object[]>of(new Object[] { "d1", "p", "acc-9" }), hql);
+
+    assertTrue(hql[0].contains(", e.account.id from FIN_Finacc_Transaction e"));
+    assertEquals("p", states.get("d1").status());
+    assertEquals("acc-9", states.get("d1").financialAccountId());
+  }
+
+  /**
+   * ETP-5591 review (W1) — bulk.posting emits "Work Effort" from its production search, so the
+   * rows are M_Production (325) records, not S_TimeExpense (486). They must resolve to 325 and be
+   * dropped with the other globally excluded production rows, never posted against table 486.
+   */
+  @Test
+  public void buildRowDropsWorkEffortRowAsProduction() throws Exception {
+    assertEquals("325", NotPostedDocumentsHandler.tableIdForLabel("Work Effort"));
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Work Effort");
+    row.put("documentId", "we-1");
+
+    assertNull(new NotPostedDocumentsHandler().buildRow(row));
   }
 }

@@ -42,6 +42,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  */
 final class PaymentCreditConsumer {
 
+  /** Opens every refusal of a funding source that is missing or not the caller's. */
+  private static final String MSG_CREDIT_SOURCE_NOT_FOUND = "Credit source not found: ";
+
   private PaymentCreditConsumer() {
   }
 
@@ -57,6 +60,33 @@ final class PaymentCreditConsumer {
       totalFunded = totalFunded.add(consumeOne(payment, creditSources.optJSONObject(i)));
     }
     return totalFunded;
+  }
+
+  /**
+   * The total {@link #consume} would fund, computed WITHOUT touching anything — for checks that
+   * must run before the payment exists (the write-off limit, see
+   * {@link PaymentWriteoffLimitGuard}). Mirrors {@link #consumeOne}'s skip rules: a missing entry,
+   * a non-positive {@code use} or a blank source id funds nothing. A source id that does not
+   * resolve is still counted here; {@link #consume} rejects it later anyway.
+   */
+  static BigDecimal requestedFunding(JSONArray creditSources) {
+    BigDecimal total = BigDecimal.ZERO;
+    if (creditSources == null) {
+      return total;
+    }
+    for (int i = 0; i < creditSources.length(); i++) {
+      JSONObject src = creditSources.optJSONObject(i);
+      if (src == null) {
+        continue;
+      }
+      BigDecimal use = parsePositiveAmount(src.optString("use", "0"));
+      String sourceKey = "credit".equals(src.optString("kind", "")) ? "paymentId" : "psdId";
+      String sourceId = src.optString(sourceKey, null);
+      if (use != null && StringUtils.isNotBlank(sourceId)) {
+        total = total.add(use);
+      }
+    }
+    return total;
   }
 
   /** Consumes a single funding source, returning the amount it funded (0 when skipped). */
@@ -80,8 +110,11 @@ final class PaymentCreditConsumer {
     if (StringUtils.isBlank(paymentId)) {
       return BigDecimal.ZERO;
     }
-    FIN_Payment creditPayment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
-    if (creditPayment == null) {
+    // ETP-5558: the credit must be the caller's tenant's AND the same business partner's — the
+    // listing offers nothing else, but nothing stopped a crafted paymentId.
+    FIN_Payment creditPayment = TenantOwnership.loadOwned(FIN_Payment.class, paymentId);
+    if (creditPayment == null || !PaymentOwnership.sameBusinessPartner(
+        creditPayment.getBusinessPartner(), payment.getBusinessPartner())) {
       throw new OBException("Credit payment not found: " + paymentId);
     }
     BigDecimal prev = creditPayment.getUsedCredit() == null
@@ -97,9 +130,10 @@ final class PaymentCreditConsumer {
     if (StringUtils.isBlank(psdId)) {
       return BigDecimal.ZERO;
     }
-    FIN_PaymentScheduleDetail psd = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class, psdId);
+    FIN_PaymentScheduleDetail psd = TenantOwnership.loadOwned(FIN_PaymentScheduleDetail.class,
+        psdId);
     if (psd == null) {
-      throw new OBException("Credit source not found: " + psdId);
+      throw new OBException(MSG_CREDIT_SOURCE_NOT_FOUND + psdId);
     }
     validateAbonoEligible(payment, psd);
     FIN_AddPayment.updatePaymentDetail(psd, payment, use.negate(), false);
@@ -128,7 +162,12 @@ final class PaymentCreditConsumer {
     Invoice invoice = psd.getInvoicePaymentSchedule() != null
         ? psd.getInvoicePaymentSchedule().getInvoice() : null;
     if (invoice == null) {
-      throw new OBException("Credit source not found: " + psd.getId());
+      throw new OBException(MSG_CREDIT_SOURCE_NOT_FOUND + psd.getId());
+    }
+    // ETP-5558: a credit note of another business partner is not this payment's to spend.
+    if (!PaymentOwnership.sameBusinessPartner(invoice.getBusinessPartner(),
+        payment.getBusinessPartner())) {
+      throw new OBException(MSG_CREDIT_SOURCE_NOT_FOUND + psd.getId());
     }
     boolean negativeTotal = invoice.getGrandTotalAmount() != null
         && invoice.getGrandTotalAmount().signum() < 0;

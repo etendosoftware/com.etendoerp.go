@@ -579,17 +579,30 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   // taxBox == 0 means base-only (no corresponding tax amount box, e.g. 0% exempt rows).
   // Returns the resolved TaxRate list (empty when the param/rates don't exist) so callers can
   // accumulate it into a UNION for the "Modificación"/"Rectificación" corrective box pairs —
-  // see fillMemoCorrectiveBoxPair. Uses InvoiceType.ONLY_NORMAL for the same reason as
-  // applyPercentageSplit above — ALL would double-count the corrective delta added there.
+  // see fillMemoCorrectiveBoxPair. Defaults to InvoiceType.ONLY_NORMAL for the same reason as
+  // applyPercentageSplit above — ALL would double-count the corrective delta added there. Groups
+  // with no dedicated correction-pair box (59/60) use the InvoiceType overload below instead.
   private List<TaxRate> fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport,
       BoxGroupConfig cfg, Map<String, List<Integer>> rateToBoxes) {
+    return fillGroupBoxes(b, helper, dao303, taxReport, cfg, rateToBoxes, InvoiceType.ONLY_NORMAL);
+  }
+
+  // ETP (casillas 59/60 rectificativas) — explicit-InvoiceType overload. Boxes without a
+  // dedicated correction-pair box (unlike 14/15, 25/26, 40/41) must fold corrective/credit-memo
+  // invoices into the SAME single pass rather than adding them via fillMemoCorrectiveBoxPair,
+  // mirroring Classic's AEAT303Report2014#generatePage3 (boxes 59/60/61 all computed with
+  // InvoiceType.ALL in one call, no separate corrective accumulator). Callers that still need the
+  // base/corrective split (sales/purchase group boxes) keep using the ONLY_NORMAL overload above.
+  private List<TaxRate> fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303, TaxReport taxReport,
+      BoxGroupConfig cfg, Map<String, List<Integer>> rateToBoxes, InvoiceType invoiceType) {
     TaxReportParameter param = dao303.getTaxReportParameter(taxReport, cfg.groupKey, cfg.paramKey);
     if (param == null) return Collections.emptyList();
     List<TaxRate> rates =
         dao303.get303Taxes(taxReport.getId(), cfg.taxType, cfg.equivCharge, cfg.intracom, param);
     if (rates.isEmpty()) return rates;
-    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ONLY_NORMAL);
+    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, invoiceType);
     addToBox(b, cfg.baseBox, result.get(TAX_BASE_AMOUNT));
     if (cfg.taxBox > 0) addToBox(b, cfg.taxBox, result.get(TAX_AMOUNT));
     List<Integer> boxes = cfg.taxBox > 0
@@ -619,12 +632,21 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
     // "Additional_Information" group only exists in monthly reports; quarterly reports use "Difference".
     // "Difference" is present in all reports and carries the same tax rates, so use it universally.
+    //
+    // Boxes 59/60 have no dedicated correction-pair box (unlike 14/15, 25/26, 40/41), so —
+    // mirroring Classic's AEAT303Report2014#generatePage3, which computes them in a single pass
+    // with InvoiceType.ALL — they must use InvoiceType.ALL here too (normal + corrective/
+    // credit-memo, positive + negative) instead of the ONLY_NORMAL default, which silently
+    // dropped every rectificativa/nota-de-crédito intracommunity-sales invoice from these boxes.
+    //
     // Box 59: intra-community deliveries (entregas intracomunitarias exentas)
     fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig("Difference", "IntracommunitySales", "All", "All", "All", 59, 0), rateToBoxes);
+        new BoxGroupConfig("Difference", "IntracommunitySales", "All", "All", "All", 59, 0),
+        rateToBoxes, InvoiceType.ALL);
     // Box 60: exports and other exempt operations with deduction right
     fillGroupBoxes(b, helper, dao303, taxReport,
-        new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
+        new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0),
+        rateToBoxes, InvoiceType.ALL);
   }
 
   // resultado_final — standard company (100 % Estado, no pending credits, no complementary)

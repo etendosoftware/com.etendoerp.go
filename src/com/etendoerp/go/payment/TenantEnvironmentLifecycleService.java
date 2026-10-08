@@ -47,7 +47,8 @@ public class TenantEnvironmentLifecycleService {
   public static final String ASSOCIATED_PRODUCTIVE_ATTRIBUTE = "ETGO_AssociatedProductiveClientId";
   public static final String TYPE_DEMO = "DEMO";
   public static final String TYPE_PRODUCTIVE = "PRODUCTIVE";
-  public static final int DEFAULT_TRIAL_DAYS = 15;
+  /** Product definition of the demo trial (ETP-5548); override per instance with the property. */
+  public static final int DEFAULT_TRIAL_DAYS = 14;
   public static final String TRIAL_DAYS_PROPERTY = "etendo.go.demo.trial.days";
   public static final String TRIAL_DAYS_ENV = "ETGO_DEMO_TRIAL_DAYS";
   public static final String GRACE_DAYS_PROPERTY = "etendo.go.billing.grace.days";
@@ -342,6 +343,20 @@ public class TenantEnvironmentLifecycleService {
           e);
       return false;
     }
+  }
+
+  /**
+   * Tells whether a demo already became the origin of a productive environment. Such a demo is
+   * never the origin of another purchase: a later productive environment starts clean, without a
+   * source (ETP-5548).
+   * @param demoClientId demo environment client id
+   * @return true when the demo carries an association marker
+   */
+  public boolean isAssociatedWithProductive(String demoClientId) {
+    if (StringUtils.isBlank(demoClientId)) {
+      return false;
+    }
+    return StringUtils.isNotBlank(readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, demoClientId));
   }
 
   /**

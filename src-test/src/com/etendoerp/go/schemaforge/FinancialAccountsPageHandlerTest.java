@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -57,18 +58,24 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.financial.FinancialUtils;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.common.currency.ConversionRate;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.AccountRow;
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
+import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.OrgCurrency;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountsPageHandler}.
@@ -88,6 +95,8 @@ import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
  *   <li>{@code handle()} returns 405 on non-GET and never touches the loaders.</li>
  *   <li>{@code buildPayload()} envelope shape matches the contract the UI hook consumes.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountsPageHandler
  */
 // Silent runner: the strict runner inspects mocks/spies after the class runs to
 // report unnecessary stubbings, but clearMocks() (below) wipes the inline mock
@@ -99,6 +108,18 @@ public class FinancialAccountsPageHandlerTest {
   private static final String CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
   private static final Set<String> ORGS = new HashSet<>(Arrays.asList(
       "0", "E443A31992CB4635AFCAEABE7183CE85"));
+  private static final String EUR_ID = "102";
+  private static final String USD_ID = "100";
+  private static final String GBP_ID = "114";
+  private static final OrgCurrency ORG_EUR = new OrgCurrency(EUR_ID, "EUR", 2);
+  private static final String TOTAL_ISO = "totalBalanceCurrencyIso";
+  private static final String TOTAL_APPROXIMATE = "totalBalanceApproximate";
+  private static final String MISSING_RATE = "missingRateCurrencies";
+
+  /** The GO locale loadAccounts() reads off the OBContext to localize the country (ETP-5579). */
+  private static final String GO_LANGUAGE = "es_ES";
+
+  private static final java.time.Instant SYNC_OLD = java.time.Instant.parse("2026-10-01T08:00:00Z");
 
   private FinancialAccountsPageHandler handler;
 
@@ -168,6 +189,7 @@ public class FinancialAccountsPageHandlerTest {
 
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(handler).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
+    doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
 
     // ETP-4896: buildPayload also attaches the countryIbanRules catalog, built by
     // FinancialAccountCountrySupport straight from OBDal (not a spied seam on this handler).
@@ -191,6 +213,8 @@ public class FinancialAccountsPageHandlerTest {
       assertTrue("account with a registered transaction serialises hasTransactions=true",
           data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
       assertNotNull("summary present", data.optJSONObject("summary"));
+      assertEquals("summary total is labelled with the resolved org currency", "EUR",
+          data.getJSONObject("summary").getString(TOTAL_ISO));
       assertTrue("countryIbanRules is a sibling of accounts/summary, not per-account",
           data.has("countryIbanRules"));
 
@@ -216,6 +240,7 @@ public class FinancialAccountsPageHandlerTest {
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(Collections.emptySet()).when(handler)
         .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
+    doReturn(ORG_EUR).when(handler).resolveOrgCurrency();
 
     FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -247,7 +272,7 @@ public class FinancialAccountsPageHandlerTest {
    */
   @Test
   public void testEmptyInputProducesZeroedSummary() throws Exception {
-    JSONObject summary = handler.buildSummary(Collections.emptyList());
+    JSONObject summary = handler.buildSummary(Collections.emptyList(), null);
 
     assertEquals(0, new BigDecimal(summary.getString("totalBalance")).compareTo(BigDecimal.ZERO));
     assertEquals(0, summary.getJSONArray("byCurrency").length());
@@ -262,6 +287,8 @@ public class FinancialAccountsPageHandlerTest {
    * Verifies that accounts denominated in different ISO codes are aggregated
    * separately in the {@code byCurrency} array — EUR balances combine into one
    * entry, USD balances into another — without leaking across currencies.
+   * Runs with a {@code null} org currency, i.e. the no-org-currency fallback, whose
+   * {@code totalBalance} is still the legacy raw sum (ETP-5580).
    *
    * @throws Exception
    *     if the JSON traversal fails
@@ -273,7 +300,7 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-2", "Caja Madrid", "C", new BigDecimal("250.50"), "EUR"),
         account("acc-3", "Citibank USD", "B", new BigDecimal("4000.00"), "USD"));
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
 
     assertEquals(0,
         new BigDecimal("5250.50").compareTo(new BigDecimal(summary.getString("totalBalance"))));
@@ -308,7 +335,7 @@ public class FinancialAccountsPageHandlerTest {
     accounts.get(1).pendingCount = 0;
     accounts.get(2).pendingCount = 1;
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
     assertEquals(2, summary.getJSONObject("pending").getInt("accountsWithPending"));
   }
 
@@ -326,10 +353,368 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
         account("acc-2", "Overdraft", "B", new BigDecimal("-250.00"), "EUR"));
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
     assertEquals(0,
         new BigDecimal("-150.00").compareTo(new BigDecimal(summary.getString("totalBalance"))));
     assertTrue(summary.getJSONArray("byCurrency").length() == 1);
+  }
+
+  // ── buildSummary() currency conversion (ETP-5580) ────────────────────────
+
+  /**
+   * Verifies that when every active account is already in the org currency the
+   * total is the exact sum, labelled with the org ISO, not flagged as approximate,
+   * and the rate seam is never consulted.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryAllOrgCurrencyIsExact() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("1000.00"), "EUR"),
+        account("acc-2", "Overdraft", "B", new BigDecimal("-357.99"), "EUR"));
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("642.01")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+  }
+
+  /**
+   * Verifies the reported bug (EUR -357.99 + USD -20.00 shown as EUR -377.99):
+   * the USD subtotal is converted once with the stubbed rate and rounded to the
+   * org currency precision, the total is flagged approximate, and
+   * {@code byCurrency} keeps the exact unconverted subtotals.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryConvertsForeignCurrencyWithRate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("-357.99"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("-15.00"), "USD"),
+        account("acc-3", "Card USD", "T", new BigDecimal("-5.00"), "USD"));
+    doReturn(new BigDecimal("0.856789")).when(handler).lookupRate(USD_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    // -20.00 * 0.856789 = -17.13578 -> -17.14 (HALF_UP, scale 2); -357.99 + -17.14 = -375.13
+    assertEquals(0, new BigDecimal("-375.13")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertTrue(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    // One lookup per currency, not per account.
+    verify(handler, times(1)).lookupRate(USD_ID, EUR_ID);
+
+    Map<String, BigDecimal> totals = byCurrencyTotals(summary);
+    assertEquals(2, totals.size());
+    assertEquals(0, new BigDecimal("-357.99").compareTo(totals.get("EUR")));
+    assertEquals(0, new BigDecimal("-20.00").compareTo(totals.get("USD")));
+  }
+
+  /**
+   * Verifies that a currency with no configured rate is excluded from the total
+   * (never summed unconverted) and listed in {@code missingRateCurrencies}, while
+   * a converted currency still flags the total approximate and {@code byCurrency}
+   * keeps the excluded subtotal.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryExcludesCurrencyWithoutRate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("10.00"), "USD"),
+        account("acc-3", "Barclays", "B", new BigDecimal("500.00"), "GBP"));
+    doReturn(new BigDecimal("0.9")).when(handler).lookupRate(USD_ID, EUR_ID);
+    doReturn(null).when(handler).lookupRate(GBP_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("109.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertTrue(summary.getBoolean(TOTAL_APPROXIMATE));
+    JSONArray missing = summary.getJSONArray(MISSING_RATE);
+    assertEquals(1, missing.length());
+    assertEquals("GBP", missing.getString(0));
+    assertEquals(0, new BigDecimal("500.00").compareTo(byCurrencyTotals(summary).get("GBP")));
+  }
+
+  /**
+   * Verifies that when the only foreign currency lacks a rate, nothing was
+   * converted, so the total is exact ({@code approximate=false}) over the org
+   * currency alone.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryMissingRateOnlyIsNotApproximate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("10.00"), "USD"));
+    doReturn(null).when(handler).lookupRate(USD_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("100.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals("USD", summary.getJSONArray(MISSING_RATE).getString(0));
+  }
+
+  /**
+   * QA BUG-1 (ETP-5580): a foreign currency whose subtotal is 0.00 adds nothing at any rate, so
+   * an EUR + USD 0.00 summary is exact — {@code approximate=false} even though a USD rate exists,
+   * and the rate is not even looked up. {@code byCurrency} still lists USD.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryZeroForeignSubtotalWithRateIsNotApproximate() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("-225110.15"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("0.00"), "USD"));
+    doReturn(new BigDecimal("0.9")).when(handler).lookupRate(USD_ID, EUR_ID);
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("-225110.15")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    assertEquals(2, summary.getJSONArray("byCurrency").length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+  }
+
+  /**
+   * QA BUG-1 (ETP-5580): a 0.00 foreign currency with NO rate is not listed in
+   * {@code missingRateCurrencies} — it cannot change the total, so the warning would be noise —
+   * while a non-zero one without a rate still is.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryZeroForeignSubtotalWithoutRateIsNotMissing() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("0.00"), "USD"),
+        account("acc-3", "Barclays", "B", new BigDecimal("50.00"), "GBP"));
+    doReturn(null).when(handler).lookupRate(anyString(), anyString());
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("100.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    JSONArray missing = summary.getJSONArray(MISSING_RATE);
+    assertEquals(1, missing.length());
+    assertEquals("GBP", missing.getString(0));
+    verify(handler, never()).lookupRate(USD_ID, EUR_ID);
+  }
+
+  /**
+   * Verifies that archived accounts in a foreign currency are ignored by the
+   * conversion too: no rate lookup, no byCurrency entry, no missing-rate entry.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryConversionIgnoresInactiveAccounts() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("1000.00"), "EUR"),
+        inactiveAccount("acc-2", "Citi Cerrada", "B", new BigDecimal("4000.00"), "USD"));
+
+    JSONObject summary = handler.buildSummary(accounts, ORG_EUR);
+
+    assertEquals(0, new BigDecimal("1000.00")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    assertEquals(1, summary.getJSONArray("byCurrency").length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+  }
+
+  /**
+   * Verifies the null-org-currency fallback: legacy raw sum, never approximate,
+   * no rate lookup, empty {@code missingRateCurrencies}, labelled with the first
+   * {@code byCurrency} ISO — and a JSON {@code null} label when there are no accounts.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryWithoutOrgCurrencyFallsBackToRawSum() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("-357.99"), "EUR"),
+        account("acc-2", "Citi USD", "B", new BigDecimal("-20.00"), "USD"));
+
+    JSONObject summary = handler.buildSummary(accounts, null);
+
+    assertEquals(0, new BigDecimal("-377.99")
+        .compareTo(new BigDecimal(summary.getString("totalBalance"))));
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+    assertEquals(0, summary.getJSONArray(MISSING_RATE).length());
+    verify(handler, never()).lookupRate(anyString(), anyString());
+
+    JSONObject empty = handler.buildSummary(Collections.emptyList(), null);
+    assertTrue("no ISO to label an empty fallback total with", empty.isNull(TOTAL_ISO));
+  }
+
+  /**
+   * Verifies that an empty account list with a resolved org currency still labels
+   * the zero total with the org ISO.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryEmptyInputUsesOrgCurrencyIso() throws Exception {
+    JSONObject summary = handler.buildSummary(Collections.emptyList(), ORG_EUR);
+
+    assertEquals("EUR", summary.getString(TOTAL_ISO));
+    assertEquals(0, new BigDecimal(summary.getString("totalBalance")).compareTo(BigDecimal.ZERO));
+    assertFalse(summary.getBoolean(TOTAL_APPROXIMATE));
+  }
+
+  /**
+   * Verifies that the converted subtotal is rounded to the org currency's own
+   * standard precision (here 0 decimals), HALF_UP.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryRoundsToOrgCurrencyPrecision() throws Exception {
+    OrgCurrency orgJpy = new OrgCurrency("JPY-ID", "JPY", 0);
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "Citi USD", "B", new BigDecimal("10.00"), "USD"));
+    doReturn(new BigDecimal("149.55")).when(handler).lookupRate(USD_ID, "JPY-ID");
+
+    JSONObject summary = handler.buildSummary(accounts, orgJpy);
+
+    // 10.00 * 149.55 = 1495.5 -> 1496 (HALF_UP, scale 0)
+    assertEquals(new BigDecimal("1496"), new BigDecimal(summary.getString("totalBalance")));
+    assertEquals("JPY", summary.getString(TOTAL_ISO));
+  }
+
+  /**
+   * Verifies {@code OrgCurrency.matches}: by id, by ISO as a fallback, and false
+   * for a different currency.
+   */
+  @Test
+  public void testOrgCurrencyMatchesByIdOrIso() {
+    assertTrue(ORG_EUR.matches(new Currency(EUR_ID, "EUR")));
+    assertTrue(ORG_EUR.matches(new Currency("other-id", "EUR")));
+    assertFalse(ORG_EUR.matches(new Currency(USD_ID, "USD")));
+    assertFalse(new OrgCurrency("x", "", 2).matches(new Currency("y", "")));
+  }
+
+  // ── resolveOrgCurrency() / lookupRate() seams (ETP-5580) ─────────────────
+
+  /**
+   * Verifies that {@code resolveOrgCurrency()} returns {@code null} when no
+   * currency is configured anywhere in the org hierarchy.
+   */
+  @Test
+  public void testResolveOrgCurrencyReturnsNullWhenUnconfigured() {
+    try (MockedStatic<NeoConversionHelper> helper = mockStatic(NeoConversionHelper.class)) {
+      helper.when(NeoConversionHelper::resolveOrgCurrencyId).thenReturn(null);
+      assertNull(handler.resolveOrgCurrency());
+    }
+  }
+
+  /**
+   * Verifies that {@code resolveOrgCurrency()} reads the ISO code and standard
+   * precision of the resolved currency, defaulting the precision to 2 when unset,
+   * and returns {@code null} when the id does not resolve to a record.
+   */
+  @Test
+  public void testResolveOrgCurrencyReadsIsoAndPrecision() {
+    try (MockedStatic<NeoConversionHelper> helper = mockStatic(NeoConversionHelper.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      helper.when(NeoConversionHelper::resolveOrgCurrencyId).thenReturn(EUR_ID);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.currency.Currency eur =
+          mock(org.openbravo.model.common.currency.Currency.class);
+      when(eur.getISOCode()).thenReturn("EUR");
+      when(eur.getStandardPrecision()).thenReturn(3L);
+      when(dal.get(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(eur);
+
+      OrgCurrency resolved = handler.resolveOrgCurrency();
+      assertEquals(EUR_ID, resolved.id);
+      assertEquals("EUR", resolved.iso);
+      assertEquals(3, resolved.precision);
+
+      when(eur.getStandardPrecision()).thenReturn(null);
+      assertEquals(2, handler.resolveOrgCurrency().precision);
+
+      when(dal.get(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(null);
+      assertNull(handler.resolveOrgCurrency());
+    }
+  }
+
+  /**
+   * Verifies that {@code lookupRate()} delegates to core
+   * {@code FinancialUtils.getConversionRate} with the current org/client and
+   * returns the multiply rate, or {@code null} for a missing or zero rate.
+   */
+  @Test
+  public void testLookupRateDelegatesToFinancialUtils() {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<FinancialUtils> finUtils = mockStatic(FinancialUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      org.openbravo.model.common.currency.Currency usd =
+          mock(org.openbravo.model.common.currency.Currency.class);
+      org.openbravo.model.common.currency.Currency eur =
+          mock(org.openbravo.model.common.currency.Currency.class);
+      when(dal.getProxy(org.openbravo.model.common.currency.Currency.class, USD_ID)).thenReturn(usd);
+      when(dal.getProxy(org.openbravo.model.common.currency.Currency.class, EUR_ID)).thenReturn(eur);
+      OBContext ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      when(ctx.getCurrentClient()).thenReturn(client);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      ConversionRate rate = mock(ConversionRate.class);
+      when(rate.getMultipleRateBy()).thenReturn(new BigDecimal("0.92"));
+      finUtils.when(() -> FinancialUtils.getConversionRate(any(), eq(usd), eq(eur), eq(org),
+          eq(client))).thenReturn(rate);
+      assertEquals(new BigDecimal("0.92"), handler.lookupRate(USD_ID, EUR_ID));
+
+      when(rate.getMultipleRateBy()).thenReturn(BigDecimal.ZERO);
+      assertNull("a zero rate is unusable", handler.lookupRate(USD_ID, EUR_ID));
+
+      when(rate.getMultipleRateBy()).thenReturn(null);
+      assertNull("a rate with no multiply value is unusable", handler.lookupRate(USD_ID, EUR_ID));
+
+      finUtils.when(() -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()))
+          .thenReturn(null);
+      assertNull("no rate configured", handler.lookupRate(USD_ID, EUR_ID));
+    }
+  }
+
+  /**
+   * Collects {@code summary.byCurrency} into an ISO → total map.
+   *
+   * @param summary the summary JSON built by {@code buildSummary}
+   * @return the per-currency totals keyed by ISO code
+   * @throws Exception if the JSON traversal fails
+   */
+  private static Map<String, BigDecimal> byCurrencyTotals(JSONObject summary) throws Exception {
+    JSONArray byCurrency = summary.getJSONArray("byCurrency");
+    Map<String, BigDecimal> totals = new HashMap<>();
+    for (int i = 0; i < byCurrency.length(); i++) {
+      JSONObject entry = byCurrency.getJSONObject(i);
+      totals.put(entry.getString("currencyIso"), new BigDecimal(entry.getString("total")));
+    }
+    return totals;
   }
 
   // ── buildAccountsArray() ─────────────────────────────────────────────────
@@ -513,17 +898,11 @@ public class FinancialAccountsPageHandlerTest {
     // Column 11 (em_psd2_connection_status): first connected ('CO'), second pending ('IN').
     when(rs.getString(11)).thenReturn("CO", "IN");
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(2, rows.size());
-      assertTrue("'CO' maps to bankConnected=true", rows.get(0).bankConnected);
-      assertFalse("non-'CO' maps to bankConnected=false", rows.get(1).bankConnected);
-    }
+    assertEquals(2, rows.size());
+    assertTrue("'CO' maps to bankConnected=true", rows.get(0).bankConnected);
+    assertFalse("non-'CO' maps to bankConnected=false", rows.get(1).bankConnected);
   }
 
   /**
@@ -551,17 +930,11 @@ public class FinancialAccountsPageHandlerTest {
     // Column 17 (prov.logo_url): first has a logo, second's provider row has none (SQL NULL).
     when(rs.getString(17)).thenReturn("https://cdn.saltedge.com/bank_icons/bbva.png", null);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(2, rows.size());
-      assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", rows.get(0).providerLogoUrl);
-      assertEquals("", rows.get(1).providerLogoUrl);
-    }
+    assertEquals(2, rows.size());
+    assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png", rows.get(0).providerLogoUrl);
+    assertEquals("", rows.get(1).providerLogoUrl);
   }
 
   /**
@@ -592,19 +965,13 @@ public class FinancialAccountsPageHandlerTest {
     // Column 13: amountTolerance = 2.50 (non-default)
     when(rs.getBigDecimal(13)).thenReturn(new BigDecimal("2.50"));
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(1, rows.size());
-      AccountRow row = rows.get(0);
-      assertEquals("dateTolerance column 12 read correctly", 5, row.dateTolerance);
-      assertEquals("amountTolerance column 13 read correctly",
-          0, new BigDecimal("2.50").compareTo(row.amountTolerance));
-    }
+    assertEquals(1, rows.size());
+    AccountRow row = rows.get(0);
+    assertEquals("dateTolerance column 12 read correctly", 5, row.dateTolerance);
+    assertEquals("amountTolerance column 13 read correctly",
+        0, new BigDecimal("2.50").compareTo(row.amountTolerance));
   }
 
   /**
@@ -634,19 +1001,13 @@ public class FinancialAccountsPageHandlerTest {
     when(rs.getString(14)).thenReturn("gli-diff-1", "");
     when(rs.getString(15)).thenReturn("Diferencias de caja", "");
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertEquals(2, rows.size());
-      assertEquals("gli-diff-1", rows.get(0).glItemDifferenceId);
-      assertEquals("Diferencias de caja", rows.get(0).glItemDifferenceName);
-      assertEquals("", rows.get(1).glItemDifferenceId);
-      assertEquals("", rows.get(1).glItemDifferenceName);
-    }
+    assertEquals(2, rows.size());
+    assertEquals("gli-diff-1", rows.get(0).glItemDifferenceId);
+    assertEquals("Diferencias de caja", rows.get(0).glItemDifferenceName);
+    assertEquals("", rows.get(1).glItemDifferenceId);
+    assertEquals("", rows.get(1).glItemDifferenceName);
   }
 
   /**
@@ -716,7 +1077,7 @@ public class FinancialAccountsPageHandlerTest {
     accounts.get(1).pendingCount = 9;
     accounts.get(2).pendingCount = 5;
 
-    JSONObject summary = handler.buildSummary(accounts);
+    JSONObject summary = handler.buildSummary(accounts, null);
 
     // Only the active EUR account contributes to the total.
     assertEquals(0,
@@ -829,7 +1190,8 @@ public class FinancialAccountsPageHandlerTest {
    * Verifies that {@code loadAccounts} maps every column of the result set
    * into an {@link AccountRow} fixture: id, name, type, balance, currency,
    * IBAN and the {@code isDefault} flag are read in the expected positions
-   * and the SQL bind parameters are set with the client id and the org array.
+   * and the SQL bind parameters are set with the GO language (the c_country_trl
+   * join, ETP-5579), the client id and the org array.
    *
    * @throws Exception
    *     if the mocked JDBC chain fails
@@ -861,7 +1223,9 @@ public class FinancialAccountsPageHandlerTest {
     // (e.g. a Cash account, or a Bank account never given one).
     when(rs.getString(19)).thenReturn("106", null);
     when(rs.getString(20)).thenReturn("ES", null);
-    when(rs.getString(21)).thenReturn("Spain", null);
+    // Column 21 is COALESCE(ctryt.name, ctry.name) (ETP-5579): the c_country_trl name in the GO
+    // language, so an es_ES user gets "España", not c_country's English "Spain".
+    when(rs.getString(21)).thenReturn("España", null);
     // Column 22: EM_ETGO_Pending_Count, the stored computed column, appended after the
     // ETP-4896 country block for the same reason — every column here is read BY POSITION.
     // COALESCEd in the SQL, so getInt never sees a NULL.
@@ -869,46 +1233,46 @@ public class FinancialAccountsPageHandlerTest {
     // Column 23: fa.swiftcode (ETP-4896 QA follow-up), appended last for the same positional
     // reason. First row has a BIC, second has none (a Cash account, or a Bank account without one).
     when(rs.getString(23)).thenReturn("BBVAESMM", null);
+    // Column 25 (em_psd2_last_sync_date): first row synced once, second never (SQL NULL).
+    when(rs.getTimestamp(25)).thenReturn(java.sql.Timestamp.from(SYNC_OLD), null);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
 
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
+    assertEquals(2, rows.size());
+    AccountRow first = rows.get(0);
+    assertEquals("acc-1", first.id);
+    assertEquals("BBVA", first.name);
+    assertEquals("B", first.type);
+    assertEquals(0, new BigDecimal("1500.00").compareTo(first.currentBalance));
+    assertEquals("EUR", first.currency.iso);
+    assertTrue("first row is default", first.isDefault);
 
-      assertEquals(2, rows.size());
-      AccountRow first = rows.get(0);
-      assertEquals("acc-1", first.id);
-      assertEquals("BBVA", first.name);
-      assertEquals("B", first.type);
-      assertEquals(0, new BigDecimal("1500.00").compareTo(first.currentBalance));
-      assertEquals("EUR", first.currency.iso);
-      assertTrue("first row is default", first.isDefault);
+    assertTrue("first row maps column 9 'Y' to active", first.active);
+    assertNotNull("first row maps columns 19-21 into a CountryRef", first.country);
+    assertEquals("106", first.country.id);
+    assertEquals("ES", first.country.iso);
+    assertEquals("España", first.country.name);
+    assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
+    assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
+    assertEquals("first row maps column 25 into lastSyncDate", SYNC_OLD,
+        first.lastSyncDate.toInstant());
 
-      assertTrue("first row maps column 9 'Y' to active", first.active);
-      assertNotNull("first row maps columns 19-21 into a CountryRef", first.country);
-      assertEquals("106", first.country.id);
-      assertEquals("ES", first.country.iso);
-      assertEquals("Spain", first.country.name);
-      assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
-      assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
+    AccountRow second = rows.get(1);
+    assertEquals("acc-2", second.id);
+    assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
+    assertFalse("second row is not default", second.isDefault);
+    assertFalse("second row maps column 9 'N' to inactive", second.active);
+    assertNull("a null column 19 (no C_Country_ID) leaves row.country null, not a CountryRef "
+        + "full of blanks", second.country);
+    assertEquals("a zero column 22 is a real zero, not a missing value", 0,
+        second.pendingCount);
+    assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
+        "", second.swiftCode);
+    assertNull("a null column 25 leaves lastSyncDate null (never synced)", second.lastSyncDate);
 
-      AccountRow second = rows.get(1);
-      assertEquals("acc-2", second.id);
-      assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
-      assertFalse("second row is not default", second.isDefault);
-      assertFalse("second row maps column 9 'N' to inactive", second.active);
-      assertNull("a null column 19 (no C_Country_ID) leaves row.country null, not a CountryRef "
-          + "full of blanks", second.country);
-      assertEquals("a zero column 22 is a real zero, not a missing value", 0,
-          second.pendingCount);
-      assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
-          "", second.swiftCode);
-
-      verify(ps).setString(1, CLIENT_ID);
-      verify(ps).setArray(2, orgArray);
-    }
+    verify(ps).setString(1, GO_LANGUAGE);
+    verify(ps).setString(2, CLIENT_ID);
+    verify(ps).setArray(3, orgArray);
   }
 
   /**
@@ -929,14 +1293,122 @@ public class FinancialAccountsPageHandlerTest {
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(false);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
+
+    assertTrue("expected empty list", rows.isEmpty());
+  }
+
+  /**
+   * Guards the SQL shape of the ETP-5579 fix: the País column is read through a
+   * {@code c_country_trl} LEFT JOIN on the GO language with a fallback to the base
+   * {@code c_country.name}, and that join's {@code ?} is the FIRST placeholder — so the language
+   * must be bound at index 1, before the client id (2) and the org array (3). Binding in the old
+   * order would compare {@code ad_language} against the client id and silently fall back to the
+   * English name for every row, with no error anywhere.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsJoinsCountryTranslationAndBindsLanguageFirst() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    Array orgArray = mock(Array.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+
+    when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    loadAccountsWithGoLanguage(conn);
+
+    String sql = sqlCaptor.getValue();
+    assertTrue("selects the translated name with a fallback to the base name",
+        sql.contains("COALESCE(ctryt.name, ctry.name)"));
+    assertFalse("no longer selects the untranslated c_country.name directly",
+        sql.contains("ctry.countrycode, ctry.name,"));
+    assertTrue("LEFT JOINs c_country_trl on the country",
+        sql.contains("LEFT JOIN c_country_trl ctryt ON ctryt.c_country_id = ctry.c_country_id"));
+    int languagePlaceholder = sql.indexOf("ctryt.ad_language = ?");
+    assertTrue("filters the translation row by a bound ad_language", languagePlaceholder >= 0);
+    assertTrue("the language join sits before the WHERE clause",
+        languagePlaceholder < sql.indexOf(" WHERE "));
+    assertEquals("the ad_language '?' is the first placeholder of the statement",
+        languagePlaceholder + "ctryt.ad_language = ".length(), sql.indexOf('?'));
+
+    InOrder binds = inOrder(ps);
+    binds.verify(ps).setString(1, GO_LANGUAGE);
+    binds.verify(ps).setString(2, CLIENT_ID);
+    binds.verify(ps).setArray(3, orgArray);
+    binds.verify(ps).executeQuery();
+  }
+
+  /**
+   * End-to-end over the loader and the serialiser (ETP-5579): the translated name returned in
+   * column 21 ("España") reaches {@link FinancialAccountsPageHandler.CountryRef#name} and is what
+   * the list's {@code countryName} key carries, while an account without a country in the same
+   * result set still serialises {@code countryName} as {@code ""}.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain or the JSON traversal fails
+   */
+  @Test
+  public void testLoadAccountsTranslatedCountryNameReachesSerialisedCountryName()
+      throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-bank", "acc-cash");
+    when(rs.getString(19)).thenReturn("106", null);
+    when(rs.getString(20)).thenReturn("ES", null);
+    when(rs.getString(21)).thenReturn("España", null);
+
+    List<AccountRow> rows = loadAccountsWithGoLanguage(conn);
+
+    assertEquals("España", rows.get(0).country.name);
+    JSONArray arr = handler.buildAccountsArray(rows, Collections.emptySet());
+    assertEquals(2, arr.length());
+    assertEquals("106", arr.getJSONObject(0).getString("countryId"));
+    assertEquals("ES", arr.getJSONObject(0).getString("countryIso"));
+    assertEquals("the País column receives the GO-language name", "España",
+        arr.getJSONObject(0).getString("countryName"));
+    assertEquals("an account with no country still serialises countryName as \"\"", "",
+        arr.getJSONObject(1).getString("countryName"));
+  }
+
+  /**
+   * Runs the real {@code loadAccounts()} over the given mocked connection, with
+   * {@code OBDal.getInstance().getConnection()} returning it and
+   * {@code OBContext.getOBContext().getLanguage().getLanguage()} returning {@link #GO_LANGUAGE}
+   * — the language the c_country_trl join is bound to (ETP-5579). Without the OBContext stub the
+   * loader NPEs before preparing the statement.
+   *
+   * @param conn
+   *     the mocked JDBC connection the loader prepares {@code ACCOUNTS_SQL} on
+   * @return the rows the loader mapped
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  private List<AccountRow> loadAccountsWithGoLanguage(Connection conn) throws Exception {
+    OBContext obContext = mock(OBContext.class);
+    Language language = mock(Language.class);
+    when(language.getLanguage()).thenReturn(GO_LANGUAGE);
+    when(obContext.getLanguage()).thenReturn(language);
+    OBDal dal = mock(OBDal.class);
+    when(dal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
-
-      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
-
-      assertTrue("expected empty list", rows.isEmpty());
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      return handler.loadAccounts(CLIENT_ID, ORGS);
     }
   }
 
@@ -1365,8 +1837,33 @@ public class FinancialAccountsPageHandlerTest {
         return "102";
       case "USD":
         return "100";
+      case "GBP":
+        return "114";
       default:
         return "0";
     }
+  }
+
+  // ── lastSyncDate ──────────────────────────────────────────────────────────
+
+  private static AccountRow syncedAccount(String id, boolean connected, boolean active,
+      java.time.Instant lastSync) {
+    AccountRow row = account(id, id, "B", BigDecimal.TEN, "EUR");
+    row.bankConnected = connected;
+    row.active = active;
+    row.lastSyncDate = lastSync != null ? java.util.Date.from(lastSync) : null;
+    return row;
+  }
+
+  /** The account JSON carries the ISO instant, and an explicit JSON null when never synced. */
+  @Test
+  public void testBuildAccountsArraySerialisesLastSyncDateAsInstantOrNull() throws Exception {
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(
+        syncedAccount("a", true, true, SYNC_OLD),
+        syncedAccount("b", true, true, null)), Collections.emptySet());
+
+    assertEquals(SYNC_OLD.toString(), arr.getJSONObject(0).getString("lastSyncDate"));
+    assertTrue("the key must stay present", arr.getJSONObject(1).has("lastSyncDate"));
+    assertTrue(arr.getJSONObject(1).isNull("lastSyncDate"));
   }
 }

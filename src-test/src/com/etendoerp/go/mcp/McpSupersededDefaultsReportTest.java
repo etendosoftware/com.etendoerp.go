@@ -27,7 +27,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * IMP-45, the MCP half — {@code supersededDefaults} on the {@code neo_create} response.
+ * IMP-45, the MCP half — {@code supersededDefaults} on the {@code etendo_create} response.
  *
  * <p>The divergence is recorded in {@code NeoDefaultsCascadeHelper} (covered by
  * {@code NeoSupersededDefaultsTest}) and travels on {@code NeoContext}. This is what the agent
@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * value it sent was <b>kept</b> — otherwise an agent reads a warning and retries a write that
  * already did what it asked — and it has to name the remedy, which is omitting the field rather
  * than sending a different one.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @DisplayName("IMP-45 — supersededDefaults on the create response")
 class McpSupersededDefaultsReportTest {
@@ -70,7 +72,7 @@ class McpSupersededDefaultsReportTest {
     String hint = body.getString("supersededDefaultsHint").toLowerCase(Locale.ROOT);
     assertTrue(hint.contains("kept"), "the write succeeded — an agent must not read this as a "
         + "rejection and retry");
-    assertTrue(hint.contains("neo_defaults"),
+    assertTrue(hint.contains("etendo_defaults"),
         "the hint must name where a blindly echoed value came from");
     assertTrue(hint.contains("omit"),
         "and the remedy is to omit the field, not to guess a different value");
@@ -100,7 +102,7 @@ class McpSupersededDefaultsReportTest {
   }
 
   /**
-   * <b>Create only.</b> An update carries no {@code neo_defaults} invitation and there is no
+   * <b>Create only.</b> An update carries no {@code etendo_defaults} invitation and there is no
    * cascade of this shape behind it, so the same report on {@code handleUpdate} would be a warning
    * about a sequence the caller never ran. The call site is the only place that can say so —
    * nothing in a signature distinguishes the two verbs.

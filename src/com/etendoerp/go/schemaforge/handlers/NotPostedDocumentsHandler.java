@@ -17,8 +17,11 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,10 +33,13 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.domain.ListTrl;
 import org.openbravo.model.ad.domain.Reference;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 
 import com.etendoerp.bulk.posting.datasource.NoPostedDocumentDS;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -51,9 +57,11 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  *   <li>Query param {@code _mode=filter-options} → returns dropdown option lists for Document type
  *       and Accounting status from AD_Ref_List.</li>
  *   <li>Otherwise → returns the unposted document grid by delegating to
- *       {@link NoPostedDocumentDS}. Each row is enriched with {@code tableId} resolved from
- *       {@code documentType} via {@link #DOCUMENT_TYPE_TO_TABLE_ID}, so the frontend can call the
- *       Post action without knowing the table.</li>
+ *       {@link NoPostedDocumentDS}. Each row is enriched with {@code documentTypeCode} and
+ *       {@code tableId} (resolved from {@code documentType} via
+ *       {@link #DS_LABEL_TO_DOCUMENT_TYPE_CODE}), so the frontend can call the Post action without
+ *       knowing the table, plus {@code accountingStatus} (and {@code financialAccountId} on
+ *       transactions) read from the document itself.</li>
  * </ul>
  *
  * <p>ACTION endpoint:
@@ -97,14 +105,18 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    *   AD = No Accounting Date   Y  = Posted
    *   D  = Document Disabled    NO = No Related PO
    *   l  = Pending Refresh      c  = Not Convertible (no rate)
-   *   b  = Not Balanced         NC = Cost Not Calculated
-   *   T  = Table Disabled
+   *   b  = Not Balanced         T  = Table Disabled
+   *
+   * <p>ETP-5591: {@code NC} (Cost Not Calculated) joined the curated set. It was excluded since
+   * ETP-4355, which hid every goods receipt/shipment whose posting stopped on an uncalculated
+   * cost (1176 rows on the local sandbox) from the page meant to surface exactly that.
    */
   private static final String[][] ACCOUNTING_STATUS_FILTER_OPTIONS = {
       { "N",   "Unposted"        },
       { "E,C", "Error"           },   // E = Error, C = Error-No-Cost (unified)
       { "i",   "Invalid Account" },
       { "p",   "Period Closed"   },
+      { "NC",  "Cost Not Calculated" },
   };
 
   /**
@@ -147,7 +159,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("RVS", "319");                                   // M_InOut
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("SI",  "318");                                   // C_Invoice
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("T",   "4D8C3B3C31D1410DA046140C9F024D17");      // FIN_Finacc_Transaction
-    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("WE",  "486");                                   // S_TimeExpense
+    // ETP-5591 — WE was mapped to 486 (S_TimeExpense), but bulk.posting emits "Work Effort" rows
+    // from DocumentSearchService#searchProduction, i.e. M_Production records (325), the same table
+    // as BMP. Mapped to 325 so those rows resolve to their real table and are excluded with BMP
+    // (ETP-4452) instead of being posted against the wrong table.
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("WE",  "325");                                   // M_Production
   }
 
   private static final String KEY_TABLE_ID = "tableId";
@@ -156,6 +172,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private static final String KEY_SUCCESS = "success";
   private static final String KEY_VALUE = "value";
   private static final String KEY_LABEL = "label";
+  private static final String KEY_DOCUMENT_ID = "documentId";
+  private static final String KEY_DOCUMENT_TYPE_CODE = "documentTypeCode";
+  private static final String KEY_FINANCIAL_ACCOUNT_ID = "financialAccountId";
 
   /**
    * Maps accounting status search keys to their {@code AD_Ref_List.ad_ref_list_id} (UUID).
@@ -170,10 +189,10 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   /**
    * Default statuses sent when the user applies no accounting-status filter (empty selection =
-   * "show all unposted").  Covers the four options exposed in the UI filter.
+   * "show all unposted").  Covers the five options exposed in the UI filter.
    */
   private static final List<String> DEFAULT_ACCOUNTING_STATUS_KEYS =
-      Arrays.asList("N", "E", "C", "i", "p");
+      Arrays.asList("N", "E", "C", "i", "p", "NC");
 
   static {
     ACCOUNTING_STATUS_KEY_TO_ID.put("N",  "D16B6411F4CB4708AE05E7F6E109920E"); // Unposted
@@ -197,53 +216,72 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   }
 
   /**
-   * Maps the {@code documentType} string returned by {@link NoPostedDocumentDS} to the
-   * corresponding {@code AD_Table_ID}. Used to enrich grid rows so the frontend can call
-   * {@code POST /action/post} with {@code {tableId, recordId}} without extra lookups.
+   * Maps the {@code documentType} label emitted by {@link NoPostedDocumentDS} to its document-type
+   * code (the {@code AD_Ref_List} search key of {@link #DOCUMENT_TYPE_REF_ID}). Both the row's
+   * {@code tableId} (via {@link #DOCUMENT_TYPE_CODE_TO_TABLE_ID}) and its {@code documentTypeCode}
+   * — which the frontend translates and uses to pick the "Open document" target window — derive
+   * from this single map.
    *
-   * <p>Values come from {@code NoPostedConstans} string constants (extracted from bytecode) and
-   * the AD_Table query: {@code SELECT tablename, ad_table_id FROM ad_table WHERE tablename IN
-   * ('C_Invoice','M_InOut','M_Movement','A_Amortization','GL_Journal','M_Inventory')}.</p>
+   * <p>ETP-5591: this replaced a parallel label → {@code AD_Table_ID} map. Keeping two maps keyed
+   * on different vocabularies is how rows kept reaching the grid with {@code tableId: null}
+   * (ETP-5075 Matched Invoice, ETP-5445 Internal Consumption, then ETP-5591 Transaction): a type
+   * was added to one map and not the other. Now a label only needs an entry here; its table comes
+   * from the code map the filter dropdown already uses.
+   *
+   * <p>Source: the labels {@code DocumentSearchService.search*} actually emits, read from the
+   * bulk.posting bytecode ({@code NoPostedConstans}); each label belongs to exactly one code.
+   * {@code NoPostedConstans} also declares {@code Invoice}, {@code ShipmentInOut}, {@code Payment}
+   * and {@code Production}, but no search method emits them, so they are deliberately absent.
    */
-  /** Package-private so it can be unit-tested directly (see {@code NotPostedDocumentsHandlerTest}). */
-  static final Map<String, String> DOCUMENT_TYPE_TO_TABLE_ID = new HashMap<>();
+  static final Map<String, String> DS_LABEL_TO_DOCUMENT_TYPE_CODE = new HashMap<>();
 
   static {
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Sales Invoice", "318");      // C_Invoice
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Purchase Invoice", "318");   // C_Invoice
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Invoice", "318");            // C_Invoice
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Goods Shipment", "319");     // M_InOut
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Goods Receipt", "319");      // M_InOut
-    DOCUMENT_TYPE_TO_TABLE_ID.put("ShipmentInOut", "319");      // M_InOut
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Return to Vendor Shipment", "319"); // M_InOut
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Return Material Receipt", "319");   // M_InOut
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Movement", "323");           // M_Movement
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Amortization", "800060");    // A_Amortization
-    DOCUMENT_TYPE_TO_TABLE_ID.put("GL Journal", "224");         // GL_Journal
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Inventory", "321");          // M_Inventory
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment In",     FIN_PAYMENT_TABLE_ID);               // FIN_Payment
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment Out",    FIN_PAYMENT_TABLE_ID);               // FIN_Payment
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Bank Statement", "D4C23A17190649E7B78F55A05AF3438C"); // FIN_BankStatement
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Reconciliation", "B1B7075C46934F0A9FD4C4D0F1457B42"); // FIN_Reconciliation
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Bill of Materials Production", "325");                                 // M_Production
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Doubtful Debt", "30721072789F410E9606D2235CB2A226");                   // FIN_Doubtful_Debt
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Landed Cost", "082F967CDF7245EB9A150941F326C45C");                     // M_LandedCost
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Landed Cost Cost", "55A984C314FD4C4FB5E7C32DE36BB07B");                // M_LC_Cost
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Cost Adjustment", "D022B92163074E5E82449C8E0B5AFDF6");                 // M_CostAdjustment
-    // ETP-5075 — Matched Purchase Invoices (Receipt-Invoice Link) rows reached this grid
-    // via C_ACCTSCHEMA_TABLE (table 472 already has active accounting, so
-    // refListDocumentTypes() already listed "MI" in the filter dropdown) but never had a
-    // row-enrichment entry here, so every row's tableId resolved to null and postRow()
-    // failed client-side with "unknown tableId for Matched Invoice". "Matched Invoice"
-    // (singular) is NoPostedDocumentDS's own raw label for this table — confirmed live,
-    // it is the exact string both the grid badge and that error message render verbatim.
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Matched Invoice", "472");                                              // M_MatchInv
-    // ETP-5445 — Internal Consumption rows had a filter code ("IC" above) but no row-enrichment
-    // entry, so their tableId resolved to null and postRow() failed client-side. "Internal
-    // Consumption" is bulk.posting's own label (NoPostedConstans.INTERNAL_CONSUMPTION, emitted
-    // by DocumentSearchService#searchInternalConsumption).
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Internal Consumption", "800168");                                      // M_Internal_Consumption
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Sales Invoice", "SI");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Purchase Invoice", "PI");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Payment In", "PIN");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Payment Out", "POT");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("GL Journal", "GLJ");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Bill of Materials Production", "BMP");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Work Effort", "WE");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Bank Statement", "BS");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Goods Shipment", "GS");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Goods Receipt", "GR");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Return to Vendor Shipment", "RVS");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Return Material Receipt", "RMR");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Amortization", "A");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Inventory", "INV");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Cost Adjustment", "CA");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Matched Invoice", "MI");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Internal Consumption", "IC");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Doubtful Debt", "DD");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Reconciliation", "R");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Transaction", "T");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Landed Cost", "LC");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Landed Cost Cost", "LCC");
+    DS_LABEL_TO_DOCUMENT_TYPE_CODE.put("Movement", "M");
   }
+
+  /**
+   * Resolves a {@link NoPostedDocumentDS} label to its {@code AD_Table_ID} through the document-type
+   * code, or {@code null} when the label is unknown. Package-private for tests.
+   */
+  static String tableIdForLabel(String label) {
+    String code = label != null ? DS_LABEL_TO_DOCUMENT_TYPE_CODE.get(label) : null;
+    return code != null ? DOCUMENT_TYPE_CODE_TO_TABLE_ID.get(code) : null;
+  }
+
+  /**
+   * The bulk.posting extension column every posting table carries. It is the column
+   * {@link NoPostedDocumentDS} filters on, so it is also what the row's status badge must show:
+   * {@code Posted} can differ from it (e.g. {@code posted = 'p'} while this is {@code 'l'}).
+   */
+  static final String ACCOUNTING_STATUS_PROPERTY = "etblkpAccountingstatus";
+
+  /** Max ids per {@code IN} clause when reading row accounting state. */
+  private static final int STATE_QUERY_CHUNK = 1000;
+
+  /** A row's accounting status key and, for financial-account transactions, its account id. */
+  record AccountingState(String status, String financialAccountId) { }
 
   @Inject
   private DocumentPostingService postingService;
@@ -252,8 +290,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * This spec is tab-less, so ETP-4254's catalog rule would hide it as "handler-only" were it
    * not for the {@code post} / {@code bulk-post} ACTION routes below — which are exactly the
    * transactional business actions the agentic catalog must keep. Declaring the action surface
-   * is what keeps {@code not-posted-documents} in {@code neo_discover} and reachable through
-   * {@code neo_action}.
+   * is what keeps {@code not-posted-documents} in {@code etendo_discover} and reachable through
+   * {@code etendo_action}.
    *
    * @return always {@code true}
    */
@@ -382,12 +420,18 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     Map<String, String> dsParams = buildDsParams(params);
     List<Map<String, Object>> rows = new AccessibleDS().fetchAll(dsParams);
 
-    JSONArray array = new JSONArray();
+    List<JSONObject> built = new ArrayList<>();
     for (Map<String, Object> row : rows) {
       JSONObject j = buildRow(row);
       if (j != null) {
-        array.put(j);
+        built.add(j);
       }
+    }
+    enrichWithAccountingState(built);
+
+    JSONArray array = new JSONArray();
+    for (JSONObject j : built) {
+      array.put(j);
     }
     JSONObject body = new JSONObject();
     body.put("rows", array);
@@ -405,8 +449,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    */
   JSONObject buildRow(Map<String, Object> row) throws Exception {
     Object docType = row.get("documentType");
-    String tableId = docType instanceof String
-        ? DOCUMENT_TYPE_TO_TABLE_ID.get(docType.toString()) : null;
+    String code = docType instanceof String ? DS_LABEL_TO_DOCUMENT_TYPE_CODE.get(docType) : null;
+    String tableId = docType instanceof String ? tableIdForLabel((String) docType) : null;
 
     if (AccountingDocumentTypeSupport.isAprmDisabledTable(tableId)) {
       return null;
@@ -417,7 +461,97 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       j.put(e.getKey(), e.getValue() != null ? e.getValue() : JSONObject.NULL);
     }
     j.put(KEY_TABLE_ID, tableId != null ? tableId : JSONObject.NULL);
+    j.put(KEY_DOCUMENT_TYPE_CODE, code != null ? code : JSONObject.NULL);
+    j.put(KEY_ACCOUNTING_STATUS, JSONObject.NULL);
     return j;
+  }
+
+  /**
+   * Adds {@code accountingStatus} (and {@code financialAccountId} on financial-account
+   * transactions) to every row, reading them from the documents themselves: the datasource rows
+   * carry neither. One query per distinct table, chunked by id.
+   *
+   * <p>Never fails the grid: a table whose state cannot be read is logged and its rows keep
+   * {@code accountingStatus: null} (the UI then renders no badge).
+   *
+   * <p>Package-private so the merge logic can be tested with a stubbed
+   * {@link #loadAccountingStates}.
+   */
+  void enrichWithAccountingState(List<JSONObject> rows) {
+    Map<String, List<JSONObject>> rowsByTable = new LinkedHashMap<>();
+    for (JSONObject row : rows) {
+      String tableId = stringOrNull(row, KEY_TABLE_ID);
+      String documentId = stringOrNull(row, KEY_DOCUMENT_ID);
+      if (tableId != null && documentId != null) {
+        rowsByTable.computeIfAbsent(tableId, k -> new ArrayList<>()).add(row);
+      }
+    }
+    for (Map.Entry<String, List<JSONObject>> entry : rowsByTable.entrySet()) {
+      applyAccountingStates(entry.getKey(), entry.getValue());
+    }
+  }
+
+  private static String stringOrNull(JSONObject row, String key) {
+    Object value = row.opt(key);
+    return value instanceof String ? (String) value : null;
+  }
+
+  private void applyAccountingStates(String tableId, List<JSONObject> tableRows) {
+    try {
+      Set<String> ids = new LinkedHashSet<>();
+      for (JSONObject row : tableRows) {
+        ids.add(row.getString(KEY_DOCUMENT_ID));
+      }
+      Map<String, AccountingState> states = loadAccountingStates(tableId, ids);
+      for (JSONObject row : tableRows) {
+        AccountingState state = states.get(row.getString(KEY_DOCUMENT_ID));
+        if (state == null) {
+          continue;
+        }
+        row.put(KEY_ACCOUNTING_STATUS, state.status() != null ? state.status() : JSONObject.NULL);
+        if (state.financialAccountId() != null) {
+          row.put(KEY_FINANCIAL_ACCOUNT_ID, state.financialAccountId());
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not read the accounting status of table {}; its rows show no status",
+          tableId, e);
+    }
+  }
+
+  /**
+   * Reads the accounting status of the given documents of one table, keyed by document id. For
+   * {@code FIN_Finacc_Transaction} it also reads the financial account, which is where the
+   * frontend opens a transaction (it has no window of its own).
+   *
+   * <p>The entity name in the HQL comes from the application dictionary
+   * ({@link ModelProvider#getEntityByTableId}), never from the request; the ids are bound.
+   * Returns an empty map for a table without the status column.
+   */
+  Map<String, AccountingState> loadAccountingStates(String tableId, Set<String> ids) {
+    Map<String, AccountingState> result = new HashMap<>();
+    Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+    if (entity == null || !entity.hasProperty(ACCOUNTING_STATUS_PROPERTY)) {
+      return result;
+    }
+    boolean withAccount = FIN_FinaccTransaction.ENTITY_NAME.equals(entity.getName());
+    String hql = "select e.id, e." + ACCOUNTING_STATUS_PROPERTY
+        + (withAccount ? ", e." + FIN_FinaccTransaction.PROPERTY_ACCOUNT + ".id" : "")
+        + " from " + entity.getName() + " e where e.id in (:ids)";
+
+    List<String> all = new ArrayList<>(ids);
+    for (int from = 0; from < all.size(); from += STATE_QUERY_CHUNK) {
+      List<String> chunk = all.subList(from, Math.min(from + STATE_QUERY_CHUNK, all.size()));
+      List<Object[]> found = OBDal.getInstance().getSession()
+          .createQuery(hql, Object[].class)
+          .setParameterList("ids", chunk)
+          .list();
+      for (Object[] r : found) {
+        result.put((String) r[0], new AccountingState((String) r[1],
+            withAccount ? (String) r[2] : null));
+      }
+    }
+    return result;
   }
 
   /**

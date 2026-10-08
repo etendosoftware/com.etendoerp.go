@@ -24,7 +24,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -32,12 +34,15 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
@@ -56,6 +61,10 @@ import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
  * rather than an arbitrary one: no field carried along, no constructor needed.
  */
 final class McpWriteRequestSupport {
+
+  private static final String FK_ZERO = "0";
+  /** Target entity name → whether it holds a record with id "0". See {@link #isExistingZeroRecord}. */
+  private static final Map<String, Boolean> ZERO_RECORD_BY_ENTITY = new ConcurrentHashMap<>();
 
   private McpWriteRequestSupport() {
     // utility class — no instances
@@ -105,7 +114,7 @@ final class McpWriteRequestSupport {
    * agents, not just SF-configured ones. filterWriteRequest strips fields not in ETGO_SF_FIELD
    * writableFields, which is too restrictive for MCP where AI agents need to set any valid
    * column."</em> The cost of that openness was measured: {@code orderReference}, curated out of
-   * the sales-order window, could be written and filtered while {@code neo_get} refused to project
+   * the sales-order window, could be written and filtered while {@code etendo_get} refused to project
    * it — so an agent could set a value, be told 200, and never read it back. The three tools now
    * answer the same question the same way.</p>
    *
@@ -115,7 +124,7 @@ final class McpWriteRequestSupport {
    * {@code NeoFieldFilter} solely to project GET responses, so nothing stopped the write and AD's
    * {@code isUpdatable} alone decided whether the value was dropped or persisted. The exemptions
    * are copied from that predicate rather than reinvented — see {@link McpQuerySupport#writeGate}.
-   * It applies to {@code neo_create} and {@code neo_update} alike: a field is read-only or it is
+   * It applies to {@code etendo_create} and {@code etendo_update} alike: a field is read-only or it is
    * not, and which verb is asking does not change the answer.</p>
    *
    * <p><b>What it does not do.</b> A key that resolves to no property at all still passes through
@@ -144,8 +153,8 @@ final class McpWriteRequestSupport {
    * As {@link #mapFieldsToDalProperties(JSONObject, Tab, SFEntity)}, also collecting the keys that
    * matched no field of the entity.
    *
-   * <p><b>IMP-18 — the write verbs report, they do not refuse.</b> {@code neo_schema},
-   * {@code neo_list} and {@code neo_get} have answered an unrecognised name with
+   * <p><b>IMP-18 — the write verbs report, they do not refuse.</b> {@code etendo_schema},
+   * {@code etendo_list} and {@code etendo_get} have answered an unrecognised name with
    * {@code unknownFields} since 2026-08-10; the write verbs dropped it in silence, so a create
    * carrying a misspelt field returned 201 and no later read could contradict it. The obvious
    * symmetry with the two gates above — refuse it — was measured and rejected: of the 73 handler
@@ -206,7 +215,7 @@ final class McpWriteRequestSupport {
         // parentId is a declared argument of the write tools, not a stray key - see
         // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
         // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
-        // not properties of this one - but neo_schema now publishes them and the handler writes
+        // not properties of this one - but etendo_schema now publishes them and the handler writes
         // them, and a key the schema advertises must not come back labelled unrecognised.
         if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
           unknown.add(key);
@@ -223,7 +232,7 @@ final class McpWriteRequestSupport {
    * The caller-facing names of the virtual fields the entity's wrapper policy publishes.
    *
    * <p>ETP-5368. Compared against the backing table's own DAL property names, resolved the same
-   * way {@code neo_schema} resolves them, so the two answers come from one source rather than from
+   * way {@code etendo_schema} resolves them, so the two answers come from one source rather than from
    * two hand-kept lists.
    */
   private static Set<String> virtualFieldNames(SFEntity sfEntity) {
@@ -280,17 +289,17 @@ final class McpWriteRequestSupport {
    *
    * <p><b>Why a second entry point, and why it does not map.</b> {@link #mapFieldsToDalProperties}
    * does two jobs — it translates the caller's spelling into DAL property names, and it applies
-   * these gates on the way. {@code neo_batch} needs only the second: its operation bodies reach
+   * these gates on the way. {@code etendo_batch} needs only the second: its operation bodies reach
    * {@code BatchService} in whatever spelling the agent sent and are resolved downstream, so
    * running the mapping here as well would rewrite keys a path that works today does not expect.
    * This method therefore refuses, and changes nothing.
    *
    * <p><b>The gap it closes.</b> The read-only gate lived only where the mapping lived, so
-   * {@code neo_create} refused a value sent for a field the spec publishes as read-only while
-   * {@code neo_batch} accepted and persisted it — measured live on {@code sales-order/lines}:
+   * {@code etendo_create} refused a value sent for a field the spec publishes as read-only while
+   * {@code etendo_batch} accepted and persisted it — measured live on {@code sales-order/lines}:
    * {@code salesOrder} was refused by one verb with {@code 422 read_only_field} and written by the
    * other. A batch being more permissive than a single create is the divergence class ETP-5415
-   * exists to remove, and it only became reachable when {@code neo_batch} was re-enabled.
+   * exists to remove, and it only became reachable when {@code etendo_batch} was re-enabled.
    *
    * <p>Keys that resolve to no property are left alone, exactly as the mapping leaves them: that
    * is IMP-18 and it is not decided here. The server's own injectors run after this, on the body
@@ -353,8 +362,8 @@ final class McpWriteRequestSupport {
   /**
    * Attach the keys a write did not recognise to the body handed back to the agent (IMP-18).
    *
-   * <p>Mirrors the {@code unknownFields} array {@code neo_list}, {@code neo_get} and
-   * {@code neo_schema} already return, so the same word means the same thing on every tool. The
+   * <p>Mirrors the {@code unknownFields} array {@code etendo_list}, {@code etendo_get} and
+   * {@code etendo_schema} already return, so the same word means the same thing on every tool. The
    * accompanying hint is worded to be <b>true even when a {@code NeoHandler} consumed the key</b>:
    * it says the name was not mapped to a field of this entity and no field of the record holds the
    * value, which is exactly what happened in both cases. Claiming the key was ignored would be a
@@ -370,7 +379,7 @@ final class McpWriteRequestSupport {
     try {
       body.put(McpFieldProjection.KEY_UNKNOWN_FIELDS, new JSONArray(unknown));
       body.put("unknownFieldsHint", "These names were not mapped to a field of this entity, and "
-          + "no field of the record holds their value. Call neo_schema with view:\"create\" for "
+          + "no field of the record holds their value. Call etendo_schema with view:\"create\" for "
           + "the names this entity accepts.");
     } catch (JSONException ignored) {
       // Reporting is an aid, never the answer. The write already succeeded; a body that cannot
@@ -382,11 +391,11 @@ final class McpWriteRequestSupport {
   /**
    * Attach the callout-vs-caller divergences a create left behind (IMP-45).
    *
-   * <p>{@code neo_defaults} tells an agent to use its result as the starting point for
-   * {@code neo_create}, and {@code neo_create} repeats the advice. Follow it literally and every
+   * <p>{@code etendo_defaults} tells an agent to use its result as the starting point for
+   * {@code etendo_create}, and {@code etendo_create} repeats the advice. Follow it literally and every
    * value handed over becomes a value the caller sent, which ETP-4784 protects from being
    * recomputed by a callout that knows the record's real context. The measured case:
-   * {@code neo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
+   * {@code etendo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
    * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
    * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
    *
@@ -408,7 +417,7 @@ final class McpWriteRequestSupport {
       body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
           + "callout had resolved a different one from this record's own context (the business "
           + "partner's configuration, for one). That is correct if the value was chosen "
-          + "deliberately. If you copied it from neo_defaults, it was a generic default resolved "
+          + "deliberately. If you copied it from etendo_defaults, it was a generic default resolved "
           + "before this record had a business partner: omit that field and let the server resolve "
           + "it, or send the value under \"callout\" instead.");
     } catch (JSONException ignored) {
@@ -446,7 +455,7 @@ final class McpWriteRequestSupport {
 
   /**
    * Validate that all mandatory columns have a value in the body before insert.
-   * Returns a JSONArray of missing fields using the same structure as neo_schema
+   * Returns a JSONArray of missing fields using the same structure as etendo_schema
    * (name, column, type, hasSelector) so the model knows exactly what to provide.
    *
    * <p><b>ETP-5368 — a field the server resolves is not a field the caller omitted.</b> This walk
@@ -456,12 +465,12 @@ final class McpWriteRequestSupport {
    * country, a street and a province was refused with "Missing required fields" naming
    * {@code locationAddress} — the very record {@code ContactsLocationAddressHandler} was about to
    * create from those fields. Skipping the names the wrapper policy declares server-resolved is
-   * the same declaration {@code neo_schema} uses to demote them to {@code optional}, so the
+   * the same declaration {@code etendo_schema} uses to demote them to {@code optional}, so the
    * catalogue and the write agree instead of contradicting each other.
    *
    * <p>ETP-5535: the fields a customization declares through
    * {@code NeoHandler#serverResolvedCreateFields} are deliberately NOT skipped here, although
-   * {@code neo_schema} demotes them. This check runs after {@code injectMandatoryDefaults} — the
+   * {@code etendo_schema} demotes them. This check runs after {@code injectMandatoryDefaults} — the
    * create callout cascade that derives them — and before the customization's pre-hook. So a
    * declared field the cascade filled is simply not missing, and one it could not fill is a real
    * gap: reporting it here gives the agent a precise 422 instead of the DAL's NOT NULL failure. The
@@ -597,10 +606,16 @@ final class McpWriteRequestSupport {
 
   /**
    * Replace FK sentinel values ("0") in the body with real values.
-   * The DAL's JsonToDataConverter tries to load entities by ID, and "0" is not a valid UUID.
-   * In Etendo, "0" means "not yet determined" — the real value comes from a related field
-   * (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
+   * In Etendo, "0" on some FKs means "not yet determined" — the real value comes from a related
+   * field (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
    * property in the body that targets the same entity and has a real value.
+   *
+   * <p>On other FKs "0" is a real record — the "no attributes" attribute set instance, the
+   * {@code *} organization. With no sibling to copy from, a "0" that resolves to an existing
+   * record of the target entity is kept: removing it wrote null or the default organization
+   * instead of what the agent sent. Only a "0" that is no record at all is removed. The sibling
+   * copy still goes first, because the document-type target holds a "0" record too (the
+   * placeholder "** New **") and must not be persisted as such.</p>
    */
   static void resolveFkSentinels(JSONObject body, Entity dalEntity, Logger log)
       throws JSONException {
@@ -617,7 +632,7 @@ final class McpWriteRequestSupport {
       }
       String targetEntity = prop.getTargetEntity().getName();
       String value = body.optString(key, "");
-      if ("0".equals(value)) {
+      if (FK_ZERO.equals(value)) {
         sentinelProps.put(key, targetEntity);
       } else if (!value.isEmpty()) {
         realValues.put(targetEntity, value);
@@ -633,13 +648,38 @@ final class McpWriteRequestSupport {
         body.put(propName, realValue);
         log.debug("Resolved FK sentinel: {} = {} (from sibling targeting {})",
             propName, realValue, targetEntity);
+      } else if (isExistingZeroRecord(targetEntity)) {
+        log.debug("Kept FK '0' for {} — it is an existing {} record", propName, targetEntity);
       } else {
         // No sibling with real value — remove to avoid DAL error. The column must
         // either have a DB default or be nullable; if not, the INSERT will fail.
         body.remove(propName);
-        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
-            propName, targetEntity);
+        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {} session={}",
+            propName, targetEntity, McpUsageTelemetry.sessionForLog());
       }
+    }
+  }
+
+  /**
+   * Whether the entity holds a record whose id is "0". Those are seed records of the dictionary
+   * (client 0), identical for every tenant and never created afterwards, so the answer is cached
+   * per entity: the lookup costs one primary-key read per entity for the life of the JVM, not one
+   * per FK per call. Read in admin mode because the question is whether the record exists, not
+   * whether the current role may read it.
+   *
+   * @param entityName DAL entity name of the FK's target
+   * @return {@code true} when a record with id "0" exists in that entity
+   */
+  static boolean isExistingZeroRecord(String entityName) {
+    return ZERO_RECORD_BY_ENTITY.computeIfAbsent(entityName, McpWriteRequestSupport::lookUpZeroRecord);
+  }
+
+  private static boolean lookUpZeroRecord(String entityName) {
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(entityName, FK_ZERO) != null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -658,9 +698,14 @@ final class McpWriteRequestSupport {
    * ({@code product} and {@code referencedInventory}), so the write landed in the neighbouring
    * field.</p>
    *
-   * <p>A scope that cannot identify the parent writes nothing, exactly as before: the caller's
-   * gate is what refuses such an entity, and silently guessing a column here is what caused the
-   * defect in the first place.</p>
+   * <p><b>ETP-5558:</b> a scope that cannot identify the parent now <b>refuses</b> the write
+   * through {@link #requireApplicableParent}. It used to log a WARN and return, on the promise that
+   * "the caller's gate is what refuses such an entity" — there was no such gate, so the create went
+   * on without its parent and the mandatory-defaults pass filled the link by itself:
+   * {@code payment-out/lines} ({@code FIN_Payment_ScheduleDetail}, whose parent-link columns point
+   * at {@code FIN_Payment_Detail} and {@code FIN_Payment_Schedule}, never at {@code FIN_Payment})
+   * was attached to an unrelated, processed customer collection. Only a same-record tab still
+   * ignores the id, because there the parent is the record itself.</p>
    *
    * @param adTab         the child tab
    * @param body          the write payload, mutated in place
@@ -668,19 +713,65 @@ final class McpWriteRequestSupport {
    * @param log           caller's logger
    * @param sfEntity      the SchemaForge entity, needed to read its {@code MCP_CONFIG}
    * @throws JSONException if the payload cannot be written to
+   * @throws McpRoutingException {@code parent_unresolvable} when the id cannot be mapped
    */
   static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log,
       SFEntity sfEntity) throws JSONException {
     if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
       return;
     }
-    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    McpParentScope.Scope scope = requireApplicableParent(sfEntity, parentIdValue);
     if (scope.getParentField() == null) {
-      log.warn("No parent field resolved for tab '{}' — parentId not applied ({})",
-          adTab.getName(), scope.getProblem());
+      // Only a same-record tab gets here: the parent is the record itself, so there is no link
+      // to write. Every other scope without a parent field was refused above.
+      log.debug("Tab '{}' is the parent's own record — parentId not applied", adTab.getName());
       return;
     }
     body.put(scope.getParentField(), parentIdValue);
+  }
+
+  /**
+   * Refuse a child create that cannot be attached to the parent the caller means (ETP-5558).
+   *
+   * <p>Shared by {@code etendo_create} and {@code etendo_batch}'s per-operation preprocessor, which never
+   * reaches {@link #resolveParentFK} because {@code BatchService} maps the parent itself. One
+   * predicate for both, so a batch cannot write what a single create refuses.</p>
+   *
+   * <p>Refused:</p>
+   * <ul>
+   *   <li>{@link McpParentScope.Kind#UNRESOLVABLE} — <b>always</b>, with or without
+   *       {@code parentId}. Without one the create still reaches the mandatory-defaults pass, which
+   *       fills the unmappable link on its own; omitting the id must not be a way around the
+   *       refusal. This is what makes the scope's "not publishable" true on the write path.</li>
+   *   <li>{@link McpParentScope.Kind#UNPARENTED} — only when a {@code parentId} is sent, since the
+   *       entity declares it has no field to put it in. (Such an entity advertises no write
+   *       method, so {@code requireMethodEnabled} normally refuses first.)</li>
+   *   <li>{@link McpParentScope.Kind#TAB_WHERE} — <b>always</b>: the parent is reached only through
+   *       the tab's where clause, so there is no field to write it into, and the defaults pass
+   *       would pick the intermediate link on its own.</li>
+   * </ul>
+   * <p>Not refused: a header, a same-record tab — its parent is the record itself — and a resolved
+   * child. The update and delete verbs do not call this: neither runs the defaults pass, so neither
+   * can pick a parent on the caller's behalf.</p>
+   *
+   * @param sfEntity the SchemaForge entity being created
+   * @param parentId the parent id the caller supplied, may be blank
+   * @return the entity's parent scope, so the caller does not resolve it twice
+   * @throws McpRoutingException {@code parent_unresolvable} (422) when the create must not proceed
+   */
+  static McpParentScope.Scope requireApplicableParent(SFEntity sfEntity, String parentId) {
+    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    McpParentScope.Kind kind = scope.getKind();
+    boolean refuse = kind == McpParentScope.Kind.UNRESOLVABLE
+        || kind == McpParentScope.Kind.TAB_WHERE
+        || (kind == McpParentScope.Kind.UNPARENTED && StringUtils.isNotBlank(parentId));
+    if (refuse) {
+      SFSpec spec = sfEntity == null ? null : sfEntity.getETGOSFSpec();
+      throw McpRoutingException.parentUnresolvable(spec == null ? null : spec.getName(),
+          sfEntity == null ? null : sfEntity.getName(), scope.getParentEntity(),
+          scope.getAgentProblem());
+    }
+    return scope;
   }
 
   /**
@@ -692,7 +783,7 @@ final class McpWriteRequestSupport {
    *
    * <p>Equivalent to calling the 3-arg overload with {@code callerProvidedFields = null}: every
    * {@code fieldErrors} key is then described the old, caller-agnostic way. Kept for the read path
-   * and for {@code neo_delete}, neither of which tracks a pre-defaults snapshot of caller fields.
+   * and for {@code etendo_delete}, neither of which tracks a pre-defaults snapshot of caller fields.
    *
    * @param responseJson the raw DAL response
    * @param seeAlso      the {@code docs} recipe for the calling verb; also tells the failure builder
@@ -787,7 +878,7 @@ final class McpWriteRequestSupport {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_CONFLICT);
       envelope.put(McpConstants.KEY_HINT, "A record with this business key already exists. Find it "
-          + "with neo_list and update it, or send a different key.");
+          + "with etendo_list and update it, or send a different key.");
     } else if (write) {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
@@ -837,7 +928,7 @@ final class McpWriteRequestSupport {
     } else {
       envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
           + "field");
-      envelope.put(McpConstants.KEY_HINT, "Call neo_schema with view:\"create\" for this entity "
+      envelope.put(McpConstants.KEY_HINT, "Call etendo_schema with view:\"create\" for this entity "
           + "to check the type and allowed values of every field sent.");
     }
     envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
@@ -920,7 +1011,7 @@ final class McpWriteRequestSupport {
     envelope.put(McpConstants.KEY_DETAIL, "This record was modified by someone else after the '"
         + McpConstants.PARAM_UPDATED + "' value you sent was read. The write was refused so their "
         + "change is not lost; nothing was written.");
-    envelope.put(McpConstants.KEY_HINT, "Re-read the record with neo_get, reapply your changes on "
+    envelope.put(McpConstants.KEY_HINT, "Re-read the record with etendo_get, reapply your changes on "
         + "top of the values it returns, and retry with the fresh '"
         + McpConstants.PARAM_UPDATED + "'. Retrying the same payload unchanged will fail "
         + "identically.");

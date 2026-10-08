@@ -47,6 +47,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
@@ -76,6 +77,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * the policy's two flags, never from the scheme — which is the property being asserted.
  *
  * <p>No database: every collaborator is a mock and the statics are mocked.
+ *
+ * @covers com.etendoerp.go.auth.EnvironmentRequestAuthenticator
  */
 class EnvironmentRequestAuthenticatorTest {
 
@@ -357,6 +360,35 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals(401, outcome.getHttpStatus());
     assertEquals("Insufficient scope or invalid token context", outcome.getMessage());
     verify(lifecycleService, never()).evaluateAccess(anyString(), eq(true), any(Instant.class));
+  }
+
+  /**
+   * ETP-5602: the etendo: scopes and their deprecated neo: aliases are equivalent, either wildcard
+   * grants everything, and a read scope of either prefix never authorizes a write.
+   */
+  @ParameterizedTest(name = "{0} {1} -> authenticated={2}")
+  @CsvSource({
+      "GET,  neo:read,                true",
+      "GET,  etendo:read,             true",
+      "POST, neo:write,               true",
+      "POST, etendo:write,            true",
+      "POST, neo:*,                   true",
+      "POST, etendo:*,                true",
+      "POST, neo:read etendo:write,   true",
+      "POST, etendo:read,             false",
+      "POST, neo:read etendo:process, false",
+      "GET,  etendo:admin,            false"
+  })
+  void anOAuth2TokenIsAuthorizedByEitherScopePrefix(String method, String scopes,
+      boolean authenticated) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2(scopes);
+    HttpServletRequest request = bearerRequest(OAUTH2_TOKEN);
+    when(request.getMethod()).thenReturn(method);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
   }
 
   /** Our own OBException messages are safe to show... */

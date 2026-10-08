@@ -53,6 +53,13 @@ public class McpSessionManager {
    * executes the callable, then commits and closes the Hibernate session on success
    * or rolls back on failure. The previous OBContext is always restored in the finally
    * block to avoid leaking state across tool calls.
+   * <p>
+   * Side effect for telemetry (ETP-5594): the effective client and org this call runs under are
+   * bound with {@link McpUsageTelemetry#setCurrentTenant(String, String)} and deliberately NOT
+   * cleared here, because the usage row is recorded after this method returns. The caller's request
+   * scope MUST call {@link McpUsageTelemetry#clearCurrentTenant()} in a {@code finally} — today that
+   * is {@link McpServlet#doPost}. A new caller outside that servlet must do the same, or a pooled
+   * thread will carry this tenant into the next request.
    *
    * @param userId      Etendo AD_User_ID (from OAuth2 token)
    * @param roleId      Etendo AD_Role_ID (from OAuth2 token)
@@ -80,16 +87,12 @@ public class McpSessionManager {
         }
       }
 
-      // Resolve client: if "0" (System), get the client from the role
-      // Tables with access level "Organization" reject clientId=0
-      String effectiveClient = clientId;
-      if ("0".equals(clientId)) {
-        String resolvedClient = resolveClientFromRole(roleId);
-        if (resolvedClient != null) {
-          effectiveClient = resolvedClient;
-          log.debug("Resolved client from role {}: {}", roleId, effectiveClient);
-        }
-      }
+      String effectiveClient = resolveEffectiveClientId(clientId, roleId);
+
+      // Telemetry only (ETP-5594): the usage row must carry the tenant the call runs under, not
+      // the token's "0" wildcard. Bound before createContext so a call that fails there is still
+      // attributed; cleared by McpServlet.doPost once the row has been recorded.
+      McpUsageTelemetry.setCurrentTenant(effectiveClient, effectiveOrg);
 
       // Set OBContext using the same method as NeoServlet.authenticateJwt
       OBContext context = SecureWebServicesUtils.createContext(
@@ -164,6 +167,30 @@ public class McpSessionManager {
   public static void runInContext(String userId, String roleId,
       String clientId, Runnable action) throws Exception {
     runInContext(userId, roleId, clientId, DEFAULT_ORG, null, action);
+  }
+
+  /**
+   * Returns the client an MCP call actually runs under. A credential carrying the System wildcard
+   * ({@code "0"}, e.g. an OAuth2 token) runs under its role's client, because tables with access
+   * level "Organization" reject client 0. Any other value is returned unchanged.
+   *
+   * <p>Shared by the context setup and by {@code McpServlet}'s commercial-access check, so the
+   * check evaluates exactly the tenant the call will touch (ETP-5642).
+   *
+   * @param clientId client carried by the credential
+   * @param roleId   role carried by the credential
+   * @return the effective client id; the given one when the role cannot resolve another
+   */
+  static String resolveEffectiveClientId(String clientId, String roleId) {
+    if (!"0".equals(clientId)) {
+      return clientId;
+    }
+    String resolvedClient = resolveClientFromRole(roleId);
+    if (resolvedClient == null) {
+      return clientId;
+    }
+    log.debug("Resolved client from role {}: {}", roleId, resolvedClient);
+    return resolvedClient;
   }
 
   /**

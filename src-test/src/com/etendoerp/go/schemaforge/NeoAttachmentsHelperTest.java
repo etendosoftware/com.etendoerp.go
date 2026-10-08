@@ -59,24 +59,29 @@ import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.attachment.AttachImplementation;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * Unit tests for private utility methods in {@link NeoAttachmentsHelper}.
+ * Unit tests for {@link NeoAttachmentsHelper}.
  *
- * <p>These tests focus on deterministic helpers (file-name sanitization,
- * content-disposition formatting, date formatting and temp-file cleanup)
- * to keep coverage fast and independent from DAL/CDI infrastructure.</p>
+ * <p>Covers the deterministic helpers (file-name sanitization, content-disposition
+ * formatting, date formatting, temp-file cleanup) and the endpoint handlers. The
+ * handlers run without a live DAL/CDI container: {@code OBDal}, {@code ModelProvider},
+ * {@code OBContext} and {@code WeldUtils} are replaced with Mockito static mocks.</p>
  *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
  */
@@ -1400,6 +1405,178 @@ public class NeoAttachmentsHelperTest {
       assertEquals(400, response.getHttpStatus());
       assertTrue(errorMessage(response).contains("Could not resolve a standard tab"));
       verify(dal, times(2)).createCriteria(Tab.class);
+    }
+  }
+
+  /**
+   * ETP-5309 repro: uploading against a record that does not exist (the SPA's unsaved
+   * literal id {@code "new"}) answers a clean 404 before the core is reached, instead of
+   * the core's raw OBSecurityException surfacing as a 500.
+   */
+  @Test
+  public void handleUploadReturnsNotFoundWhenOwningRecordDoesNotExist() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    Part part = mock(Part.class);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+
+    when(request.getContentType()).thenReturn("multipart/form-data");
+    when(request.getPart("file")).thenReturn(part);
+    when(request.getParameter("tabId")).thenReturn("TAB1");
+    when(part.getSubmittedFileName()).thenReturn("order-1.pdf");
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
+    when(entity.getName()).thenReturn("Order");
+    when(dal.get("Order", "new")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "new", request, false);
+
+      assertEquals(404, response.getHttpStatus());
+      assertEquals("Record 'new' does not exist in table 'C_Order'. Save it before attaching files.",
+          errorMessage(response));
+      contextMock.verify(() -> OBContext.setAdminMode(true));
+      contextMock.verify(OBContext::restorePreviousMode);
+      weldMock.verifyNoInteractions();
+      // The check runs before the payload is materialized: no temp file is ever written.
+      verify(part, never()).getInputStream();
+    }
+  }
+
+  /** A minimal valid PDF payload, so {@link NeoAttachmentPolicy#validateContent} accepts it. */
+  private static Part stubPdfPart(String fileName) throws Exception {
+    Part part = mock(Part.class);
+    when(part.getSubmittedFileName()).thenReturn(fileName);
+    when(part.getInputStream()).thenAnswer(inv -> new ByteArrayInputStream(
+        "%PDF-1.4\n%%EOF\n".getBytes(StandardCharsets.US_ASCII)));
+    return part;
+  }
+
+  private static HttpServletRequest stubUploadRequest(Part part) throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getContentType()).thenReturn("multipart/form-data");
+    when(request.getPart("file")).thenReturn(part);
+    when(request.getParameter("tabId")).thenReturn("TAB1");
+    return request;
+  }
+
+  private static void stubCurrentOrganization(MockedStatic<OBContext> contextMock, String orgId) {
+    OBContext context = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(context.getCurrentOrganization()).thenReturn(org);
+    contextMock.when(OBContext::getOBContext).thenReturn(context);
+  }
+
+  /**
+   * ETP-5309: when the owning record exists, the existence check lets the upload through to
+   * the core — looked up by the table's DAL entity, in admin mode, which is then restored.
+   */
+  @Test
+  public void handleUploadReachesCoreWhenOwningRecordExists() throws Exception {
+    Part part = stubPdfPart("etp5309-existing-" + System.nanoTime() + ".pdf");
+    HttpServletRequest request = stubUploadRequest(part);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
+    when(entity.getName()).thenReturn("Order");
+    when(dal.get("Order", "REC1")).thenReturn(mock(BaseOBObject.class));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      stubCurrentOrganization(contextMock, "ORG1");
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
+
+      assertEquals(201, response.getHttpStatus());
+      verify(dal).get("Order", "REC1");
+      verify(aim).upload(any(), eq("TAB1"), eq("REC1"), eq("ORG1"), any(File.class));
+      contextMock.verify(() -> OBContext.setAdminMode(true));
+      contextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * ETP-5309: a table with no DAL entity is not checked — exactly as the core skips it — so
+   * the upload proceeds without a lookup and without touching admin mode.
+   */
+  @Test
+  public void handleUploadSkipsRecordCheckWhenTableHasNoEntity() throws Exception {
+    Part part = stubPdfPart("etp5309-noentity-" + System.nanoTime() + ".pdf");
+    HttpServletRequest request = stubUploadRequest(part);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      stubCurrentOrganization(contextMock, "ORG1");
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
+
+      assertEquals(201, response.getHttpStatus());
+      verify(dal, never()).get(anyString(), any());
+      verify(aim).upload(any(), eq("TAB1"), eq("REC1"), eq("ORG1"), any(File.class));
+      contextMock.verify(() -> OBContext.setAdminMode(true), never());
+    }
+  }
+
+  /**
+   * ETP-5309: admin mode entered for the existence lookup is restored even when the lookup
+   * throws; the failure surfaces as the handler's 500 and nothing reaches the core.
+   */
+  @Test
+  public void handleUploadRestoresAdminModeWhenRecordLookupThrows() throws Exception {
+    Part part = stubPdfPart("etp5309-throws-" + System.nanoTime() + ".pdf");
+    HttpServletRequest request = stubUploadRequest(part);
+    OBDal dal = mock(OBDal.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    stubTableLookup(dal, "TABLE1");
+    when(modelProvider.getEntityByTableId("TABLE1")).thenReturn(entity);
+    when(entity.getName()).thenReturn("Order");
+    when(dal.get("Order", "REC1")).thenThrow(new OBException("lookup failed"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class);
+        MockedStatic<OBContext> contextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      NeoResponse response = NeoAttachmentsHelper.handleUpload("C_Order", "REC1", request, false);
+
+      assertEquals(500, response.getHttpStatus());
+      assertEquals("lookup failed", errorMessage(response));
+      contextMock.verify(() -> OBContext.setAdminMode(true));
+      contextMock.verify(OBContext::restorePreviousMode);
+      verify(dal).rollbackAndClose();
+      verify(part, never()).getInputStream();
+      weldMock.verifyNoInteractions();
     }
   }
 

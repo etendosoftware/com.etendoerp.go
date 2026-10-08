@@ -79,6 +79,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_TRIAL_EXPIRES_AT = "trialExpiresAt";
   private static final String FIELD_TRIAL_DAYS_REMAINING = "trialDaysRemaining";
   private static final String FIELD_ACCESS_STATE = "accessState";
+  private static final String FIELD_ASSOCIATED_WITH_PRODUCTIVE = "associatedWithProductive";
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
   private static final String FIELD_RELATIONSHIP = "relationship";
@@ -623,6 +624,10 @@ final class EtendoGoJwtDalHelper {
     if (access != null) {
       env.put(FIELD_ACCESS_STATE, access.name());
     }
+    // ETP-5548: a demo that already originated a productive environment is not offered as the
+    // source of another purchase; the picker reads this to leave it out.
+    env.put(FIELD_ASSOCIATED_WITH_PRODUCTIVE,
+        ENVIRONMENT_LIFECYCLE_SERVICE.isAssociatedWithProductive(client.getId()));
     if (lifecycle != null) {
       env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
       env.put(FIELD_SUBSCRIPTION_STATUS, lifecycle.getSubscriptionStatus().name());

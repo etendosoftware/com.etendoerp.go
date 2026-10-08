@@ -695,21 +695,19 @@ public final class BankStatementsSupport {
    * @throws Exception if reading the result set or writing the JSON fails
    */
   static void appendTxnForeignOriginal(JSONObject t, ResultSet rs) throws Exception {
-    String foreignIso = StringUtils.trimToEmpty(rs.getString("txn_foreign_currency"));
     String accountIso = StringUtils.trimToEmpty(rs.getString("txn_currency"));
-    BigDecimal foreignAmount = rs.getBigDecimal("txn_foreign_amount");
+    ForeignOriginal foreign = ForeignOriginal.of(rs.getString("txn_foreign_currency"), accountIso,
+        rs.getBigDecimal("txn_foreign_amount"), rs.getBigDecimal("txn_foreign_rate"));
     // Not a foreign pair (or no stored original amount): keep the txn as is.
-    if (foreignIso.isEmpty() || accountIso.isEmpty() || foreignIso.equals(accountIso)
-        || foreignAmount == null) {
+    if (foreign == null) {
       return;
     }
     BigDecimal base = nullSafeBigDecimal(rs.getBigDecimal("txn_amount"));
-    t.put("foreignAmount", base.signum() < 0 ? foreignAmount.abs().negate() : foreignAmount.abs());
-    t.put("foreignCurrency", foreignIso);
+    t.put("foreignAmount", foreign.signedLike(base));
+    t.put("foreignCurrency", foreign.currencyIso());
     t.put("currency", accountIso);
-    BigDecimal rate = rs.getBigDecimal("txn_foreign_rate");
-    if (rate != null) {
-      t.put("foreignRate", rate);
+    if (foreign.rate() != null) {
+      t.put("foreignRate", foreign.rate());
     }
   }
 }
