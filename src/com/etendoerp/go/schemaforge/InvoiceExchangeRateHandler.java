@@ -49,6 +49,11 @@ import org.openbravo.model.common.invoice.Invoice;
  * this same pair in sync in the other direction (header → this row) — so editing either the
  * header currency or this tab keeps both consistent.
  *
+ * <p>On POST the final rate is mirrored onto the header the same way (ETP-5657). DELETE is not
+ * handled here: it goes through the default NEO delete (DAL), where
+ * {@code ConversionRateDocDeleteGuardObserver} (module {@code com.smf.currency.conversionrate})
+ * refuses removing the rate of a non-draft invoice.
+ *
  * <p>Registered via {@code javaQualifier = "invoiceExchangeRateHandler"} on the
  * {@code exchangeRates} entity of the sales-invoice and purchase-invoice specs.
  */
@@ -86,7 +91,11 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
 
   /**
    * POST: resolve the parent invoice from the body, default the {@code currency} / {@code toCurrency}
-   * pair, and derive the missing side of {@code rate} / {@code foreignAmount}.
+   * pair, derive the missing side of {@code rate} / {@code foreignAmount}, and mirror the resulting
+   * rate onto the invoice header's {@code eTGOCurrencyRate} via
+   * {@link #syncHeaderCurrencyRate(Invoice, BigDecimal)} — the same sync an edit does, so adding the
+   * rate on a completed-but-unposted invoice (ETP-5657) updates the header (and its {@code updated},
+   * which invalidates the cached PDF) too. A missing or non-positive rate syncs nothing.
    */
   private NeoResponse handleCreate(JSONObject body) {
     String invoiceId = resolveInvoiceIdFromBody(body);
@@ -111,6 +120,9 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
         }
       }
       computeRateAndForeignAmount(body, invoice);
+      // ETP-5657: mirror the new row's final rate onto the header, same as an edit does. Saving the
+      // header moves its `updated`, which is what invalidates the cached PDF of the invoice.
+      syncHeaderCurrencyRate(invoice, readDecimal(body, PROPERTY_RATE));
     } catch (Exception e) {
       // Abort the save: persisting the row without the derived currency/rate would
       // create an inconsistent document-level exchange rate. OBException rolls back

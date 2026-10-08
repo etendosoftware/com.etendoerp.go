@@ -1846,9 +1846,10 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 
 - **Declaration.** `NeoHandler#actionContracts()` returns `Map<String, NeoActionContract>` (empty by
   default). `NeoActionContract` (`schemaforge/util`) carries the name, a description, whether it
-  mutates, and typed parameters (`string`, `boolean`, `date` = `yyyy-MM-dd`, `array` of
-  `string`/`object`, closed `enum`s). A non-empty declaration also makes the default
-  `servesActions()` answer `true`; handlers that declare nothing keep answering `false`.
+  mutates, and typed parameters (`string`, `boolean`, `number` = a JSON number or a numeric
+  string, `date` = `yyyy-MM-dd`, `array` of `string`/`object`, closed `enum`s). A non-empty
+  declaration also makes the default `servesActions()` answer `true`; handlers that declare nothing
+  keep answering `false`.
 - **Catalog.** `ToolRegistry` adds such R specs (role passing `hasReportSpecAccess(spec,"GET")`) to
   the **`etendo_schema` and `etendo_action` enums only** — never to `etendo_list`/`etendo_get`, which cannot
   serve them. `etendo_discover` reports such a spec with `isReport:true`, `callable:false` (it is not a
@@ -1888,7 +1889,7 @@ stays retired (IMP-19: it is not a report generator); its actions are published 
 | `pendingLines` | read | `dateFrom`, `dateTo`, `q` | `GET ?action=pendingLines` |
 | `candidates` | read | **`statementLineId`**, `kind` (transactions\|invoices), `docType` (receipts\|payments), `dateFrom`, `dateTo` | `GET ?action=candidates` |
 | `autoMatch` | read | — | `GET ?action=autoMatch` |
-| `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `glItemId`, `description` | `POST ?action=reconcileGroup` |
+| `reconcileGroup` | write | **`statementLineId`**, `operationIds[]`, `invoices[{invoiceId,scheduleId}]`, `paymentMethodId`, `writeoffDifference`, `actualPayment` (number), `conversionRate` (number), `convertedAmount` (number), `glItemId`, `description` | `POST ?action=reconcileGroup` |
 | `reconcileDifference` | write | **`statementLineId`**, `glItemId`, `description` | `POST ?action=reconcileDifference` |
 | `applySuggestions` | write | **`groups[{statementLineId, operationIds[], createPayment?}]`** | `POST ?action=applySuggestions` |
 | `undoReconciliation` | write | **`statementLineId`** | `POST ?action=reactivate` |
@@ -1899,9 +1900,95 @@ Notes: 1:1, 1:N and partial matches are all `reconcileGroup` (a shortfall beyond
 a pending remainder, exactly as in the UI). `glItemId` is optional on `reconcileDifference`
 because the account's difference GL item is the default — declaring it required would refuse calls
 the UI makes (the IMP-19 §4 reasoning); without either the handler answers `GL_ITEM_REQUIRED`.
-Multi-currency needs no parameter: conversion uses the same exchange rate as the UI, and
-`candidates` reports `amountBase`. Rejecting an automatch group means not sending it —
-`applySuggestions` persists nothing for a group it did not receive, so there is no `reject` action.
+Multi-currency needs no parameter by default: each foreign invoice is paid at its own exchange
+rate (document rate, else the general table), and `candidates` reports `amountBase`; to book what
+the bank actually moved, see *Explicit conversion* below. Rejecting an automatch group means not
+sending it — `applySuggestions` persists nothing for a group it did not receive, so there is no
+`reject` action.
+
+**Explicit conversion on `reconcileGroup` (ETP-5657).** Same body on the SPA route and on
+`etendo_action`. Three optional top-level fields make the invoice leg book what the bank actually
+moved, as Classic's Add Payment from Match Statement does, instead of each invoice's own rate. They
+are unsigned magnitudes (numbers or numeric strings); the line's sign gives the direction. They
+only describe the invoice leg, so they require a non-empty `invoices[]`.
+
+- `actualPayment`: the total to pay across the selected invoices, in the **invoice** currency.
+  Required as soon as either of the other two is sent.
+- `conversionRate`: the invoice → account rate.
+- `convertedAmount`: the amount in the **account** currency.
+
+With none of them the request behaves exactly as before (greedy allocation at each invoice's rate,
+`ReconciliationFlowSupport.createInvoicePayments`). With any of them,
+`ReconciliationWriteoffSupport.payInvoicesFromBody` routes to `ReconciliationConversionSupport`:
+
+- **Validation (400, literal messages the SPA maps to i18n keys), in this order.** Nothing is
+  written until all of it passes.
+  - sent without `invoices` (e.g. `operationIds` + `convertedAmount`), or combined with
+    `operationIds` or `writeoffDifference:true` → *"Conversion fields cannot be combined with
+    existing transactions or a write-off"*. Without invoices the fields would otherwise be ignored
+    and the call would answer 201 having booked nothing of what they state;
+  - every invoice/schedule id is loaded tenant-guarded BEFORE any amount is computed: a foreign or
+    unknown id, or a schedule of another invoice → the usual 404 `Invoice or payment schedule not
+    found: <invoiceId>`, no amount echoed (a schedule named twice is kept once). The
+    schedule-of-another-invoice refusal is shared with the default path
+    (`ReconciliationFlowSupport.loadInstallment`);
+  - the selected invoices do not share one currency, or it is the account's →
+    *"Conversion fields require all selected invoices to share one currency different from the
+    account currency"*;
+  - `actualPayment` absent while `conversionRate` or `convertedAmount` is sent →
+    *"actualPayment is required when conversionRate or convertedAmount is sent"*;
+  - `actualPayment` not a number, ≤ 0, or above the selected schedules' outstanding (at the invoice
+    currency's precision) → *"The amount to pay must be greater than zero and not exceed the
+    outstanding amount of the selected invoices"*;
+  - a `conversionRate` that is malformed or ≤ 0 → *"Invalid conversion rate format"* /
+    *"Conversion rate must be greater than zero"*; exactly 1 → *"A conversion rate other than 1 is
+    required when the invoice and account currencies differ"*, but **only when `convertedAmount` is
+    absent** (the rate then drives the conversion). With `convertedAmount` present the rate is
+    advisory and 1 is accepted — a 1:1 pegged pair must stay reconcilable. Same messages as the
+    two-step payment modal (`PaymentCurrencyConverter.parseRate` / `rateError`);
+  - the converted amount not a number, ≤ 0 or above `|line|` — **strict**, no tolerance, against
+    the line `resolveForMatch` resolved (the pending remainder of a partial line); above it, Core's
+    split would create a remainder of the opposite sign → *"The converted amount must be greater
+    than zero and not exceed the statement line amount"*;
+  - a paid invoice whose share of the converted amount rounds to 0 → *"The converted amount is too
+    small to allocate across the selected invoices"*.
+- **Precedence.** `convertedAmount` wins when present (the rate is then advisory: only the
+  preferred per-payment rate, and a rate of 1 is accepted). With only `conversionRate`, converted =
+  `round(actualPayment × rate)` at the account currency's precision, HALF_UP, and the rate must not
+  be 1. With only `actualPayment`, converted = `|line|` rounded down to the account currency's
+  precision (Classic's default). A rate/converted mismatch is never a 400. Amounts are rounded
+  HALF_UP to their currency's precision before being checked. **There is no deviation check —
+  neither here nor in the SPA (Classic parity):** a caller that sends a converted amount far from
+  what the invoices are worth books the whole gap as a realized exchange difference (e.g. 78.26 USD
+  worth 53.24 EUR settled for 27.75 EUR → a 25.49 EUR loss). The SPA only shows the invoices' own
+  rate and the resulting gain/loss as information. Classic's Add Payment has no such check either
+  (verified: a 10.00 EUR line against a 106.72 USD invoice is confirmed without a warning and posts
+  a 62.60 EUR loss).
+- **Allocation.** Invoices are filled in request order (the SPA sends invoice-date ascending):
+  `pay_i = min(remaining actualPayment, outstanding_i)`; an invoice that gets nothing gets no
+  payment. `convertedAmount` is split across the paid invoices by largest remainder, proportional
+  to `pay_i`, so Σ `txn_i` equals it exactly. Each payment's rate is the first candidate `r` with
+  `round(pay_i × r) == txn_i`: the typed rate verbatim, then `txn_i / pay_i` at 6, 8, 10 and 12
+  decimals, then `DECIMAL64` (`PaymentCurrencyConverter.consistentRate`) — e.g. 40.91 USD settled
+  for 27.87 EUR → 0.681252. Accounting recomputes amount × rate, so a rate that does not reproduce
+  the transaction would end in a Currency Balancing line. With several invoices the per-payment
+  rates therefore differ slightly from any single typed or derived rate: 21.34 + 21.34 USD converted
+  to 27.87 EUR (0.652999 overall) become 13.94 EUR at 0.653233 and 13.93 EUR at 0.652765.
+- **Persistence.** One `ReconciliationPaymentService.registerReconciliationPayment` per paid
+  invoice, rate and transaction amount stored verbatim, no write-off. Core stores
+  `FIN_Payment.financialTransactionAmount/ConvertRate`, the transaction's `foreign*` fields and both
+  `C_Conversion_Rate_Document` rows, and books the realized exchange difference on posting. The
+  invoice's own rate is never read in this mode, so an invoice without a configured rate is
+  reconcilable here. The rest of `reconcileGroup` is unchanged: Σ `txn_i` = line closes it; less
+  leaves the usual pending remainder, or the within-tolerance GL difference. Core's posting of these
+  payments has known cent-level effects outside this module: the invoice-currency source amount on
+  the customer/supplier account (430/400) is the account-currency amount ÷ the payment rate, so a
+  per-invoice balance in the invoice currency may not land on exactly zero; and a multi-invoice
+  match can still put one minor unit (0.01 EUR) on the currency-balancing account. Both were
+  verified to occur in Classic's Add Payment on the same data. The source amount is identical; the
+  balancing cent appears on the opposite side, because Classic makes one payment at a shared rate
+  while this mode makes one per invoice. Figures and the product rationale are in Iteration 6 of
+  schema_forge `docs/plans/ETP-4502-cross-domain.md`.
 
 The role gate, the SPA-shaped derived context and the flush-to-clean after a successful write
 (ETP-5468 BUG-2) are shared by every such dispatcher through `AgentActionSupport`; each dispatcher
@@ -2304,13 +2391,32 @@ them `id` = the financial account:
 
 | Action | Kind | Parameters (required in **bold**) | UI gate it mirrors |
 |---|---|---|---|
-| `listMovements` | read | — | the Movements list (`GET financial-account-transactions`, same payload: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, … and `totals`) |
+| `listMovements` | read | — | the Movements list (`GET financial-account-transactions`, same payload: `transactions[]` with `processed`, `posted`, `paymentId`, `transferTxnId`, the cross-currency `foreignAmount`/`foreignCurrency`/`foreignConversionRate` (see below), … and `totals`) |
 | `movementGlItems` | read | `search` | the G/L item picker (`?action=glitem-lookup`) |
 | `createMovement` | write | **`trxType`** (`BPD`\|`BPW`), **`amount`** (> 0), **`date`** (also the accounting date), **`glItemId`**, `description` (≤ 255), `bpartnerId`, `projectId`, `costcenterId`, `productId`, `process` (`true` = Confirmar, default draft) | *Nuevo movimiento* — the form offers no bank fee and requires a G/L item |
 | `updateMovement` | write | **`movementId`**, any of the create fields, `process` (drafts only) | *Editar*: not on a payment-linked or posted movement; on a processed one only description, G/L item, contact and dimensions |
 | `processMovement` | write | **`movementId`** | *Procesar*: drafts that belong to no payment |
 | `reactivateMovement` | write | **`movementId`** | *Reactivar*: processed movements (payment-linked ones are refused by the endpoint, 409, ETP-5111) |
 | `deleteMovement` | write | **`movementId`** | *Eliminar*: any status — a processed movement is reactivated and removed (`TransactionRemovalUtil.reactivateAndRemove`); payment-linked movements and transfer legs are refused by the endpoint (409) |
+
+**Foreign-currency keys on a movement row (ETP-5657).** A `transactions[]` row whose payment
+crossed currencies also carries what Core stored on `FIN_FINACC_TRANSACTION`, read verbatim:
+
+| Key | Source | Type / convention |
+|---|---|---|
+| `foreignAmount` | `FOREIGN_AMOUNT` | number, the stored magnitude: Core writes it **unsigned** for deposits and withdrawals alike (like `depositAmount` / `withdrawalAmount`); the direction is `trxType` / the sign of `amount` |
+| `foreignCurrency` | ISO code of `FOREIGN_CURRENCY_ID` | string, e.g. `"USD"` — what Classic's movements CSV prints |
+| `foreignConversionRate` | `FOREIGN_CONVERT_RATE` | number; equals the "Índice" of the `C_Conversion_Rate_Document` Core writes for the transaction. Omitted when no rate is stored |
+
+The keys are present only when `foreignCurrency` is set and differs from the **account** currency and
+`foreignAmount` is not null; a same-currency row is unchanged. Example (EUR account, a 40.91 USD
+invoice collected as 27.80 EUR): `{"trxType":"BPD","amount":27.80,"depositAmount":27.80,
+"withdrawalAmount":0,"currencyIso":"EUR","foreignAmount":40.91,"foreignCurrency":"USD",
+"foreignConversionRate":0.67954, …}`. The "is it a foreign pair" rule is the one
+`ForeignOriginal.of` shares with the reconciliation candidates and statement-line transactions
+(ETP-5450), which re-sign the same stored amount for their own display. The movements CSV export
+(`?export=csv`, `MOVEMENT_CSV_COLUMNS` in the SPA) serializes these same rows, so its
+*Foreign Amount* / *Foreign Currency* columns are filled for those movements.
 
 Each write hands `FinancialAccountTransactionsHandler` the body the SPA sends (create: account,
 `trxType`, both dates, `depositAmount`/`paymentAmount` split by type, the account's currency, the
@@ -2420,7 +2526,7 @@ had to infer which included entity was the header by calling `etendo_schema` on 
 surfaces that directly: each window spec that has entities carries a `primaryEntity` field naming the
 root entity.
 
-**Response fragment** (`handleDiscover` → `McpToolRouterSupport.buildDiscoverSpec`):
+**Response fragment** (`McpDiscoverTool.handle` → `McpToolRouterSupport.buildDiscoverSpec`):
 
 ```json
 {
@@ -2630,6 +2736,12 @@ caller-side transaction ownership can undo that. `BatchService` detects it gener
 `commitAndClose()` underneath closes the Hibernate session, so the `Session` identity changes
 mid-batch — and then reports `atomic: false` with `persisted` naming the records that outlived the
 rollback.
+
+The `user` entity is a second instance of the same mechanism: its create post-hook sends a company
+invitation, and `CompanyInvitationService` commits that invitation with `commitAndClose()`. A batch
+that creates a user commits every operation before it, so a later failure reports `atomic: false`
+with those records in `persisted`. (The ETP-5194 email correction re-invites the same way, but it is
+an update, and batch only creates — it never runs inside a batch.)
 
 | `atomic` | `persisted` | What the caller does |
 |---|---|---|
@@ -2970,7 +3082,8 @@ was deferred to its own cycle.
 
 `McpParentScope` classifies every child entity as `RESOLVED` (a link field points at the parent
 tab's table, or `parent.field` declares one), `SAME_RECORD`, `UNPARENTED` (declared by
-`parent.mode`) or `UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
+`parent.mode`), `TAB_WHERE` (scoped by its tab where clause — ETP-5639, below) or
+`UNRESOLVABLE`. Until ETP-5558 an `UNRESOLVABLE` child was only flagged with
 `configError` in `etendo_discover`, and every write verb still served it:
 `McpWriteRequestSupport.resolveParentFK` logged a WARN, dropped the `parentId` and let the create
 continue, and the mandatory-defaults pass then filled the link by itself.
@@ -3004,6 +3117,7 @@ at an intermediate record (a payment detail, a payment schedule) the agent has n
 | `RESOLVED` | written into the link field (unchanged) | unchanged |
 | `SAME_RECORD` | ignored — the parent is the record itself (unchanged) | unchanged |
 | `UNPARENTED` | **422 `parent_unresolvable`** | unchanged (such an entity advertises no write method anyway) |
+| `TAB_WHERE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
 | `UNRESOLVABLE` | **422 `parent_unresolvable`** | **422 `parent_unresolvable`** |
 | header (`NOT_CHILD`) | `parentId` ignored (unchanged) | unchanged |
 
@@ -3026,6 +3140,37 @@ three carry `configError` in `etendo_discover`): `payment-in/finPaymentScheduleD
 only link column `M_Transaction_ID` points elsewhere). All three advertise every write method; with
 this change none of them can be created through MCP. Making any of them creatable again is an
 entity decision — a `parent.field` that is genuinely the link — not a change to this gate.
+
+**Update (ETP-5639).** None of the three is `UNRESOLVABLE` any more, and they stopped logging
+`Parent scope unresolvable` on every resolution (118 WARN/week in production):
+
+- `product/transactionAdjustments` declares `MCP_CONFIG`
+  `"parent": {"field": "inventoryTransaction", "entity": "transactions"}` —
+  `M_Costing_Transactions_HQL`'s id is the `M_Transaction` id, so the field is genuinely the link.
+  `entity` is declared because the tab's own parent (`averageCostTransactions`, over the HQL view)
+  is not an included entity of the spec, so it cannot be named; `transactions` (over
+  `M_Transaction`) holds the same ids, and naming it lets the `parent_required` refusal and
+  `etendo_schema` tell the agent where to find the parent.
+  This also fixes a silent read bug: the tab's where clause (`costAdjustmentLine != null`) has no
+  parent placeholder, so `etendo_list` with a `parentId` used to return the adjustments of **every**
+  transaction. Now the list gate adds `inventoryTransaction = parentId`. `create` stays off through
+  `verbs` (the tab is read-only in the UI). A `parent.reason` is published as
+  `parentOptionalReason` only when some verb really lets the parent be omitted (`parentRequiredFor`
+  shorter than the five verbs); next to a parent required on every verb it used to say the
+  opposite of the truth.
+- The payment Lines (`payment-in/finPaymentScheduleDetail`, `payment-out/lines`) reach `FIN_Payment`
+  in two hops (`FIN_Payment_Detail_ID` → `FIN_Payment`), which `parent.field` cannot express. Their
+  tab where clause carries the parent placeholder
+  (`... pd.finPayment.id = @FIN_Payment_ID@`), and `NeoParentTabFilterResolver.resolveTabWhere`
+  fills it from `parentId` on the MCP list as on REST (ETP-5542), so the reads were always scoped.
+  `McpParentScope` now recognises that shape as a scope of its own, **`TAB_WHERE`**: when no
+  parent-link column points at the parent tab's table but the tab's HQL where clause contains the
+  placeholder of the parent table's key column (`@<ParentTable>_ID@`, matched on the DAL and DB
+  table names), the entity is publishable, `etendo_list` requires `parentId` (`parentRequiredFor:
+  ["list"]`, no `parentField`), the clause does the filtering, and creates are refused with
+  `parent_unresolvable` because there is no field to write the parent into. No WARN, no
+  `configError`, no `parentProblem`. Structural rule (tab metadata only); `mode: unparented` would
+  have declared the reads global, which they are not.
 
 #### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
 
@@ -3192,6 +3337,7 @@ not: `etendo_create` does not run it in shared code, so it is in the table below
 | `NeoCommercialLinePolicy.injectCommercialAmounts` | **no** in shared code — only from the customizations of sales order, sales quotation and sales invoice lines (ETP-5528, §4.12.20) | yes | `etendo_batch` runs it in `NeoCrudHandler.executePostCreate`; `etendo_create` never reaches that method — it is a separate pipeline. Since ETP-5528, sales order and sales quotation lines get the amounts on every create from their own customizations (`OrderLineDiscountSupport.deriveAmountsOnCreate`), and so do sales invoice lines (`SalesInvoiceLineHandler` → `InvoiceLineAmountSupport.deriveAmountsOnCreate`). Every other entity is as on `develop`: a generic commercial line persists `lineGrossAmount = 0` on a net price list, and purchase order and purchase invoice lines still do not get it (measured 2026-09-30: purchase order line gross 0, purchase invoice line net / gross 0 / 0). Declared, not fixed in shared code. (`grossUnitPrice` still persists as 0 on both verbs — a separate, undiagnosed defect, not a divergence) |
 | `buildInvalidDatesError` | yes | **no** | no explicit 422 for an unreadable or ambiguous date (ETP-4793 / IMP-24). Type coercion itself does run on the shared path (`executePostCreate` → `coerceTypes`), so the value is not silently mangled — the agent just gets a less precise failure |
 | the `warehouse` default | *Almacén Secundario* | *Almacén Principal* | observed with an identical body, 2026-09-28. Not yet diagnosed: it may be a genuine divergence in the defaults chain or a session dependency. Recorded here so it is not rediscovered as new |
+| `user` create — invitation (ETP-4830, declared by ETP-5194) | invitation committed by the post-hook | same, but mid-batch | the invitation's `commitAndClose()` commits every earlier operation of the batch, so a later failure answers `atomic: false` (§4.12.4.1). Same behaviour on REST `/batch`; declared, not changed. The ETP-5194 email correction is an update, which batch does not perform |
 
 This is a **declared** list, not an unknown one: the point is that the next person to touch either
 path can see what is deliberately unequal. Closing a row means adding the step to
@@ -3765,8 +3911,9 @@ protected value came from a person, and there is nothing to warn about.
 
 `initialize` advertises the server as `serverInfo.name = "etendo-mcp"` with
 `title = "Etendo MCP"`, `websiteUrl` and one `icons` entry pointing at the public
-`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973). `protocolVersion` is still
-`2024-11-05`: the new fields are additive and older clients ignore them. None of this is what a
+`https://app.etendo.ai/favicon.png` (MCP 2025-11-25, SEP-973), and a one-sentence `description`
+(2025-11-25 `Implementation.description`). `protocolVersion` is negotiated — see *Protocol revision*
+below (ETP-5639); it used to be a fixed `2024-11-05`. None of this is what a
 client lists the server as — that is the alias chosen at registration (`claude mcp add <alias>`,
 `[mcp_servers.<alias>]`), and Claude does not render `serverInfo.icons` for custom connectors today.
 
@@ -4190,6 +4337,21 @@ Then set `JAVA_QUALIFIER = 'myCustomHandler'` on the corresponding ETGO_SF_Entit
 - Return a `NeoResponse` to take full control of the response.
 - Return `null` to let the request fall through to the default DataSourceServlet handling.
 - If the handler class is not found via CDI, the request falls through to default handling with a warning log.
+- **Per-request state between `handle()` and `afterHandle()` goes on the context, never on the handler (ETP-5194).** Every channel passes the **same** `NeoContext` instance to both phases of one operation: REST single (`/sws/neo/*`), REST batch (`/sws/neo/batch`, per operation) and MCP (`McpHookExecutor`). A handler instance, on the other hand, may be shared across requests, so an instance field written in `handle()` can be read by another request's `afterHandle()`. Use the context's attribute bag instead — `context.setAttribute(key, value)` in the pre-hook, `context.getAttribute(key)` in the post-hook. Values live only as long as that context (one operation); `setAttribute(key, null)` removes the key. Namespace keys by the owning class (`MyHandler.class.getName() + ".marker"`) so two customizations on the same context cannot collide. Reference use: `UserRoleAssignmentHandler` / `UserEmailCorrection` marks an allowed email correction in `rejectEmailChange` and re-invites in `reinviteAfterEmailChange` only when the marker is present (see the "`UserRoleAssignmentHandler`'s admin-created-user invitation" example below, bullet "Email correction window").
+
+  ```java
+  private static final String ATTR_EMAIL_CHANGE =
+      UserRoleAssignmentHandler.class.getName() + ".emailChange";
+
+  // handle(): the change is allowed, remember it for the post-hook
+  context.setAttribute(ATTR_EMAIL_CHANGE, new EmailChange(currentEmail));
+
+  // afterHandle(): act only if this same request marked it
+  Object marker = context.getAttribute(ATTR_EMAIL_CHANGE);
+  if (!(marker instanceof EmailChange)) {
+    return null; // nothing was marked: keep the default result
+  }
+  ```
 
 **Advanced pattern — legacy `ad_actionButton` servlets with no `CallProcess` path:** most custom
 handlers either call `CallProcess` (stored-procedure AD Processes) or run their own HQL query.
@@ -4240,6 +4402,7 @@ class reads each flag, and what breaks if it is wrong); the user-facing behaviou
 | `adTab` | `Tab` | Resolved AD_Tab (null for process specs). |
 | `obContext` | `OBContext` | Authenticated user context. |
 | `previousResult` | `NeoResponse` | Mutable. Can be set by the handler for post-processing patterns. |
+| attributes (`getAttribute`/`setAttribute`) | `Object` per `String` key | Mutable per-request state handed from `handle()` to `afterHandle()` of the same operation (ETP-5194). Keys namespaced by the owning class; `null` removes. See "Handler behavior" above. |
 
 **NeoResponse static builders:**
 
@@ -4332,6 +4495,8 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
 **Real-world example — `InternalConsumptionHeaderHandler` (post/unpost routing for a window with no AD posting button, ETP-5445):** `schemaforge/handlers/InternalConsumptionHeaderHandler.java` (`@Named("internal-consumption")`, wired through `JAVA_QUALIFIER = 'internal-consumption'` on the `internalConsumption` `ETGO_SF_ENTITY` record) exists only to delegate `handle()` to `DocumentPostingService#handleAction`, the same shape as the Physical Inventory header handler (ETP-5360). Without it, `POST /sws/neo/internal-consumption/internalConsumption/{id}/action/post` (or `/unpost`) falls through to NEO's generic AD-button-column lookup, finds no posting button on `M_Internal_Consumption`, and answers `Action not found: post`. Every non-posting request returns `null` from `handle()`, so default CRUD is unchanged; `afterHandle()` is a no-op. Two runtime prerequisites the handler cannot provide: the tenant's `c_acctschema_table` row for `AD_Table_ID 800168` must be active (the GOClient reference data ships it `ISACTIVE='Y'` since ETP-5445; existing tenants get it from the `etendo_schema_forge` data-fix R40, gap A4b), and every line transaction must have its cost calculated (the pre-check above). Voiding a posted Internal Consumption is not blocked by core (`M_INTERNAL_CONSUMPTION_POST1` exempts `VO` and never reads `Posted`); it creates a separate, unposted `VO: <name>` reversal document that must be posted on its own. Unposting a never-posted document is not rejected server-side — it returns `200` as a no-op — the SPA only offers Unpost when `posted` is true.
 
 **`DocumentPostingService` failure messages are translated and carry `messageKeys` (ETP-5360 reject cycle):** the `post()` and `unpost()` catch blocks used to return `e.getMessage()` verbatim. Core accounting code raises raw AD_Message tokens there, most visibly `ResetAccounting`'s `new OBException("@PeriodClosedForUnPosting@")` on every unpost in a closed period, so the SPA toast showed the literal `@PeriodClosedForUnPosting@`. Both catches now go through the private `translatedFailure(raw)`, which extracts the keys with `NeoMessageTranslator.extractMessageKeys` BEFORE translating the text with `NeoMessageTranslator.safeParseTranslation` (session language, degrades to the raw text when no OBContext is available). `PostResult` gained a third component, `messageKeys` (never `null`; the two-argument constructor defaults it to an empty list, so existing callers compile unchanged), and the M_Inventory pre-check above sets it to `["NotCalculatedCost"]`. `handleAction` adds a top-level `messageKeys` array (`NeoProcessService.MESSAGE_KEYS`) to the flat `{success, message}` body only when the list is non-empty, the same wire field `NeoProcessService` already sends, which the SPA reads through `extractBackendMessageKeys` and maps by identity in `translateBackendError`.
+
+**`DocumentPostingService` re-localizes the locked-document message and sends its `messageKeys` (ETP-5529):** when `AcctServerData.update` cannot take the `Processing='Y'` lock (another posting process holds the record — or the record is already posted, unprocessed, or left with a stuck `Processing='Y'`), `AcctServer.post` sets `STATUS_DocumentLocked` and `@OtherPostingProcessActive@` ("This record is being posted by another process"). That text came back in English for every NEO user: core's `setMessageResult(conn, vars, status, type)` overload **discards the `VariablesSecureApp` it is handed** and delegates to the session overload, which reads the classic `HttpServletRequest` session (no `#AD_Language` for a NEO request) — so building the vars with the GO locale changes nothing (tried and disproved live; the generic per-status fallback `setMessageResult(conn, vars, getStatus(), "")` goes through the same overload). `errorMessageOf` therefore re-resolves `OtherPostingProcessActive` in the `OBContext` (GO) language — the same per-status pattern as `InvalidAccount` (ETP-5175) — keeping core's text if that lookup returns `null` or blank (see the guard below), and `failureOf` sets `messageKeys = ["OtherPostingProcessActive"]`, which the SPA maps to its own `backendError.recordBeingPosted` copy (`en_US` / `es_ES`). An active AD language with no `AD_MESSAGE_TRL` row for that message (e.g. `es_AR`) still gets the English base text. Any other status that is not re-localized here keeps core's session-language text. All three re-localizations in `errorMessageOf` — `InvalidAccount`, this locked-document one and the Goods Movement `DocumentDisabled` → `NotCalculatedCost` one (ETP-5436) — go through the private helper `localizedMessage(key)`, which calls `OBMessageUtils.messageBD(key)` only when there is an `OBContext` with a language and otherwise returns `null`, read as "keep core's text": `messageBD(String)` dereferences the context language unguarded, so a caller with no language (a background process, not a NEO/MCP request, which always sets one) would otherwise have turned a known posting failure into a `NullPointerException` message with no `messageKeys`. This is the one case the "fail-closed by construction" claim in the ETP-5175 base-sentence fix above did not cover.
 
 **Real-world example — `ChartOfAccountsHandler` GL Item auto-management (ETP-5020):** `schemaforge/handlers/ChartOfAccountsHandler.java` (`@Named("chart-of-accounts")`, wired on the chart-of-accounts spec) keeps Etendo Classic's `C_Glitem` plumbing invisible behind the `C_ElementValue` subaccount UI.
 
@@ -4452,6 +4617,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   - The `handle()` pre-hook no longer reads or validates a `password` field at all — the field, if the frontend still sends one, is simply ignored by this handler (it still reaches `AD_User.Password`, Openbravo's own classic-backend login, unrelated to `etgo_account`). Invite-email is now the only way to activate an admin-created user's account.
   - **Duplicate-email pre-check (ETP-5264).** Before deriving `username` from `email`, `handleCreate`'s `handle()` pre-hook now calls `rejectDuplicateEmail(normalizedEmail, client)`, which queries for another `AD_User` of the SAME client whose `email` already matches (case-insensitive exact match) and, if found, short-circuits with a clear `400` — `"A user with this email address already exists"` — WITHOUT ever writing `username` onto the request body. Previously a duplicate email fell through to username derivation, so both users ended up with colliding derived `username`s and the create failed on the DB's own unique-constraint violation instead — a raw message naming `username`, a field this create form never shows, which read as confusing/misleading to the admin. A `null` client (no `OBContext`) is a no-op, same as before ETP-5264: `handleCreate` still falls through to its best-effort username derivation in that case. On the frontend (`etendo_schema_forge`), this 400 is mapped via `backendErrors.js`'s `backendError.duplicateUserEmail` key to a correctly-worded toast — see that repo's `docs/generated-custom-windows/user.md` step 1a-bis. Covered by `UserRoleAssignmentHandlerTest#handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived`/`#handleAllowsCreateWhenNoDuplicateEmailExistsForClient`.
+  - **Email correction window (ETP-5194).** The logic lives in `UserEmailCorrection` (package-private, next to the handler; split out to keep the handler within its method budget) and the invitation queries in `CompanyInvitationEmailCorrection`. `validateUpdate` used to reject every `email` change after creation. Since ETP-5194 `rejectEmailChange` lets it through while `isEmailEditable` holds: not the owner; the user already has an invitation of its own (`CompanyInvitationEmailCorrection#hasInvitationForUser` — a business-partner contact never has one and must never be invited by any flow, so a blank email also stays locked); and the latest invitation to the current email is `EXPIRED`/`DELIVERY_FAILED` (`CompanyInvitationEmailCorrection#isEmailCorrectableStatus`) — or absent, the recovery state below — with no `ACCEPTED` invitation ever, by this user or to this address (`#hasAcceptedInvitation`). Everything else is a `400` `"Field 'email' can only be changed while the user's invitation has expired or could not be delivered"`. A non-owner with no invitation of its own gets a dedicated `400` instead — `"This user was never invited to Etendo (for example, a business partner contact person): edit its email through spec 'contacts', entity 'contact'"` — because contact persons share the `AD_User` table and are edited, with no lock and no invitation, through `contacts/contact` (`ContactHandler`). The reverse path is guarded too: an Etendo user linked to a business partner is listed among its contact persons, so `ContactHandler` refuses (400 `"This contact is an Etendo user: change its email through spec 'user', entity 'user'"`) an email change on `contacts/contact` when the record is the owner or has an invitation of its own (`UserEmailCorrection#rejectContactPathEmailChangeOnGoUser`, fail-closed); a real contact person's email stays freely editable. `resendInvitation` applies the same contact rule: its lookup is by email, so it now also requires an invitation issued to that very `AD_User` (`NO_INVITATION_TO_RESEND` otherwise). An allowed value must be non-blank (`400` `"Field 'email' is required"`; a JSON `null` counts as blank), well-formed (`400` `"Invalid email format"`, `EmailContractCommandSupport#isValidEmail`) and not another user's address in the client (`400` `"A user with this email address already exists"`, the ETP-5264 guard excluding the user's own row). It is lowercased in the body; a change that only differs in case from the stored value is a no-op (normalized, no re-invite). A real change is marked on the context with `NeoContext#setAttribute` (the pre- and post-hook share the same context instance on REST single, REST batch and MCP — see "Handler behavior" in §5.3). The `PUT`/`PATCH` post-hook (`reinviteAfterEmailChange`) then re-derives `username` **through DAL** — a `username` put in the body would be dropped by `filterWriteRequest`, it is a system field — invites the new address with `createInvitationForNewlyCreatedUser`, and only afterwards — and only when the latest invitation to the new address provably belongs to this user (`latestInvitationBelongsTo`) — revokes the old address's invitations (`revokeSupersededInvitations`). The invite reports most failures as an error result rather than an exception, so without that check a failed re-invite stranded the user; now the old invitations are kept, and a user with invitations of its own but none to its current address stays correctable (never when any invitation of the user, or to the address, was accepted). Only invitations to the **current** address lock it: an open invitation left on an older address (e.g. the email was changed in classic) does not, and a successful correction revokes that dangling link. Every `user` GET row carries the verdict as `emailEditable`, which the SPA's `readOnlyLogicJs` reads; a row on which the owner or invitation-status lookup failed (no `isOwner` or no `invitationStatus` key) gets `false` (fail closed). The update response row of a correction is refreshed the same way — the re-derived `username`, `invitationStatus`, `isOwner` and `emailEditable` — so the form repaints from the save response itself. Correcting an address that already belongs to a Go account removes that account's access to this tenant (environments resolve by email/username value). Known gaps, not fixed by ETP-5194: correcting to an address that no `AD_User` holds but that has another user's open invitation (that user's email was changed in classic) locks the corrected user, because the status is resolved by address and reads the other user's `SENT`; a change that only differs in case is refused with the locked `400` on a user whose email is locked (the equality check runs before normalization), while it is a silent no-op on an editable one. Batch never performs this correction — batch only creates (§4.12.4.1).
   - **Ordering (ETP-4830 human-directed requirement, item #14): "create user → assign personal role → invite."** `afterHandle()`'s `POST` branch FIRST calls `ensurePersonalRoleForNewlyCreatedUser` — which delegates to `UserRoleCompositionService#createFreshPersonalRole(User)`, never the get-or-create `ensurePersonalRole(User)`, so a brand-new user can never end up with someone else's orphaned role (see the org-access/defaults writeup in §8d) — and only THEN calls `CompanyInvitationService#createInvitationForNewlyCreatedUser`, so no other role can ever land on the user before its own personal role exists. The strict ordering is proven by a call-order test, not just "both ran" (`UserRoleAssignmentHandlerTest`'s `afterHandleAssignsPersonalRoleBeforeInvitationOnCreate`). Template-role composition on top of that empty personal role happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save — which is why the invitation intentionally skips the "invited user already has an active role" check below (an empty personal role with no templates composed onto it is not a meaningful "active role" from that check's perspective).
   - `afterHandle()`'s `POST` branch then calls `CompanyInvitationService#createInvitationForNewlyCreatedUser(obContext, email, appBaseUrl, language)` — the same invitation/token/`company-invitation`-contract/dedup/throttle machinery ETP-4894 built for a company administrator inviting an *existing* user (§ `docs/transactional-email-contracts.md`). It resolves the inviter from `context.getObContext()` (captured by the dispatcher before this method's own `OBContext.setAdminMode(true)`, so it still reflects the real acting admin's client/org/user) rather than from an authenticated `etgo_account` bearer token, since this runs from a NeoHandler post-hook, not from the public `/sws/go/invitations` endpoint. It deliberately skips the "invited user already has an active role in the invitation organization" check `createInvitation` otherwise enforces — a freshly `POST`-created `AD_User` has zero roles yet by construction beyond the empty personal role just created above (role composition happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save/`PUT`), so that check would always 400 here and adds no real safety. `CompanyInvitationService` grew a `requireExistingRole` private overload for this rather than a bespoke duplicate of `createInvitationForInviter`, so the new call site still gets dedup-of-an-open-invitation and throttling for free.
   - There is no eager `etgo_account` row on this path any more: the invitation's `register-and-accept` flow is now the *sole* place an `etgo_account` gets created for an admin-created user, lazily, once the invitee actually accepts. Accepting that invitation does not require the invited `AD_User` to already hold a role — an earlier revision's `hasActiveRoleForOrganization` accept-time check was dropped from both `acceptExistingAccountInAdminMode` and `registerAndAcceptInAdminMode` for exactly this reason (a freshly-created user has none yet by construction); see `docs/transactional-email-contracts.md` for the full accept-time contract this handler's invitation flows into.
@@ -7666,3 +7832,287 @@ named exactly "Entregas IVA 21%" belongs to another client and is not visible to
 record as context — on `etendo_batch` including `parentRef` ops, whose parent id is taken from the
 op's resolved `parentId()` rather than the body. The same input now answers `ambiguous_fk` with its candidates (substring match),
 and an unambiguous name resolves.
+
+#### 4.12.23 What the MCP server logs, and at which level (ETP-5639)
+
+Production logs are read in Datadog, so each MCP line below is one line, carries what is needed to
+act on it, and never carries agent-written free text or a request body.
+
+**Unknown JSON-RPC method → one `WARN`, no stack trace.** A client asking for a method the server
+does not offer — mostly MCP 2026-07-28 clients probing with `server/discover` before falling back to
+`initialize`, plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
+longer logged as `ERROR Error processing MCP message` with a full stack trace (~570 a week before
+this change). `McpServlet` has a dedicated `catch (McpMethodNotFoundException)`:
+
+```
+WARN McpServlet - MCP client called unsupported method 'server/discover' (client=claude-code)
+```
+
+The client name comes from the telemetry session when the client ran `initialize`, otherwise from
+`params._meta["io.modelcontextprotocol/clientInfo"].name` (which 2026-07-28 probes carry), otherwise
+`unknown` (`McpServlet.clientNameFor`). No telemetry row: only `tools/call` produces one. Every other
+failure keeps the `ERROR` with its stack trace.
+
+**A routing refusal is logged under its own code.** Every `McpRoutingException` the router catches
+leaves one `WARN` built from the refusal's error code (`McpRoutingException.logLine`):
+
+```
+WARN McpToolRouter - MCP tool 'etendo_update' rejected (read_only_field): Field 'x' is read-only on entity 'y' and cannot be written
+```
+
+It used to read `addressed something that does not exist` whatever the code, which mislabelled
+read-only fields, disabled methods, a missing `view` and a missing `parentId`. The agent-facing
+envelope is unchanged. The `parent_required` detail no longer reads "the id of the parent its parent
+record" when the parent entity cannot be named: it says "the id of its parent record".
+
+**The MCP tool-call telemetry line names its tenant.** `LogNeoTelemetrySink` prints
+`event=backend_mcp_tool_call_completed clientId=<AD_Client_ID> properties={...}` for MCP tool calls,
+so a failure seen in Datadog (`VECTOR_COLLECTION_NOT_FOUND`, `accounting_schema_unresolved`) can be
+traced to its tenant without a DB lookup. The id (never a name) rides on `NeoTelemetryEvent.getClientId()`,
+**not** in the properties: properties are what every sink receives, Mixpanel included, and the
+tenant id stays in our own log. Events emitted without a tenant keep the previous line unchanged.
+
+**An accepted `etendo_feedback` report leaves one `INFO` line pointing at its row.** The report stays
+in `ETGO_MCP_USAGE.Payload` (the source of truth); Datadog gets:
+
+```
+INFO McpFeedbackTool - MCP feedback received: usageId=<ETGO_MCP_USAGE_ID> session=<sessionKey> clientId=<AD_Client_ID> client=claude-code frictions=2 failures=1 wasted=0 suggestions=1 tools=[etendo_create]
+```
+
+Counts per section and the tool names named in `failures`/`wastedCalls` only — the report fields
+are agent-written free text that can carry tenant data, so none of it is logged, and a `tool` entry
+that does not look like a tool name is left out. To read the report, fetch the row by `usageId`.
+The id is minted when the row is built (`McpUsageRow.Builder`), not inside the asynchronous insert,
+so the line can name it; if the writer later drops the row (queue full, insert failed) the id points
+at nothing and the drop logs its own `WARN`. A rejected or rate-limited report logs no such line. The
+former `etendo_feedback accepted for session …` line is now `DEBUG`.
+
+**MCP WARN/ERROR lines on the request path carry `session=<Mcp-Session-Id>`** (`none` when the
+client sent no session header), so filtering Datadog by `session=<key>` puts a session's failures
+next to its feedback line. Covered: `McpServlet` (unsupported method, `Error processing MCP
+message`), `McpToolRouter` (routing refusal, role refusals, `Error routing MCP tool`, docs fetch
+failure, `etendo_batch` access denied / failure) and `McpWriteRequestSupport` (`Removed FK sentinel`).
+Not covered: authentication failures (logged before the session key is bound) and lines that are
+not per-request (configuration parsing, cached parent scopes, the telemetry writer thread). The
+production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key is in the message.
+
+#### 4.12.24 Protocol revision: 2025-11-25, negotiated (ETP-5639)
+
+The server speaks the four `initialize`-based revisions **`2024-11-05`, `2025-03-26`,
+`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. The stateless `2026-07-28`
+revision is not served (its `server/discover` probe answers `-32601`, which makes a dual-era client
+fall back to `initialize`; see §4.12.23).
+
+| Request | Behaviour |
+|---|---|
+| `initialize` with a supported `protocolVersion` | answered with that version; remembered for the session (`McpUsageTelemetry.ClientInfo.getProtocolVersion()`) |
+| `initialize` with an unknown or missing `protocolVersion` | answered with the latest, `2025-11-25` (lifecycle rule) |
+| any later POST without `MCP-Protocol-Version` | served, taken as `2025-03-26` (spec fallback) |
+| any later POST with a supported header | served as sent |
+| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose; it turns strict when the 2026-07-28 era is added, where era detection depends on the header |
+| notification (no `id`) | `202 Accepted` (was `204 No Content`) |
+| `GET /sws/mcp` | **`405 Method Not Allowed`**, `Allow: POST, OPTIONS` — a Streamable HTTP server without an SSE stream MUST. The informational JSON it used to answer is gone |
+| `GET /sws/mcp/.well-known/oauth-protected-resource` | unchanged — RFC 9728 metadata, `200` |
+| CORS preflight | `MCP-Protocol-Version` is in `Access-Control-Allow-Headers`, so a browser client (MCP Inspector) passes the preflight |
+
+The version currently changes nothing in the answers: every 2025 field the server returns is
+additive. It is validated and logged so that a client on an unexpected revision is visible.
+
+**SEP-1303 audit (input validation errors are tool errors).** Every failure inside `tools/call` —
+unknown tool, unknown argument, invalid filter, refused write, DAL validation — is caught by
+`McpToolRouter.route` and returned as a tool result with `isError: true`. Only two shapes still
+answer a JSON-RPC error: `tools/call` with no `params`, and with no `name` (both `-32603`). Those are
+malformed protocol messages, not tool input, so they are outside SEP-1303; mapping them to `-32602`
+(Invalid params) is a possible follow-up, not done here.
+
+#### 4.12.25 Tool annotations (ETP-5639)
+
+`tools/list` gives every tool an `annotations` object with all four hints of MCP 2025-03-26, so
+clients can decide which calls to confirm with the user. All four are explicit on every tool: the
+spec defaults (`readOnlyHint=false`, **`destructiveHint=true`**, `idempotentHint=false`,
+`openWorldHint=true`) would otherwise report `etendo_create` as destructive. `openWorldHint` is `false`
+everywhere — every tool stays inside the ERP.
+
+| Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
+|---|---|---|---|
+| `etendo_list`, `etendo_get`, `etendo_schema`, `etendo_discover`, `etendo_selectors`, `etendo_defaults`, `docs`, `etendo_widget`, `etendo_vector_search`, `etendo_get_image_upload`, every `generate_*` report | true | false | true |
+| `etendo_create`, `etendo_request_image_upload`, `etendo_upload_image`, `etendo_feedback` | false | false | false |
+| `etendo_delete` | false | true | true |
+| `etendo_update`, `etendo_batch`, `etendo_action`, `etendo_generate_amortization_plan`, every process tool (`complete_order` …) | false | true (conservative) | false |
+
+Fixed in code (`McpToolAnnotations`), with **no `MCP_CONFIG` override**: annotations are per tool,
+and the shared `etendo_update` / `etendo_batch` / `etendo_action` serve every entity, so a per-entity setting
+could not reach them. An unclassified tool falls to the conservative last row.
+`McpToolAnnotationsTest` pins the read-only set and requires every fixed tool to be classified
+explicitly — a new fixed tool must be added to one of the sets.
+
+#### 4.12.26 Compact tool results and `etendo_discover({spec})` (ETP-5639, IMP-53)
+
+**Every MCP tool result is compact JSON.** The JSON a tool returns in `content[].text` used to be
+rendered with a two-space indent. Measured on 2026-10-06, `etendo_discover()` came to 76 541 bytes
+and 2 868 lines, and the same JSON without indentation is 45 051 bytes, so 41 % of the response was
+whitespace. Agent harnesses refused to show that result inline: one agent had to grep the file it
+was saved to, and another skipped discover, guessed an entity name, and got a 404. Results are now
+rendered with `JSONObject.toString()` at each place JSON becomes MCP text:
+`McpResponseSanitizer.render` (the JSON overloads of `wrapAsTextContent` / `wrapAsErrorContent`),
+the routing and unexpected-failure envelopes in `McpToolResponses`, the `etendo_feedback` refusals
+(which now go through the sanitising JSON overload too), and `resources/read` in `McpServlet`.
+**Only whitespace changes.** The keys, the values and the NEO REST output (`/sws/neo/*`) stay the
+same. A newline inside a string value still comes through as `\n`. Bodies that are text already
+(the `docs` passthrough, or a `NeoResponse` body a handler returns as a string) are passed on as
+they are. Because of this, the `resp_bytes` usage metric (`McpCallObservation` → `McpUsageLogger`) is
+about 40 % lower for JSON tools from ETP-5639 on, so values from before and after this change cannot
+be compared. The drop is whitespace, not a change in behaviour.
+
+**`_indentResponse` asks for the old, readable form, one call at a time.** Every published tool
+(`etendo_*`, `generate_*`, process tools, `docs`, `etendo_feedback` and the image tools) declares an
+optional boolean `_indentResponse`. When it is `true`, that call's JSON comes back indented by two
+spaces, as before ETP-5639, and so does its error body. When it is missing or `false`, the output is
+compact. It only changes how the JSON is rendered and is never a business argument:
+
+- `McpToolRouter.route` removes it from the arguments (`McpIndentResponse.take`) before anything
+  else reads them. The unknown-argument guard (IMP-40), the handlers, NEO (`fields`, `filters`,
+  process and report `parameters`) and the usage telemetry (`target_entity`, `fields_touched`)
+  never see it. It is also not in the `available` list of an `unknown_argument` refusal.
+- The mode lasts for the call only. `McpResponseSanitizer` holds it in a thread-local that `route`
+  sets and restores, and `McpResponseSanitizer.serialize` is the single place where it is applied.
+- Bodies that are already text (the `docs` passthrough, prose errors) are not affected.
+- A scope refusal (`McpAuthorizationService.authorizeToolCall`) does not produce a tool result. It
+  propagates out of `route` and `McpServlet` answers it as a JSON-RPC error, which is always compact
+  and ignores `_indentResponse`. The thread-local is reset in `route`'s `finally`, so the mode does
+  not carry over to the next request on that thread.
+- `McpIndentResponse.declare` adds the argument to every tool in `generateTools`, with one
+  shared description (`McpConstants.DESC_INDENT_RESPONSE`), so a new tool cannot miss it.
+
+**Catalog cost.** Each tool definition grows by 138 bytes in compact JSON. On the 28-tool catalog
+that `etendo-mcp-local` publishes for a full-scope role, `tools/list` grows by about 3.9 KB.
+Process tools add 138 bytes each.
+
+**`etendo_discover` takes an optional `spec`.** With it, the answer has the same envelope (`specs`,
+`count`, `guidance`, `app`) but holds only the named spec, so an agent that already knows which
+spec it needs gets only that spec's entities, `primaryEntity`, parent links and actions. The server
+also accepts a JSON array of names, although the input schema only declares a string. A missing or
+blank `spec` returns the whole catalog, as before.
+
+```json
+etendo_discover({"spec": "sales-order"})
+→ {"specs":[{"name":"sales-order",...}],"count":1,"guidance":{...}}
+```
+
+The server checks access against the whole catalog either way. A name the role cannot reach is
+refused in the same way as a name that does not exist (unknown, inactive, `SHOWINMCP = N`, or no
+window access), so a narrowed call reveals nothing the full catalog would not. An array is refused
+as a whole, and `detail` names every unknown entry in the order given, so one retry can fix them all:
+
+```json
+{"status":422,"error":"validation_error","detail":"Unknown spec 'sales-ordr' for etendo_discover",
+ "field":"spec","available":["purchase-order","sales-order",...],
+ "hint":"Retry with one of the names in 'available'. Omit 'spec' to get the whole catalog.",
+ "seeAlso":"docs(topic:\"reading records\")","tool":"etendo_discover",...}
+```
+
+This refusal includes `available`, which the `spec_not_found` refusal of the other tools leaves out on purpose. The agent
+called the catalog tool to learn the names, and the list of names is a small fraction of the full
+catalog. `etendo_discover` skips the single-spec gate that other tools use
+(`ToolRegistry.resolveSpecName` returns `null` for it), because that gate would answer 404 without
+the names and cannot read an array. Because `etendo_discover` now declares its arguments, the
+unknown-argument guard (IMP-40) covers it too: `etendo_discover({entity:"header"})` is refused
+with `unknown_argument` instead of being ignored. The tool annotations (§4.12.25) do not change:
+the tool is still read-only and idempotent.
+
+#### 4.12.27 Named filters can be found from the catalog and from the response (ETP-5639, IMP-50)
+
+A **named filter** is a business state that a human writes per entity in
+`ETGO_SF_ENTITY.NAMED_FILTERS`, as a JSON array of `{name, where, label?, description?}`. An agent
+uses one with `etendo_list(filters:{status:"<name>"})`, and `McpQuerySupport` adds the entry's HQL
+`where` to the query. The `where` is never shown to the agent.
+
+**Why this changed.** After `outstanding` was added to sales-invoice and purchase-invoice, three
+blind agents out of three still called `status:"pending"` first and missed the partially paid
+invoices. The `etendo_list` description only gave three example names. The real list was only in
+`etendo_schema view:"full"` (about 40 KB), which no agent called. Both fixes below are built from
+the data: shared code contains no spec, entity or filter name.
+
+**1. The catalog lists them.** The description of the `filters` argument of `etendo_list` ends with
+the filters configured on the entities of the specs that this role reaches. These are the same
+specs as in the tool's `spec` enum. Each entity gets one line, and each description is cut to its
+first sentence:
+
+```
+Configured named filters (spec/entity: name (meaning)):
+sales-invoice/header: completed (Fully paid invoices (payment complete).), pending (…), partial (…), outstanding (Every invoice that still owes a balance: unpaid plus partially paid.)
+```
+
+- `McpNamedFilterCatalog.summary` builds this text with one query on every `tools/list`. Nothing
+  caches it, so a `NAMED_FILTERS` change appears on the next catalog request and there is nothing
+  to invalidate. (`McpConfigCache` holds parsed `MCP_CONFIG` and tab hierarchy, not the catalog.)
+  MCP clients that keep their own copy of `tools/list` still need to fetch it again.
+- The summary stops at `McpNamedFilters.CATALOG_CAP` (1 500 characters). Past that limit it ends
+  with `… N more: call etendo_schema view:"full"`.
+- An entity with no named filters gets no line. A failed query only removes the summary; the rest
+  of the catalog is still returned.
+- The three hard-coded example names were removed from the fixed text.
+- **Cost, measured on the local configuration (2026-10-06):** two entities have filters
+  (`sales-invoice/header`, `purchase-invoice/header`, four filters each). The summary is 658
+  characters, and the `etendo_list` definition in `tools/list` grows by **597 bytes**: 820 bytes
+  for the new `filters` tail minus 223 bytes for the old example text.
+
+**2. The response names them when one is applied.** When `filters.status` names a configured
+filter, the `etendo_list` body gets a `namedFilters` block. The block lists the entity's other
+filters, so the agent can see whether a different one was the better choice:
+
+```json
+"namedFilters": {"applied":"pending","description":"Unpaid invoices with nothing collected yet (outstanding equals the total).",
+  "available":[{"name":"completed","description":"…"},{"name":"partial","description":"…"},{"name":"outstanding","description":"…"}]}
+```
+
+- The block is missing when no named filter was applied. That includes the case where `status` is
+  read as a plain column, on an entity without named filters.
+- It is added after `fields` projection and after flattening (`McpNamedFilters.attachApplied`). It
+  is not a row column, so `fields` does not remove it. `_indentResponse` controls how it is
+  rendered, like the rest of the body.
+- A read served by a read provider (`McpHookExecutor.runReadProvider`) returns before this point
+  and does not include the block.
+
+**The unknown-status 422 (IMP-3/IMP-17)** keeps its contract: `available` is still the list of bare
+names. It now also includes `namedFilters`, which holds the same names with their first-sentence
+descriptions, in the same shape as `available` in the response block.
+
+#### 4.12.28 MCP refuses a commercially blocked environment (ETP-5642)
+
+**The defect.** Once a demo trial expires (or a subscription's payment grace elapses),
+`TenantEnvironmentLifecycleService.evaluateAccess` answers `DEMO_TRIAL_EXPIRED` /
+`SUBSCRIPTION_REQUIRED`, and every environment surface built on `EnvironmentRequestAuthenticator`
+(NEO, Copilot, report selectors) plus the account endpoints acting on the session's tenant answer
+**402**. `McpServlet` resolves its identity on its own — cookie session, OAuth2, legacy JWT — and
+never asked: measured on 2026-10-06, an MCP client kept running `etendo_list` **and
+`etendo_update`** on an expired demo, through every scheme, for the owner and an invited user
+alike, while NEO answered 402 to the same token.
+
+**The rule now.** `McpServlet.doPost` evaluates the commercial decision once, right after
+`authenticate()` and before any JSON-RPC dispatch:
+
+| decision | answer |
+|---|---|
+| `ALLOWED` | served as before |
+| `null` — a tenant without lifecycle metadata | served: the controlled legacy transition, same as `EnvironmentRequestAuthenticator.bind()` |
+| `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` | HTTP **402** `{"error":"Environment access is not available: <DECISION>"}` |
+
+- **Every method is refused, `initialize` and `tools/list` included.** A tool catalog for an
+  environment that cannot be used is of no use to a client.
+- **A transport error, not an in-band tool error.** A tool result with `isError` reads as a
+  per-call failure an agent retries; a 402 ends the exchange. The wording is NEO's
+  (`EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX`), so the SPA recognizes the same decision.
+- **The decision is evaluated on the effective client.** A credential carrying the System wildcard
+  (`"0"`, e.g. an OAuth2 token) runs under its role's client; the check resolves it with the same
+  `McpSessionManager.resolveEffectiveClientId` the context setup uses, so it sees exactly the
+  tenant the call would touch. Evaluating `"0"` itself would read no lifecycle metadata, answer
+  `null` and let everything through.
+- The OAuth discovery hint is unaffected: `WWW-Authenticate` travels only on the 401 for a request
+  without credentials, and this check runs after the identity is resolved.
+
+**Still divergent from `EnvironmentRequestAuthenticator`** (declared, separate follow-up): the
+legacy JWT fallback in `McpServlet.authenticate` does not honour the `GoLegacyBearer` kill switch,
+and the cookie path does not run `GoSessionRoleReconciler` (ETP-5395). Moving `McpServlet` onto the
+shared authenticator would close both; it needs an `identify()` variant that keeps the commercial
+check, because MCP builds its own per-call `OBContext`.

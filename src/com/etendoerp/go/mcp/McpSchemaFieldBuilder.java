@@ -667,7 +667,7 @@ final class McpSchemaFieldBuilder {
     if (McpConstants.TYPE_IMAGE.equals(type)) {
       McpImageFieldSupport.decorateImageField(fieldObj);
     }
-    addDefaultExpression(fieldObj, col);
+    addDefaultExpression(fieldObj, col, dalEntity);
     addVisibility(fieldObj, visibility, !isButton && col.isMandatory());
     boolean isBusinessCritical = Boolean.TRUE.equals(
         businessCriticalByColumnId.get((String) col.getId()));
@@ -845,14 +845,16 @@ final class McpSchemaFieldBuilder {
         || Boolean.TRUE.equals(col.isUseAutomaticSequence());
   }
 
-  private static void addDefaultExpression(JSONObject fieldObj, Column col) throws JSONException {
+  private static void addDefaultExpression(JSONObject fieldObj, Column col, Entity dalEntity)
+      throws JSONException {
     String defaultExpr = col.getDefaultValue();
     if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
       return;
     }
     defaultExpr = defaultExpr.trim();
     boolean isLegacyZeroFkSentinel = "0".equals(defaultExpr)
-        && col.getDBColumnName().toUpperCase().endsWith("_ID");
+        && col.getDBColumnName().toUpperCase().endsWith("_ID")
+        && !isZeroARealRecord(dalEntity, col.getDBColumnName());
     if (isLegacyZeroFkSentinel) {
       // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
       // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
@@ -863,6 +865,35 @@ final class McpSchemaFieldBuilder {
       return;
     }
     fieldObj.put(KEY_DEFAULT_EXPRESSION, defaultExpr);
+  }
+
+  /**
+   * Whether a "0" default on this FK column names a real record rather than the "resolve later"
+   * placeholder — the same rule {@link McpWriteRequestSupport#resolveFkSentinels} applies on write.
+   * A sibling FK to the same target makes it the placeholder (document type ← target document
+   * type), even though that target holds a "0" record; otherwise it is real when the target holds
+   * a record with id "0" (the {@code *} organization).
+   */
+  private static boolean isZeroARealRecord(Entity dalEntity, String dbColName) {
+    if (dalEntity == null) {
+      return false;
+    }
+    Property prop;
+    try {
+      prop = dalEntity.getPropertyByColumnName(dbColName);
+    } catch (Exception ignored) {
+      return false;
+    }
+    Entity target = prop == null ? null : prop.getTargetEntity();
+    if (target == null) {
+      return false;
+    }
+    for (Property other : dalEntity.getProperties()) {
+      if (other != prop && !other.isPrimitive() && target.equals(other.getTargetEntity())) {
+        return false;
+      }
+    }
+    return McpWriteRequestSupport.isExistingZeroRecord(target.getName());
   }
 
   /**

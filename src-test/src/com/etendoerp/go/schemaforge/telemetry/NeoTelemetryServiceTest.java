@@ -31,14 +31,54 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 
+import org.apache.logging.log4j.Level;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.usageevents.LogCapture;
 
+/**
+ * @covers com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService
+ * @covers com.etendoerp.go.schemaforge.telemetry.LogNeoTelemetrySink
+ */
 class NeoTelemetryServiceTest {
+
+  /**
+   * ETP-5639: a failed MCP call seen in Datadog must name its tenant, but the tenant id is not a
+   * property — properties reach Mixpanel. It rides on the event and only the log sink prints it.
+   */
+  @Test
+  void emitCarriesTheClientIdOutsideTheProperties() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED,
+        mapOf("status", "error", "tool", "generate_balance_sheet"), "4028E6C72959682B01295A070852010D");
+
+    assertEquals("4028E6C72959682B01295A070852010D", sink.last().getClientId());
+    assertFalse(sink.last().getProperties().containsKey("clientId"),
+        "the tenant id must not travel as a property to the other sinks");
+  }
+
+  @Test
+  void logSinkPrintsTheClientIdWhenTheEventHasOne() {
+    try (LogCapture logs = LogCapture.of(LogNeoTelemetrySink.class)) {
+      NeoTelemetryService service = new NeoTelemetryService(new LogNeoTelemetrySink(), () -> 0L);
+      service.emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED,
+          mapOf("status", "error", "tool", "etendo_vector_search"), "CLIENT-A");
+      service.emit(NeoTelemetryEvents.BACKEND_MCP_TOOL_CALL_COMPLETED,
+          mapOf("status", "ok", "tool", "etendo_list"));
+
+      List<String> lines = new ArrayList<>(logs.messages(Level.INFO));
+      lines.addAll(logs.messages(Level.WARN));
+      assertTrue(lines.stream().anyMatch(l -> l.contains("clientId=CLIENT-A")), lines.toString());
+      assertTrue(lines.stream().anyMatch(l -> l.contains("etendo_list") && !l.contains("clientId=")),
+          "an event without a tenant keeps the old line: " + lines);
+    }
+  }
 
   @Test
   void emitKeepsOnlyBackendEvents() {

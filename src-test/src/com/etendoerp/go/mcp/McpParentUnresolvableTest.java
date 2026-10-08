@@ -177,7 +177,8 @@ class McpParentUnresolvableTest {
   }
 
   @ParameterizedTest
-  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE", "UNPARENTED" })
+  @EnumSource(value = McpParentScope.Kind.class,
+      names = { "UNRESOLVABLE", "UNPARENTED", "TAB_WHERE" })
   @DisplayName("every scope with no parent field to write the id into is refused")
   void everyUnmappableKindIsRefused(McpParentScope.Kind kind) throws Exception {
     withScope(scope(kind, null, kind == McpParentScope.Kind.UNRESOLVABLE ? PROBLEM : null));
@@ -191,11 +192,16 @@ class McpParentUnresolvableTest {
    * WARN-1 of the review: the corruption does not need a parentId. Without one the create reaches
    * the mandatory-defaults pass all the same, which fills the unmappable link on its own. An
    * unresolvable scope therefore refuses every create, whatever the caller sent.
+   *
+   * <p>ETP-5639: a {@code TAB_WHERE} child is refused the same way. Its parent is reached only
+   * through the tab's where clause, so there is no field to write it into, and the defaults pass
+   * would pick the intermediate link on its own.</p>
    */
-  @Test
-  @DisplayName("an unresolvable scope refuses the create even when no parentId is sent")
-  void unresolvableIsRefusedWithoutParentId() throws Exception {
-    withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, PROBLEM));
+  @ParameterizedTest
+  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE", "TAB_WHERE" })
+  @DisplayName("a scope with no writable parent link refuses the create without parentId too")
+  void unresolvableIsRefusedWithoutParentId(McpParentScope.Kind kind) throws Exception {
+    withScope(scope(kind, null, PROBLEM));
 
     for (String absent : new String[] { null, "", "  " }) {
       McpRoutingException refusal = assertThrows(McpRoutingException.class,
@@ -208,7 +214,7 @@ class McpParentUnresolvableTest {
   }
 
   @ParameterizedTest
-  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE" }, mode =
+  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE", "TAB_WHERE" }, mode =
       EnumSource.Mode.EXCLUDE)
   @DisplayName("without parentId, every other scope kind is left alone")
   void blankParentIdIsOnlyJudgedForUnresolvable(McpParentScope.Kind kind) throws Exception {

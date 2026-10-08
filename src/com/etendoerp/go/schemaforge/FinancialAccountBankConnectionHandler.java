@@ -136,6 +136,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_NATURE = "nature";
   private static final String KEY_WARNING = "warning";
   private static final String KEY_PROVIDER_NAME = "providerName";
+  private static final String KEY_LAST_SYNC_DATE = "lastSyncDate";
   private static final String KEY_IMPORT_FROM_DATE = "importFromDate";
   private static final String KEY_IMPORT_TO_DATE = "importToDate";
   private static final String KEY_STATEMENT_GROUPING = "statementGrouping";
@@ -272,6 +273,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     data.put(KEY_IMPORT_TO_DATE,
         FinancialAccountBankConnectionSupport.formatDate(finAcc.getPSD2ImportToDate()));
     data.put(KEY_STATEMENT_GROUPING, finAcc.getPSD2StatementFrequency());
+    data.put(KEY_LAST_SYNC_DATE, lastSyncJson(finAcc));
     if (connection != null) {
       Date expiresAt = connection.getConsentExpiresAt();
       data.put(ACTION_STATUS, connection.getConnectionStatus());
@@ -817,7 +819,18 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put(ACTION_STATUS, status);
     data.put("message", messages.toString().trim());
+    // The PSD2 module stamps the account on the managed instance we already hold, so this reads
+    // the fresh value without another query (ETP-5582).
+    data.put(KEY_LAST_SYNC_DATE, lastSyncJson(finAcc));
     return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /** ISO instant of the account's last successful sync, or JSON null when it never synced. */
+  private static Object lastSyncJson(FIN_FinancialAccount finAcc) {
+    Date lastSync = finAcc.getPSD2LastSyncDate();
+    return lastSync != null
+        ? FinancialAccountBankConnectionSupport.formatInstant(lastSync)
+        : JSONObject.NULL;
   }
 
   // ---------------------------------------------------------------------------
