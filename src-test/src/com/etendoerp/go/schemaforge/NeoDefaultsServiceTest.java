@@ -3832,6 +3832,85 @@ public class NeoDefaultsServiceTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — a business partner created without IsProspect gets
+  // N, as in classic, never the DB-level DEFAULT 'Y'
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsBusinessPartnerWithoutIsProspectGetsFalse() {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // C_BPartner.IsProspect: mandatory YesNo, no AD default, DB DEFAULT 'Y'.
+    Column isProspect = metadataColumn("IsProspect", "C_BPartner", "20", true);
+    when(isProspect.isActive()).thenReturn(true);
+    when(isProspect.isKeyColumn()).thenReturn(false);
+    Table table = isProspect.getTable();
+    when(table.getId()).thenReturn("291");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(isProspect));
+    when(adTab.getTable()).thenReturn(table);
+
+    Property prospectProp = mock(Property.class);
+    when(prospectProp.getName()).thenReturn("potentialCustomer");
+    when(prospectProp.isAuditInfo()).thenReturn(false);
+    when(dalEntity.getPropertyByColumnName("IsProspect")).thenReturn(prospectProp);
+    when(dalEntity.getPropertyByColumnName("IsProspect", false)).thenReturn(prospectProp);
+    when(vars.getSessionValue(anyString())).thenReturn("");
+
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-bp");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(
+             NeoDefaultsCascadeHelper.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("291")).thenReturn(dalEntity);
+      when(mp.getEntityByTableName("C_BPartner")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      // If the DB DEFAULT were consulted, this 'Y' would end up in the body.
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("Y");
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(isProspect)).thenReturn("20");
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx, null, false);
+
+      assertEquals("IsProspect omitted from the body must be created N, as in classic",
+          Boolean.FALSE, body.opt("potentialCustomer"));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // injectMandatoryDefaults — ETP-4274: a user-supplied value always wins
   // (body.has(propName) early-return), even for a non-mandatory column
   // ═══════════════════════════════════════════════════════════════════════════
