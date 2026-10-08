@@ -281,7 +281,11 @@ strict order:
      entity's `setDefaultValue` (a boolean with no AD default is generated as `false`) — **not**
      the DB default: `C_BPartner.IsProspect` (DB `DEFAULT 'Y'`, no AD default) is created `N`,
      as in classic. Visible effect: `/defaults` no longer returns those DB-level values to
-     pre-fill the form; the stored row is unchanged for optional columns.
+     pre-fill the form; the stored row is unchanged for optional columns. When one entity's form
+     still needs such a value on `/defaults`, its own customization supplies it from the
+     `DEFAULTS` surface — never the shared service: `BusinessPartnerHandler`
+     (`@NeoExtension(spec = "contacts", entity = "businessPartner")`) fills `creditLimit = 0`
+     when no earlier step resolved it (ETP-5676).
 3. **Run the callout cascade** (`NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate`),
    passing the *step-1 snapshot* as `protectedFields` — never a snapshot taken after step 2.
 

@@ -2073,6 +2073,102 @@ class BusinessPartnerHandlerTest {
     assertEquals("Juan García", body.getString("name"));
   }
 
+  // ── afterHandle() — ETP-5676: creditLimit default on /defaults ───────────────
+
+  private void stubDefaultsResponse(JSONObject body) {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(body));
+  }
+
+  /**
+   * The mandatory SO_CreditLimit is left to the create path's safe-type fill, so /defaults used to
+   * hand the form an empty field; this entity's own customization now supplies 0.
+   */
+  @Test
+  void testDefaultsFillsCreditLimitWithZeroWhenAbsent() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("customer", true);
+    stubDefaultsResponse(new JSONObject().put("defaults", defaults));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject out = result.getBody().getJSONObject("defaults");
+    assertEquals(0, out.getInt("creditLimit"));
+    assertTrue(out.getBoolean("customer"), "other defaults must be left untouched");
+  }
+
+  @Test
+  void testDefaultsFillsCreditLimitWhenBlankOrNull() throws Exception {
+    for (Object empty : new Object[] {"", "  ", JSONObject.NULL}) {
+      JSONObject defaults = new JSONObject();
+      defaults.put("creditLimit", empty);
+      stubDefaultsResponse(new JSONObject().put("defaults", defaults));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result, "empty value: " + empty);
+      assertEquals(0, result.getBody().getJSONObject("defaults").getInt("creditLimit"));
+    }
+  }
+
+  /** A value a preference or a callout already resolved must not be overwritten. */
+  @Test
+  void testDefaultsKeepsAnExistingCreditLimit() throws Exception {
+    JSONObject defaults = new JSONObject();
+    defaults.put("creditLimit", "2500");
+    stubDefaultsResponse(new JSONObject().put("defaults", defaults));
+
+    assertNull(handler.afterHandle(ctx));
+    assertEquals("2500", defaults.getString("creditLimit"));
+  }
+
+  @Test
+  void testDefaultsCreatesTheDefaultsObjectWhenTheResponseHasNone() throws Exception {
+    stubDefaultsResponse(new JSONObject());
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    assertNotNull(result);
+    assertEquals(0, result.getBody().getJSONObject("defaults").getInt("creditLimit"));
+  }
+
+  @Test
+  void testDefaultsWithoutAPreviousResultLeavesTheResponseAlone() {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getPreviousResult()).thenReturn(null);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /** Create and every other CRUD read take the unchanged branch: no creditLimit is injected. */
+  @Test
+  void testNonDefaultsEndpointsNeverReceiveTheCreditLimitDefault() throws Exception {
+    JSONObject body = new JSONObject().put("defaults", new JSONObject());
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(body));
+
+    handler.afterHandle(ctx);
+
+    assertFalse(body.getJSONObject("defaults").has("creditLimit"));
+  }
+
+  /** The entity binding travels with the class (annotation first), the qualifier stays as fallback. */
+  @Test
+  void testBindsToTheContactsBusinessPartnerEntityByAnnotationAndQualifier() {
+    NeoExtension binding = BusinessPartnerHandler.class.getAnnotation(NeoExtension.class);
+    assertNotNull(binding);
+    assertEquals("contacts", binding.spec());
+    assertEquals("businessPartner", binding.entity());
+    assertEquals("businessPartnerHandler",
+        BusinessPartnerHandler.class.getAnnotation(javax.inject.Named.class).value());
+    assertNull(BusinessPartnerHandler.class.getAnnotation(javax.enterprise.context.ApplicationScoped.class),
+        "@Named only: a normal-scoped bean resolves to a proxy that does not carry @Named");
+  }
+
   private void stubEmptySelectorRequest(MockedStatic<RequestContext> reqCtx) {
     RequestContext requestContext = mock(RequestContext.class);
     HttpServletRequest request = mock(HttpServletRequest.class);
