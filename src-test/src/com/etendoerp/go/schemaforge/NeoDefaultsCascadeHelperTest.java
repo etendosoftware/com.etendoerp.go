@@ -2002,6 +2002,15 @@ public class NeoDefaultsCascadeHelperTest {
   }
 
   @Test
+  public void testHasSafeTypeDefaultFalseForNullReference() {
+    Column col = mock(Column.class);
+    when(col.getReference()).thenReturn(null);
+
+    assertFalse("A column without a reference has no safe-type default",
+        NeoDefaultsCascadeHelper.hasSafeTypeDefault(col));
+  }
+
+  @Test
   public void testHasSafeTypeDefaultTrueForYesNoAndNumericReferences() {
     for (String refId : Arrays.asList("20", "11", "12", "22", "29")) {
       assertTrue("Reference " + refId + " has a safe-type default",

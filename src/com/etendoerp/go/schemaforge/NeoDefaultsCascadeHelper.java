@@ -798,6 +798,9 @@ public class NeoDefaultsCascadeHelper {
    */
   static boolean hasSafeTypeDefault(Column col) {
     String refId = referenceId(col);
+    if (refId == null) {
+      return false;
+    }
     return YES_NO_REFERENCE.equals(refId) || NUMERIC_SAFE_TYPE_REFERENCES.contains(refId);
   }
 
@@ -853,6 +856,9 @@ public class NeoDefaultsCascadeHelper {
   static void injectSafeTypeDefault(JSONObject body, String propName, Column col) {
     try {
       String refId = referenceId(col);
+      if (refId == null) {
+        return;
+      }
       if (NUMERIC_SAFE_TYPE_REFERENCES.contains(refId)) {
         body.put(propName, 0);
       } else if (YES_NO_REFERENCE.equals(refId)) {
