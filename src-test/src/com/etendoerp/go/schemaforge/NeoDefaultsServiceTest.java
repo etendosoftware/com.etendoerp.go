@@ -6298,9 +6298,13 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "IsProspect"))
           .thenReturn("potentialCustomer");
-      // The safe-type check decides whether the DB DEFAULT may be read: keep the real answer.
+      // The safe-type check decides whether the DB DEFAULT may be read. IsProspect is a YesNo, so
+      // the answer is true. It is stubbed rather than called for real: with the whole class
+      // mocked, the private referenceId(...) it relies on is mocked too and answers null, which
+      // made the real method say "no safe type" and let the DB DEFAULT through. The real
+      // hasSafeTypeDefault is covered by NeoDefaultsCascadeHelperTest.
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.hasSafeTypeDefault(any()))
-          .thenCallRealMethod();
+          .thenReturn(true);
       stubModelSequenceProperty(modelMock, "C_BPartner", "IsProspect", false);
       sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
           .thenReturn("Y");
