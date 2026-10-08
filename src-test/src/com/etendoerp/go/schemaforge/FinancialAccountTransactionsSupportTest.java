@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -46,8 +48,12 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Pure unit tests for {@link FinancialAccountTransactionsSupport}: Classic-parity label mappings,
- * payment-label assembly, date formatting, day arithmetic, role filters, conversion-rate rule, and
- * request-body parsing helpers. No DB or OBBaseTest — everything is either pure or mocked.
+ * payment-label assembly, date formatting, day arithmetic, role filters, conversion-rate rule,
+ * request-body parsing helpers, and the Movements row's foreign-currency original
+ * ({@code putForeignOriginal}, ETP-5657). No DB or OBBaseTest — everything is either pure or
+ * mocked.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport
  */
 public class FinancialAccountTransactionsSupportTest {
 
@@ -418,5 +424,93 @@ public class FinancialAccountTransactionsSupportTest {
         FinancialAccountTransactionsSupport.class.getDeclaredConstructor();
     ctor.setAccessible(true);
     assertTrue(ctor.newInstance() instanceof FinancialAccountTransactionsSupport);
+  }
+
+  // ── putForeignOriginal (ETP-5657) ────────────────────────────────────────
+
+  /** A Movements row's foreign-currency columns, as TRANSACTIONS_SQL selects them. */
+  private static ResultSet foreignColumns(String foreignIso, String accountIso, String amount,
+      String rate) throws Exception {
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.getString("foreign_currency_iso")).thenReturn(foreignIso);
+    when(rs.getString("account_currency_iso")).thenReturn(accountIso);
+    when(rs.getBigDecimal("foreign_amount"))
+        .thenReturn(amount == null ? null : new BigDecimal(amount));
+    when(rs.getBigDecimal("foreign_convert_rate"))
+        .thenReturn(rate == null ? null : new BigDecimal(rate));
+    return rs;
+  }
+
+  private static void assertNoForeignOriginal(JSONObject row) {
+    assertFalse(row.has("foreignAmount"));
+    assertFalse(row.has("foreignCurrency"));
+    assertFalse(row.has("foreignConversionRate"));
+  }
+
+  @Test
+  public void putForeignOriginalEmitsTheTrioForAForeignPair() throws Exception {
+    JSONObject row = new JSONObject();
+
+    FinancialAccountTransactionsSupport.putForeignOriginal(row,
+        foreignColumns("USD", "EUR", "40.91", "0.67954"));
+
+    assertEquals(0,
+        new BigDecimal("40.91").compareTo(new BigDecimal(row.getString("foreignAmount"))));
+    assertEquals("USD", row.getString("foreignCurrency"));
+    assertEquals(0, new BigDecimal("0.67954")
+        .compareTo(new BigDecimal(row.getString("foreignConversionRate"))));
+  }
+
+  /** Core stores FOREIGN_AMOUNT unsigned for a withdrawal too; the row repeats it verbatim. */
+  @Test
+  public void putForeignOriginalKeepsTheStoredAmountUnsignedForAPayment() throws Exception {
+    JSONObject row = new JSONObject();
+
+    FinancialAccountTransactionsSupport.putForeignOriginal(row,
+        foreignColumns("USD", "EUR", "58.70", "0.681431"));
+
+    assertEquals("58.70", row.getString("foreignAmount"));
+  }
+
+  @Test
+  public void putForeignOriginalWithoutRateOmitsOnlyTheRate() throws Exception {
+    JSONObject row = new JSONObject();
+
+    FinancialAccountTransactionsSupport.putForeignOriginal(row,
+        foreignColumns("USD", "EUR", "40.91", null));
+
+    assertEquals("USD", row.getString("foreignCurrency"));
+    assertTrue(row.has("foreignAmount"));
+    assertFalse(row.has("foreignConversionRate"));
+  }
+
+  @Test
+  public void putForeignOriginalSameCurrencyAddsNothing() throws Exception {
+    JSONObject row = new JSONObject();
+
+    FinancialAccountTransactionsSupport.putForeignOriginal(row,
+        foreignColumns("EUR", "EUR", "27.80", "1"));
+
+    assertNoForeignOriginal(row);
+  }
+
+  @Test
+  public void putForeignOriginalWithoutForeignCurrencyAddsNothing() throws Exception {
+    JSONObject row = new JSONObject();
+
+    FinancialAccountTransactionsSupport.putForeignOriginal(row,
+        foreignColumns(null, "EUR", "27.80", null));
+
+    assertNoForeignOriginal(row);
+  }
+
+  @Test
+  public void putForeignOriginalWithoutStoredAmountAddsNothing() throws Exception {
+    JSONObject row = new JSONObject();
+
+    FinancialAccountTransactionsSupport.putForeignOriginal(row,
+        foreignColumns("USD", "EUR", null, "0.67954"));
+
+    assertNoForeignOriginal(row);
   }
 }

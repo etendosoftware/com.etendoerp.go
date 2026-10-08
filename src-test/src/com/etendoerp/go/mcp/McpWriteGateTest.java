@@ -303,6 +303,35 @@ class McpWriteGateTest {
               + " exists");
     }
 
+    /**
+     * IMP-50: the unknown-status refusal raised on this same filter path keeps {@code available}
+     * as the bare names and adds {@code namedFilters} with what each one means.
+     */
+    @Test
+    @DisplayName("filtering: an unknown named status lists the valid names and their meanings")
+    void unknownNamedStatusCarriesDescriptions() throws Exception {
+      SFEntity sfEntity = specEntity();
+      when(sfEntity.getNamedFilters()).thenReturn(
+          "[{\"name\":\"open\",\"description\":\"Still owes a balance. Any date.\","
+              + "\"where\":\"e.open = true\"},{\"name\":\"closed\",\"where\":\"e.open = false\"}]");
+
+      McpRoutingException thrown = assertThrows(McpRoutingException.class,
+          () -> McpQuerySupport.buildWhereFromFilters(fields("status", "opne"), adTab, sfEntity,
+              null));
+      JSONObject envelope = thrown.toEnvelope();
+
+      assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
+      assertEquals("[\"open\",\"closed\"]",
+          envelope.getJSONArray(McpConstants.KEY_AVAILABLE).toString());
+      org.codehaus.jettison.json.JSONArray described = envelope.getJSONArray("namedFilters");
+      assertEquals(2, described.length());
+      assertEquals("open", described.getJSONObject(0).getString("name"));
+      assertEquals("Still owes a balance.",
+          described.getJSONObject(0).getString("description"));
+      assertFalse(described.getJSONObject(1).has("description"));
+      assertFalse(envelope.toString().contains("e.open"), "the where fragment must not leak");
+    }
+
     private String filterRefusal(String key, SFEntity sfEntity) throws Exception {
       McpRoutingException thrown = assertThrows(McpRoutingException.class,
           () -> McpQuerySupport.buildWhereFromFilters(fields(key, "x"), adTab, sfEntity, null));
