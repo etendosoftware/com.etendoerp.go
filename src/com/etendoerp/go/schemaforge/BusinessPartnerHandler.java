@@ -106,26 +106,15 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * checks the field name and falls through ({@code null}) for every other selector field this
  * entity exposes, so no other column or window is affected.
  *
- * <p>On GET {@code /contacts/businessPartner/defaults} (ETP-5676): {@code afterHandle()} fills
- * {@code creditLimit} with {@code 0} when no earlier step (preference, callout, DB default)
- * resolved it. {@code C_BPartner.SO_CreditLimit} is a mandatory number, which the shared defaults
- * service deliberately leaves to the create path's safe-type fill (so the create persists 0); the
- * form, which reads {@code /defaults} before it posts, would otherwise show the field empty. The
- * rule lives here, with the entity it is about, and never in the shared defaults service.
- *
  * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
- * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity, and by
- * {@code @NeoExtension} for the same pair (the annotation is looked up first).
+ * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
  */
-@NeoExtension(spec = "contacts", entity = "businessPartner")
 @Named("businessPartnerHandler")
 public class BusinessPartnerHandler extends AbstractPersonNameHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
   private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
-  private static final String KEY_DEFAULTS = "defaults";
-  private static final String FIELD_CREDIT_LIMIT = "creditLimit";
   private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
   /** {@code C_BPartner.Value} is {@code VARCHAR(40)}. */
   private static final int SEARCH_KEY_MAX_LENGTH = 40;
@@ -674,39 +663,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   }
 
   /**
-   * Supplies {@code creditLimit = 0} on the {@code /defaults} response when nothing resolved it
-   * (ETP-5676). A value an earlier step already put there — a preference, a callout — is never
-   * replaced; "empty" means absent, JSON null or a blank string.
-   *
-   * @return the response carrying the default, or {@code null} to leave the response untouched
-   */
-  NeoResponse fillCreditLimitDefault(NeoContext ctx) {
-    NeoResponse previous = ctx.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
-    }
-    try {
-      JSONObject body = previous.getBody();
-      JSONObject defaults = body.optJSONObject(KEY_DEFAULTS);
-      if (defaults == null) {
-        defaults = new JSONObject();
-        body.put(KEY_DEFAULTS, defaults);
-      }
-      Object current = defaults.opt(FIELD_CREDIT_LIMIT);
-      boolean empty = current == null || JSONObject.NULL.equals(current)
-          || (current instanceof String && StringUtils.isBlank((String) current));
-      if (!empty) {
-        return null;
-      }
-      defaults.put(FIELD_CREDIT_LIMIT, 0);
-      return NeoResponse.ok(body);
-    } catch (Exception e) {
-      log.warn("BusinessPartnerHandler: could not fill the creditLimit default", e);
-      return null;
-    }
-  }
-
-  /**
    * POST only: replaces the placeholder {@code searchKey} the create had to invent with the
    * identifier the database computed, both in C_BPartner and in the response being returned.
    *
@@ -733,12 +689,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
     String method = ctx.getHttpMethod();
-    if (NeoEndpointType.DEFAULTS.equals(ctx.getEndpointType())) {
-      NeoResponse withCreditLimit = fillCreditLimitDefault(ctx);
-      if (withCreditLimit != null) {
-        return withCreditLimit;
-      }
-    }
     if ("GET".equals(method)) {
       // A list GET can ask for its child records (ETP-4997); a single-record GET gets the
       // contact-email fallback. Neither applies to the other, so the first that declines
