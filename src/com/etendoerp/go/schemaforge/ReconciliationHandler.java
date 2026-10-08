@@ -949,8 +949,8 @@ public class ReconciliationHandler implements NeoHandler {
     }
 
     // Pay each selected unpaid invoice; the new transaction ids join operationIds so the standard
-    // reconcile below matches them to the line (method choice and ETP-4797 write-off: see
-    // payInvoicesFromBody).
+    // reconcile below matches them to the line (method choice, ETP-4797 write-off and ETP-5657
+    // explicit conversion: see payInvoicesFromBody).
     NeoResponse payError = ReconciliationWriteoffSupport.payInvoicesFromBody(
         account, line, invoiceSpecs, body, operationIds, TOLERANCE);
     if (payError != null) {

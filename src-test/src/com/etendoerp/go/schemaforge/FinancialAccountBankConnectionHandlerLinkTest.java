@@ -81,6 +81,8 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * <p>Linking is delegated to {@link SaltEdgeAccountLinkHelper}; account creation is delegated to
  * {@link FinancialAccountSupport}. Both are mocked statically so the tests assert only this
  * handler's orchestration and response envelope.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionHandlerLinkTest {
@@ -395,6 +397,50 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       JSONObject data = dataOf(response);
       assertEquals("OK", data.getString("status"));
       assertEquals("Imported 5 statements", data.getString("message"));
+    }
+  }
+
+  /** sync echoes the account's freshly stamped last sync date (ETP-5582). */
+  @Test
+  public void testSyncReturnsLastSyncDateWhenStamped() throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2LastSyncDate())
+        .thenReturn(java.util.Date.from(java.time.Instant.parse("2026-10-06T09:15:00Z")));
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
+          .thenReturn("OK");
+
+      JSONObject data = dataOf(handler.handle(postContext("sync", body)));
+
+      assertEquals("2026-10-06T09:15:00Z", data.getString("lastSyncDate"));
+    }
+  }
+
+  /** sync on an account that never synced (failed run) returns JSON null, key present. */
+  @Test
+  public void testSyncReturnsNullLastSyncDateWhenNotStamped() throws Exception {
+    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2LastSyncDate()).thenReturn(null);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.fetchAccountTransactions(eq(finAcc), any()))
+          .thenReturn("ERROR");
+
+      JSONObject data = dataOf(handler.handle(postContext("sync", body)));
+
+      assertTrue(data.has("lastSyncDate"));
+      assertTrue(data.isNull("lastSyncDate"));
     }
   }
 

@@ -90,7 +90,13 @@ public class EnvironmentRequestAuthenticator {
   static final String MSG_MISSING_CLAIMS = "Invalid token: missing required claims";
   static final String MSG_INVALID_TOKEN = "Invalid or expired token";
   static final String MSG_INSUFFICIENT_SCOPE = "Insufficient scope or invalid token context";
-  static final String MSG_ACCESS_PREFIX = "Environment access is not available: ";
+  /**
+   * Prefix of the 402 answer for a commercially blocked environment, followed by the
+   * {@link EnvironmentAccessPolicy.Decision} name. Public because every surface that refuses a
+   * blocked environment must answer with the same wording: the SPA parses it to show the
+   * blocked-access screen (ETP-5642).
+   */
+  public static final String MSG_ACCESS_PREFIX = "Environment access is not available: ";
 
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String HEADER_ACCEPT_LANGUAGE = "Accept-Language";

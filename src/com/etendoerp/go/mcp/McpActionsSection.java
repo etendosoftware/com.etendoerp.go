@@ -89,6 +89,14 @@ final class McpActionsSection {
   private static final Set<String> ALLOWED_KEYS =
       Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES);
 
+  /**
+   * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
+   * every call, so two first callers registering concurrently handed the registry two different
+   * objects under one name, and the loser's call failed as a duplicate.
+   */
+  private static final McpConfigSection DECLARATION = McpConfigSection.of(NAME, ALLOWED_KEYS,
+      McpConfigSection.Merge.REPLACE, McpActionsSection::validate);
+
   /** The reason an agent reads when the configuration itself cannot be trusted. */
   static final String UNUSABLE_REASON = "its MCP configuration is invalid";
 
@@ -101,8 +109,7 @@ final class McpActionsSection {
    * @return the section, with its allowed keys, {@code REPLACE} merge and validator
    */
   static McpConfigSection declaration() {
-    return McpConfigSection.of(NAME, ALLOWED_KEYS, McpConfigSection.Merge.REPLACE,
-        McpActionsSection::validate);
+    return DECLARATION;
   }
 
   /**
