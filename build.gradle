@@ -224,3 +224,68 @@ rootProject.afterEvaluate { rootProj ->
 
     rootTest.finalizedBy isolated
 }
+
+/**
+ * ETP-5695 — {@code goTestUnit}: the database-free half of this module's Java suite.
+ *
+ * <p>The module's test classes split cleanly in two. A few dozen reach {@code OBBaseTest} or
+ * {@code WeldBaseTest} through their {@code extends} chain, so they need a live database — and,
+ * for the {@code WeldBaseTest} ones, the CDI container that a full {@code ./gradlew install}
+ * leaves behind. The rest, the vast majority, are Mockito-only and need nothing but a compiled
+ * classpath. {@code scripts/check-unit-test-classification.sh} prints the current count; it is not
+ * repeated here because it changes with every new test. Today both halves run in one {@code ./gradlew test --tests "com.etendoerp.go.*"}, which is why
+ * the Java suite can only start after the pipeline's install, roughly an hour of job time before
+ * its first assertion.</p>
+ *
+ * <p>This task runs the second half on its own: the suite a developer can run with no Postgres and
+ * no Tomcat, and the one a PR pipeline can run before any environment exists. Membership is by
+ * naming convention — every {@code *IntegrationTest} is excluded — plus two classes that predate
+ * the convention and are referenced by name throughout {@code docs/}, so they are excluded by name
+ * instead of being renamed.</p>
+ *
+ * <p>{@code scripts/check-unit-test-classification.sh} enforces that split: a new DB-backed test
+ * that does not follow the convention fails that check, instead of failing inside a
+ * database-less pipeline with a DAL stack trace that looks like an infrastructure problem.</p>
+ *
+ * <p>Declared against {@code rootProject} for the same reason as {@code goIsolatedDalTest} above:
+ * the {@code test} task is contributed by the Etendo Gradle plugin and has no editable source in
+ * this repository.</p>
+ */
+def dbBackedGoTests = [
+        '**/*IntegrationTest.class',
+        // Predate the *IntegrationTest convention; both extend a DAL base class.
+        '**/UserRoleCompositionServiceOverlapReverificationTest.class',
+        '**/BusinessPartnerHandlerDbTest.class',
+]
+
+rootProject.afterEvaluate { rootProj ->
+    def rootTest = rootProj.tasks.findByName('test')
+    if (rootTest == null || rootProj.tasks.findByName('goTestUnit') != null) {
+        return
+    }
+
+    rootProj.tasks.create('goTestUnit', Test) { Test t ->
+        t.group = 'verification'
+        t.description = 'Runs the com.etendoerp.go tests that need no database (see modules/com.etendoerp.go/build.gradle).'
+
+        t.testClassesDirs = rootTest.testClassesDirs
+        t.classpath = rootTest.classpath
+
+        t.useJUnitPlatform()
+        t.include '**/com/etendoerp/go/**/*Test.class'
+        dbBackedGoTests.each { pattern -> t.exclude pattern }
+
+        // The module may be absent from a given build: nothing to run is not an error.
+        t.filter.failOnNoMatchingTests = false
+
+        // Same JVM shape as the root task, so a test that passes here passes there.
+        t.systemProperties = rootTest.systemProperties
+        t.jvmArgs = rootTest.jvmArgs
+        t.minHeapSize = rootTest.minHeapSize
+        t.maxHeapSize = rootTest.maxHeapSize
+        t.workingDir = rootTest.workingDir
+        t.environment(rootTest.environment)
+        t.maxParallelForks = rootTest.maxParallelForks
+        t.forkEvery = rootTest.forkEvery
+    }
+}
