@@ -5583,6 +5583,23 @@ real effect (the opposite of Balance Sheet): P&L is a period-activity total of p
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
 
+Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
+account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
+strictly negative; otherwise it is 0, that 0 is what rolls up to its parent, and every descendant
+of such an account shows 0. Formula accounts read the operand's value before its own clamp, which
+is how the PGC mirror accounts (`551` under Activo / `(551)` under Pasivo) show a balance on
+whichever side it is positive, so the balance sheet balances. Precondition: the tenant must have its
+`C_ElementValue_Operand` rows (data-fix `R39-elementvalue-operand-backfill`), otherwise the mirror
+has no formula to pick the value up. Mirrored by hand in `report-grouping.js` (SPA) and the two
+`sql.query` copies in the report contracts. `isGroupStart` is computed over the report's roots, not
+its visible rows, so a report with 2+ groups keeps the first visible group's header even when only
+one group has visible rows; this deviates from Classic (which prints those rows headerless) on
+purpose, display only. A second deliberate, display-only deviation: an account counts as reset
+only when its clamp actually changed the value (per period), so the breakdown of a KEPT P/N
+account stays visible (`551` 5 shows `5510` and `55100000`). Classic hides it whenever Compare To
+is off, because its reset flag is set on any failed condition (0 included) and the reference
+period's flag overwrites the main one. Totals are identical either way.
+
 `generate_report_journal_entries`'s response nests one object per journal entry
 (`fact_acct_group_id`) with header fields (`entry_no`, `dateacct` as `yyyy-MM-dd`,
 `document_type`, `docbasetype`, `isreturn`, `doc_window`, `doc_record_id`, `doc_query_key`,
