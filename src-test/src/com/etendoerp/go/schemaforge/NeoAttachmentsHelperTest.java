@@ -58,12 +58,15 @@ import org.junit.Test;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.attachment.AttachImplementation;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
@@ -74,6 +77,8 @@ import org.openbravo.model.ad.utility.Attachment;
  * <p>These tests focus on deterministic helpers (file-name sanitization,
  * content-disposition formatting, date formatting and temp-file cleanup)
  * to keep coverage fast and independent from DAL/CDI infrastructure.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
  */
 public class NeoAttachmentsHelperTest {
 
@@ -1464,5 +1469,157 @@ public class NeoAttachmentsHelperTest {
     verify(response).setContentType("application/json");
     verify(response).setCharacterEncoding(StandardCharsets.UTF_8.name());
     assertTrue(sink.toString().contains("unprocessable"));
+  }
+
+  /**
+   * Stubs {@link WeldUtils} so {@code NeoAttachmentsHelper.getAttachManager()}
+   * resolves to a manager handing back {@code handler} for any attach method.
+   */
+  private static void stubAttachManager(MockedStatic<WeldUtils> weldMock,
+      AttachImplementation handler) {
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    when(aim.getHandler(anyString())).thenReturn(handler);
+    weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+        .thenReturn(aim);
+  }
+
+  /**
+   * ETP-5526 (CP-16) — the size column rendered "0 B" for every attachment in
+   * every window because the size was computed from {@code c_file.path}, which
+   * is {@code NULL} for attachments stored the "old way". The size must now come
+   * from the attach implementation, exactly like the download does, so a
+   * {@code null} path no longer zeroes it.
+   */
+  @Test
+  public void computeFileSizeUsesAttachImplementationWhenPathIsNull() throws Exception {
+    File payload = File.createTempFile("neo-attachment-size", ".bin");
+    Files.write(payload.toPath(), new byte[2048]);
+
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(payload);
+    when(handler.isTempFile()).thenReturn(false);
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(2048L, size);
+      // The payload is the backend's own file, not a temp copy: it must survive.
+      assertTrue(payload.exists());
+    } finally {
+      payload.delete();
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-16) — backends that materialize a temporary copy must not leak
+   * one file per listed attachment: the copy is removed once its length is read.
+   */
+  @Test
+  public void computeFileSizeRemovesTemporaryCopyFromTempFileBackends() throws Exception {
+    File payload = File.createTempFile("neo-attachment-size-temp", ".bin");
+    Files.write(payload.toPath(), new byte[16]);
+
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(payload);
+    when(handler.isTempFile()).thenReturn(true);
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(16L, size);
+      assertFalse(payload.exists());
+    } finally {
+      payload.delete();
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-16) — {@code computeFileSize} runs inside the list response, so
+   * a backend failure must degrade to 0 instead of breaking the whole listing.
+   */
+  @Test
+  public void computeFileSizeReturnsZeroWhenBackendFails() throws Exception {
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenThrow(new OBException("backend down"));
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(0L, size);
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-16) — a missing file on disk still yields 0, as before.
+   */
+  @Test
+  public void computeFileSizeReturnsZeroWhenFileDoesNotExist() throws Exception {
+    File missing = new File(System.getProperty("java.io.tmpdir"),
+        "neo-attachment-size-missing-" + System.nanoTime() + ".bin");
+
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(missing);
+    when(handler.isTempFile()).thenReturn(false);
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(0L, size);
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-17) — "Subido por" showed the AD username, which in a
+   * multi-client instance is a technical login such as
+   * {@code isaias.battaglia+70@smfconsulting.es+lapaulina}. The projection must
+   * carry the e-mail so the UI can show it, while keeping {@code name}.
+   */
+  @Test
+  public void userToJsonExposesEmailAlongsideName() throws Exception {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("U1");
+    when(user.getName()).thenReturn("isaias.battaglia+70@smfconsulting.es+lapaulina");
+    when(user.getEmail()).thenReturn("isaias.battaglia@smfconsulting.es");
+
+    JSONObject json = (JSONObject) invokePrivateStatic("userToJson",
+        new Class<?>[]{ User.class }, user);
+
+    assertEquals("U1", json.getString("id"));
+    assertEquals("isaias.battaglia@smfconsulting.es", json.getString("email"));
+    assertEquals("isaias.battaglia+70@smfconsulting.es+lapaulina", json.getString("name"));
+  }
+
+  /**
+   * ETP-5526 (CP-17) — a user with no e-mail on record omits the key entirely,
+   * so the UI falls back to {@code name}.
+   */
+  @Test
+  public void userToJsonOmitsEmailWhenBlank() throws Exception {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("U1");
+    when(user.getName()).thenReturn("Openbravo");
+    when(user.getEmail()).thenReturn("  ");
+
+    JSONObject json = (JSONObject) invokePrivateStatic("userToJson",
+        new Class<?>[]{ User.class }, user);
+
+    assertFalse(json.has("email"));
+    assertEquals("Openbravo", json.getString("name"));
   }
 }

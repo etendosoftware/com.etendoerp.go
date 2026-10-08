@@ -1095,6 +1095,17 @@ Authorization: Bearer {token}
 `{tableName}` is the AD_Table physical name (case-insensitive, e.g. `C_Invoice`, `C_Order`,
 `M_InOut`). Returns `200 { "items": [...] }`, one entry per attachment
 (`id`, `name`, `size`, `dataType`, `description`, `uploadedAt`, `updatedAt`, `uploadedBy`).
+
+`size` is the byte length reported by the attach implementation configured for the row
+(`AttachImplementation.downloadFile`), i.e. the same file the download endpoint serves — never a
+path rebuilt from `c_file.path`, which is `NULL` for attachments stored the "old way" and made
+every size read as 0 (ETP-5526). Any backend failure degrades to `0` rather than breaking the
+listing.
+
+`uploadedBy` is `{ "id", "name", "email"? }`. `name` is the AD username, which in a multi-client
+instance is a technical login (`user+70@domain+client`); `email` is present only when the user has
+one on record, and clients should prefer it and fall back to `name` (ETP-5526).
+
 Includes whichever attachment is currently marked as the record's "main" document (see below) —
 since ETP-4855 a file attached from the preview must also be visible in the Attachments tab.
 Returns `400` if `tableName` or `recordId` is missing, `404` if `tableName` does not resolve to a

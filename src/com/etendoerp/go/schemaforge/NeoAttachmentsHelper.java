@@ -51,10 +51,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.attachment.AttachImplementation;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
+import org.openbravo.client.application.attachment.AttachmentUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -62,6 +63,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.utility.Attachment;
+import org.openbravo.model.ad.utility.AttachmentConfig;
 
 /**
  * Cross-cutting helper for the NEO Headless attachments endpoint
@@ -782,6 +784,12 @@ public final class NeoAttachmentsHelper {
     return json;
   }
 
+  /**
+   * Projects the uploader. {@code name} is the AD user name, which is a technical
+   * login (it may carry the {@code +client} suffixes used to disambiguate logins),
+   * so the e-mail is exposed alongside it and preferred by the UI when present.
+   * {@code name} stays as the fallback for users with no e-mail on record.
+   */
   private static Object userToJson(User user) throws JSONException {
     if (user == null) {
       return JSONObject.NULL;
@@ -789,6 +797,9 @@ public final class NeoAttachmentsHelper {
     JSONObject json = new JSONObject();
     json.put("id", user.getId());
     json.put("name", user.getName());
+    if (StringUtils.isNotBlank(user.getEmail())) {
+      json.put("email", user.getEmail());
+    }
     return json;
   }
 
@@ -800,23 +811,59 @@ public final class NeoAttachmentsHelper {
   }
 
   /**
-   * Returns the file size in bytes by inspecting the attachment payload on disk.
-   * Returns 0 when the file is missing (e.g. configured to an alternative
-   * storage backend or moved out-of-band).
+   * Returns the file size in bytes, asking the configured attach implementation
+   * for the payload instead of rebuilding the path by hand.
+   *
+   * <p>The path must not be derived from {@code c_file.path}: that column is
+   * {@code NULL} for every attachment stored the "old way"
+   * ({@code CoreAttachImplementation.getPath} returns {@code null} whenever the
+   * directory contains a {@code -}), so a hand-built path yields 0 bytes for
+   * those rows. {@link AttachImplementation#downloadFile(Attachment)} is the same
+   * contract {@link AttachImplementationManager#download} uses, so the size always
+   * matches what the download actually serves, on any storage backend.</p>
+   *
+   * <p>Backends that materialize a temporary copy ({@link
+   * AttachImplementation#isTempFile()}) have it removed again right away.</p>
+   *
+   * <p>Defensive by design: this runs inside the list response, so any failure
+   * (no handler, missing file, backend error) degrades to 0 instead of breaking
+   * the listing.</p>
    */
   private static long computeFileSize(Attachment attachment) {
-    if (attachment.getPath() == null || attachment.getName() == null) {
+    if (attachment == null || StringUtils.isBlank(attachment.getName())) {
       return 0L;
     }
-    String attachRoot = OBPropertiesProvider.getInstance()
-        .getOpenbravoProperties()
-        .getProperty("attach.path");
-    if (StringUtils.isBlank(attachRoot)) {
+    try {
+      AttachImplementation handler = resolveAttachHandler(attachment);
+      if (handler == null) {
+        return 0L;
+      }
+      File file = handler.downloadFile(attachment);
+      if (file == null || !file.exists()) {
+        return 0L;
+      }
+      long size = file.length();
+      if (handler.isTempFile()) {
+        cleanupTempFile(file);
+      }
+      return size;
+    } catch (RuntimeException e) {
+      log.warn("Could not compute size of attachment {}: {}", attachment.getId(), e.getMessage());
       return 0L;
     }
-    File file = new File(attachRoot + File.separator + attachment.getPath(),
-        attachment.getName());
-    return file.exists() ? file.length() : 0L;
+  }
+
+  /**
+   * Resolves the {@link AttachImplementation} configured for the given attachment,
+   * falling back to the default method when the row carries no attachment config.
+   */
+  private static AttachImplementation resolveAttachHandler(Attachment attachment) {
+    String method = AttachmentUtils.DEFAULT_METHOD;
+    AttachmentConfig config = attachment.getAttachmentConf();
+    if (config != null && config.getAttachmentMethod() != null) {
+      method = config.getAttachmentMethod().getValue();
+    }
+    return getAttachManager().getHandler(method);
   }
 
   /**
