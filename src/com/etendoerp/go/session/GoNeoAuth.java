@@ -28,7 +28,10 @@ public final class GoNeoAuth {
   public enum Action {
     /** A valid cookie session resolved — reconstruct {@code OBContext} from it. */
     USE_SESSION,
-    /** A cookie session resolved but the unsafe request failed CSRF/Origin → 403. */
+    /**
+     * A cookie session resolved but the request failed a tab-bound proof (CSRF/Origin on an unsafe
+     * method, or the ETP-5675 account header on any method) → 403.
+     */
     CSRF_REJECTED,
     /** A cookie was present but the session is invalid/expired/revoked → 401. */
     SESSION_INVALID,
