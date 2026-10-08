@@ -142,6 +142,42 @@ public class NeoAttachmentsHelperTest {
     return mainQuery;
   }
 
+  /**
+   * Wires {@code response.getOutputStream()} to this test's {@link #captured} sink so the
+   * zip bytes a handler streams can be read back and inspected.
+   *
+   * @param response the mocked response to wire
+   * @throws Exception when the mock cannot be stubbed
+   */
+  private void stubOutputStream(HttpServletResponse response) throws Exception {
+    final java.io.ByteArrayOutputStream sink = captured;
+    javax.servlet.ServletOutputStream out = new javax.servlet.ServletOutputStream() {
+      @Override public boolean isReady() { return true; }
+      @Override public void setWriteListener(javax.servlet.WriteListener l) {
+        // Sync-only test double: these tests never use the async servlet API.
+      }
+      @Override public void write(int b) { sink.write(b); }
+    };
+    when(response.getOutputStream()).thenReturn(out);
+  }
+
+  /**
+   * Reads back every entry name of the zip this test's {@link #captured} sink holds.
+   *
+   * @return the entry names, in no particular order
+   * @throws Exception when the captured bytes are not a readable zip
+   */
+  private java.util.Set<String> capturedZipEntryNames() throws Exception {
+    java.util.Set<String> names = new java.util.HashSet<>();
+    try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(captured.toByteArray()))) {
+      java.util.zip.ZipEntry entry;
+      while ((entry = zip.getNextEntry()) != null) {
+        names.add(entry.getName());
+      }
+    }
+    return names;
+  }
+
   private static String errorMessage(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("error").getString("message");
   }
@@ -617,15 +653,7 @@ public class NeoAttachmentsHelperTest {
   @SuppressWarnings("unchecked")
   public void handleDownloadAllIncludesAttachmentMarkedAsMain() throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
-    when(response.getOutputStream()).thenReturn(
-        new javax.servlet.ServletOutputStream() {
-          private final java.io.ByteArrayOutputStream sink = captured;
-          @Override public boolean isReady() { return true; }
-          @Override public void setWriteListener(javax.servlet.WriteListener l) {
-            // Sync-only test double: this test never uses the async servlet API.
-          }
-          @Override public void write(int b) { sink.write(b); }
-        });
+    stubOutputStream(response);
     OBDal dal = mock(OBDal.class);
     stubTableAndMainLookup(dal, "TABLE1", "ATT-MAIN");
 
@@ -645,25 +673,108 @@ public class NeoAttachmentsHelperTest {
 
       NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
 
-      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-OTHER"), any());
-      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-MAIN"), any());
+      verify(aim, times(1)).download(eq("ATT-OTHER"), any());
+      verify(aim, times(1)).download(eq("ATT-MAIN"), any());
       verify(response).setStatus(HttpServletResponse.SC_OK);
 
-      java.util.Set<String> zippedNames = new java.util.HashSet<>();
-      try (ZipInputStream zip = new ZipInputStream(
-          new java.io.ByteArrayInputStream(captured.toByteArray()))) {
-        java.util.zip.ZipEntry entry;
-        while ((entry = zip.getNextEntry()) != null) {
-          zippedNames.add(entry.getName());
-        }
-      }
       assertEquals(
           new java.util.HashSet<>(Arrays.asList("supplier-invoice.pdf", "note.pdf")),
-          zippedNames);
+          capturedZipEntryNames());
     }
   }
 
   private final java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
+
+  /**
+   * ETP-5526 — the zip endpoint accepts an optional {@code ids} subset so the
+   * Attachments tab's selection bar can download only the ticked rows. Verifies the
+   * happy path: exactly the requested attachment is fetched and zipped, and the one
+   * that was not asked for is never even read from storage.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleDownloadAllWithIdsZipsOnlyTheRequestedSubset() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    stubOutputStream(response);
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1");
+
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    Attachment wanted = stubAttachment("ATT-B", "delivery-note.pdf");
+    Attachment other = stubAttachment("ATT-A", "purchase-order.pdf");
+    when(criteria.list()).thenReturn(Arrays.asList(other, wanted));
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", "ATT-B", response);
+
+      verify(aim, times(1)).download(eq("ATT-B"), any());
+      verify(aim, never()).download(eq("ATT-A"), any());
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertEquals(Collections.singleton("delivery-note.pdf"), capturedZipEntryNames());
+    }
+  }
+
+  /**
+   * ETP-5526 — the authorization half of the same feature: an id the caller supplied is
+   * only served when it actually belongs to the record in the URL. A foreign (or
+   * non-existent) id answers 404 and NOTHING is streamed — no partial archive, no
+   * single-file leak. Without this the endpoint would read any attachment in the
+   * instance from any record's URL.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleDownloadAllRejectsAnIdThatDoesNotBelongToTheRecord() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1");
+
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    Attachment own = stubAttachment("ATT-A", "purchase-order.pdf");
+    when(criteria.list()).thenReturn(Collections.singletonList(own));
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", "ATT-A,ATT-SOMEONE-ELSE", response);
+
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+      assertTrue(sink.toString().contains("Attachment not found"));
+      // Not even the legitimately-owned id is served: the request is refused whole.
+      verify(aim, never()).download(anyString(), any());
+      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    }
+  }
+
+  /**
+   * ETP-5526 — supplying {@code ids} with nothing usable in it is a client bug, so it
+   * answers 400 rather than falling back to "every attachment of the record": silently
+   * zipping everything would turn an empty selection into a surprise bulk download.
+   */
+  @Test
+  public void handleDownloadAllRejectsAnEmptyIdsParameter() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+
+    NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", " , ", response);
+
+    verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+    assertTrue(sink.toString().contains("ids must name at least one attachment"));
+  }
 
 
   /**

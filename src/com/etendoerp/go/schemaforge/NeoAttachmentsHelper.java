@@ -31,6 +31,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -105,6 +106,7 @@ public final class NeoAttachmentsHelper {
   private static final String ERR_ATTACHMENT_NOT_FOUND = "Attachment not found";
   private static final String TABLENAME_RECORDID_REQUIRED = "tableName and recordId are required";
   private static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
+  private static final String ERR_IDS_REQUIRED = "ids must name at least one attachment";
   private static final String CONTENT_DISPOSITION = "Content-Disposition";
   private static final String MAIN_FLAG_COLUMN = "EM_ETGO_ISPREVIEWMAIN";
   private static final String ERR_FISCAL_DECL_NOT_DRAFT_PREFIX =
@@ -494,6 +496,12 @@ public final class NeoAttachmentsHelper {
    * in the Attachments tab's own list (see {@link #handleList}), so omitting
    * it here would silently download fewer files than the tab shows.
    *
+   * <p>Backwards-compatible overload of
+   * {@link #handleDownloadAll(String, String, String, HttpServletResponse)} with no id
+   * filter. Kept as its own method (rather than making every caller pass {@code null})
+   * because "the whole record" is the endpoint's original contract and several callers
+   * — including {@code SifAttachmentsSection} in the SPA — depend on exactly it.</p>
+   *
    * @param tableName the AD_Table.name (case-insensitive)
    * @param recordId  the record's primary key
    * @param response  the HTTP response to write to
@@ -501,8 +509,47 @@ public final class NeoAttachmentsHelper {
    */
   public static void handleDownloadAll(String tableName, String recordId,
       HttpServletResponse response) throws IOException {
+    handleDownloadAll(tableName, recordId, null, response);
+  }
+
+  /**
+   * Streams a record's attachments as a single zip file, optionally restricted to the
+   * subset named by {@code idsParam} (ETP-5526 — the Attachments tab's selection bar
+   * downloads only the ticked rows).
+   *
+   * <p><b>Authorization.</b> The subset is never taken on trust: the candidate set is
+   * always the record's own attachments, resolved by exactly the same criteria
+   * {@link #handleList} uses, and every requested id must be found in it. An id that
+   * belongs to a different record — or to nothing at all — answers {@code 404} and
+   * <em>nothing is streamed</em>, so the endpoint cannot be used to read another
+   * record's files by guessing ids. The two failure modes answer the same 404 on
+   * purpose: distinguishing them would confirm the existence of an attachment the
+   * caller is not entitled to.</p>
+   *
+   * <p>This is a stricter check than the single-file
+   * {@link #handleDownload(String, HttpServletResponse)} performs: that one resolves an
+   * attachment by id alone, because its URL carries no record to validate against. Here
+   * the record IS in the URL, so the ownership relation is checkable and is checked.</p>
+   *
+   * @param tableName the AD_Table.name (case-insensitive)
+   * @param recordId  the record's primary key
+   * @param idsParam  comma-separated attachment ids, or {@code null} for every
+   *                  attachment of the record (the original behaviour). Supplying the
+   *                  parameter with no usable id is a {@code 400}, not an implicit
+   *                  "everything" — an empty selection is a client bug, and silently
+   *                  zipping the whole record would hide it
+   * @param response  the HTTP response to write to
+   * @throws IOException if writing the response fails
+   */
+  public static void handleDownloadAll(String tableName, String recordId, String idsParam,
+      HttpServletResponse response) throws IOException {
     if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
       writeError(response, 400, TABLENAME_RECORDID_REQUIRED);
+      return;
+    }
+    final Set<String> requestedIds = idsParam == null ? null : parseIdList(idsParam);
+    if (requestedIds != null && requestedIds.isEmpty()) {
+      writeError(response, 400, ERR_IDS_REQUIRED);
       return;
     }
     try {
@@ -513,10 +560,22 @@ public final class NeoAttachmentsHelper {
       criteria.add(Restrictions.eq(Attachment.PROPERTY_RECORD, recordId));
       criteria.setFilterOnReadableOrganization(false);
 
+      List<Attachment> recordAttachments = criteria.list();
+      String foreignId = firstIdNotOwnedBy(requestedIds, recordAttachments);
+      if (foreignId != null) {
+        log.warn("Attachments zip rejected: id {} does not belong to {}/{}",
+            foreignId, tableName, recordId);
+        writeError(response, 404, ERR_ATTACHMENT_NOT_FOUND);
+        return;
+      }
+
       AttachImplementationManager aim = getAttachManager();
       ByteArrayOutputStream buffer = new ByteArrayOutputStream();
       try (ZipOutputStream zip = new ZipOutputStream(buffer)) {
-        for (Attachment attachment : criteria.list()) {
+        for (Attachment attachment : recordAttachments) {
+          if (requestedIds != null && !requestedIds.contains(attachment.getId())) {
+            continue;
+          }
           ByteArrayOutputStream fileBuffer = new ByteArrayOutputStream();
           aim.download(attachment.getId(), fileBuffer);
           zip.putNextEntry(new ZipEntry(attachment.getName()));
@@ -547,6 +606,50 @@ public final class NeoAttachmentsHelper {
         writeError(response, 500, "Internal error downloading attachments archive");
       }
     }
+  }
+
+  /**
+   * Splits the {@code ids} query parameter of the zip endpoint into a set of attachment
+   * ids, dropping blanks and duplicates while preserving the caller's order.
+   *
+   * @param idsParam the raw comma-separated parameter (never {@code null} here)
+   * @return the parsed ids; empty when the parameter carried none
+   */
+  private static Set<String> parseIdList(String idsParam) {
+    Set<String> ids = new LinkedHashSet<>();
+    for (String raw : StringUtils.split(idsParam, ',')) {
+      String id = StringUtils.trimToNull(raw);
+      if (id != null) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Ownership check behind the zip subset: the first requested id that is NOT among the
+   * record's own attachments, or {@code null} when every one of them is (or when no
+   * subset was requested at all).
+   *
+   * @param requestedIds      the ids the caller asked for, or {@code null} for "all"
+   * @param recordAttachments every attachment of the record in the URL
+   * @return the offending id, or {@code null} when the request is legitimate
+   */
+  private static String firstIdNotOwnedBy(Set<String> requestedIds,
+      List<Attachment> recordAttachments) {
+    if (requestedIds == null) {
+      return null;
+    }
+    Set<String> owned = new HashSet<>();
+    for (Attachment attachment : recordAttachments) {
+      owned.add(attachment.getId());
+    }
+    for (String id : requestedIds) {
+      if (!owned.contains(id)) {
+        return id;
+      }
+    }
+    return null;
   }
 
   // ── Delete ──────────────────────────────────────────────────────────────────

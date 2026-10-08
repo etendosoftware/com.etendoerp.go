@@ -38,6 +38,12 @@ class NeoBuiltInEndpointHandler {
   private static final String DESCRIPTION_FIELD = "description";
   private static final String IS_MAIN_FIELD = "isMain";
   private static final String MARK_AS_MAIN_PARAM = "markAsMain";
+  /**
+   * Optional query parameter of the {@code /zip} sub-resource: a comma-separated list of
+   * attachment ids restricting the archive to that subset (ETP-5526). Absent = every
+   * attachment of the record, exactly as before.
+   */
+  private static final String ATTACHMENT_IDS_PARAM = "ids";
   private static final String INVALID_JSON_BODY_PREFIX = "Invalid JSON body: ";
   /** Path segment that turns {@code /image/...} into the ETP-5184 upload-ticket endpoint. */
   static final String IMAGE_UPLOAD_SEGMENT = "upload";
@@ -297,7 +303,9 @@ class NeoBuiltInEndpointHandler {
    *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments</li>
    *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload;
    *       {@code ?markAsMain=true} marks the uploaded file as main atomically</li>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip;
+   *       {@code ?ids=a,b,c} restricts the archive to those attachments, every one of which
+   *       must belong to {@code {recordId}} (ETP-5526)</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}/main}   — look up the attachment
    *       marked as this record's main document, or {@code {}} if none</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}/count}  — {@code {count: N}}, the
@@ -344,7 +352,8 @@ class NeoBuiltInEndpointHandler {
     String tableName = segments[0];
     String recordId = segments[1];
     if (segments.length >= 3 && isGetOnlySubresource(segments[2])) {
-      handleAttachmentsGetOnlySubresource(segments[2], tableName, recordId, method, response);
+      handleAttachmentsGetOnlySubresource(segments[2], tableName, recordId, method, request,
+          response);
       return;
     }
 
@@ -383,16 +392,24 @@ class NeoBuiltInEndpointHandler {
    * Handles the GET-only record sub-resources
    * {@code /attachments/{tableName}/{recordId}/zip|main|count}; any other verb gets
    * {@code 405 "Attachments <subresource> endpoint only supports GET"}.
+   *
+   * <p>The {@code zip} sub-resource reads the optional {@code ids} query parameter
+   * (ETP-5526). It is passed through verbatim — {@code null} when the caller did not
+   * supply it, which is what keeps the "every attachment of the record" behaviour
+   * byte-for-byte identical for existing callers. The helper, not this dispatcher,
+   * parses it and enforces that every id belongs to {@code recordId}.</p>
    */
   private void handleAttachmentsGetOnlySubresource(String subresource, String tableName,
-      String recordId, String method, HttpServletResponse response) throws IOException {
+      String recordId, String method, HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
     if (!"GET".equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Attachments " + subresource + " endpoint only supports GET");
       return;
     }
     if (ATTACHMENTS_SEGMENT_ZIP.equals(subresource)) {
-      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId, response);
+      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId,
+          request.getParameter(ATTACHMENT_IDS_PARAM), response);
     } else if (ATTACHMENTS_SEGMENT_MAIN.equals(subresource)) {
       servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
     } else {
