@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -322,6 +323,76 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals("no role left", outcome.getMessage());
     swsStatic.verify(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()), never());
+  }
+
+  // ============================== legacy JWT role check (ETP-5270) ==============================
+
+  /** The claim is the role at login: every JWT is checked against the roles the user holds now. */
+  @Test
+  void aJwtRoleIsCheckedAgainstTheRolesTheUserHoldsNow() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(bearerRequest(BEARER_TOKEN), SurfacePolicy.NEO_API);
+
+    assertTrue(outcome.isAuthenticated());
+    verify(roleReconciler).requireHeldRole(USER_ID, ROLE_ID, CLIENT_ID);
+  }
+
+  /** A JWT cannot be rebound like a cookie session: a revoked role refuses it on every surface. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(SurfacePolicy.class)
+  void aJwtWhoseRoleWasRevokedIs401OnEverySurface(SurfacePolicy policy) {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+    doThrow(new SessionRoleRevokedException(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED))
+        .when(roleReconciler).requireHeldRole(USER_ID, ROLE_ID, CLIENT_ID);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(bearerRequest(BEARER_TOKEN), policy);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED, outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
+  }
+
+  /** identify() resolves without binding, and must not skip the check either (support chat). */
+  @Test
+  void identifyRefusesAJwtWhoseRoleWasRevoked() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+    doThrow(new SessionRoleRevokedException(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED))
+        .when(roleReconciler).requireHeldRole(USER_ID, ROLE_ID, CLIENT_ID);
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.identify(bearerRequest(BEARER_TOKEN), SurfacePolicy.NEO_AUXILIARY);
+
+    assertEquals(401, outcome.getHttpStatus());
+    assertEquals(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED, outcome.getMessage());
+  }
+
+  /** The kill switch answers first: a retired credential never costs a role lookup. */
+  @Test
+  void withTheSwitchOffAJwtRoleIsNeverLookedUp() {
+    System.setProperty(LEGACY_BEARER_PROPERTY, "false");
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubJwt();
+
+    authenticator.authenticate(bearerRequest(BEARER_TOKEN), SurfacePolicy.NEO_API);
+
+    verify(roleReconciler, never()).requireHeldRole(any(), any(), any());
+  }
+
+  /** OAuth2 tokens are not the legacy credential and keep their own lifecycle (out of scope). */
+  @Test
+  void anOAuth2TokenIsNotSubjectToTheJwtRoleCheck() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.noSession());
+    stubOAuth2("neo:*");
+
+    assertTrue(authenticator.authenticate(bearerRequest(OAUTH2_TOKEN), SurfacePolicy.NEO_API)
+        .isAuthenticated());
+    verify(roleReconciler, never()).requireHeldRole(any(), any(), any());
   }
 
   @Test

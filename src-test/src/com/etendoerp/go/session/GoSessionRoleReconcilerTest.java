@@ -162,6 +162,52 @@ public class GoSessionRoleReconcilerTest {
     verify(store, never()).update(any());
   }
 
+  // ------------------------------------------------ requireHeldRole (ETP-5270, legacy JWT)
+
+  @Test
+  public void aTokenRoleTheUserStillHoldsPasses() {
+    directory.eligible.add(PERSONAL);
+
+    reconciler.requireHeldRole(USER, PERSONAL, CLIENT);
+
+    verify(store, never()).update(any());
+  }
+
+  /** A JWT cannot be rebound: even with another valid role available, the token is refused. */
+  @Test
+  public void aTokenRoleRevokedSinceIssueIsRefusedEvenWithAnotherRoleAvailable() {
+    directory.eligible.add(ADMIN);
+    directory.defaultRoleId = ADMIN;
+    directory.activeRoleIds = List.of(ADMIN);
+
+    SessionRoleRevokedException refused = assertThrows(SessionRoleRevokedException.class,
+        () -> reconciler.requireHeldRole(USER, PERSONAL, CLIENT));
+
+    assertEquals(GoSessionRoleReconciler.MSG_TOKEN_ROLE_REVOKED, refused.getMessage());
+    verify(store, never()).update(any());
+  }
+
+  /** The client is part of the check: the same role id under another tenant is not held. */
+  @Test
+  public void aTokenRoleHeldOnlyInAnotherClientIsRefused() {
+    directory.eligible.add(PERSONAL);
+
+    assertThrows(SessionRoleRevokedException.class,
+        () -> reconciler.requireHeldRole(USER, PERSONAL, "OTHER_CLIENT"));
+  }
+
+  @Test
+  public void aTokenWithAMissingIdIsRefused() {
+    directory.eligible.add(PERSONAL);
+
+    assertThrows(SessionRoleRevokedException.class,
+        () -> reconciler.requireHeldRole(USER, PERSONAL, null));
+    assertThrows(SessionRoleRevokedException.class,
+        () -> reconciler.requireHeldRole(USER, " ", CLIENT));
+    assertThrows(SessionRoleRevokedException.class,
+        () -> reconciler.requireHeldRole(null, PERSONAL, CLIENT));
+  }
+
   /** In-memory role facts; everything not listed is "not eligible" / "no access". */
   private static final class FakeRoleDirectory implements GoSessionRoleReconciler.RoleDirectory {
     private final Set<String> eligible = new HashSet<>();
