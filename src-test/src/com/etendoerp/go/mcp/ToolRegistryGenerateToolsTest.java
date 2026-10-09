@@ -972,6 +972,44 @@ class ToolRegistryGenerateToolsTest {
       }
     }
 
+    /**
+     * ETP-5640: MCP 2026-07-28 asks for a deterministic {@code tools/list} (client caching, LLM
+     * prompt-cache hits). The order is the registry's own — built-ins, process and report tools
+     * in spec order, CRUD tools, image tools — and the spec enums follow the specs' query order
+     * (by name), never a hash order. Pinned so a {@code HashMap}/{@code HashSet} slipped into the
+     * catalog fails here instead of reshuffling every client's cache.
+     */
+    @Test
+    @DisplayName("the catalog order and the spec enums are deterministic")
+    void catalogOrderIsDeterministic() {
+      SFSpec invoices = createWindowSpec(SPEC_INVOICES);
+      SFSpec salesOrder = createWindowSpec(SPEC_SALES_ORDER);
+      SFSpec processSpec = createProcessSpec(SPEC_COMPLETE_ORDER);
+      when(processSpec.getProcess()).thenReturn(null);
+      mockEmptyEntities();
+      mockSpecCriteria(List.of(invoices, salesOrder, processSpec));
+      Set<String> scopes = scopesOf("neo:read", "neo:write", "neo:process", "neo:report");
+
+      List<McpToolDefinition> first = registry.generateTools(scopes);
+      List<McpToolDefinition> second = new ToolRegistry().generateTools(scopes);
+
+      assertEquals(toolNames(first), toolNames(second));
+      for (int i = 0; i < first.size(); i++) {
+        assertEquals(String.valueOf(first.get(i).getInputSchema()),
+            String.valueOf(second.get(i).getInputSchema()), first.get(i).getName());
+      }
+      List<String> names = toolNames(first);
+      assertEquals(List.of("etendo_discover", "docs", McpConstants.TOOL_NEO_WIDGET,
+          McpConstants.TOOL_NEO_VECTOR_SEARCH, McpConstants.TOOL_NEO_FEEDBACK),
+          names.subList(0, 5), "built-ins first, in a fixed order: " + names);
+      assertTrue(names.indexOf("complete_order") < names.indexOf("etendo_list"),
+          "process tools before the CRUD tools: " + names);
+      Map<String, Object> listSchema = first.get(names.indexOf("etendo_list")).getInputSchema();
+      Map<?, ?> specProp = (Map<?, ?>) ((Map<?, ?>) listSchema.get("properties")).get("spec");
+      assertEquals(List.of(SPEC_INVOICES, SPEC_SALES_ORDER), specProp.get("enum"),
+          "the spec enum keeps the query order");
+    }
+
     @Test
     @DisplayName("spec processing exception is caught and does not break other specs")
     void specExceptionDoesNotBreakOthers() {
