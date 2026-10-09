@@ -185,6 +185,29 @@ public class McpRequestEraTest {
     assertEquals(McpRequestEra.HEADER_MISMATCH, c.refusal().code());
   }
 
+  /** W4: a decoded header carrying a line break cannot forge a log line through the message. */
+  @Test
+  public void mismatchMessageNeverCarriesControlCharacters() throws Exception {
+    String forged = "x\nWARN fake line\r\u2028end";
+    String encoded = "=?base64?" + Base64.getEncoder()
+        .encodeToString(forged.getBytes(StandardCharsets.UTF_8)) + "?=";
+
+    Classification c = classify("tools/call", toolCall(meta(MODERN)), full("tools/call", encoded));
+
+    String message = c.refusal().message();
+    assertEquals(McpRequestEra.HEADER_MISMATCH, c.refusal().code());
+    assertFalse(message, message.contains("\n") || message.contains("\r")
+        || message.contains("\u2028"));
+    assertTrue(message, message.contains("x?WARN fake line??end"));
+  }
+
+  @Test
+  public void printableReplacesControlCharactersAndBoundsTheValue() {
+    assertEquals("a?b?c", McpRequestEra.printable("a\tb\u0085c"));
+    assertNull(McpRequestEra.printable(null));
+    assertTrue(McpRequestEra.printable("y".repeat(500)).length() <= 60);
+  }
+
   @Test
   public void resourcesReadMirrorsTheUri() throws Exception {
     JSONObject params = new JSONObject().put("uri", "etendo://specs")

@@ -24,7 +24,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -106,6 +108,8 @@ final class McpRequestEra {
 
   private static final String BASE64_PREFIX = "=?base64?";
   private static final String BASE64_SUFFIX = "?=";
+  /** Control characters and Unicode line/paragraph separators: what could forge a log line. */
+  private static final Pattern CONTROL = Pattern.compile("[\\p{Cc}\\p{Zl}\\p{Zp}]");
   /** Bound on how much of an unexpected value reaches a message or a log line. */
   private static final int MAX_ECHOED_VALUE = 60;
 
@@ -150,6 +154,42 @@ final class McpRequestEra {
     static Classification legacy() {
       return new Classification(Era.LEGACY, null, null, List.of());
     }
+  }
+
+  /**
+   * Classify one HTTP request, or call it legacy outright while the
+   * {@link GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED} kill switch is on — exactly how the servlet
+   * behaved before the modern era existed.
+   *
+   * @param request the HTTP request, read for its mirror headers only
+   * @param method  the JSON-RPC method
+   * @param params  the JSON-RPC {@code params}, may be {@code null}
+   * @return the decision, never {@code null}
+   */
+  static Classification forRequest(HttpServletRequest request, String method,
+      JSONObject params) {
+    if (!modernEnabled()) {
+      return Classification.legacy();
+    }
+    return classify(method, params,
+        new Headers(request.getHeader(McpProtocolVersion.HEADER), request.getHeader(HEADER_METHOD),
+            request.getHeader(HEADER_NAME)),
+        strict());
+  }
+
+  /**
+   * A client-supplied value made safe to echo into a log line or an error message: every control
+   * character (CR, LF, TAB, …) becomes {@code ?}, so a header or a {@code _meta} field cannot forge
+   * a log line, and the result is bounded.
+   *
+   * @param value the value, may be {@code null}
+   * @return the printable value, or {@code null}
+   */
+  static String printable(String value) {
+    if (value == null) {
+      return null;
+    }
+    return StringUtils.abbreviate(CONTROL.matcher(value).replaceAll("?"), MAX_ECHOED_VALUE);
   }
 
   /**
@@ -254,7 +294,8 @@ final class McpRequestEra {
         refusal = checkMirror(HEADER_METHOD, headers.method(), method, true);
       }
       if (refusal == null) {
-        refusal = checkMirror(HEADER_NAME, headers.name(), nameInBody(), nameInBody() != null);
+        String name = nameInBody();
+        refusal = checkMirror(HEADER_NAME, headers.name(), name, name != null);
       }
       if (refusal == null && meta != null
           && !(meta.opt(META_CLIENT_CAPABILITIES) instanceof JSONObject)) {
@@ -345,10 +386,8 @@ final class McpRequestEra {
 
     private static Refusal mismatch(String header, String headerValue, String bodyValue) {
       return new Refusal(HttpServletResponse.SC_BAD_REQUEST, HEADER_MISMATCH,
-          "Header mismatch: " + header + " header value '"
-              + StringUtils.abbreviate(headerValue, MAX_ECHOED_VALUE)
-              + "' does not match body value '"
-              + StringUtils.abbreviate(bodyValue, MAX_ECHOED_VALUE) + "'",
+          "Header mismatch: " + header + " header value '" + printable(headerValue)
+              + "' does not match body value '" + printable(bodyValue) + "'",
           null);
     }
 
@@ -356,7 +395,7 @@ final class McpRequestEra {
       JSONObject data = new JSONObject();
       try {
         data.put("supported", new JSONArray(McpProtocolVersion.ALL_SUPPORTED));
-        data.put("requested", StringUtils.abbreviate(requested, MAX_ECHOED_VALUE));
+        data.put("requested", printable(requested));
       } catch (JSONException e) {
         // Cannot happen with string values; the code alone still identifies the error.
         data = null;
