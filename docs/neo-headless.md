@@ -965,6 +965,8 @@ The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_O
 
 New entity-specific selector behavior should be implemented as a selector policy where possible, not as another hardcoded branch in `NeoSelectorService`.
 
+**Account selectors list posting accounts only (ETP-5681).** `PostingAccountCombinationSelectorPolicy` (entity-keyed, `FinancialMgmtAccountingCombination`) adds `e.account.summaryLevel = false and e.account.active = true` to every `C_ValidCombination` selector — the 186 account columns all share the one OBUISEL "Valid Combination Selector", so the target entity is the only common hook. A summary account is a heading that only adds up its children; Etendo does not reject one at posting time, so offering it let a heading be configured as, e.g., a default receivables account and be posted to silently. The two handlers that ship their own account catalog instead of using `/selectors` — `GeneralLedgerConfigurationHandler` (Esquema contable) and `FinancialAccountAccountingHandler` — apply the same rule through `schemaforge/util/PostingAccountCombinations.forSchema()`. `ElementValue` selectors are deliberately left alone (the chart of accounts "parent account" field must list headings). Scope: selector **lists** only, on every channel (REST and MCP); a write that sends a summary combination id directly is not rejected yet — ETP-5693.
+
 ### 4.5 Button Actions (Process Execution on Records)
 
 Button actions are fields whose AD_Column has `AD_Reference_ID = '28'` (Button type) with a linked process.

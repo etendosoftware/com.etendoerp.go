@@ -28,9 +28,11 @@ import org.junit.Test;
 /**
  * Wiring tests for {@link NeoSelectorPolicy}'s context-filter registry.
  *
- * <p>Guards that {@link FinancialAccountPaymentMethodSelectorPolicy} and
- * {@link CurrencyIsoAllowlistSelectorPolicy} are registered and dispatched for their respective
- * entities. Pure logic — no DB access.</p>
+ * <p>Guards that {@link FinancialAccountPaymentMethodSelectorPolicy},
+ * {@link CurrencyIsoAllowlistSelectorPolicy} and {@link PostingAccountCombinationSelectorPolicy}
+ * are registered and dispatched for their respective entities. Pure logic — no DB access.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy
  */
 public class NeoSelectorPolicyTest {
 
@@ -52,6 +54,16 @@ public class NeoSelectorPolicyTest {
     String filter = NeoSelectorPolicy.resolveContextParamFilter("Currency", new HashMap<>(), "c");
 
     assertTrue(filter.contains("c.iSOCode in ('EUR', 'USD', 'GBP')"));
+  }
+
+  @Test
+  public void registryDispatchesPostingAccountCombinationPolicy() {
+    // ETP-5681: every C_ValidCombination selector hides summary / inactive accounts.
+    String filter = NeoSelectorPolicy.resolveContextParamFilter(
+        "FinancialMgmtAccountingCombination", new HashMap<>(), "e");
+
+    assertTrue(filter, filter.contains("e.account.summaryLevel = false"));
+    assertTrue(filter, filter.contains("e.account.active = true"));
   }
 
   @Test
