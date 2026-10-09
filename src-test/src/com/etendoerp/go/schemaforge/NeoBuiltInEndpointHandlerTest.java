@@ -838,14 +838,14 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
 
-    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class);
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
              NeoAttachmentAuthorizer.class)) {
       handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
           "GET", request, response);
 
-      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownload("ATT123", response));
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT123", response));
       authorizerMock.verifyNoInteractions();
     }
   }
@@ -868,16 +868,21 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Verifies ZIP download delegation for attachments record endpoint.
+   * Verifies ZIP download delegation for attachments record endpoint: with no {@code ids}
+   * query parameter the route must still ask for the whole record, which it does by
+   * passing {@code null} through to the subset-aware overload (ETP-5526). Asserting the
+   * {@code null} explicitly is what keeps "no selection means everything" a pinned
+   * contract rather than an accident of argument order.
    */
   @Test
   public void handleAttachmentsZipGetDelegatesToDownloadAll() throws Exception {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(request.getPathInfo()).thenReturn("/attachments/c_order/100/zip");
+    when(request.getParameter("ids")).thenReturn((String) null);
 
-    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class);
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
              NeoAttachmentAuthorizer.class)) {
@@ -885,7 +890,35 @@ public class NeoBuiltInEndpointHandlerTest {
           "GET", request, response);
 
       assertTrue(handled);
-      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownloadAll("c_order", "100", response));
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownloadAll(
+          "c_order", "100", (String) null, response));
+    }
+  }
+
+  /**
+   * ETP-5526 — the other half of the same seam: when the Attachments tab's selection bar
+   * sends {@code ?ids=...}, the route hands the raw parameter to the helper verbatim. It
+   * must not parse, split, trim or validate it here — the ownership check that makes the
+   * subset safe lives in the helper, and a dispatcher that pre-digested the parameter
+   * could quietly bypass it.
+   */
+  @Test
+  public void handleAttachmentsZipGetPassesTheIdsParameterThrough() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    when(request.getPathInfo()).thenReturn("/attachments/c_order/100/zip");
+    when(request.getParameter("ids")).thenReturn("ATT-A,ATT-B");
+
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
+         MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
+             NeoAttachmentAuthorizer.class)) {
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("attachments", null, null),
+          "GET", request, response);
+
+      assertTrue(handled);
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownloadAll(
+          "c_order", "100", "ATT-A,ATT-B", response));
     }
   }
 
@@ -1012,8 +1045,8 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     when(request.getPathInfo()).thenReturn("/attachments/file/ATT123");
 
-    try (MockedStatic<NeoAttachmentsHelper> attachmentsMock = Mockito.mockStatic(
-        NeoAttachmentsHelper.class);
+    try (MockedStatic<NeoAttachmentsDownloader> downloaderMock = Mockito.mockStatic(
+        NeoAttachmentsDownloader.class);
          // ETP-5205 — the write-tier authorizer runs first; a static mock answers null (allowed).
          MockedStatic<NeoAttachmentAuthorizer> authorizerMock = Mockito.mockStatic(
              NeoAttachmentAuthorizer.class)) {
@@ -1021,7 +1054,7 @@ public class NeoBuiltInEndpointHandlerTest {
           "GET", request, response);
 
       assertTrue(handled);
-      attachmentsMock.verify(() -> NeoAttachmentsHelper.handleDownload("ATT123", response));
+      downloaderMock.verify(() -> NeoAttachmentsDownloader.handleDownload("ATT123", response));
     }
   }
 

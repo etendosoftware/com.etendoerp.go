@@ -53,6 +53,7 @@ import javax.servlet.http.Part;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
+import org.junit.BeforeClass;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.InOrder;
@@ -61,9 +62,11 @@ import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.attachment.AttachImplementation;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -74,16 +77,61 @@ import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * Unit tests for {@link NeoAttachmentsHelper}.
+ * Unit tests for the NEO attachments endpoint: {@link NeoAttachmentsHelper} and the
+ * streaming half ETP-5526 split out of it, {@link NeoAttachmentsDownloader}.
  *
  * <p>Covers the deterministic helpers (file-name sanitization, content-disposition
  * formatting, date formatting, temp-file cleanup) and the endpoint handlers. The
  * handlers run without a live DAL/CDI container: {@code OBDal}, {@code ModelProvider},
  * {@code OBContext} and {@code WeldUtils} are replaced with Mockito static mocks.</p>
  *
+ * <p>Both classes are exercised from here rather than from a second test class because
+ * they serve one endpoint and share every fixture below (the attachment stubs, the
+ * table/main-attachment query stubs, the response sinks). {@code invokePrivateStatic}
+ * targets the helper and {@code invokePrivateStaticOnDownloader} the downloader.</p>
+ *
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsHelper
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentsDownloader
  */
 public class NeoAttachmentsHelperTest {
+
+  /**
+   * Initializes {@link AttachImplementationManager} before any test can mock it, with the
+   * one call its static initializer makes off the DB answered by a stub.
+   *
+   * <p>That class computes a static field from
+   * {@code ModelProvider.getInstance().getEntity(Attachment.class)}, so its {@code <clinit>}
+   * reads the model — and the model is loaded from the database, through a
+   * {@code ConnectionProviderImpl} built out of {@code OBPropertiesProvider}. Mockito's
+   * inline mock maker forces that {@code <clinit>} the first time anything in the JVM calls
+   * {@code mock(AttachImplementationManager.class)}, so the first such test decides whether
+   * the class initializes at all: once a static initializer has thrown, the JVM marks the
+   * class erroneous and every later mock of it dies with {@code NoClassDefFoundError}
+   * without the test ever running.</p>
+   *
+   * <p>That is what ETP-5526 hit. {@link #computeFileSizeReturnsExistingFileLength} stubs
+   * {@code OBPropertiesProvider} with a {@link Properties} holding only {@code attach.path},
+   * and now also builds the manager mock inside that scope; whenever JUnit happened to run it
+   * first, {@code ConnectionProviderImpl} read a null {@code bbdd.rdbms} from the stub and the
+   * {@code <clinit>} died, taking 17 untouched tests with it. Which test runs first is not
+   * something a test may depend on, and neither is a reachable database, so the initialization
+   * is pinned here instead: under a stubbed {@code ModelProvider} it needs neither.</p>
+   */
+  @BeforeClass
+  public static void initializeAttachImplementationManager() throws Exception {
+    Property dataType = mock(Property.class);
+    when(dataType.getFieldLength()).thenReturn(60);
+    Entity attachmentEntity = mock(Entity.class);
+    when(attachmentEntity.getProperty(Attachment.PROPERTY_DATATYPE)).thenReturn(dataType);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(Attachment.class)).thenReturn(attachmentEntity);
+
+    try (MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class)) {
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      Class.forName(AttachImplementationManager.class.getName(), true,
+          AttachImplementationManager.class.getClassLoader());
+    }
+  }
 
   @After
   public void clearCacheAfterEachTest() {
@@ -140,12 +188,62 @@ public class NeoAttachmentsHelperTest {
     return mainQuery;
   }
 
+  /**
+   * Wires {@code response.getOutputStream()} to this test's {@link #captured} sink so the
+   * zip bytes a handler streams can be read back and inspected.
+   *
+   * @param response the mocked response to wire
+   * @throws Exception when the mock cannot be stubbed
+   */
+  private void stubOutputStream(HttpServletResponse response) throws Exception {
+    final java.io.ByteArrayOutputStream sink = captured;
+    javax.servlet.ServletOutputStream out = new javax.servlet.ServletOutputStream() {
+      @Override public boolean isReady() { return true; }
+      @Override public void setWriteListener(javax.servlet.WriteListener l) {
+        // Sync-only test double: these tests never use the async servlet API.
+      }
+      @Override public void write(int b) { sink.write(b); }
+    };
+    when(response.getOutputStream()).thenReturn(out);
+  }
+
+  /**
+   * Reads back every entry name of the zip this test's {@link #captured} sink holds.
+   *
+   * @return the entry names, in no particular order
+   * @throws Exception when the captured bytes are not a readable zip
+   */
+  private java.util.Set<String> capturedZipEntryNames() throws Exception {
+    java.util.Set<String> names = new java.util.HashSet<>();
+    try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(captured.toByteArray()))) {
+      java.util.zip.ZipEntry entry;
+      while ((entry = zip.getNextEntry()) != null) {
+        names.add(entry.getName());
+      }
+    }
+    return names;
+  }
+
   private static String errorMessage(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("error").getString("message");
   }
 
   private static Object invokePrivateStatic(String methodName, Class<?>[] paramTypes, Object... args) throws Exception {
-    Method method = NeoAttachmentsHelper.class.getDeclaredMethod(methodName, paramTypes);
+    return invokePrivateStaticOn(NeoAttachmentsHelper.class, methodName, paramTypes, args);
+  }
+
+  /**
+   * Same as {@link #invokePrivateStatic} for the streaming half of the endpoint, which
+   * ETP-5526 split out into {@link NeoAttachmentsDownloader}.
+   */
+  private static Object invokePrivateStaticOnDownloader(String methodName, Class<?>[] paramTypes,
+      Object... args) throws Exception {
+    return invokePrivateStaticOn(NeoAttachmentsDownloader.class, methodName, paramTypes, args);
+  }
+
+  private static Object invokePrivateStaticOn(Class<?> owner, String methodName,
+      Class<?>[] paramTypes, Object... args) throws Exception {
+    Method method = owner.getDeclaredMethod(methodName, paramTypes);
     method.setAccessible(true);
     return method.invoke(null, args);
   }
@@ -174,9 +272,9 @@ public class NeoAttachmentsHelperTest {
    */
   @Test
   public void resolveContentTypeReturnsDefaultForBlankValues() throws Exception {
-    String fromNull = (String) invokePrivateStatic("resolveContentType", new Class<?>[]{ String.class }, (Object) null);
-    String fromBlank = (String) invokePrivateStatic("resolveContentType", new Class<?>[]{ String.class }, "   ");
-    String fromValue = (String) invokePrivateStatic("resolveContentType", new Class<?>[]{ String.class }, "text/plain");
+    String fromNull = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, (Object) null);
+    String fromBlank = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "   ");
+    String fromValue = (String) invokePrivateStaticOnDownloader("resolveContentType", new Class<?>[]{ String.class }, "text/plain");
 
     assertEquals("application/octet-stream", fromNull);
     assertEquals("application/octet-stream", fromBlank);
@@ -188,7 +286,7 @@ public class NeoAttachmentsHelperTest {
    */
   @Test
   public void buildContentDispositionIncludesAsciiAndUtf8Filename() throws Exception {
-    String disposition = (String) invokePrivateStatic("buildContentDisposition", new Class<?>[]{ String.class },
+    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
         "invoice 2026.pdf");
 
     assertTrue(disposition.contains("filename=\"invoice 2026.pdf\""));
@@ -200,7 +298,7 @@ public class NeoAttachmentsHelperTest {
    */
   @Test
   public void buildContentDispositionReplacesQuotesInFilename() throws Exception {
-    String disposition = (String) invokePrivateStatic("buildContentDisposition", new Class<?>[]{ String.class },
+    String disposition = (String) invokePrivateStaticOnDownloader("buildContentDisposition", new Class<?>[]{ String.class },
         "in\"voice\".pdf");
 
     assertTrue(disposition.contains("filename=\"in_voice_.pdf\""));
@@ -563,7 +661,7 @@ public class NeoAttachmentsHelperTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     StringWriter sink = stubWriter(response);
 
-    NeoAttachmentsHelper.handleDownload(" ", response);
+    NeoAttachmentsDownloader.handleDownload(" ", response);
 
     verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
     assertTrue(sink.toString().contains("attachmentId is required"));
@@ -582,7 +680,7 @@ public class NeoAttachmentsHelperTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      NeoAttachmentsHelper.handleDownload("ATT1", response);
+      NeoAttachmentsDownloader.handleDownload("ATT1", response);
 
       verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
       assertTrue(sink.toString().contains("Attachment not found"));
@@ -598,7 +696,7 @@ public class NeoAttachmentsHelperTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     StringWriter sink = stubWriter(response);
 
-    NeoAttachmentsHelper.handleDownloadAll("", " ", response);
+    NeoAttachmentsDownloader.handleDownloadAll("", " ", response);
 
     verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
     assertTrue(sink.toString().contains("tableName and recordId are required"));
@@ -615,15 +713,7 @@ public class NeoAttachmentsHelperTest {
   @SuppressWarnings("unchecked")
   public void handleDownloadAllIncludesAttachmentMarkedAsMain() throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
-    when(response.getOutputStream()).thenReturn(
-        new javax.servlet.ServletOutputStream() {
-          private final java.io.ByteArrayOutputStream sink = captured;
-          @Override public boolean isReady() { return true; }
-          @Override public void setWriteListener(javax.servlet.WriteListener l) {
-            // Sync-only test double: this test never uses the async servlet API.
-          }
-          @Override public void write(int b) { sink.write(b); }
-        });
+    stubOutputStream(response);
     OBDal dal = mock(OBDal.class);
     stubTableAndMainLookup(dal, "TABLE1", "ATT-MAIN");
 
@@ -641,27 +731,110 @@ public class NeoAttachmentsHelperTest {
       weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
           .thenReturn(aim);
 
-      NeoAttachmentsHelper.handleDownloadAll("C_Order", "REC1", response);
+      NeoAttachmentsDownloader.handleDownloadAll("C_Order", "REC1", response);
 
-      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-OTHER"), any());
-      verify(aim, times(1)).download(org.mockito.ArgumentMatchers.eq("ATT-MAIN"), any());
+      verify(aim, times(1)).download(eq("ATT-OTHER"), any());
+      verify(aim, times(1)).download(eq("ATT-MAIN"), any());
       verify(response).setStatus(HttpServletResponse.SC_OK);
 
-      java.util.Set<String> zippedNames = new java.util.HashSet<>();
-      try (ZipInputStream zip = new ZipInputStream(
-          new java.io.ByteArrayInputStream(captured.toByteArray()))) {
-        java.util.zip.ZipEntry entry;
-        while ((entry = zip.getNextEntry()) != null) {
-          zippedNames.add(entry.getName());
-        }
-      }
       assertEquals(
           new java.util.HashSet<>(Arrays.asList("supplier-invoice.pdf", "note.pdf")),
-          zippedNames);
+          capturedZipEntryNames());
     }
   }
 
   private final java.io.ByteArrayOutputStream captured = new java.io.ByteArrayOutputStream();
+
+  /**
+   * ETP-5526 — the zip endpoint accepts an optional {@code ids} subset so the
+   * Attachments tab's selection bar can download only the ticked rows. Verifies the
+   * happy path: exactly the requested attachment is fetched and zipped, and the one
+   * that was not asked for is never even read from storage.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleDownloadAllWithIdsZipsOnlyTheRequestedSubset() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    stubOutputStream(response);
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1");
+
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    Attachment wanted = stubAttachment("ATT-B", "delivery-note.pdf");
+    Attachment other = stubAttachment("ATT-A", "purchase-order.pdf");
+    when(criteria.list()).thenReturn(Arrays.asList(other, wanted));
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoAttachmentsDownloader.handleDownloadAll("C_Order", "REC1", "ATT-B", response);
+
+      verify(aim, times(1)).download(eq("ATT-B"), any());
+      verify(aim, never()).download(eq("ATT-A"), any());
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertEquals(Collections.singleton("delivery-note.pdf"), capturedZipEntryNames());
+    }
+  }
+
+  /**
+   * ETP-5526 — the authorization half of the same feature: an id the caller supplied is
+   * only served when it actually belongs to the record in the URL. A foreign (or
+   * non-existent) id answers 404 and NOTHING is streamed — no partial archive, no
+   * single-file leak. Without this the endpoint would read any attachment in the
+   * instance from any record's URL.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handleDownloadAllRejectsAnIdThatDoesNotBelongToTheRecord() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+    OBDal dal = mock(OBDal.class);
+    stubTableAndMainLookup(dal, "TABLE1");
+
+    OBCriteria<Attachment> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Attachment.class)).thenReturn(criteria);
+    Attachment own = stubAttachment("ATT-A", "purchase-order.pdf");
+    when(criteria.list()).thenReturn(Collections.singletonList(own));
+
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+          .thenReturn(aim);
+
+      NeoAttachmentsDownloader.handleDownloadAll("C_Order", "REC1", "ATT-A,ATT-SOMEONE-ELSE", response);
+
+      verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+      assertTrue(sink.toString().contains("Attachment not found"));
+      // Not even the legitimately-owned id is served: the request is refused whole.
+      verify(aim, never()).download(anyString(), any());
+      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    }
+  }
+
+  /**
+   * ETP-5526 — supplying {@code ids} with nothing usable in it is a client bug, so it
+   * answers 400 rather than falling back to "every attachment of the record": silently
+   * zipping everything would turn an empty selection into a surprise bulk download.
+   */
+  @Test
+  public void handleDownloadAllRejectsAnEmptyIdsParameter() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter sink = stubWriter(response);
+
+    NeoAttachmentsDownloader.handleDownloadAll("C_Order", "REC1", " , ", response);
+
+    verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+    assertTrue(sink.toString().contains("ids must name at least one attachment"));
+  }
 
 
   /**
@@ -1579,15 +1752,32 @@ public class NeoAttachmentsHelperTest {
   }
 
   /**
-   * Verifies file-size resolution when payload exists on disk.
+   * ETP-5526 (CP-16) — a real file's length is reported, and it is the length of the file
+   * the ATTACH IMPLEMENTATION hands back. This is the same guarantee this test has always
+   * asserted, re-expressed against the mechanism that now produces it: the size no longer
+   * comes from {@code attach.path} + {@code c_file.path}, because that column is
+   * {@code NULL} for every attachment stored the old way and made every size read 0.
+   *
+   * <p>Both mechanisms are wired up and pointed at DIFFERENT real files, so the test
+   * cannot pass by accident: {@code c_file.path} resolves to an existing 5-byte file
+   * under a configured {@code attach.path} root, while the implementation serves an
+   * existing 11-byte file. Only 11 is correct — reinstating the path-based computation
+   * would report 5 and fail here instead of silently regressing.</p>
+   *
+   * <p>Distinct from {@link #computeFileSizeUsesAttachImplementationWhenPathIsNull},
+   * which covers the row that has NO path at all; this one covers the row that HAS one
+   * and must ignore it.</p>
    */
   @Test
   public void computeFileSizeReturnsExistingFileLength() throws Exception {
     File root = Files.createTempDirectory("neo-attach-root").toFile();
     File subdir = new File(root, "sub");
-    File file = new File(subdir, "payload.bin");
+    File pathDecoy = new File(subdir, "payload.bin");
     subdir.mkdirs();
-    Files.write(file.toPath(), "12345".getBytes(StandardCharsets.UTF_8));
+    Files.write(pathDecoy.toPath(), "12345".getBytes(StandardCharsets.UTF_8));
+
+    File served = File.createTempFile("neo-attachment-served", ".bin");
+    Files.write(served.toPath(), "hello world".getBytes(StandardCharsets.UTF_8));
 
     Attachment attachment = mock(Attachment.class);
     when(attachment.getPath()).thenReturn("sub");
@@ -1598,13 +1788,21 @@ public class NeoAttachmentsHelperTest {
     properties.setProperty("attach.path", root.getAbsolutePath());
     when(provider.getOpenbravoProperties()).thenReturn(properties);
 
-    try (MockedStatic<OBPropertiesProvider> propsMock = Mockito.mockStatic(OBPropertiesProvider.class)) {
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(served);
+    when(handler.isTempFile()).thenReturn(false);
+
+    try (MockedStatic<OBPropertiesProvider> propsMock = Mockito.mockStatic(OBPropertiesProvider.class);
+        MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
       propsMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+      stubAttachManager(weldMock, handler);
 
       long size = (Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class }, attachment);
-      assertEquals(5L, size);
+      assertEquals("must be the implementation's file, not the one c_file.path points at",
+          11L, size);
     } finally {
-      file.delete();
+      served.delete();
+      pathDecoy.delete();
       subdir.delete();
       root.delete();
     }
@@ -1637,12 +1835,125 @@ public class NeoAttachmentsHelperTest {
     HttpServletResponse response = mock(HttpServletResponse.class);
     StringWriter sink = stubWriter(response);
 
-    invokePrivateStatic("writeError", new Class<?>[]{ HttpServletResponse.class, int.class, String.class },
+    invokePrivateStaticOnDownloader("writeError", new Class<?>[]{ HttpServletResponse.class, int.class, String.class },
         response, 422, "unprocessable");
 
     verify(response).setStatus(422);
     verify(response).setContentType("application/json");
     verify(response).setCharacterEncoding(StandardCharsets.UTF_8.name());
     assertTrue(sink.toString().contains("unprocessable"));
+  }
+
+  /**
+   * Stubs {@link WeldUtils} so {@code NeoAttachmentsHelper.getAttachManager()}
+   * resolves to a manager handing back {@code handler} for any attach method.
+   */
+  private static void stubAttachManager(MockedStatic<WeldUtils> weldMock,
+      AttachImplementation handler) {
+    AttachImplementationManager aim = mock(AttachImplementationManager.class);
+    when(aim.getHandler(anyString())).thenReturn(handler);
+    weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(AttachImplementationManager.class))
+        .thenReturn(aim);
+  }
+
+  /**
+   * ETP-5526 (CP-16) — the size column rendered "0 B" for every attachment in
+   * every window because the size was computed from {@code c_file.path}, which
+   * is {@code NULL} for attachments stored the "old way". The size must now come
+   * from the attach implementation, exactly like the download does, so a
+   * {@code null} path no longer zeroes it.
+   */
+  @Test
+  public void computeFileSizeUsesAttachImplementationWhenPathIsNull() throws Exception {
+    File payload = File.createTempFile("neo-attachment-size", ".bin");
+    Files.write(payload.toPath(), new byte[2048]);
+
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(payload);
+    when(handler.isTempFile()).thenReturn(false);
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(2048L, size);
+      // The payload is the backend's own file, not a temp copy: it must survive.
+      assertTrue(payload.exists());
+    } finally {
+      payload.delete();
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-16) — backends that materialize a temporary copy must not leak
+   * one file per listed attachment: the copy is removed once its length is read.
+   */
+  @Test
+  public void computeFileSizeRemovesTemporaryCopyFromTempFileBackends() throws Exception {
+    File payload = File.createTempFile("neo-attachment-size-temp", ".bin");
+    Files.write(payload.toPath(), new byte[16]);
+
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(payload);
+    when(handler.isTempFile()).thenReturn(true);
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(16L, size);
+      assertFalse(payload.exists());
+    } finally {
+      payload.delete();
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-16) — {@code computeFileSize} runs inside the list response, so
+   * a backend failure must degrade to 0 instead of breaking the whole listing.
+   */
+  @Test
+  public void computeFileSizeReturnsZeroWhenBackendFails() throws Exception {
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenThrow(new OBException("backend down"));
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(0L, size);
+    }
+  }
+
+  /**
+   * ETP-5526 (CP-16) — a missing file on disk still yields 0, as before.
+   */
+  @Test
+  public void computeFileSizeReturnsZeroWhenFileDoesNotExist() throws Exception {
+    File missing = new File(System.getProperty("java.io.tmpdir"),
+        "neo-attachment-size-missing-" + System.nanoTime() + ".bin");
+
+    Attachment attachment = stubAttachment("ATT1", "invoice.pdf");
+    AttachImplementation handler = mock(AttachImplementation.class);
+    when(handler.downloadFile(attachment)).thenReturn(missing);
+    when(handler.isTempFile()).thenReturn(false);
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      stubAttachManager(weldMock, handler);
+
+      long size = ((Long) invokePrivateStatic("computeFileSize", new Class<?>[]{ Attachment.class },
+          attachment)).longValue();
+
+      assertEquals(0L, size);
+    }
   }
 }

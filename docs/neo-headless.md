@@ -1102,8 +1102,10 @@ Errors from either type return HTTP 400 with `"status": "error"`.
 
 A built-in endpoint over Etendo's real `Attachment`/`C_File` table, backing both the generic
 "Adjuntos" tab and, via the "main document" marker below, the sidebar/preview panel of every
-document window. Implemented in `NeoAttachmentsHelper.java`, routed from
-`NeoBuiltInEndpointHandler.java`.
+document window. Implemented in `NeoAttachmentsHelper.java` — plus
+`NeoAttachmentsDownloader.java` for the two shapes that stream binary content (the
+single-file download and the zip, which write the response body themselves instead of
+returning a `NeoResponse`) — and routed from `NeoBuiltInEndpointHandler.java`.
 
 **Base path:** `/sws/neo/attachments`
 
@@ -1161,6 +1163,13 @@ Authorization: Bearer {token}
 `{tableName}` is the AD_Table physical name (case-insensitive, e.g. `C_Invoice`, `C_Order`,
 `M_InOut`). Returns `200 { "items": [...] }`, one entry per attachment
 (`id`, `name`, `size`, `dataType`, `description`, `uploadedAt`, `updatedAt`, `uploadedBy`).
+
+`size` is the byte length reported by the attach implementation configured for the row
+(`AttachImplementation.downloadFile`), i.e. the same file the download endpoint serves — never a
+path rebuilt from `c_file.path`, which is `NULL` for attachments stored the "old way" and made
+every size read as 0 (ETP-5526). Any backend failure degrades to `0` rather than breaking the
+listing.
+
 Includes whichever attachment is currently marked as the record's "main" document (see below) —
 since ETP-4855 a file attached from the preview must also be visible in the Attachments tab.
 Returns `400` if `tableName` or `recordId` is missing, `404` if `tableName` does not resolve to a
@@ -1276,15 +1285,44 @@ Streams the file body directly (not wrapped in JSON) with `Content-Type` from th
 `dataType` and an RFC 5987 `Content-Disposition: attachment` header. Returns `404` if the
 attachment does not exist.
 
-#### GET — Download all attachments as a zip
+#### GET — Download attachments as a zip
 
 ```
-GET /sws/neo/attachments/{tableName}/{recordId}?zip=true
+GET /sws/neo/attachments/{tableName}/{recordId}/zip
+GET /sws/neo/attachments/{tableName}/{recordId}/zip?ids={id1},{id2},...
 Authorization: Bearer {token}
 ```
 
-Streams a zip of every attachment for the record, including whichever one is marked as main — same
-set as the list above.
+Streams a zip named `attachments_{recordId}.zip`.
+
+Without `ids`, it contains every attachment of the record, including whichever one is marked as
+main — the same set as the list above. (Earlier revisions of this page documented the route as
+`?zip=true`; the sub-resource has always been `/zip`.)
+
+**`ids` — zip a subset (ETP-5526).** Optional, comma-separated. The Attachments tab's
+selection bar sends it so that "download" acts on the ticked rows instead of the whole record.
+It is a query parameter on the existing GET rather than a new verb or body, matching how the
+sibling record endpoints already take optional arguments (`?markAsMain=`, `?tabId=`), and keeping
+the zip a plain cacheable read.
+
+| Request | Answer |
+|---|---|
+| no `ids` | every attachment of the record (unchanged — existing callers are unaffected) |
+| `ids` naming attachments of this record | a zip with exactly those, in list order |
+| `ids` naming an attachment of ANOTHER record, or no attachment at all | `404 Attachment not found`, **nothing streamed** |
+| `ids` present but empty (`?ids=` / `?ids=+,+`) | `400 ids must name at least one attachment` |
+
+**Authorization.** The candidate set is always the record's own attachments, resolved with exactly
+the criteria `handleList` uses; a requested id is served only if it is found there. One foreign id
+fails the whole request — no partial archive is produced — and the "foreign" and "non-existent"
+cases answer the same 404 on purpose, so the endpoint cannot be used to probe for attachments the
+caller is not entitled to. Note this is *stricter* than the single-file
+`GET /attachments/file/{attachmentId}`, which resolves by id alone because its URL carries no
+record to validate against; here the record is in the URL, so the relation is checkable and is
+checked.
+
+An empty `ids` is deliberately NOT treated as "everything": a client that computed an empty
+selection would otherwise trigger a surprise whole-record download instead of surfacing its bug.
 
 #### DELETE — Remove an attachment
 
