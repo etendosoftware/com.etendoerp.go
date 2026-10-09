@@ -241,6 +241,18 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
+   * The header fields this window can still change once the invoice is completed (ETP-5692) — the
+   * one extension point of the invoice write guards ({@link InvoicePostingGate#checkHeaderRequest}).
+   * The sales default; {@link PurchaseInvoiceHeaderHandler} adds {@code orderReference}. Both sets
+   * are declared once, in {@link CompletedInvoiceWriteFence}.
+   *
+   * @return the allowlist the completed-invoice write fence applies to this header
+   */
+  protected Set<String> completedEditableHeaderFields() {
+    return CompletedInvoiceWriteFence.headerEditableWhenCompleted();
+  }
+
+  /**
    * Rejects PUT requests that attempt to change the document type after the invoice has been saved
    * (i.e., after a documentNo has been assigned).
    *

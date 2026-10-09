@@ -183,8 +183,10 @@ final class McpActionsView {
    * view, found {@code aPRMProcessPayment} still offering Void, and offered it to its user. A
    * hidden or excluded button is left out, a redirected one is withdrawn with {@code useInstead},
    * a narrowed one keeps only its allowed {@code actionValues}, and an unusable configuration
-   * withdraws every button. A button is matched by its field name and by its DB column, the two
-   * names {@code etendo_action} fires it by.</p>
+   * withdraws every button. A hidden or excluded button curated {@code readOnly} — a value the
+   * window displays, such as {@code posted} — is kept as a plain read-only value instead of being
+   * left out (ETP-5692, {@link #isDisplayedValue}). A button is matched by its field name and by
+   * its DB column, the two names {@code etendo_action} fires it by.</p>
    *
    * @param fields   the full schema field array; its kept buttons are shaped in place
    * @param config   the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
@@ -205,9 +207,48 @@ final class McpActionsView {
         shaped.put(field);
       } else if (shapeButton(field, config, keptForPeople)) {
         shaped.put(field);
+      } else if (isDisplayedValue(field)) {
+        shaped.put(asReadOnlyValue(field));
       }
     }
     return shaped;
+  }
+
+  /**
+   * Button decoration a withheld button loses when it is kept as a plain value (ETP-5692): every
+   * key {@code McpSchemaFieldBuilder#addButtonInfo} and this class add to say "this is an action".
+   */
+  private static final List<String> BUTTON_KEYS = List.of("triggerValue", "action",
+      McpConstants.KEY_ACTION_VALUES, McpConstants.KEY_ACTION_PARAMETER, "processType",
+      "processName", "processId", McpSchemaFieldBuilder.KEY_INVOKE_VIA,
+      McpSchemaFieldBuilder.KEY_INVOKABLE, McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON,
+      "useInstead");
+
+  /**
+   * Whether a button the configuration withholds is ALSO a value the window displays: its curated
+   * visibility is {@code readOnly} (ETP-5692). An AD button column stores a value — {@code Posted}
+   * holds the posting state the window shows as a read-only field — and withholding the action
+   * used to drop that value from {@code view:"full"} and {@code fields:[...]} with it, so an agent
+   * told to "read posted" got {@code unknownFields:["posted"]}. Structural: it reads the curation,
+   * never the entity or the column name.
+   */
+  private static boolean isDisplayedValue(JSONObject button) {
+    return McpSchemaFieldBuilder.VISIBILITY_READ_ONLY
+        .equals(button.optString(McpSchemaFieldBuilder.KEY_VISIBILITY, null));
+  }
+
+  /**
+   * The withheld button as a read-only value: no action decoration and no {@code button} type, so
+   * the actions view — which lists {@code type:"button"} fields — still leaves it out, and nothing
+   * in it says it can be run.
+   */
+  private static JSONObject asReadOnlyValue(JSONObject button) throws JSONException {
+    for (String key : BUTTON_KEYS) {
+      button.remove(key);
+    }
+    button.put("type", "string");
+    button.put(McpSchemaFieldBuilder.KEY_READ_ONLY, true);
+    return button;
   }
 
   /**
@@ -292,7 +333,7 @@ final class McpActionsView {
     for (String name : names) {
       String instead = config.redirectOf(name);
       if (instead != null) {
-        redirect(button, instead, config.getRedirectReason());
+        redirect(button, instead, config.redirectReasonOf(name));
         break;
       }
     }

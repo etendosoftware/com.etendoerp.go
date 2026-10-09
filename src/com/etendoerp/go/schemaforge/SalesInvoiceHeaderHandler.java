@@ -107,8 +107,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
-   * invoice payment actions, {@code currencyOptions} and the follow-up document actions
-   * ({@link FollowUpSupport#actionContracts()}, ETP-5576). Published by the MCP next to the AD
+   * invoice payment actions, {@code currencyOptions}, the follow-up document actions
+   * ({@link FollowUpSupport#actionContracts()}, ETP-5576) and {@code post} / {@code unpost}
+   * (ETP-5692). Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
   @Override
@@ -117,6 +118,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(true));
     contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
     contracts.putAll(followUp.actionContracts());
+    // ETP-5692: post / unpost were served (DocumentPostingService) but undeclared, so an agent
+    // had to guess them; the raw `posted` AD button is hidden by MCP_CONFIG in their favour.
+    contracts.putAll(InvoicePostingGate.CONTRACTS);
     return contracts;
   }
 
@@ -132,6 +136,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
+    }
+    // ETP-5692: completed-invoice write fence + unpost status gate, before anything is captured.
+    NeoResponse invoiceGuard =
+        InvoicePostingGate.checkHeaderRequest(context, completedEditableHeaderFields());
+    if (invoiceGuard != null) {
+      return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);

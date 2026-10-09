@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -340,7 +342,10 @@ public class DocumentPostingService {
       boolean posted = acct.post(recordId, false, vars, conn, con);
       if (!posted || acct.errors != 0) {
         conn.releaseRollbackConnection(con);
-        return failureOf(acct);
+        PostResult notPostable = AcctServer.STATUS_DocumentLocked.equals(acct.getStatus())
+            ? notPostableFailure(acct.tableName, recordId, conn)
+            : null;
+        return notPostable != null ? notPostable : failureOf(acct);
       }
       conn.releaseCommitConnection(con);
       return new PostResult(true, "Document posted");
@@ -555,6 +560,101 @@ public class DocumentPostingService {
    * renders it in its own locale.
    */
   private static final String MSG_OTHER_POSTING_PROCESS_ACTIVE = "OtherPostingProcessActive";
+
+  /**
+   * Stable identity sent as the failure's {@code messageKeys} when {@code AcctServer} refused a
+   * document that is not processed yet (a draft) — ETP-5692. A plain string, deliberately NOT an
+   * AD_MESSAGE record: the text is plain English ({@link #TEXT_DOCUMENT_NOT_PROCESSED}), like this
+   * service's own "Document posted" / "Unposted (N entries removed)". No core message says exactly
+   * this for every table (core's {@code *CreateDocNotCompleted} are about generating documents).
+   */
+  static final String MSG_DOCUMENT_NOT_PROCESSED = "ETGO_PostingDocumentNotProcessed";
+
+  /**
+   * {@code AD_MESSAGE.VALUE} core resolves to "Document already Posted." ({@code AD_MESSAGE_ID =
+   * 800116} in core's {@code AD_MESSAGE.xml}, translated by the language packs) — reused for a
+   * post of a document whose {@code Posted} is already {@code 'Y'} (ETP-5692).
+   */
+  static final String MSG_DOCUMENT_ALREADY_POSTED = "PostedDocument";
+
+  /** The not-processed text, and the English fallback of {@link #MSG_DOCUMENT_ALREADY_POSTED}. */
+  private static final String TEXT_DOCUMENT_NOT_PROCESSED =
+      "Only processed (completed) documents can be posted. Complete the document first.";
+  private static final String TEXT_DOCUMENT_ALREADY_POSTED = "Document already Posted.";
+
+  /**
+   * The real reason behind a {@code STATUS_DocumentLocked} failure, or {@code null} to keep
+   * {@link #failureOf}'s {@code OtherPostingProcessActive} (ETP-5692).
+   *
+   * <p><b>Why.</b> {@code AcctServer.post} takes its lock with
+   * {@code UPDATE <table> SET Processing='Y' WHERE <table>_ID=? AND Processed='Y'
+   * AND (Processing='N' OR Processing IS NULL) AND Posted<>'Y'}
+   * ({@code AcctServer_data.xsql}, method {@code update}) and maps every "0 rows updated" to
+   * {@code STATUS_DocumentLocked} — "This record is being posted by another process". So a post
+   * of a <em>draft</em> (Processed='N') and a post of an <em>already posted</em> document were
+   * both reported as a concurrency lock, which is false and gives the caller nothing to act on
+   * (live QA: a draft invoice answered "being posted by another process" with Processing='N').
+   * This re-reads the two columns of that very statement and names the condition that failed.</p>
+   *
+   * <p><b>Structural, not identity.</b> {@code Processed} and {@code Posted} are the columns
+   * {@code AcctServer} itself requires on every table it posts, and {@code tableName} is the one
+   * {@code AcctServer.get} resolved — no table is named here, so the answer is correct for every
+   * document this service posts.</p>
+   *
+   * <p>Fails open: an unknown table, a missing row or a failed read keeps the existing
+   * lock message.</p>
+   *
+   * <p>The connection from {@code conn.getConnection()} is borrowed — with
+   * {@code DalConnectionProvider} it is the shared DAL session connection — so it is never closed
+   * here (only the statement and result set are); a pooled provider would need different
+   * handling.</p>
+   *
+   * @param tableName {@code AcctServer.tableName} of the failed post; {@code null} skips the check
+   * @param recordId  the document id
+   * @param conn      the provider whose (non-transaction) connection reads the row
+   * @return the precise failure, or {@code null} when the lock really is the cause or the state
+   *     cannot be read
+   */
+  // tableName comes from AcctServer's own table registry (never from the request) and is the same
+  // identifier AcctServerData.update interpolates; the id is bound.
+  @SuppressWarnings("java:S2077")
+  private static PostResult notPostableFailure(String tableName, String recordId,
+      ConnectionProvider conn) {
+    if (StringUtils.isBlank(tableName) || !tableName.matches("\\w+") || conn == null) {
+      return null;
+    }
+    String sql = "SELECT Processed, Posted FROM " + tableName + " WHERE " + tableName + "_ID = ?";
+    try {
+      Connection connection = conn.getConnection();
+      try (PreparedStatement ps = connection.prepareStatement(sql)) {
+        ps.setString(1, recordId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (!rs.next()) {
+            return null;
+          }
+          if (!"Y".equals(rs.getString(1))) {
+            return new PostResult(false, TEXT_DOCUMENT_NOT_PROCESSED,
+                List.of(MSG_DOCUMENT_NOT_PROCESSED));
+          }
+          if ("Y".equals(rs.getString(2))) {
+            return localizedFailure(MSG_DOCUMENT_ALREADY_POSTED, TEXT_DOCUMENT_ALREADY_POSTED);
+          }
+          return null;
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not read the posting state of {} {}; keeping the lock message", tableName,
+          recordId, e);
+      return null;
+    }
+  }
+
+  /** A keyed failure whose text is {@code messageKey} in the GO locale, else {@code fallback}. */
+  private static PostResult localizedFailure(String messageKey, String fallback) {
+    String text = localizedMessage(messageKey);
+    return new PostResult(false, StringUtils.isNotBlank(text) ? text : fallback,
+        List.of(messageKey));
+  }
 
   /**
    * {@code OBMessageUtils.messageBD(key)} in the {@link OBContext} (GO) language, or {@code null}
