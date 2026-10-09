@@ -662,6 +662,61 @@ public class McpServletTest {
     assertFalse(result.has("_meta"));
   }
 
+  /**
+   * Read a resource the provider refuses as {@code OBSecurityException} (unknown or inaccessible
+   * spec), through the real servlet path, with the request already set up by the caller.
+   */
+  private JSONObject readRefusedResource() throws Exception {
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedConstruction<McpResourceProvider> providerMock = mockConstruction(
+             McpResourceProvider.class, (provider, ctx) -> when(provider.readResource(anyString()))
+                 .thenThrow(new org.openbravo.base.exception.OBSecurityException(
+                     "Access denied to spec 'secret'")))) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenAnswer(inv -> ((Callable<?>) inv.getArgument(5)).call());
+
+      try (LogCapture logs = LogCapture.of(McpServlet.class)) {
+        servlet.doPost(request, response);
+        assertTrue("a missing resource is no server failure: " + logs.messages(Level.ERROR),
+            logs.messages(Level.ERROR).isEmpty());
+        assertEquals(1, logs.messages(Level.WARN).size());
+        assertNull(logs.events(Level.WARN).get(0).getThrown());
+      }
+    }
+    return new JSONObject(getResponseBody()).getJSONObject("error");
+  }
+
+  @Test
+  public void modernMissingResourceIsInvalidParams() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "etendo:read");
+    setModernHeaders(MODERN, "resources/read", "etendo://specs/secret");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 43)
+        .put("method", "resources/read")
+        .put("params", new JSONObject().put("uri", "etendo://specs/secret")
+            .put("_meta", modernMeta(MODERN))).toString());
+
+    JSONObject error = readRefusedResource();
+
+    assertEquals(McpRequestEra.INVALID_PARAMS, error.getInt("code"));
+    assertEquals("Resource not found: etendo://specs/secret", error.getString("message"));
+  }
+
+  @Test
+  public void legacyMissingResourceKeepsItsCodeWithoutAStackTrace() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "etendo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 44)
+        .put("method", "resources/read")
+        .put("params", new JSONObject().put("uri", "etendo://specs/secret")).toString());
+
+    JSONObject error = readRefusedResource();
+
+    assertEquals(McpServlet.JSON_RPC_INTERNAL_ERROR, error.getInt("code"));
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+  }
+
   @Test
   public void decorateModernMarksEveryResultButCachesOnlyTheCatalog() throws Exception {
     JSONObject call = McpServlet.decorateModern("tools/call",

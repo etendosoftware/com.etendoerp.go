@@ -252,6 +252,14 @@ public class McpServlet extends HttpServlet {
       recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
           toolName, callParams, result, null);
 
+    } catch (McpResourceNotFoundException e) {
+      // Not a server failure: one WARN line, no stack trace. The modern era answers -32602, the
+      // code MCP 2026-07-28 gives it; the legacy era keeps the -32603 it always answered.
+      log.warn("MCP client read a missing resource: {} (client={}) session={}", e.getMessage(),
+          clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
+      writeRpcError(response, body,
+          era.isModern() ? McpRequestEra.INVALID_PARAMS : JSON_RPC_INTERNAL_ERROR,
+          e.getMessage());
     } catch (McpMethodNotFoundException e) {
       // A client asking for something we do not offer — chiefly 2026-07-28 clients probing with
       // server/discover before falling back to initialize. Not a server failure: one WARN line, no
@@ -940,7 +948,14 @@ public class McpServlet extends HttpServlet {
           OBContext.setAdminMode(true);
           try {
             McpResourceProvider provider = new McpResourceProvider();
-            JSONObject resourceContent = provider.readResource(uri);
+            JSONObject resourceContent;
+            try {
+              resourceContent = provider.readResource(uri);
+            } catch (org.openbravo.base.exception.OBSecurityException e) {
+              // An unknown spec and a spec the role cannot see: one answer, so the error does not
+              // reveal which specs exist (ETP-5640).
+              throw new McpResourceNotFoundException(uri, e);
+            }
 
             JSONObject result = new JSONObject();
             JSONArray contents = new JSONArray();
