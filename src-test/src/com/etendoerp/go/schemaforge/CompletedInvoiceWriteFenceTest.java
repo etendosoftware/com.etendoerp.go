@@ -69,9 +69,9 @@ public class CompletedInvoiceWriteFenceTest {
   private static final String ERROR = "error";
   private static final String STATUS_CO = "CO";
 
-  private static final Set<String> SALES = CompletedInvoiceWriteFence.HEADER_EDITABLE_WHEN_COMPLETED;
+  private static final Set<String> SALES = CompletedInvoiceWriteFence.headerEditableWhenCompleted();
   private static final Set<String> PURCHASE =
-      CompletedInvoiceWriteFence.PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED;
+      CompletedInvoiceWriteFence.purchaseHeaderEditableWhenCompleted();
 
   // ---------------------------------------------------------------------------
   // fixtures
@@ -84,7 +84,7 @@ public class CompletedInvoiceWriteFenceTest {
   }
 
   /** A mocked entity record whose properties are {@code stored} (every key a property). */
-  private static <T extends BaseOBObject> T record(Class<T> type, Map<String, Object> stored) {
+  private static <T extends BaseOBObject> T mockedEntity(Class<T> type, Map<String, Object> stored) {
     T rec = mock(type);
     Entity entity = mock(Entity.class);
     when(entity.hasProperty(anyString())).thenAnswer(inv -> stored.containsKey(inv.getArgument(0)));
@@ -109,7 +109,7 @@ public class CompletedInvoiceWriteFenceTest {
   }
 
   private static Invoice invoice(String docStatus, String posted, boolean processed) {
-    Invoice invoice = record(Invoice.class, storedHeader());
+    Invoice invoice = mockedEntity(Invoice.class, storedHeader());
     when(invoice.isProcessed()).thenReturn(processed);
     when(invoice.getDocumentStatus()).thenReturn(docStatus);
     when(invoice.getPosted()).thenReturn(posted);
@@ -141,7 +141,7 @@ public class CompletedInvoiceWriteFenceTest {
     stored.put(PROJECT, ref("PRJ-1"));
     stored.put(COSTCENTER, ref("CC-1"));
     stored.put("invoice", invoice);
-    InvoiceLine line = record(InvoiceLine.class, stored);
+    InvoiceLine line = mockedEntity(InvoiceLine.class, stored);
     when(line.getInvoice()).thenReturn(invoice);
     try (MockedStatic<OBContext> obc = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class)) {

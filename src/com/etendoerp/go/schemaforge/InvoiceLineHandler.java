@@ -56,7 +56,7 @@ import org.openbravo.model.common.order.Order;
  * PATCH.
  *
  * <p>On PATCH/PUT (ETP-5692): a line of a processed invoice accepts only
- * {@link CompletedInvoiceWriteFence#LINE_EDITABLE_WHEN_COMPLETED}, and those only while the invoice
+ * {@link CompletedInvoiceWriteFence#lineEditableWhenCompleted()}, and those only while the invoice
  * is {@code CO} and not posted — see {@link CompletedInvoiceWriteFence}.
  *
  * <p>Registered via {@code javaQualifier = "invoiceLineHandler"} on the lines

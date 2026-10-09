@@ -8230,8 +8230,8 @@ first in `handle()` by `SalesInvoiceHeaderHandler`, `PurchaseInvoiceHeaderHandle
 PATCHes it on a completed invoice **by design** (ETP-5205, `handleNotesSave` excludes only the
 role-level read-only). The live QA case "`description` (sales) answered 200 while the SPA locks it"
 is therefore the SPA's own behaviour, not a gap, and stays allowed. The allowlist is declared once,
-in `CompletedInvoiceWriteFence` (`HEADER_EDITABLE_WHEN_COMPLETED`,
-`PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED`, `LINE_EDITABLE_WHEN_COMPLETED`); `draftMode` is a
+in `CompletedInvoiceWriteFence` (`headerEditableWhenCompleted()`,
+`purchaseHeaderEditableWhenCompleted()`, `lineEditableWhenCompleted()`); `draftMode` is a
 frontend-only setting that `push-to-neo` does not carry, so the two must be changed together.
 
 **What is not fenced, and why it does not need to be.** Writes the invoice's own handlers and

@@ -96,6 +96,10 @@ public final class CompletedInvoiceWriteFence {
 
   /** Purchase-invoice supplier number: allowlisted, but locked once the invoice is sent to the SII. */
   private static final String FIELD_ORDER_REFERENCE = "orderReference";
+  private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+  private static final String FIELD_PROJECT = "project";
+  private static final String FIELD_COSTCENTER = "costcenter";
+  private static final String FIELD_DESCRIPTION = "description";
 
   /**
    * Header fields both invoice windows can still change once completed: the
@@ -103,24 +107,26 @@ public final class CompletedInvoiceWriteFence {
    * {@code costcenter}) plus {@code description}, the window's {@code notesField}, which the notes
    * panel saves on a completed document by design (ETP-5205).
    */
-  public static final Set<String> HEADER_EDITABLE_WHEN_COMPLETED = orderedSet("accountingDate",
-      "project", "costcenter", "description");
+  private static final Set<String> HEADER_EDITABLE_WHEN_COMPLETED = orderedSet(
+      FIELD_ACCOUNTING_DATE, FIELD_PROJECT, FIELD_COSTCENTER, FIELD_DESCRIPTION);
 
   /**
    * Purchase-invoice header: the above plus {@code orderReference} (the supplier's invoice
    * number), which its {@code keepSaveWhenCompletedFields} also lists (ETP-4839).
    */
-  public static final Set<String> PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED =
+  private static final Set<String> PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED =
       union(HEADER_EDITABLE_WHEN_COMPLETED, orderedSet(FIELD_ORDER_REFERENCE));
 
   /** Line fields both invoice windows can still change once completed ({@code editableLineFieldsWhenCompleted}). */
-  public static final Set<String> LINE_EDITABLE_WHEN_COMPLETED = orderedSet("project", "costcenter");
+  private static final Set<String> LINE_EDITABLE_WHEN_COMPLETED =
+      orderedSet(FIELD_PROJECT, FIELD_COSTCENTER);
 
   /** Allowlisted fields the ledger was booked with: locked while the invoice is posted. */
-  static final Set<String> LEDGER_FIELDS = orderedSet("accountingDate", "project", "costcenter");
+  private static final Set<String> LEDGER_FIELDS =
+      orderedSet(FIELD_ACCOUNTING_DATE, FIELD_PROJECT, FIELD_COSTCENTER);
 
   /** Allowlisted accounting dimensions: editable on a processed invoice only while it is {@code CO}. */
-  static final Set<String> DIMENSION_FIELDS = orderedSet("project", "costcenter");
+  private static final Set<String> DIMENSION_FIELDS = orderedSet(FIELD_PROJECT, FIELD_COSTCENTER);
 
   /** Keys that carry no business change: identity, the concurrency token, audit and the parent link. */
   private static final Set<String> META_KEYS = Set.of("id", "updated", "updatedBy", "creationDate",
@@ -152,6 +158,33 @@ public final class CompletedInvoiceWriteFence {
   private static final int SC_UNPROCESSABLE = 422;
 
   private CompletedInvoiceWriteFence() {
+  }
+
+  /**
+   * The header allowlist of a sales invoice once completed (unmodifiable).
+   *
+   * @return accountingDate, project, costcenter, description
+   */
+  public static Set<String> headerEditableWhenCompleted() {
+    return HEADER_EDITABLE_WHEN_COMPLETED;
+  }
+
+  /**
+   * The header allowlist of a purchase invoice once completed (unmodifiable).
+   *
+   * @return the sales allowlist plus orderReference
+   */
+  public static Set<String> purchaseHeaderEditableWhenCompleted() {
+    return PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED;
+  }
+
+  /**
+   * The line allowlist of both invoices once completed (unmodifiable).
+   *
+   * @return project, costcenter
+   */
+  public static Set<String> lineEditableWhenCompleted() {
+    return LINE_EDITABLE_WHEN_COMPLETED;
   }
 
   /**
@@ -219,8 +252,8 @@ public final class CompletedInvoiceWriteFence {
   }
 
   /**
-   * The rules of the class javadoc, against {@code record} (the header or the line) and the state
-   * of {@code invoice}.
+   * The rules of the class javadoc, against {@code persisted} (the stored header or line) and the
+   * state of {@code invoice}.
    *
    * <p>On a voided or closed invoice that is NOT posted, only the dimensions
    * ({@link #DIMENSION_FIELDS}: project, costcenter) are locked; {@code accountingDate} stays
@@ -228,12 +261,12 @@ public final class CompletedInvoiceWriteFence {
    * is {@code @Posted@='Y'} only. The posted lock ({@link #LEDGER_FIELDS}) is the one that covers
    * it.</p>
    */
-  static NeoResponse check(BaseOBObject record, Invoice invoice, JSONObject body,
+  static NeoResponse check(BaseOBObject persisted, Invoice invoice, JSONObject body,
       Set<String> editableWhenCompleted) throws JSONException {
     if (!Boolean.TRUE.equals(invoice.isProcessed())) {
       return null;
     }
-    List<String> changed = changedFields(record, body);
+    List<String> changed = changedFields(persisted, body);
     if (changed.isEmpty()) {
       return null;
     }
@@ -280,29 +313,31 @@ public final class CompletedInvoiceWriteFence {
   }
 
   /**
-   * The keys of {@code body} whose value differs from {@code record}'s. A key that is not a
+   * The keys of {@code body} whose value differs from {@code persisted}'s. A key that is not a
    * property of the entity is always a change (it cannot be compared, and is never allowed);
    * identity, audit, the concurrency token, server-owned keys and {@code $_identifier} companions
    * are not business changes and are skipped.
    */
-  static List<String> changedFields(BaseOBObject record, JSONObject body) throws JSONException {
-    Entity entity = record.getEntity();
+  static List<String> changedFields(BaseOBObject persisted, JSONObject body) throws JSONException {
+    Entity entity = persisted.getEntity();
     JSONObject values = unwrap(body, entity);
     List<String> changed = new ArrayList<>();
     for (Iterator<?> it = values.keys(); it.hasNext();) {
       String key = String.valueOf(it.next());
-      if (isMetaKey(key)) {
-        continue;
-      }
-      if (!entity.hasProperty(key)) {
-        changed.add(key);
-        continue;
-      }
-      if (!sameValue(record.get(key), values.get(key))) {
+      if (!isMetaKey(key) && isChangedProperty(persisted, entity, key, values)) {
         changed.add(key);
       }
     }
     return changed;
+  }
+
+  /**
+   * Whether {@code key} of {@code values} changes {@code persisted}: always for a key the entity
+   * has no property for (it cannot be compared), else when the sent value differs from the stored.
+   */
+  private static boolean isChangedProperty(BaseOBObject persisted, Entity entity, String key,
+      JSONObject values) throws JSONException {
+    return !entity.hasProperty(key) || !sameValue(persisted.get(key), values.get(key));
   }
 
   private static JSONObject unwrap(JSONObject body, Entity entity) {
@@ -321,29 +356,33 @@ public final class CompletedInvoiceWriteFence {
    * number, {@code true}/{@code "Y"} for a boolean. Empty and {@code null} are the same.
    */
   static boolean sameValue(Object stored, Object sent) {
-    boolean sentEmpty = sent == null || JSONObject.NULL.equals(sent)
-        || (sent instanceof String && ((String) sent).isEmpty());
-    if (stored == null || (stored instanceof String && ((String) stored).isEmpty())) {
+    boolean sentEmpty = isEmptySent(sent);
+    if (isEmptyStored(stored)) {
       return sentEmpty;
     }
-    if (sentEmpty) {
-      return false;
-    }
+    return !sentEmpty && sameNonEmptyValue(stored, sent);
+  }
+
+  private static boolean isEmptySent(Object sent) {
+    return sent == null || JSONObject.NULL.equals(sent)
+        || (sent instanceof String && ((String) sent).isEmpty());
+  }
+
+  private static boolean isEmptyStored(Object stored) {
+    return stored == null || (stored instanceof String && ((String) stored).isEmpty());
+  }
+
+  /** {@link #sameValue} once neither side is empty, dispatched on the stored value's type. */
+  private static boolean sameNonEmptyValue(Object stored, Object sent) {
     if (stored instanceof BaseOBObject) {
       Object id = sent instanceof JSONObject ? ((JSONObject) sent).opt("id") : sent;
       return String.valueOf(((BaseOBObject) stored).getId()).equals(String.valueOf(id));
     }
     if (stored instanceof Date) {
-      String text = String.valueOf(sent);
-      return text.length() >= 10
-          && new SimpleDateFormat("yyyy-MM-dd").format((Date) stored).equals(text.substring(0, 10));
+      return sameDate((Date) stored, String.valueOf(sent));
     }
     if (stored instanceof Number) {
-      try {
-        return new BigDecimal(stored.toString()).compareTo(new BigDecimal(String.valueOf(sent))) == 0;
-      } catch (NumberFormatException e) {
-        return false;
-      }
+      return sameNumber((Number) stored, String.valueOf(sent));
     }
     if (stored instanceof Boolean) {
       String text = String.valueOf(sent);
@@ -351,6 +390,21 @@ public final class CompletedInvoiceWriteFence {
       return ((Boolean) stored) == sentTrue;
     }
     return String.valueOf(stored).equals(String.valueOf(sent));
+  }
+
+  /** A stored date against the {@code yyyy-MM-dd} prefix of the sent text. */
+  private static boolean sameDate(Date stored, String sent) {
+    return sent.length() >= 10
+        && new SimpleDateFormat("yyyy-MM-dd").format(stored).equals(sent.substring(0, 10));
+  }
+
+  /** A stored number against the sent text, scale-insensitive; unparseable text is a change. */
+  private static boolean sameNumber(Number stored, String sent) {
+    try {
+      return new BigDecimal(stored.toString()).compareTo(new BigDecimal(sent)) == 0;
+    } catch (NumberFormatException e) {
+      return false;
+    }
   }
 
   /**

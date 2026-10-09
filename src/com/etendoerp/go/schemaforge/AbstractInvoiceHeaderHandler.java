@@ -250,7 +250,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @return the allowlist the completed-invoice write fence applies to this header
    */
   protected Set<String> completedEditableHeaderFields() {
-    return CompletedInvoiceWriteFence.HEADER_EDITABLE_WHEN_COMPLETED;
+    return CompletedInvoiceWriteFence.headerEditableWhenCompleted();
   }
 
   /**

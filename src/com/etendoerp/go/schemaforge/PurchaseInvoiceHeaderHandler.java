@@ -133,7 +133,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   protected Set<String> completedEditableHeaderFields() {
-    return CompletedInvoiceWriteFence.PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED;
+    return CompletedInvoiceWriteFence.purchaseHeaderEditableWhenCompleted();
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
