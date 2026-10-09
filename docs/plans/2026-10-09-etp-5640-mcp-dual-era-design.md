@@ -24,12 +24,12 @@ Line numbers below are from `feature/ETP-5640` (cut from `develop`, contains ETP
 | # | Decision |
 |---|---|
 | D1 | **Era is decided per request from the body, not from headers alone.** A request is *modern* when `params._meta["io.modelcontextprotocol/protocolVersion"]` is present, or its method is `server/discover`, or its `MCP-Protocol-Version` header names a modern version. Everything else is *legacy* and keeps ETP-5639 behaviour byte for byte. `initialize` is always legacy. |
-| D2 | **Strict where the spec's era detection depends on it, lenient where it does not.** Modern requests get spec error bodies with HTTP status (`400` + `-32022` / `-32020` / `-32602`, `404` + `-32601`). A *missing* mirror header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) or missing `clientCapabilities` is served with one WARN by default (`mcp.modern.strict=false`); a *mismatching* header is always `400 -32020`. Legacy requests keep the ETP-5639 lenient policy unchanged. |
+| D2 | **Strict where the spec's era detection depends on it, lenient where it does not.** Modern requests get spec error bodies with HTTP status (`400` + `-32022` / `-32020` / `-32602`, `404` + `-32601`). A *missing* mirror header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) or missing `clientCapabilities` is served with one WARN by default (`mcp.modern.strict=false`); a *mismatching* header is always `400 -32020`. Legacy requests keep the ETP-5639 lenient policy unchanged — with one deliberate exception on the `resources/read` error path, see D7. |
 | D3 | **`server/discover` goes in last, as its own revertable commit.** It is the switch that moves Claude Code and the Claude.ai connector to modern mode; everything a modern client needs (result shape, errors, telemetry) ships before it. |
 | D4 | **Kill switch: backend feature flag `mcp-modern-era-disabled` (`GoFeatureFlags`, OpenFeature + ConfigCat).** Dual-era is ON by default: the flag unset, `false`, unreachable or failing all resolve to `false` = modern served. `true` restores today's behaviour exactly (row K1): `server/discover` → `-32601`, `_meta` ignored, every request legacy. No restart only where `etendo.go.configcat.sdkKey` is set (ConfigCat provider). Without an SDK key, `PropertiesFeatureProvider` reads `etendo.go.flags.mcp-modern-era-disabled` / `ETGO_FLAG_MCP_MODERN_ERA_DISABLED`, and flipping it needs a Tomcat restart. A client that already cached "modern" keeps working (tool calls need no `initialize`). |
-| D5 | **Telemetry: a server-derived session key for modern traffic.** Client name/version come from each request's `_meta`. The session key is minted per (user, client, role, client name) and renewed after 30 min of inactivity, prefixed `m-` so the era is visible without a schema change. No new column, no change to `McpUsageRow`'s shape. |
+| D5 | **Telemetry: a server-derived session key for modern traffic.** Client name/version come from each request's `_meta`. The session key is minted per (user, token client, role) — not per client name, which is client-controlled — and renewed after 30 min of inactivity, prefixed `m-` so the era is visible without a schema change. No new column, no change to `McpUsageRow`'s shape. |
 | D6 | **Modern-only response decoration.** `resultType: "complete"` and a minimal `_meta.serverInfo` on every modern result; `ttlMs` + `cacheScope` on `server/discover`, `tools/list`, `resources/list`, `resources/read`. Legacy responses are not touched. |
-| D7 | **Resource not found → `-32602` in the modern era only.** Today it is not `-32002` but `-32603` plus an ERROR stack trace (§5.4); legacy keeps its code, both eras lose the stack trace. |
+| D7 | **Resource not found → `-32602` in the modern era only.** Today it is not `-32002` but `-32603` plus an ERROR stack trace (§5.4); legacy keeps its code, both eras lose the stack trace. This is the one intended change on the legacy path: its message becomes `Resource not found: <uri>` and its log drops from ERROR + stack trace to one WARN, while the code stays `-32603` (the message never says whether the spec exists). |
 
 The user's decisions on the open questions are recorded in §9.
 
@@ -277,7 +277,12 @@ generic catch: **`200` + `-32603` and an ERROR log with stack trace** — not th
 - Modern: `-32602` (Invalid params), HTTP `200` (the spec assigns no status to it), message
   `Resource not found: <uri>`.
 - Legacy: keep `-32603` (no client depends on it, and changing a legacy code is out of scope; moving
-  legacy to `-32002` is a one-line follow-up if wanted).
+  legacy to `-32002` is a one-line follow-up if wanted). The legacy era is **not** byte-identical on
+  this path, on purpose: the message changes from the internal exception text to
+  `Resource not found: <uri>`, and the log drops from ERROR + stack trace to one WARN. Only the code
+  is kept. The old message could name the spec, which is the existence leak this section removes.
+- An unknown entity inside a known spec (`McpRoutingException` with `NOT_FOUND` from
+  `McpToolRouterSupport.findIncludedEntity`) is the same "no such resource" answer, in both eras.
 - Both: WARN one line, no stack trace — a caller asking for something that does not exist is not a
   server failure (same reasoning as ETP-5639's unknown-method fix).
 
@@ -317,9 +322,12 @@ switch — the coordinator's main concern.
 
 ### 6.3 Recommended design (C, with E as ground truth)
 
-- `McpUsageTelemetry.sessionFor(DerivedKey tuple, ClientInfo, nowMs)`: a bounded
-  (`MAX_TRACKED_SESSIONS = 1000`, oldest-first, like `SESSIONS` at `McpUsageTelemetry.java:74-82`)
-  map tuple → `{sessionKey, lastSeenMs}`; a gap > 30 min mints a new `m-` + UUID (38 chars;
+- `McpUsageTelemetry.modernSession(userId, clientId, roleId, nowMs)`: a bounded
+  (`MAX_TRACKED_SESSIONS = 1000`, **least-recently-used** eviction — an access-ordered map, so an
+  active session is never evicted by a burst of new callers) map (user, token client, role) →
+  `{sessionKey, lastSeenMs}`. The client name is deliberately **not** in the tuple: it is
+  client-controlled, so a rotating name could otherwise mint unbounded sessions and reset the
+  feedback rate-limit bucket. The `etendo_feedback` bucket is keyed on the same authenticated caller; a gap > 30 min mints a new `m-` + UUID (38 chars;
   `ETGO_MCP_USAGE.SESSION_KEY` is `VARCHAR(200)`,
   `src-db/database/model/tables/ETGO_MCP_USAGE.xml:36`). The tuple uses only values we already
   hold before dispatch (`AuthIdentity`, `McpServlet.java:918-932`) — the effective tenant is resolved
@@ -414,7 +422,7 @@ names a spec, entity or table.
 | `McpServlet` | `McpServletTest.java` (57 tests; protocol cases at `:423-490`, unknown-method at `:709-734`) | full decision table §2.3 through `doPost` with mocked request headers — one test per row L1–L4, M1–M11, K1; asserted on HTTP status, error `code`/`data`, presence/absence of `resultType`, `_meta.serverInfo`, `ttlMs`/`cacheScope`, `Mcp-Session-Id` |
 | `McpProtocolVersion` | `McpServletTest.java` (its only test home) | sets and ordering; `forRequest` unchanged for L2/L3 |
 | new era classifier | **new** `McpRequestEraTest.java` — justified: new unit with no existing coverage | pure table tests incl. Base64 `Mcp-Name` decoding, sentinel-shaped plain value, non-string `M`, `_meta` not an object |
-| `McpUsageTelemetry` | `McpUsageTenantQaTest.java` | derived key stable across calls, renewed after the gap, distinct per user/client name, `m-` prefix, bounded map; `clientInfo` from `_meta`; ThreadLocals cleared in `finally` |
+| `McpUsageTelemetry` | `McpUsageTenantQaTest.java` | derived key stable across calls, renewed after the gap, distinct per user/role, stable across a rotating client name, `m-` prefix, LRU-bounded map; `clientInfo` from `_meta`; ThreadLocals cleared in `finally` |
 | `McpCallObservation` | no test exists (`find-tests`: none) — cover through `McpServletTest` | row carries resolved key in both eras |
 | `McpFeedbackTool` | `McpFeedbackToolTest.java` | two modern clients do not share a rate-limit bucket |
 | `McpResourceProvider` | `McpResourceProviderTest.java` | unknown URI / inaccessible spec → `McpResourceNotFoundException`, same answer for both |

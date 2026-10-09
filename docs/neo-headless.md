@@ -8187,7 +8187,13 @@ always legacy. Anything else is legacy and behaves exactly as §4.12.24 describe
 | `_meta` version not a string | `400`, `-32602` |
 | a mirror header, `_meta` version or `clientCapabilities` **missing** | served, one `WARN MCP modern request served without: …`; `400` (`-32020` / `-32602`) only with `mcp.modern.strict=true` |
 | `ping` or any unknown method | `404`, `-32601` |
-| `resources/read` of a missing or inaccessible resource | `-32602` `Resource not found: <uri>` (legacy keeps `-32603`); both eras log one `WARN`, no stack trace |
+| `resources/read` of a missing or inaccessible resource | `-32602` `Resource not found: <uri>` (legacy keeps `-32603`); both eras log one `WARN`, no stack trace. An unknown entity inside a known spec is the same answer |
+
+**The one legacy-visible change.** Everything else in the legacy era is ETP-5639 as it was, but a
+legacy `resources/read` of a missing or inaccessible resource changes on purpose: the code stays
+`-32603`, the message becomes `Resource not found: <uri>` (it used to be the internal exception
+text, which could name the spec), and the log drops from `ERROR` with a stack trace to one `WARN`.
+The message never says whether the spec exists.
 
 Why missing headers are lenient by default: a dual-era client reads a `400` with a recognised
 modern error as "modern server, fix and retry", not "fall back" — refusing a client that omits a
@@ -8203,7 +8209,8 @@ where ConfigCat is configured; a restart where the flag comes from
 after a rollback, because tool calls never needed `initialize`.
 
 **Telemetry.** A modern request's client name comes from its own `_meta` clientInfo and its session
-key is derived (`m-` prefix, renewed after 30 min idle) — see `docs/mcp-usage-telemetry.md`
+key is derived per (user, token client, role) — never per client name, which the client controls —
+with an `m-` prefix, renewed after 30 min idle; see `docs/mcp-usage-telemetry.md`
 §*Modern clients*. One `INFO MCP modern session started: session=m-… client=<name>/<version>
 protocol=2026-07-28 traceparent=yes|no` per derived session is the rollout's evidence. This part
 runs whatever the kill switch says.

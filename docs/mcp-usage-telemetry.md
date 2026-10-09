@@ -134,8 +134,8 @@ every request, in `params._meta["io.modelcontextprotocol/clientInfo"]`, and that
 `client_name` / `client_version` come from (`McpUsageTelemetry.clientInfoFromMeta`). A stale
 `Mcp-Session-Id` on such a request is ignored.
 
-The session key is **derived** (`McpUsageTelemetry.modernSession`): one per (user, token client, role,
-client name), renewed after 30 minutes without a call, and prefixed `m-` — so
+The session key is **derived** (`McpUsageTelemetry.modernSession`): one per (user, token client, role),
+renewed after 30 minutes without a call, and prefixed `m-` — so
 `session_key LIKE 'm-%'` (or `session=m-*` in Datadog) separates the eras without a column of its own.
 Each new derived session logs one INFO line:
 
@@ -148,9 +148,12 @@ and with several Tomcat nodes one task can be split across nodes (the map is per
 still carries the user, the client name and its timestamp, so SQL can regroup them cluster-wide.
 
 This applies whatever the `mcp-modern-era-disabled` kill switch says: a client that cached the
-modern era keeps sending `_meta` after a rollback, and its rows keep their client name. The derived
-key also gives each modern client its own `etendo_feedback` rate-limit bucket instead of the shared
-anonymous one.
+modern era keeps sending `_meta` after a rollback, and its rows keep their client name. The client
+name is deliberately not part of the key: it is client-controlled, so a client that changes it on every
+request would otherwise mint a session per request. For the same reason the `etendo_feedback`
+rate-limit bucket is keyed on the authenticated caller (user, token client, role), not on the session
+or the client name — a rotating name cannot reset it. The derived-session map evicts the least
+recently used entry, so a burst of new callers never drops an active session.
 
 ## Opt-out (D28)
 
