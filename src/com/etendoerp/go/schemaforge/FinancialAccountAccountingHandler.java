@@ -17,8 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.List;
-
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -41,6 +39,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
 
 /**
  * NeoHandler for the {@code accountingConfiguration} entity of the {@code financial-account} spec
@@ -403,14 +403,8 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     if (ledger == null) {
       return out;
     }
-    OBCriteria<AccountingCombination> criteria = OBDal.getInstance().createCriteria(AccountingCombination.class);
-    criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNTINGSCHEMA, ledger));
-    criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACTIVE, true));
-    criteria.addOrder(Order.asc(AccountingCombination.PROPERTY_COMBINATION));
-    @SuppressWarnings("unchecked")
-    List<AccountingCombination> rows = criteria.list();
-
-    for (AccountingCombination combo : rows) {
+    // ETP-5681: posting (leaf, active) accounts only — a summary account is a heading.
+    for (AccountingCombination combo : PostingAccountCombinations.forSchema(ledger)) {
       JSONObject item = new JSONObject();
       item.put(FIELD_ID, combo.getId());
       item.put("code", resolveCombinationCode(combo));

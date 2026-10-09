@@ -50,6 +50,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaGL;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
+import com.etendoerp.go.schemaforge.util.PostingAccountCombinations;
+
 /**
  * Aggregate handler for the custom General Ledger Configuration window.
  *
@@ -412,15 +414,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   }
 
   private JSONArray buildAccountOptions(AcctSchema schema) throws JSONException {
-    OBCriteria<AccountingCombination> criteria = OBDal.getInstance().createCriteria(AccountingCombination.class);
-    criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNTINGSCHEMA, schema));
-    criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACTIVE, true));
-    criteria.addOrder(Order.asc(AccountingCombination.PROPERTY_COMBINATION));
-    @SuppressWarnings("unchecked")
-    List<AccountingCombination> rows = criteria.list();
-
+    // ETP-5681: posting (leaf, active) accounts only — a summary account is a heading.
     JSONArray out = new JSONArray();
-    for (AccountingCombination combo : rows) {
+    for (AccountingCombination combo : PostingAccountCombinations.forSchema(schema)) {
       JSONObject item = new JSONObject();
       item.put("id", combo.getId());
       item.put("code", resolveCombinationCode(combo));
