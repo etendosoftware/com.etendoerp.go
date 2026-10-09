@@ -134,8 +134,11 @@ public class McpServlet extends HttpServlet {
   // ── CORS ───────────────────────────────────────────────────────────────
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
+    // Mcp-Method / Mcp-Name: the mirror headers every 2026-07-28 POST carries (ETP-5640).
+    // Mcp-Session-Id stays for the legacy era's browser clients.
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
         "Content-Type, Authorization, Accept, Mcp-Session-Id, " + McpProtocolVersion.HEADER
+            + ", " + McpRequestEra.HEADER_METHOD + ", " + McpRequestEra.HEADER_NAME
             + ", X-Go-CSRF, X-Go-Account",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }

@@ -506,6 +506,22 @@ public class McpServletTest {
     }
   }
 
+  /** ETP-5640: a browser-based 2026-07-28 client sends the mirror headers on every POST. */
+  @Test
+  public void corsAllowsTheModernMirrorHeaders() throws Exception {
+    try (MockedStatic<com.etendoerp.go.common.CorsUtils> cors =
+             mockStatic(com.etendoerp.go.common.CorsUtils.class)) {
+      servlet.doOptions(request, response);
+      cors.verify(() -> com.etendoerp.go.common.CorsUtils.apply(eq(request), eq(response),
+          anyString(),
+          org.mockito.ArgumentMatchers.argThat((String headers) -> headers != null
+              && headers.contains(McpRequestEra.HEADER_METHOD + ",")
+              && headers.contains(McpRequestEra.HEADER_NAME + ",")
+              && headers.contains("Mcp-Session-Id")),
+          anyString(), eq(false)));
+    }
+  }
+
   // ── commercial access gate (ETP-5642) ───────────────────────────────────
 
   private void stubAccessDecision(EnvironmentAccessPolicy.Decision decision) {
