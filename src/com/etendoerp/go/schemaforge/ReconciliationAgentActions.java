@@ -39,12 +39,12 @@ import org.codehaus.jettison.json.JSONObject;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * The bank-reconciliation actions an agent can run through {@code neo_action} (ETP-5468, front A).
+ * The bank-reconciliation actions an agent can run through {@code etendo_action} (ETP-5468, front A).
  *
  * <p><b>Purely additive.</b> The SPA keeps calling {@code /sws/neo/bank-reconciliation?action=…}
  * — a report-spec request whose context carries no endpoint type — and {@link
  * ReconciliationHandler#handle} only enters {@link #dispatch} for {@code NeoEndpointType.ACTION},
- * which only {@code neo_action} produces for this spec. Every action here re-enters the SAME
+ * which only {@code etendo_action} produces for this spec. Every action here re-enters the SAME
  * wrapper the SPA route uses ({@code ReconciliationHandlerSupport.handle*}), so the business
  * validations, the {@code runPostAction} rollback and the error mapping are identical to the UI's —
  * this class only translates the MCP call shape (record {@code id} = financial account,
@@ -78,7 +78,7 @@ final class ReconciliationAgentActions {
           + "pending sub-line (remainderLineId) automatically; reconcileDifference needs the "
           + "pending sub-line itself and its refusal names it as remainderLineId.";
 
-  /** What the {@code neo_action} {@code id} argument identifies for every action here. */
+  /** What the {@code etendo_action} {@code id} argument identifies for every action here. */
   private static final String ID_DESC =
       "The financial account id (FIN_Financial_Account) whose bank statement lines are "
           + "reconciled.";
@@ -210,11 +210,14 @@ final class ReconciliationAgentActions {
                 + "leaves the line partially reconciled (pending remainder). A 201 with "
                 + "partial:true means the line is NOT complete: pendingAmount (signed like the "
                 + "line) is still open — continue with remainderLineId. partial:false means the "
-                + "line is closed. Foreign-currency items are converted with the same exchange "
-                + "rate the UI uses — no extra parameter. A line left linked to a movement "
-                + "that has no reconciliation at all is freed first (the movement is kept). A "
-                + "line whose movement sits in an unconfirmed draft reconciliation is refused "
-                + "(409) until that draft is reviewed. Completes and processes the "
+                + "line is closed. Foreign-currency invoices are converted at each invoice's "
+                + "own exchange rate unless you send actualPayment (with convertedAmount and/or "
+                + "conversionRate) to book what the bank actually moved, as the UI does: then all "
+                + "selected invoices must share one currency other than the account's, and "
+                + "operationIds and writeoffDifference are not allowed. A line left linked to a "
+                + "movement that has no reconciliation at all is freed first (the movement is "
+                + "kept). A line whose movement sits in an unconfirmed draft reconciliation is "
+                + "refused (409) until that draft is reviewed. Completes and processes the "
                 + "reconciliation; a refusal rolls back this call's own writes, invoice payments "
                 + "included.",
             required(P_LINE, S, LINE_DESC),
@@ -226,6 +229,20 @@ final class ReconciliationAgentActions {
                 + "Defaults to the account's method."),
             optional("writeoffDifference", NeoActionContract.TYPE_BOOLEAN, "Single invoice only: "
                 + "write off the shortfall so the invoice ends fully paid. Default false."),
+            optional(ReconciliationConversionSupport.KEY_ACTUAL_PAYMENT,
+                NeoActionContract.TYPE_NUMBER, "Explicit conversion: total to pay across the "
+                + "selected invoices, in the INVOICE currency (unsigned). More than 0 and at most "
+                + "their outstanding; less pays them partially, filling them in request order. "
+                + "Required when conversionRate or convertedAmount is sent. Needs invoices; "
+                + "refused (400) without them."),
+            optional(ReconciliationConversionSupport.KEY_CONVERSION_RATE,
+                NeoActionContract.TYPE_NUMBER, "Explicit conversion: invoice-to-account rate. "
+                + "Used to derive convertedAmount when that is absent, and must then not be 1; "
+                + "advisory when convertedAmount is sent."),
+            optional(ReconciliationConversionSupport.KEY_CONVERTED_AMOUNT,
+                NeoActionContract.TYPE_NUMBER, "Explicit conversion: amount in the ACCOUNT "
+                + "currency (unsigned), at most the line amount. Wins over conversionRate. "
+                + "Defaults to the line amount when only actualPayment is sent."),
             optional("glItemId", S, "GL item for a within-tolerance difference. Defaults to the "
                 + "account's difference GL item; answered GL_ITEM_REQUIRED when neither exists."),
             optional("description", S, "Description of the difference movement, if one is "

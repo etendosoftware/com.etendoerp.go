@@ -19,10 +19,17 @@ package com.etendoerp.go.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -30,16 +37,47 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.MockedStatic;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Tab;
+
+import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoHandler;
+import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
- * Unit tests for {@link McpFieldProjection} — the pure {@code neo_list}/{@code neo_get} field
- * projection behind the IMP-2 {@code fields} / {@code view:"summary"} arguments.
+ * Unit tests for {@link McpFieldProjection} — the pure {@code etendo_list}/{@code etendo_get} field
+ * projection behind the IMP-2 {@code fields} / {@code view:"summary"} arguments — and for the
+ * emittable set {@code McpQuerySupport.applyProjection} judges a {@code fields:[…]} whitelist by.
+ *
+ * @covers com.etendoerp.go.mcp.McpFieldProjection
+ * @covers com.etendoerp.go.mcp.McpQuerySupport
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
 @SuppressWarnings("java:S2187")
 @DisplayName("McpFieldProjection")
 class McpFieldProjectionTest {
+
+  /** A customization that injects {@code followUp} on every GET record (ETP-5576). */
+  private static final NeoHandler DECLARES_FOLLOW_UP = new NeoHandler() {
+    @Override
+    public NeoResponse handle(NeoContext context) {
+      return null;
+    }
+
+    @Override
+    public Set<String> responseEnrichedFields() {
+      return Set.of("followUp");
+    }
+  };
 
   private static Set<String> req(String... names) {
     return new HashSet<>(java.util.Arrays.asList(names));
@@ -237,6 +275,72 @@ class McpFieldProjectionTest {
 
       // must not throw when there is no envelope to attach to
       McpFieldProjection.reportUnknownFields(new JSONObject(), req("x"), Optional.of(req("id")));
+    }
+  }
+
+  /**
+   * ETP-5576 (MCP obs. 11): {@code McpQuerySupport.applyProjection} adds the keys the entity's
+   * customization injects on every GET record ({@code NeoHandler#responseEnrichedFields}) to the
+   * emittable set. Before, {@code fields:["followUp"]} on an invoice was reported in
+   * {@code unknownFields} by the very response that carried {@code followUp}.
+   */
+  @Nested
+  @DisplayName("applyProjection — keys a customization injects on read (ETP-5576)")
+  class InjectedKeys {
+
+    /**
+     * Rows: case, the bound customization ({@code null} = none), whether the spec's emittable set
+     * can be determined, the expected {@code unknownFields} ({@code null} = no key at all).
+     */
+    static Stream<Arguments> cases() {
+      return Stream.of(
+          Arguments.of("a declared key is emittable, a typo is still reported",
+              DECLARES_FOLLOW_UP, true, List.of("bogus")),
+          Arguments.of("an entity declaring nothing is judged as before",
+              null, true, List.of("bogus", "followUp")),
+          Arguments.of("an undeterminable emittable set still judges nothing",
+              DECLARES_FOLLOW_UP, false, null));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("cases")
+    void unknownFieldsLeavesOutTheDeclaredInjectedKeys(String scenario, NeoHandler customization,
+        boolean emittableKnown, List<String> expectedUnknown) throws Exception {
+      Optional<Set<String>> specKeys =
+          emittableKnown ? Optional.of(req("id", "documentNo")) : Optional.empty();
+      NeoFieldFilter fieldFilter = mock(NeoFieldFilter.class);
+      when(fieldFilter.emittableResponseKeys()).thenReturn(specKeys);
+      // The DAL fallback for an unknown spec set: no entity for the table, so "cannot validate".
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn("C_Invoice");
+      Tab adTab = mock(Tab.class);
+      when(adTab.getTable()).thenReturn(table);
+      ModelProvider provider = mock(ModelProvider.class);
+      SFEntity sfEntity = mock(SFEntity.class);
+      JSONObject root = envelope();
+      JSONObject args = new JSONObject();
+      args.put(McpFieldProjection.PARAM_FIELDS, new JSONArray().put("followUp").put("bogus"));
+
+      try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+              mockStatic(NeoExtensionDispatcher.class);
+          MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+        dispatcher.when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(customization);
+        models.when(ModelProvider::getInstance).thenReturn(provider);
+
+        McpQuerySupport.applyProjection(root, args, sfEntity, adTab, fieldFilter);
+      }
+
+      JSONObject response = root.getJSONObject("response");
+      if (expectedUnknown == null) {
+        assertFalse(response.has(McpFieldProjection.KEY_UNKNOWN_FIELDS), scenario);
+        return;
+      }
+      JSONArray unknown = response.getJSONArray(McpFieldProjection.KEY_UNKNOWN_FIELDS);
+      List<String> names = new ArrayList<>();
+      for (int i = 0; i < unknown.length(); i++) {
+        names.add(unknown.getString(i));
+      }
+      assertEquals(expectedUnknown, names, scenario);
     }
   }
 }

@@ -136,6 +136,20 @@ final class McpUsageTelemetry {
     return CURRENT_SESSION.get();
   }
 
+  /** What a log line prints when the request carries no session key. */
+  static final String NO_SESSION = "none";
+
+  /**
+   * The session key as MCP WARN/ERROR lines print it ({@code session=<key>}), so Datadog can put a
+   * session's failures next to its feedback report (ETP-5639).
+   *
+   * @return the current session key, or {@value #NO_SESSION}
+   */
+  static String sessionForLog() {
+    String key = CURRENT_SESSION.get();
+    return key != null ? key : NO_SESSION;
+  }
+
   // ── Session / client handshake ──────────────────────────────────────────
 
   /**
@@ -145,6 +159,18 @@ final class McpUsageTelemetry {
    * @return the new session key, to be echoed in the {@value #HEADER_SESSION_ID} response header
    */
   static String openSession(JSONObject params) {
+    return openSession(params, null);
+  }
+
+  /**
+   * Same as {@link #openSession(JSONObject)}, also remembering the protocol version the handshake
+   * negotiated, which later requests fall back to (ETP-5639).
+   *
+   * @param params          the {@code initialize} params
+   * @param protocolVersion the negotiated version, may be {@code null}
+   * @return the new session key
+   */
+  static String openSession(JSONObject params, String protocolVersion) {
     String sessionKey = UUID.randomUUID().toString();
     JSONObject clientInfo = params != null ? params.optJSONObject("clientInfo") : null;
     String name = clientInfo != null ? StringUtils.trimToNull(clientInfo.optString("name", null))
@@ -152,7 +178,7 @@ final class McpUsageTelemetry {
     String version = clientInfo != null
         ? StringUtils.trimToNull(clientInfo.optString("version", null))
         : null;
-    SESSIONS.put(sessionKey, new ClientInfo(name, version));
+    SESSIONS.put(sessionKey, new ClientInfo(name, version, protocolVersion));
     return sessionKey;
   }
 
@@ -176,29 +202,29 @@ final class McpUsageTelemetry {
       return null;
     }
     switch (toolName) {
-      case "neo_list":
+      case "etendo_list":
         return "list";
-      case "neo_get":
+      case "etendo_get":
         return "get";
-      case "neo_create":
+      case "etendo_create":
         return "create";
-      case "neo_update":
+      case "etendo_update":
         return "update";
-      case "neo_delete":
+      case "etendo_delete":
         return "delete";
-      case "neo_batch":
+      case "etendo_batch":
         return "batch";
-      case "neo_action":
+      case "etendo_action":
         return "action";
-      case "neo_schema":
+      case "etendo_schema":
         return "schema";
-      case "neo_defaults":
+      case "etendo_defaults":
         return "defaults";
-      case "neo_selectors":
+      case "etendo_selectors":
         return "selectors";
-      case "neo_discover":
+      case "etendo_discover":
         return "discover";
-      case "neo_vector_search":
+      case "etendo_vector_search":
         return "search";
       case "docs":
         return "docs";
@@ -332,17 +358,28 @@ final class McpUsageTelemetry {
     }
   }
 
-  /** What the {@code initialize} handshake reported about the calling agent. */
+  /** What the {@code initialize} handshake reported about the calling agent, and negotiated. */
   static final class ClientInfo {
 
     static final ClientInfo UNKNOWN = new ClientInfo(null, null);
 
     private final String name;
     private final String version;
+    private final String protocolVersion;
 
     ClientInfo(String name, String version) {
+      this(name, version, null);
+    }
+
+    ClientInfo(String name, String version, String protocolVersion) {
       this.name = name;
       this.version = version;
+      this.protocolVersion = protocolVersion;
+    }
+
+    /** @return the protocol version {@code initialize} negotiated, or {@code null} */
+    String getProtocolVersion() {
+      return protocolVersion;
     }
 
     String getName() {

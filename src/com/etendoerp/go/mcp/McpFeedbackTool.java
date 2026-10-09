@@ -28,18 +28,18 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * The {@code neo_feedback} tool (B3): the agent tells us, in its own words, what was confusing,
+ * The {@code etendo_feedback} tool (B3): the agent tells us, in its own words, what was confusing,
  * what it could not find, what it had to guess, and what failed.
  *
  * <h2>Why this is the highest-value row in the table</h2>
  *
- * <p>{@code ETGO_MCP_USAGE} can see <i>that</i> an agent called {@code neo_schema} five times and
+ * <p>{@code ETGO_MCP_USAGE} can see <i>that</i> an agent called {@code etendo_schema} five times and
  * gave up. It cannot see what the agent was <i>trying to do</i>. That intent is what turns a metric
  * into an actionable defect, and the calling agent is the only party that holds it.</p>
  *
  * <h2>The row is written by the servlet, not here</h2>
  *
- * <p>A {@code neo_feedback} call <i>is</i> a tool call, so it produces exactly ONE row (D31):
+ * <p>A {@code etendo_feedback} call <i>is</i> a tool call, so it produces exactly ONE row (D31):
  * {@code McpServlet.recordToolCall} writes it with {@code row_type = 'feedback'} and the normalized
  * verdict in {@code Payload}, carrying the same session, tenant, timestamp and client columns as
  * every other row. That is the point of storing it here rather than in a table of its own — the
@@ -84,7 +84,7 @@ final class McpFeedbackTool {
   }
 
   /**
-   * Handle one {@code neo_feedback} call.
+   * Handle one {@code etendo_feedback} call.
    *
    * @param args the submitted verdict
    * @return the MCP tool result — an acknowledgement, or an error envelope the agent can act on
@@ -93,7 +93,7 @@ final class McpFeedbackTool {
     try {
       return dispatch(args);
     } catch (JSONException e) {
-      throw new McpToolException("Error building the neo_feedback response", e);
+      throw new McpToolException("Error building the etendo_feedback response", e);
     }
   }
 
@@ -106,7 +106,7 @@ final class McpFeedbackTool {
           errorBody("rate_limited",
               "This session has already submitted " + MAX_PER_WINDOW + " feedback reports in the "
                   + "last hour. Nothing is wrong — send one consolidated report per task rather "
-                  + "than one per call.").toString(2));
+                  + "than one per call."));
     }
 
     try {
@@ -114,10 +114,11 @@ final class McpFeedbackTool {
       McpFeedbackVerdict.normalize(args);
     } catch (McpFeedbackVerdict.InvalidVerdictException e) {
       return McpToolRouter.wrapAsErrorContent(
-          errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()).toString(2));
+          errorBody(McpConstants.ERROR_VALIDATION, e.getMessage()));
     }
 
-    log.info("neo_feedback accepted for session {}", sessionKey);
+    // The INFO line, with the usage row id, is McpServlet's once the row exists (logReceived).
+    log.debug("etendo_feedback accepted for session {}", sessionKey);
     return McpToolRouter.wrapAsTextContent(acknowledgement());
   }
 
@@ -135,12 +136,75 @@ final class McpFeedbackTool {
     try {
       return McpFeedbackVerdict.normalize(args);
     } catch (Exception e) {
-      log.debug("neo_feedback verdict not storable: {}", e.getMessage());
+      log.debug("etendo_feedback verdict not storable: {}", e.getMessage());
       return null;
     }
   }
 
   /** @return true when this session is still within its window allowance. */
+  /**
+   * Log one {@code INFO} line for an accepted report, pointing at its {@code ETGO_MCP_USAGE} row.
+   *
+   * <p>The report itself stays in the database: its fields are agent-written free text that can
+   * carry tenant data, so the line holds only the row id, the session, tenant and client, the
+   * number of entries per section and the tool names involved (only names shaped like a tool
+   * name — anything else is free text and is left out).</p>
+   *
+   * @param row the feedback row just enqueued, whose payload is the normalized report
+   */
+  static void logReceived(McpUsageRow row) {
+    try {
+      log.info(receivedLogLine(row));
+    } catch (Exception e) { // NOSONAR — a log line must never fail the telemetry path.
+      log.debug("Could not log the etendo_feedback summary.", e);
+    }
+  }
+
+  /**
+   * @param row the feedback row
+   * @return {@code MCP feedback received: usageId=… session=… clientId=… client=… frictions=n
+   *         failures=n wasted=n suggestions=n tools=[…]}
+   * @throws JSONException if the stored payload is not the normalized report
+   */
+  static String receivedLogLine(McpUsageRow row) throws JSONException {
+    JSONObject report = new JSONObject(row.payload());
+    java.util.Set<String> tools = new java.util.TreeSet<>();
+    collectTools(report.optJSONArray("failures"), tools);
+    collectTools(report.optJSONArray("wastedCalls"), tools);
+    return "MCP feedback received: usageId=" + row.id()
+        + " session=" + row.sessionKey()
+        + " clientId=" + row.clientId()
+        + " client=" + (row.clientName() == null ? "unknown" : row.clientName())
+        + " frictions=" + count(report, "frictions")
+        + " failures=" + count(report, "failures")
+        + " wasted=" + count(report, "wastedCalls")
+        + " suggestions=" + count(report, "suggestions")
+        + " tools=" + tools;
+  }
+
+  /** What a tool name looks like; an entry not matching it is free text and is not logged. */
+  private static final java.util.regex.Pattern TOOL_NAME =
+      java.util.regex.Pattern.compile("[a-z][a-z0-9_]{0,63}");
+
+  private static int count(JSONObject report, String section) {
+    org.codehaus.jettison.json.JSONArray items = report.optJSONArray(section);
+    return items == null ? 0 : items.length();
+  }
+
+  private static void collectTools(org.codehaus.jettison.json.JSONArray items,
+      java.util.Set<String> tools) {
+    if (items == null) {
+      return;
+    }
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.optJSONObject(i);
+      String tool = item == null ? null : item.optString("tool", null);
+      if (tool != null && TOOL_NAME.matcher(tool).matches()) {
+        tools.add(tool);
+      }
+    }
+  }
+
   private static boolean accept(String sessionKey) {
     long now = System.currentTimeMillis();
     synchronized (WINDOWS) {

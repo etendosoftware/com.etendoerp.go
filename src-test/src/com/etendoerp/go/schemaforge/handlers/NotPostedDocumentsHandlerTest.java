@@ -71,6 +71,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * to {@code NoPostedDocumentDS.getData}) still requires a live OBDal session and is excluded.
  * The {@code setPostingService(...)} package-private seam allows injection of a mock
  * {@link DocumentPostingService} so post / bulk-post paths can be exercised without a database.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.NotPostedDocumentsHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class NotPostedDocumentsHandlerTest {
@@ -115,7 +117,7 @@ public class NotPostedDocumentsHandlerTest {
   /**
    * ETP-4254: this spec is tab-less, so the MCP catalog rule would hide it as "handler-only"
    * unless the handler declares its {@code post} / {@code bulk-post} action surface. Losing the
-   * declaration removes the spec from neo_discover AND from neo_action — a silent regression
+   * declaration removes the spec from etendo_discover AND from etendo_action — a silent regression
    * with no other failing test, which is why it is asserted here.
    */
   @Test
@@ -271,6 +273,51 @@ public class NotPostedDocumentsHandlerTest {
       JSONObject rowResult = resp.getBody().getJSONArray("results").getJSONObject(0);
       assertEquals("InvalidAccount", rowResult.getJSONArray("messageKeys").getString(0));
       assertEquals("Acme", rowResult.getJSONObject("messageParams").getString("bpName"));
+    }
+  }
+
+  /**
+   * ETP-5529: in a bulk post, only the row another posting process holds carries the
+   * {@code OtherPostingProcessActive} identity; a row that posted keeps a clean result.
+   */
+  @Test
+  public void handleBulkPostForwardsLockedDocumentKeyOnlyOnTheLockedRow() throws Exception {
+    try (MockedStatic<NeoAccessHelper> accessMock = mockAccessGranted()) {
+      NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+      DocumentPostingService service = mock(DocumentPostingService.class);
+      handler.setPostingService(service);
+
+      when(service.post("318", "REC-LOCKED")).thenReturn(new DocumentPostingService.PostResult(false,
+          "Este registro está siendo contabilizado por otro proceso", List.of("OtherPostingProcessActive")));
+      when(service.post("318", "REC-OK"))
+          .thenReturn(new DocumentPostingService.PostResult(true, "Document posted"));
+
+      JSONObject locked = new JSONObject();
+      locked.put("tableId", "318");
+      locked.put("recordId", "REC-LOCKED");
+      JSONObject ok = new JSONObject();
+      ok.put("tableId", "318");
+      ok.put("recordId", "REC-OK");
+      JSONObject body = new JSONObject();
+      body.put("rows", new JSONArray().put(locked).put(ok));
+
+      NeoContext ctx = mock(NeoContext.class);
+      when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+      when(ctx.getFieldName()).thenReturn("bulk-post");
+      when(ctx.getRequestBody()).thenReturn(body);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      JSONArray results = resp.getBody().getJSONArray("results");
+      JSONObject lockedResult = results.getJSONObject(0);
+      assertFalse(lockedResult.getBoolean("success"));
+      assertEquals("Este registro está siendo contabilizado por otro proceso", lockedResult.getString("message"));
+      assertEquals("OtherPostingProcessActive", lockedResult.getJSONArray("messageKeys").getString(0));
+      JSONObject okResult = results.getJSONObject(1);
+      assertTrue(okResult.getBoolean("success"));
+      assertFalse(okResult.has("messageKeys"));
+      assertEquals(1, resp.getBody().getInt("ok"));
+      assertEquals(2, resp.getBody().getInt("total"));
     }
   }
 

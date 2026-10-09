@@ -68,6 +68,8 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * for connected and disconnected accounts; account-not-found → 404; the ETP-5181
  * {@code maxFetchInterval} advisory field; the OBException → 400 and the generic Exception → 500
  * translations (both rollback).
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountBankConnectionHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionHandlerRoutingTest {
@@ -398,6 +400,44 @@ public class FinancialAccountBankConnectionHandlerRoutingTest {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       assertEquals(500, handler.handle(getContext(params)).getHttpStatus());
       verify(handler).doRollbackAndClose();
+    }
+  }
+
+  // ── ETP-5582: lastSyncDate on GET status ──────────────────────────────────
+
+  /** GET status exposes the account's last successful sync as an ISO instant. */
+  @Test
+  public void testStatusReturnsLastSyncDateWhenSynced() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    when(finAcc.getPSD2LastSyncDate())
+        .thenReturn(java.util.Date.from(java.time.Instant.parse("2026-10-05T10:30:00Z")));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, null);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertEquals("2026-10-05T10:30:00Z", data.getString("lastSyncDate"));
+    }
+  }
+
+  /** A never-synced account yields an explicit JSON null (key kept), not a missing key. */
+  @Test
+  public void testStatusReturnsNullLastSyncDateWhenNeverSynced() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    when(finAcc.getPSD2LastSyncDate()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, null);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertTrue(data.has("lastSyncDate"));
+      assertTrue(data.isNull("lastSyncDate"));
     }
   }
 

@@ -45,22 +45,27 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * CRUD handler tests that require a full DAL session run against a live Etendo
  * instance via OBBaseTest. These tests cover the pure-logic, no-DAL parts
  * plus the authorization guard and exception-wrapping logic of {@code route()}.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpToolResponses
+ * @covers com.etendoerp.go.mcp.McpResponseSanitizer
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 public class McpToolRouterTest {
 
   private static final String FIELD_CONTENT = "content";
   private static final String FIELD_IS_ERROR = "isError";
   private static final String SPEC_SALES_ORDER = "sales-order";
-  private static final String TOOL_NEO_LIST = "neo_list";
-  private static final String TOOL_NEO_GET = "neo_get";
-  private static final String TOOL_NEO_CREATE = "neo_create";
-  private static final String TOOL_NEO_UPDATE = "neo_update";
-  private static final String TOOL_NEO_DELETE = "neo_delete";
-  private static final String TOOL_NEO_SELECTORS = "neo_selectors";
-  private static final String TOOL_NEO_DEFAULTS = "neo_defaults";
-  private static final String TOOL_NEO_SCHEMA = "neo_schema";
-  private static final String TOOL_NEO_DISCOVER = "neo_discover";
-  private static final String TOOL_NEO_BATCH = "neo_batch";
+  private static final String TOOL_NEO_LIST = "etendo_list";
+  private static final String TOOL_NEO_GET = "etendo_get";
+  private static final String TOOL_NEO_CREATE = "etendo_create";
+  private static final String TOOL_NEO_UPDATE = "etendo_update";
+  private static final String TOOL_NEO_DELETE = "etendo_delete";
+  private static final String TOOL_NEO_SELECTORS = "etendo_selectors";
+  private static final String TOOL_NEO_DEFAULTS = "etendo_defaults";
+  private static final String TOOL_NEO_SCHEMA = "etendo_schema";
+  private static final String TOOL_NEO_DISCOVER = "etendo_discover";
+  private static final String TOOL_NEO_BATCH = "etendo_batch";
   private static final String TOOL_COMPLETE_ORDER = "complete_order";
   private static final String TOOL_GENERATE_INVOICE = "generate_invoice_report";
   private static final String TOOL_DOCS = "docs";
@@ -129,6 +134,70 @@ public class McpToolRouterTest {
     assertEquals(longText, content.getJSONObject(0).getString("text"));
   }
 
+  // ── compact serialisation of JSON tool results (ETP-5639 / IMP-53) ────────
+
+  /**
+   * A nested JSON body used by the compactness tests: an object inside an array inside an object,
+   * the shape that pretty-printing indents most.
+   */
+  private static JSONObject nestedBody() throws Exception {
+    JSONObject row = new JSONObject();
+    row.put("name", "Line 1\nsecond line");
+    row.put("qty", 2);
+    JSONArray rows = new JSONArray();
+    rows.put(row);
+    JSONObject body = new JSONObject();
+    body.put("specs", rows);
+    body.put("count", 1);
+    return body;
+  }
+
+  /**
+   * IMP-53: a JSON tool result is rendered compact — indentation was 41 % of etendo_discover's
+   * bytes. A newline inside a string value is escaped as {@code \n}, so a raw newline in the text
+   * can only be pretty-print indentation.
+   */
+  @Test
+  public void testWrapAsTextContentJsonBodyIsCompact() throws Exception {
+    JSONObject result = McpToolRouter.wrapAsTextContent(nestedBody());
+
+    String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+    assertFalse("tool result must not be pretty-printed: " + text, text.contains("\n"));
+    JSONObject parsed = new JSONObject(text);
+    assertEquals("Line 1\nsecond line",
+        parsed.getJSONArray("specs").getJSONObject(0).getString("name"));
+  }
+
+  /** IMP-53: the error counterpart is compact too — the same egress, the same rule. */
+  @Test
+  public void testWrapAsErrorContentJsonBodyIsCompact() throws Exception {
+    JSONObject result = McpToolRouter.wrapAsErrorContent(nestedBody());
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    String text = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+    assertFalse("error result must not be pretty-printed: " + text, text.contains("\n"));
+  }
+
+  /** IMP-53: the unexpected-failure envelope is rendered compact. */
+  @Test
+  public void testUnexpectedErrorBodyIsCompact() throws Exception {
+    String text = McpToolResponses.buildUnexpectedErrorBody(TOOL_NEO_LIST,
+        new IllegalStateException("boom"));
+
+    assertFalse("error envelope must not be pretty-printed: " + text, text.contains("\n"));
+    assertEquals(TOOL_NEO_LIST, new JSONObject(text).getString("tool"));
+  }
+
+  /** IMP-53: the routing-failure envelope is rendered compact. */
+  @Test
+  public void testRoutingErrorBodyIsCompact() throws Exception {
+    String text = McpToolResponses.buildRoutingErrorBody(
+        McpRoutingException.specNotFound(SPEC_SALES_ORDER), TOOL_NEO_LIST);
+
+    assertFalse("error envelope must not be pretty-printed: " + text, text.contains("\n"));
+    assertEquals("spec", new JSONObject(text).getString("field"));
+  }
+
   // ── wrapAsErrorContent ─────────────────────────────────────────────────
 
   /** Tests that wrapAsErrorContent sets isError flag and wraps the message. */
@@ -172,7 +241,7 @@ public class McpToolRouterTest {
   // ── McpToolResponses.deleteConfirmation (ETP-5474) ─────────────────────
 
   /**
-   * Pins the single {@code neo_delete} success shape shared by the generic removal path and the
+   * Pins the single {@code etendo_delete} success shape shared by the generic removal path and the
    * delete pre-hook: one text content item whose JSON is exactly
    * {@code {"deleted": true, "id": <recordId>}}, and no {@code isError} flag.
    */
@@ -196,120 +265,120 @@ public class McpToolRouterTest {
     assertEquals(recordId, payload.getString("id"));
   }
 
-  // ── mapColumnTypeStatic ───────────────────────────────────────────────
+  // ── mapColumnType ───────────────────────────────────────────────
 
-  /** Tests that mapColumnTypeStatic maps string reference IDs correctly. */
+  /** Tests that mapColumnType maps string reference IDs correctly. */
   @Test
   public void testMapColumnTypeStringRefs() {
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("10"));
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("14"));
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("34"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("10"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("14"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("34"));
   }
 
-  /** Tests that mapColumnTypeStatic maps numeric reference IDs correctly. */
+  /** Tests that mapColumnType maps numeric reference IDs correctly. */
   @Test
   public void testMapColumnTypeNumericRefs() {
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("11"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("22"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("29"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("12"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("800008"));
-    assertEquals("number", McpToolRouter.mapColumnTypeStatic("800019"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("11"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("22"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("29"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("12"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("800008"));
+    assertEquals("number", McpSchemaFieldBuilder.mapColumnType("800019"));
   }
 
-  /** Tests that mapColumnTypeStatic maps boolean reference ID correctly. */
+  /** Tests that mapColumnType maps boolean reference ID correctly. */
   @Test
   public void testMapColumnTypeBooleanRef() {
-    assertEquals("boolean", McpToolRouter.mapColumnTypeStatic("20"));
+    assertEquals("boolean", McpSchemaFieldBuilder.mapColumnType("20"));
   }
 
-  /** Tests that mapColumnTypeStatic maps date/time reference IDs correctly. */
+  /** Tests that mapColumnType maps date/time reference IDs correctly. */
   @Test
   public void testMapColumnTypeDateTimeRefs() {
-    assertEquals("date", McpToolRouter.mapColumnTypeStatic("15"));
-    assertEquals("datetime", McpToolRouter.mapColumnTypeStatic("16"));
-    assertEquals("time", McpToolRouter.mapColumnTypeStatic("24"));
+    assertEquals("date", McpSchemaFieldBuilder.mapColumnType("15"));
+    assertEquals("datetime", McpSchemaFieldBuilder.mapColumnType("16"));
+    assertEquals("time", McpSchemaFieldBuilder.mapColumnType("24"));
   }
 
-  /** Tests that mapColumnTypeStatic maps button reference ID correctly. */
+  /** Tests that mapColumnType maps button reference ID correctly. */
   @Test
   public void testMapColumnTypeButtonRef() {
-    assertEquals("button", McpToolRouter.mapColumnTypeStatic("28"));
+    assertEquals("button", McpSchemaFieldBuilder.mapColumnType("28"));
   }
 
-  /** Tests that mapColumnTypeStatic maps list reference ID correctly. */
+  /** Tests that mapColumnType maps list reference ID correctly. */
   @Test
   public void testMapColumnTypeListRef() {
-    assertEquals("list", McpToolRouter.mapColumnTypeStatic("17"));
+    assertEquals("list", McpSchemaFieldBuilder.mapColumnType("17"));
   }
 
-  /** Tests that mapColumnTypeStatic maps ID reference correctly. */
+  /** Tests that mapColumnType maps ID reference correctly. */
   @Test
   public void testMapColumnTypeIdRef() {
-    assertEquals("id", McpToolRouter.mapColumnTypeStatic("13"));
+    assertEquals("id", McpSchemaFieldBuilder.mapColumnType("13"));
   }
 
-  /** Tests that mapColumnTypeStatic maps foreign key reference IDs correctly. */
+  /** Tests that mapColumnType maps foreign key reference IDs correctly. */
   @Test
   public void testMapColumnTypeForeignKeyRefs() {
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("19"));
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("18"));
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("30"));
-    assertEquals("foreignKey", McpToolRouter.mapColumnTypeStatic("95E2A8B50A254B2AAE6774B8C2F28120"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("19"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("18"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("30"));
+    assertEquals("foreignKey", McpSchemaFieldBuilder.mapColumnType("95E2A8B50A254B2AAE6774B8C2F28120"));
   }
 
-  /** Tests that mapColumnTypeStatic returns string for null input. */
+  /** Tests that mapColumnType returns string for null input. */
   @Test
   public void testMapColumnTypeNullRef() {
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic(null));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType(null));
   }
 
-  /** Tests that mapColumnTypeStatic returns string for unknown reference ID. */
+  /** Tests that mapColumnType returns string for unknown reference ID. */
   @Test
   public void testMapColumnTypeUnknownRef() {
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("9999"));
-    assertEquals("string", McpToolRouter.mapColumnTypeStatic("unknown"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("9999"));
+    assertEquals("string", McpSchemaFieldBuilder.mapColumnType("unknown"));
   }
 
-  // ── mapSelectorTypeStatic ─────────────────────────────────────────────
+  // ── mapSelectorType ─────────────────────────────────────────────
 
-  /** Tests that mapSelectorTypeStatic maps TableDir reference correctly. */
+  /** Tests that mapSelectorType maps TableDir reference correctly. */
   @Test
   public void testMapSelectorTypeTableDir() {
-    assertEquals("TableDir", McpToolRouter.mapSelectorTypeStatic("19"));
+    assertEquals("TableDir", McpSchemaFieldBuilder.mapSelectorType("19"));
   }
 
-  /** Tests that mapSelectorTypeStatic maps Table reference correctly. */
+  /** Tests that mapSelectorType maps Table reference correctly. */
   @Test
   public void testMapSelectorTypeTable() {
-    assertEquals("Table", McpToolRouter.mapSelectorTypeStatic("18"));
+    assertEquals("Table", McpSchemaFieldBuilder.mapSelectorType("18"));
   }
 
-  /** Tests that mapSelectorTypeStatic maps Search reference correctly. */
+  /** Tests that mapSelectorType maps Search reference correctly. */
   @Test
   public void testMapSelectorTypeSearch() {
-    assertEquals("Search", McpToolRouter.mapSelectorTypeStatic("30"));
+    assertEquals("Search", McpSchemaFieldBuilder.mapSelectorType("30"));
   }
 
-  /** Tests that mapSelectorTypeStatic maps OBUISEL reference correctly. */
+  /** Tests that mapSelectorType maps OBUISEL reference correctly. */
   @Test
   public void testMapSelectorTypeObuisel() {
-    assertEquals("OBUISEL", McpToolRouter.mapSelectorTypeStatic("95E2A8B50A254B2AAE6774B8C2F28120"));
+    assertEquals("OBUISEL", McpSchemaFieldBuilder.mapSelectorType("95E2A8B50A254B2AAE6774B8C2F28120"));
   }
 
-  /** Tests that mapSelectorTypeStatic returns null for null input. */
+  /** Tests that mapSelectorType returns null for null input. */
   @Test
   public void testMapSelectorTypeNullRef() {
-    assertNull(McpToolRouter.mapSelectorTypeStatic(null));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType(null));
   }
 
-  /** Tests that mapSelectorTypeStatic returns null for non-selector reference IDs. */
+  /** Tests that mapSelectorType returns null for non-selector reference IDs. */
   @Test
   public void testMapSelectorTypeNonSelectorRefs() {
-    assertNull(McpToolRouter.mapSelectorTypeStatic("10"));
-    assertNull(McpToolRouter.mapSelectorTypeStatic("11"));
-    assertNull(McpToolRouter.mapSelectorTypeStatic("20"));
-    assertNull(McpToolRouter.mapSelectorTypeStatic("9999"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("10"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("11"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("20"));
+    assertNull(McpSchemaFieldBuilder.mapSelectorType("9999"));
   }
 
   // ── ToolRegistry.resolveSpecName ───────────────────────────────────────
@@ -330,7 +399,7 @@ public class McpToolRouterTest {
     assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(TOOL_NEO_DEFAULTS, args));
   }
 
-  /** Tests that resolveSpecName returns the spec argument for neo_schema. */
+  /** Tests that resolveSpecName returns the spec argument for etendo_schema. */
   @Test
   public void testResolveSpecNameForSchemaTool() throws Exception {
     JSONObject args = new JSONObject();
@@ -398,18 +467,18 @@ public class McpToolRouterTest {
   public void testIsCrudToolFalse() {
     assertFalse(ToolRegistry.isCrudTool(TOOL_COMPLETE_ORDER));
     assertFalse(ToolRegistry.isCrudTool(TOOL_GENERATE_INVOICE));
-    assertFalse(ToolRegistry.isCrudTool("neo_other"));
+    assertFalse(ToolRegistry.isCrudTool("etendo_other"));
     assertFalse(ToolRegistry.isCrudTool(""));
   }
 
-  /** Tests that neo_batch is treated as a CRUD tool so spec resolution is skipped. */
+  /** Tests that etendo_batch is treated as a CRUD tool so spec resolution is skipped. */
   @Test
   public void testNeoBatchIsCrudTool() {
     assertTrue(ToolRegistry.isCrudTool(TOOL_NEO_BATCH));
   }
 
   /**
-   * Tests that resolveSpecName returns null for neo_batch even with arguments --
+   * Tests that resolveSpecName returns null for etendo_batch even with arguments --
    * each operation carries its own spec, there is no top-level spec.
    */
   @Test
@@ -427,7 +496,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that the router rejects neo_batch with missing/empty operations as an MCP
+   * Tests that the router rejects etendo_batch with missing/empty operations as an MCP
    * error content block, without dispatching to BatchService (no DAL touched).
    */
   @Test
@@ -589,27 +658,27 @@ public class McpToolRouterTest {
     McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:*"));
   }
 
-  // ── McpAuthorizationService — neo_widget (ETP-4284 / G4) ──────────────
+  // ── McpAuthorizationService — etendo_widget (ETP-4284 / G4) ──────────────
 
-  /** Tests that neo_widget requires read scope at execution time. */
+  /** Tests that etendo_widget requires read scope at execution time. */
   @Test
   public void testAuthorizeToolCallAllowsWidgetWithReadScope() {
     McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:read"));
   }
 
-  /** Tests that the wildcard scope allows neo_widget. */
+  /** Tests that the wildcard scope allows etendo_widget. */
   @Test
   public void testAuthorizeToolCallAllowsWidgetWithWildcardScope() {
     McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:*"));
   }
 
-  /** Tests that neo_widget is rejected without read scope. */
+  /** Tests that etendo_widget is rejected without read scope. */
   @Test(expected = OBSecurityException.class)
   public void testAuthorizeToolCallRejectsWidgetWithoutReadScope() {
     McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:write"));
   }
 
-  /** Tests that neo_widget is rejected with process scope only. */
+  /** Tests that etendo_widget is rejected with process scope only. */
   @Test(expected = OBSecurityException.class)
   public void testAuthorizeToolCallRejectsWidgetWithProcessScope() {
     McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:process"));
@@ -771,7 +840,7 @@ public class McpToolRouterTest {
 
   /**
    * Router-level regression test for the ETP-4510 code-review BLOCKER: MCP write
-   * tools (neo_create/neo_update/neo_delete) must deny a role whose
+   * tools (etendo_create/etendo_update/etendo_delete) must deny a role whose
    * {@code AD_Window_Access} row is read-only, exactly like the REST NEO Headless
    * path does. Before the fix, {@code route()} authorized every tool call through
    * the 1-arg (GET-tier) {@code hasWindowAccess}, so a read-only role could still
@@ -819,7 +888,7 @@ public class McpToolRouterTest {
 
   /**
    * Companion to {@link #testRouteDeniesWriteToolsForReadOnlyWindowAccess}: the same
-   * read-only window must still pass authorization for a read tool (neo_list), proving
+   * read-only window must still pass authorization for a read tool (etendo_list), proving
    * the fix only tightens writes and does not regress reads.
    */
   @Test
@@ -845,7 +914,7 @@ public class McpToolRouterTest {
       // missing DAL/entity resolution, never "Access denied".
       if (result.optBoolean(FIELD_IS_ERROR, false)) {
         String errorText = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
-        assertFalse("neo_list should not be blocked by access control for a read-only window, "
+        assertFalse("etendo_list should not be blocked by access control for a read-only window, "
             + "got: " + errorText, errorText.contains("Access denied"));
       }
     }
@@ -854,7 +923,7 @@ public class McpToolRouterTest {
   // ── route() — null args for each tool type ────────────────────────────
 
   /**
-   * Tests that route() with neo_get and null arguments returns an error about
+   * Tests that route() with etendo_get and null arguments returns an error about
    * missing arguments.
    */
   @Test
@@ -872,7 +941,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that route() with neo_create and null arguments returns an error about
+   * Tests that route() with etendo_create and null arguments returns an error about
    * missing arguments.
    */
   @Test
@@ -890,7 +959,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that route() with neo_delete and null arguments returns an error about
+   * Tests that route() with etendo_delete and null arguments returns an error about
    * missing arguments.
    */
   @Test
@@ -908,7 +977,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that route() with neo_selectors and null arguments returns an error about
+   * Tests that route() with etendo_selectors and null arguments returns an error about
    * missing arguments.
    */
   @Test
@@ -926,7 +995,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that route() with neo_defaults and null arguments returns an error about
+   * Tests that route() with etendo_defaults and null arguments returns an error about
    * missing arguments.
    */
   @Test
@@ -944,7 +1013,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that route() with neo_schema and null arguments returns an error about
+   * Tests that route() with etendo_schema and null arguments returns an error about
    * missing arguments.
    */
   @Test
@@ -984,10 +1053,10 @@ public class McpToolRouterTest {
     }
   }
 
-  // ── route() — neo_widget (ETP-4284 / G4) ──────────────────────────────
+  // ── route() — etendo_widget (ETP-4284 / G4) ──────────────────────────────
 
   /**
-   * Tests that route() with neo_widget and a valid widget but no DAL passes
+   * Tests that route() with etendo_widget and a valid widget but no DAL passes
    * authorization (the subsequent error is about spec/DAL resolution, not scope).
    */
   @Test
@@ -1004,13 +1073,13 @@ public class McpToolRouterTest {
       JSONObject result = router.route(McpConstants.TOOL_NEO_WIDGET, args, Set.of("neo:read"));
       assertTrue(result.optBoolean(FIELD_IS_ERROR, false));
       String errorText = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
-      assertFalse("neo_widget error should not be about scope",
+      assertFalse("etendo_widget error should not be about scope",
           errorText.contains("requires scope"));
     }
   }
 
   /**
-   * Tests that route() rejects neo_widget without read scope. Authorization runs
+   * Tests that route() rejects etendo_widget without read scope. Authorization runs
    * before the try/catch in route(), so the OBSecurityException propagates to the
    * caller (it is NOT wrapped as error content) — matching the other write/process
    * scope-rejection tests above.
@@ -1026,7 +1095,7 @@ public class McpToolRouterTest {
   }
 
   /**
-   * Tests that route() with neo_widget and null arguments returns an error
+   * Tests that route() with etendo_widget and null arguments returns an error
    * (the required 'widget' argument is missing).
    */
   @Test
@@ -1225,9 +1294,9 @@ public class McpToolRouterTest {
     assertEquals("a_b", ToolRegistry.kebabToSnake("a-b"));
   }
 
-  // ── neo_schema isCrudTool ─────────────────────────────────────────────
+  // ── etendo_schema isCrudTool ─────────────────────────────────────────────
 
-  /** Tests that neo_schema is classified as a CRUD tool. */
+  /** Tests that etendo_schema is classified as a CRUD tool. */
   @Test
   public void testNeoSchemaIsCrudTool() {
     assertTrue(ToolRegistry.isCrudTool(TOOL_NEO_SCHEMA));
@@ -1349,7 +1418,7 @@ public class McpToolRouterTest {
     assertNotNull(envelope);
     assertEquals(409, envelope.getInt("status"));
     assertEquals("conflict", envelope.getString("error"));
-    assertTrue(envelope.getString("hint").contains("neo_list"));
+    assertTrue(envelope.getString("hint").contains("etendo_list"));
   }
 
   /** The failing-row dump must never reach an agent — it is both an internals leak and an ACE cost. */
@@ -1401,7 +1470,7 @@ public class McpToolRouterTest {
     assertNotNull(envelope);
     assertEquals(422, envelope.getInt("status"));
     assertFalse(envelope.has("fieldErrors"));
-    assertTrue(envelope.getString("hint").contains("neo_schema"));
+    assertTrue(envelope.getString("hint").contains("etendo_schema"));
   }
 
   /** A successful response, and one with no wrapper at all, must not be classified as a failure. */
@@ -1422,18 +1491,18 @@ public class McpToolRouterTest {
 
   /**
    * The last leak IMP-5 left open: {@code route}'s catch-all flattened every routing failure into
-   * {@code "Error executing neo_list: …"}. The envelope is a {@code server_error} on purpose — a
+   * {@code "Error executing etendo_list: …"}. The envelope is a {@code server_error} on purpose — a
    * validation code would invite a retry-with-corrections that cannot succeed.
    */
   @Test
   public void testUnexpectedErrorBodyIsAServerErrorEnvelope() throws Exception {
-    String body = McpToolResponses.buildUnexpectedErrorBody("neo_list",
+    String body = McpToolResponses.buildUnexpectedErrorBody("etendo_list",
         new RuntimeException("null pointer somewhere"));
 
     JSONObject envelope = new JSONObject(body);
     assertEquals(500, envelope.getInt("status"));
     assertEquals("server_error", envelope.getString("error"));
-    assertEquals("neo_list", envelope.getString("tool"));
+    assertEquals("etendo_list", envelope.getString("tool"));
     assertTrue(envelope.getString("hint").contains("will not help"));
     assertFalse(body.startsWith("Error executing"));
   }

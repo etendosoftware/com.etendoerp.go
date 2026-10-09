@@ -48,7 +48,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 /**
  * ETP-5558 BUG-1 — a child write whose {@code parentId} cannot be mapped is refused, not written.
  *
- * <p><b>The defect.</b> {@code neo_create(spec:"payment-out", entity:"lines", parentId:<payment>)}
+ * <p><b>The defect.</b> {@code etendo_create(spec:"payment-out", entity:"lines", parentId:<payment>)}
  * targets {@code FIN_Payment_ScheduleDetail}, whose parent-link columns point at
  * {@code FIN_Payment_Detail} and {@code FIN_Payment_Schedule} — never at {@code FIN_Payment}, the
  * table of its parent tab. {@link McpParentScope} correctly answers {@code UNRESOLVABLE}, but
@@ -59,6 +59,9 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *
  * <p>The refusal is asserted on the envelope an agent reads, because the point is not only to stop
  * the write but to say why: a bare "bad request" would leave the caller retrying the same call.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpParentScope
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @DisplayName("ETP-5558 BUG-1 — an unmappable parentId is refused (parent_unresolvable)")
 class McpParentUnresolvableTest {
@@ -118,7 +121,7 @@ class McpParentUnresolvableTest {
   // ── the repro ─────────────────────────────────────────────────────────
 
   @Test
-  @DisplayName("neo_create's parent mapping refuses an unresolvable scope instead of writing on")
+  @DisplayName("etendo_create's parent mapping refuses an unresolvable scope instead of writing on")
   void resolveParentFkRefusesUnresolvable() throws Exception {
     withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, PROBLEM));
     JSONObject body = new JSONObject();
@@ -174,7 +177,8 @@ class McpParentUnresolvableTest {
   }
 
   @ParameterizedTest
-  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE", "UNPARENTED" })
+  @EnumSource(value = McpParentScope.Kind.class,
+      names = { "UNRESOLVABLE", "UNPARENTED", "TAB_WHERE" })
   @DisplayName("every scope with no parent field to write the id into is refused")
   void everyUnmappableKindIsRefused(McpParentScope.Kind kind) throws Exception {
     withScope(scope(kind, null, kind == McpParentScope.Kind.UNRESOLVABLE ? PROBLEM : null));
@@ -188,11 +192,16 @@ class McpParentUnresolvableTest {
    * WARN-1 of the review: the corruption does not need a parentId. Without one the create reaches
    * the mandatory-defaults pass all the same, which fills the unmappable link on its own. An
    * unresolvable scope therefore refuses every create, whatever the caller sent.
+   *
+   * <p>ETP-5639: a {@code TAB_WHERE} child is refused the same way. Its parent is reached only
+   * through the tab's where clause, so there is no field to write it into, and the defaults pass
+   * would pick the intermediate link on its own.</p>
    */
-  @Test
-  @DisplayName("an unresolvable scope refuses the create even when no parentId is sent")
-  void unresolvableIsRefusedWithoutParentId() throws Exception {
-    withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, PROBLEM));
+  @ParameterizedTest
+  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE", "TAB_WHERE" })
+  @DisplayName("a scope with no writable parent link refuses the create without parentId too")
+  void unresolvableIsRefusedWithoutParentId(McpParentScope.Kind kind) throws Exception {
+    withScope(scope(kind, null, PROBLEM));
 
     for (String absent : new String[] { null, "", "  " }) {
       McpRoutingException refusal = assertThrows(McpRoutingException.class,
@@ -205,7 +214,7 @@ class McpParentUnresolvableTest {
   }
 
   @ParameterizedTest
-  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE" }, mode =
+  @EnumSource(value = McpParentScope.Kind.class, names = { "UNRESOLVABLE", "TAB_WHERE" }, mode =
       EnumSource.Mode.EXCLUDE)
   @DisplayName("without parentId, every other scope kind is left alone")
   void blankParentIdIsOnlyJudgedForUnresolvable(McpParentScope.Kind kind) throws Exception {
@@ -251,24 +260,24 @@ class McpParentUnresolvableTest {
     McpRoutingException refusal = assertThrows(McpRoutingException.class,
         () -> McpWriteRequestSupport.requireApplicableParent(sfEntity, null));
     String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
-    assertTrue(hint.contains("neo_schema(spec:'" + SPEC_NAME + "', entity:'" + PARENT_ENTITY
+    assertTrue(hint.contains("etendo_schema(spec:'" + SPEC_NAME + "', entity:'" + PARENT_ENTITY
         + "', view:'actions')"), "the hint must be a call the agent can make as is: " + hint);
     assertFalse(hint.contains("<"), "no placeholder may reach the agent: " + hint);
   }
 
   @Test
-  @DisplayName("with no parent entity known, the hint sends the agent to neo_discover instead")
+  @DisplayName("with no parent entity known, the hint sends the agent to etendo_discover instead")
   void hintFallsBackWithoutParentEntity() throws Exception {
     withScope(scope(McpParentScope.Kind.UNRESOLVABLE, null, null, PROBLEM));
 
     McpRoutingException refusal = assertThrows(McpRoutingException.class,
         () -> McpWriteRequestSupport.requireApplicableParent(sfEntity, null));
     String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
-    assertTrue(hint.contains("neo_discover"), hint);
+    assertTrue(hint.contains("etendo_discover"), hint);
     assertFalse(hint.contains("<") || hint.contains("null"), "no placeholder or null: " + hint);
   }
 
-  // ── neo_create applies the gate before the defaults ───────────────────
+  // ── etendo_create applies the gate before the defaults ───────────────────
 
   /**
    * NIT-3 of the review: the refusal is only worth anything if it runs before
@@ -276,7 +285,7 @@ class McpParentUnresolvableTest {
    * {@code parentId} branch, so a create without one is judged too.
    */
   @Test
-  @DisplayName("neo_create runs the parent gate before injectMandatoryDefaults, for every create")
+  @DisplayName("etendo_create runs the parent gate before injectMandatoryDefaults, for every create")
   void createPathAppliesTheGateBeforeDefaults() {
     String body = McpSourceScanner.methodBody(
         McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"), "handleCreate");
@@ -297,17 +306,17 @@ class McpParentUnresolvableTest {
         "the gate must not live only inside the parentId branch");
   }
 
-  // ── neo_batch applies the same gate ───────────────────────────────────
+  // ── etendo_batch applies the same gate ───────────────────────────────────
 
   /**
-   * {@code neo_batch} never reaches {@code resolveParentFK}: it hands the body to
+   * {@code etendo_batch} never reaches {@code resolveParentFK}: it hands the body to
    * {@code BatchService}, whose shared create path maps the parent on its own. The MCP gate must
    * therefore be called from the batch preprocessor too, before the operation is written — the
    * method is private and needs a live DAL, so the call site is pinned by source, the same way
    * {@code McpBillToInjectorCallSiteTest} pins its injector.
    */
   @Test
-  @DisplayName("neo_batch refuses an unmappable parent before the curation gates run")
+  @DisplayName("etendo_batch refuses an unmappable parent before the curation gates run")
   void batchPreprocessorAppliesTheGate() {
     String body = McpSourceScanner.methodBody(
         McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java"),

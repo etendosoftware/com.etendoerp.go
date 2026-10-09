@@ -42,12 +42,14 @@ import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Tab;
 
 /**
- * ETP-5558 — {@code neo_selectors} on a column that is not a selector of the entity answered 500
+ * ETP-5558 — {@code etendo_selectors} on a column that is not a selector of the entity answered 500
  * ("Column not found in table") in blind run {@code 20261001T2331-local-8163}. It is the caller's
  * mistake, so it is now a 422 {@code unknown_selector_column} naming the columns that work, the
- * same shape as {@code neo_list}'s {@code unknown_filter_field}.
+ * same shape as {@code etendo_list}'s {@code unknown_filter_field}.
+ *
+ * @covers com.etendoerp.go.mcp.McpSelectorContextHelper
  */
-@DisplayName("ETP-5558 — neo_selectors refuses an unknown column with 422")
+@DisplayName("ETP-5558 — etendo_selectors refuses an unknown column with 422")
 class McpSelectorUnknownColumnTest {
 
   private static final Set<String> SELECTOR_REFS = Set.of("19", "18", "30", "95E2A8B50A254B2AAE6774B8C2F28120");

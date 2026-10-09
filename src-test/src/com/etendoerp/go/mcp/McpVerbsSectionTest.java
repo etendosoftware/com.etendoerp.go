@@ -49,6 +49,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * route BUG-1 corrupted data through. The flags cannot be turned off, because REST and the SPA read
  * them too. The section hides the verb for agents only, and the refusal points at the action that
  * does the job instead.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpVerbsSection
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")
@@ -215,7 +217,7 @@ class McpVerbsSectionTest {
     @DisplayName("a hidden verb is a 405 method_not_allowed naming the reason and the way instead")
     void hiddenVerbRefusal() throws Exception {
       SFEntity e = entity("{\"verbs\":{\"create\":false,\"reason\":\"Payments are created from "
-          + "the invoice\",\"instead\":\"neo_action(spec:'sales-invoice', entity:'header', "
+          + "the invoice\",\"instead\":\"etendo_action(spec:'sales-invoice', entity:'header', "
           + "action:'registerPayment')\"}}");
 
       McpRoutingException refusal = assertThrows(McpRoutingException.class,
@@ -239,7 +241,7 @@ class McpVerbsSectionTest {
       McpRoutingException refusal = assertThrows(McpRoutingException.class,
           () -> McpToolRouterSupport.requireMethodEnabled(e.getETGOSFSpec(), e, "DELETE"));
       String hint = refusal.toEnvelope().getString(McpConstants.KEY_HINT);
-      assertTrue(hint.contains("neo_schema(spec:'" + SPEC_NAME + "', entity:'" + ENTITY_NAME
+      assertTrue(hint.contains("etendo_schema(spec:'" + SPEC_NAME + "', entity:'" + ENTITY_NAME
           + "', view:'actions')"), hint);
     }
 
@@ -295,7 +297,7 @@ class McpVerbsSectionTest {
   class ConfigError {
 
     @Test
-    @DisplayName("neo_discover reports configError on a header entity with an unusable config")
+    @DisplayName("etendo_discover reports configError on a header entity with an unusable config")
     void headerReportsConfigError() throws Exception {
       SFEntity e = entity("{\"verbs\":{\"create\":false}}");
 
@@ -331,7 +333,7 @@ class McpVerbsSectionTest {
     }
 
     @Test
-    @DisplayName("neo_batch applies the method gate per operation, before the curation gates")
+    @DisplayName("etendo_batch applies the method gate per operation, before the curation gates")
     void batchApplyTheGate() {
       String body = McpSourceScanner.methodBody(router(), "preprocessBatchOperation");
       Matcher gate = Pattern.compile("requireMethodEnabled\\s*\\(\\s*spec\\s*,\\s*sfEntity\\s*,"
@@ -344,7 +346,7 @@ class McpVerbsSectionTest {
     }
 
     @Test
-    @DisplayName("neo_schema derives its methods from the policy and gates view:create")
+    @DisplayName("etendo_schema derives its methods from the policy and gates view:create")
     void schemaUsesThePolicy() {
       String body = McpSourceScanner.methodBody(router(), "handleSchema");
       assertFalse(Pattern.compile("sfEntity\\s*\\.\\s*is(Post|Put|Delete)\\s*\\(").matcher(body)

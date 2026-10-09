@@ -80,6 +80,8 @@ import org.openbravo.model.common.geography.Region;
  * <p>Complements {@code ContactsLocationAddressHandlerTest}, which covers {@code
  * resolveRegionByName} itself (the tenant-versus-System duplicate, accent folding, ambiguity) and
  * the whitespace guard.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.ContactsLocationAddressHandler
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -132,7 +134,7 @@ class ContactsLocationAddressParentAndRegionTest {
     @Test
     @DisplayName("the body FK is used — the MCP path, where McpToolRouter writes the resolved FK")
     void bodyFkIsUsed() throws Exception {
-      // neo_create removes parentId from the body and puts the resolved id under
+      // etendo_create removes parentId from the body and puts the resolved id under
       // businessPartner. A 404 rather than a 400 is the proof the id was read and looked up.
       JSONObject body = new JSONObject();
       body.put(FIELD_BUSINESS_PARTNER, BODY_BP);

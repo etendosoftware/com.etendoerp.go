@@ -38,7 +38,7 @@ public class McpToolDefinition {
   /**
    * Create a new tool definition.
    *
-   * @param name        unique tool name (snake_case, e.g. "neo_list" or "complete_order")
+   * @param name        unique tool name (snake_case, e.g. "etendo_list" or "complete_order")
    * @param description human-readable description of what the tool does
    * @param inputSchema JSON Schema for the tool's input parameters, represented as a Map
    */

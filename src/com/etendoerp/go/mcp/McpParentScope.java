@@ -21,6 +21,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -70,7 +72,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * <p>{@code McpWriteRequestSupport#resolveParentFK} walks the columns, takes the first with
  * {@code isLinkToParentColumn()} and assigns {@code parentId} to it <b>without checking it points
  * at the real parent</b>. In the 17 mismatched entities that first column is the wrong one: a
- * {@code neo_create} on {@code product/stock} passing a product id writes it into the
+ * {@code etendo_create} on {@code product/stock} passing a product id writes it into the
  * "referenced inventory" foreign key. It does not fail — it stores wrong data, which is why nobody
  * noticed. Both names exist on the same entity ({@code product} and {@code referencedInventory}),
  * so the write lands in the neighbouring field. Routing that resolution through this class corrects
@@ -82,18 +84,28 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * 2. parent.mode = sameRecord       -&gt; SAME_RECORD (verified against the model)
  * 3. parent.field declared          -&gt; RESOLVED by that property. Wins over the heuristic
  * 4. one parent-link column pointing at the SEQNO parent's table -&gt; RESOLVED
- * 5. anything else                  -&gt; UNRESOLVABLE: not publishable until declared
+ * 5. no such column, but the tab's HQL where clause carries the parent's key placeholder
+ *                                   -&gt; TAB_WHERE: reads gated on parentId, writes refused
+ * 6. anything else                  -&gt; UNRESOLVABLE: not publishable until declared
  * </pre>
+ *
+ * <p>Step 5 covers a parent reached in more than one hop, which {@code parent.field} cannot
+ * express because it takes a direct foreign key only. The payment Lines tabs filter
+ * {@code FIN_Payment_ScheduleDetail} by {@code pd.finPayment.id = @FIN_Payment_ID@} through
+ * {@code FIN_Payment_Detail}; {@code NeoParentTabFilterResolver#resolveTabWhere} fills the
+ * placeholder from {@code parentId} on the MCP list as it does on REST, so the read is scoped by
+ * the query. The rule is structural — the placeholder must name the parent table's key column —
+ * and names no entity.</p>
  *
  * <p>Step 5 is what keeps the gate from having a permissive default. What "not publishable" means
  * in practice, verb by verb:</p>
  * <ul>
- *   <li><b>create</b> ({@code neo_create}, {@code neo_batch}) — refused with
+ *   <li><b>create</b> ({@code etendo_create}, {@code etendo_batch}) — refused with
  *       {@code parent_unresolvable}, with or without {@code parentId}, by
  *       {@code McpWriteRequestSupport#requireApplicableParent} (ETP-5558). Letting it through is
  *       what attached a {@code payment-out} line to an unrelated collection: the mandatory-defaults
  *       pass fills the unmappable link on its own.</li>
- *   <li><b>discovery</b> — {@code neo_discover} and {@code neo_schema} still list the entity, with
+ *   <li><b>discovery</b> — {@code etendo_discover} and {@code etendo_schema} still list the entity, with
  *       {@code configError} and {@code parentProblem} saying why.</li>
  *   <li><b>read, update, delete</b> — served, without a parent gate (there is no field to gate
  *       on). None of them runs the defaults pass, so none can choose a parent for the caller.</li>
@@ -130,6 +142,13 @@ final class McpParentScope {
      * rather than merely undiscovered.
      */
     UNPARENTED,
+    /**
+     * A child with no link field of its own, scoped to its parent by its tab's HQL where clause,
+     * which carries the parent's key placeholder. Publishable: lists require {@code parentId} and
+     * are filtered by that clause; creates are refused, since there is no field to write the
+     * parent into.
+     */
+    TAB_WHERE,
     /** A child whose link field cannot be identified: not publishable — creates are refused. */
     UNRESOLVABLE
   }
@@ -216,24 +235,29 @@ final class McpParentScope {
      * Whether the parent key must accompany a given verb.
      *
      * @param verb one of {@link McpParentSection#ALL_VERBS}
-     * @return {@code true} only for a resolved child whose configuration does not relax that verb
+     * @return {@code true} for a resolved child whose configuration does not relax that verb, and
+     *         for a {@link Kind#TAB_WHERE} child on {@code list} — the only verb its where clause
+     *         gates
      */
     boolean requiresParentFor(String verb) {
-      return kind == Kind.RESOLVED && !optionalVerbs.contains(verb);
+      if (optionalVerbs.contains(verb)) {
+        return false;
+      }
+      if (kind == Kind.TAB_WHERE) {
+        return McpParentSection.VERB_LIST.equals(verb);
+      }
+      return kind == Kind.RESOLVED;
     }
 
     /**
-     * The verbs the parent key is required on, for {@code neo_discover} and {@code neo_schema}.
+     * The verbs the parent key is required on, for {@code etendo_discover} and {@code etendo_schema}.
      *
      * @return the required verbs in declaration order, empty when the gate does not apply
      */
     List<String> requiredVerbs() {
       List<String> required = new ArrayList<>();
-      if (kind != Kind.RESOLVED) {
-        return required;
-      }
       for (String verb : McpParentSection.ALL_VERBS) {
-        if (!optionalVerbs.contains(verb)) {
+        if (requiresParentFor(verb)) {
           required.add(verb);
         }
       }
@@ -241,7 +265,7 @@ final class McpParentScope {
     }
 
     /**
-     * This scope as the block {@code neo_discover} and {@code neo_schema} publish.
+     * This scope as the block {@code etendo_discover} and {@code etendo_schema} publish.
      *
      * <p>Emitting it is what keeps the gate from being pure friction: an agent that can read
      * {@code parentField} and {@code parentRequiredFor} makes the correct call on the first try
@@ -276,7 +300,11 @@ final class McpParentScope {
       if (!required.isEmpty()) {
         item.put("parentRequiredFor", new JSONArray(required));
       }
-      if (reason != null) {
+      // ETP-5639: the declared reason explains why the parent may be omitted, so it is published
+      // only when some verb really lets it be omitted. A child that declares parent.field with a
+      // reason but relaxes no verb used to show parentOptionalReason next to a parentRequiredFor
+      // naming every verb — telling the agent the parent was optional when it never was.
+      if (reason != null && required.size() < McpParentSection.ALL_VERBS.size()) {
         item.put("parentOptionalReason", reason);
       }
       if (problem != null) {
@@ -476,16 +504,20 @@ final class McpParentScope {
       return unresolvable(r, "its parent tab could not be resolved");
     }
     List<Property> candidates = parentLinkProperties(r.tab, r.dalEntity);
-    if (candidates.isEmpty()) {
-      return unresolvable(r, "it declares no active parent-link column",
-          "Set MCP_CONFIG parent.field to the property that links it to '"
-              + r.parentTab.getTable().getDBTableName() + "'");
-    }
     for (Property candidate : candidates) {
       if (targetsTableOf(candidate, r.parentTab)) {
         return new Scope(Kind.RESOLVED, candidate.getName(),
             parentEntityName(r.entity, r.parentTab, r.config), r.optional, r.reason, null);
       }
+    }
+    Scope tabWhere = tabWhereScope(r);
+    if (tabWhere != null) {
+      return tabWhere;
+    }
+    if (candidates.isEmpty()) {
+      return unresolvable(r, "it declares no active parent-link column",
+          "Set MCP_CONFIG parent.field to the property that links it to '"
+              + r.parentTab.getTable().getDBTableName() + "'");
     }
     List<String> names = new ArrayList<>();
     for (Property candidate : candidates) {
@@ -494,6 +526,59 @@ final class McpParentScope {
     return unresolvable(r, "none of its parent-link fields " + names + " points at the parent tab "
         + "table '" + r.parentTab.getTable().getDBTableName() + "'",
         "Set MCP_CONFIG parent.field to the correct one");
+  }
+
+  /**
+   * Step 5: a child whose tab where clause scopes it to the parent, with no link column to do it.
+   *
+   * <p>Only reached when no parent-link column points at the parent tab's table — a resolvable
+   * column always wins, since a field can also be written. The clause must carry the placeholder of
+   * the parent table's key column ({@code @FIN_Payment_ID@}); a clause with session variables only
+   * ({@code @#AccessibleOrgTree@}) or no placeholder at all does not scope anything to a parent.</p>
+   *
+   * @return the scope, or {@code null} when the clause names no parent key
+   */
+  private static Scope tabWhereScope(Resolution r) {
+    if (!referencesParentKey(r.tab.getHqlwhereclause(), r.parentTab)) {
+      return null;
+    }
+    return new Scope(Kind.TAB_WHERE, null, parentEntityName(r.entity, r.parentTab, r.config),
+        r.optional, r.reason, null, "it is linked to its parent only through its tab's filter, "
+            + "with no field of its own to write the parent into");
+  }
+
+  /** {@code @Token@} placeholders, the shape {@code NeoParentTabFilterResolver} substitutes. */
+  private static final Pattern PLACEHOLDER = Pattern.compile("@([A-Za-z_.]+)@");
+
+  /**
+   * Whether a tab where clause carries the placeholder of its parent table's key column.
+   *
+   * <p>The key is spelled {@code <table>_ID}, matched case-insensitively against both the table's
+   * DAL name and its DB name — the token {@code NeoParentTabFilterResolver} fills with the parent
+   * id as is.</p>
+   *
+   * @param whereClause the child tab's HQL where clause, may be {@code null}
+   * @param parentTab   the parent tab, may be {@code null}
+   * @return {@code true} when the clause names the parent's key
+   */
+  static boolean referencesParentKey(String whereClause, Tab parentTab) {
+    if (whereClause == null || whereClause.indexOf('@') < 0 || parentTab == null
+        || parentTab.getTable() == null) {
+      return false;
+    }
+    Table parentTable = parentTab.getTable();
+    Matcher matcher = PLACEHOLDER.matcher(whereClause);
+    while (matcher.find()) {
+      String token = matcher.group(1);
+      if (isKeyOf(token, parentTable.getName()) || isKeyOf(token, parentTable.getDBTableName())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isKeyOf(String token, String tableName) {
+    return tableName != null && token.equalsIgnoreCase(tableName + "_ID");
   }
 
   /**
@@ -680,7 +765,7 @@ final class McpParentScope {
    * Copy a scope's descriptor onto a response object, so every tool that describes an entity
    * describes it identically.
    *
-   * <p>{@code neo_discover} and {@code neo_schema} both need this block, and an agent that reads
+   * <p>{@code etendo_discover} and {@code etendo_schema} both need this block, and an agent that reads
    * {@code parentField} from one and then calls the other must find the same key spelled the same
    * way. Duplicating the merge loop in each caller is how those two drift apart, so the loop lives
    * here and the callers pass their own target.</p>

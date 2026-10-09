@@ -44,6 +44,11 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * that omits a key the service reads would make the MCP refuse a valid call (it validates against
  * the contract before dispatch), and one that adds a key the service ignores would invite the agent
  * to send something that does nothing.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.PaymentActionHandlerSupport
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.FollowUpSupport
  */
 @DisplayName("ETP-5558 — invoice payment action contracts")
 class PaymentActionContractsTest {
@@ -69,7 +74,7 @@ class PaymentActionContractsTest {
 
   @ParameterizedTest
   @ValueSource(booleans = { true, false })
-  @DisplayName("every contract says what the neo_action id is: the invoice")
+  @DisplayName("every contract says what the etendo_action id is: the invoice")
   void everyContractNamesItsId(boolean isReceipt) {
     for (NeoActionContract c : PaymentActionHandlerSupport.actionContracts(isReceipt).values()) {
       assertNotNull(c.getIdDescription(), c.getName());
@@ -201,7 +206,8 @@ class PaymentActionContractsTest {
   }
 
   @Test
-  @DisplayName("both invoice headers publish the payment actions plus currencyOptions over GET")
+  @DisplayName("both invoice headers publish the payment actions, currencyOptions over GET and "
+      + "their follow-up action")
   void headersPublishTheUnion() {
     Map<String, NeoActionContract> sales = new SalesInvoiceHeaderHandler().actionContracts();
     Map<String, NeoActionContract> purchase = new PurchaseInvoiceHeaderHandler().actionContracts();
@@ -211,6 +217,11 @@ class PaymentActionContractsTest {
     assertEquals("GET", sales.get("currencyOptions").getHttpMethod(),
         "currencyOptions only answers GET; the MCP must call it that way");
     assertEquals("POST", sales.get("registerPayment").getHttpMethod());
+    // ETP-5576 MCP-8: the follow-up actions are discoverable, with the one input the creator reads.
+    assertEquals(List.of("warehouseId"), names(sales.get("createShipment")));
+    assertEquals(List.of("warehouseId"), names(purchase.get("createGoodsReceipt")));
+    assertFalse(sales.containsKey("createGoodsReceipt"));
+    assertFalse(purchase.containsKey("createShipment"));
   }
 
   @Test

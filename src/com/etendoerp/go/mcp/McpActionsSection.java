@@ -45,7 +45,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *     "redirect": { "aPRMAddpayment": "registerPayment" },
  *     "values":   { "aPRMProcessPayment": ["P"] },
  *     "reason":   "PIS needs a person to authorize at the bank",
- *     "redirectReason": "the classic Add Payment button is not the Etendo GO payment flow"
+ *     "redirectReason": "the classic Add Payment button is not the Etendo payment flow"
  *   }
  * }
  * </pre>
@@ -57,20 +57,20 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *
  * <ul>
  *   <li>{@code hidden} — action names (declared handler actions or AD button names). They are left
- *       out of {@code neo_schema view:"actions"} and {@code neo_discover}, and {@code neo_action}
+ *       out of {@code etendo_schema view:"actions"} and {@code etendo_discover}, and {@code etendo_action}
  *       refuses them with 405 even though the handler would serve them.</li>
  *   <li>{@code redirect} — {@code button → action}: a button the agent should not use, and the
  *       action to use instead. The button stays listed (the catalogue is complete, IMP-21) carrying
- *       {@code useInstead}; {@code neo_action} on it is refused with that hint.</li>
+ *       {@code useInstead}; {@code etendo_action} on it is refused with that hint.</li>
  *   <li>{@code values} — {@code button → [values]}: the only values of a list-backed button
  *       ({@code actionValues}) the agent is offered — the ones the UI's own button sends. The view
- *       lists only those, and {@code neo_action} refuses another {@code docAction}/{@code action}
+ *       lists only those, and {@code etendo_action} refuses another {@code docAction}/{@code action}
  *       with 422. Sending none keeps the button's own default, as the UI does.</li>
  *   <li>{@code reason} — mandatory; it reaches the agent in the refusal.</li>
  *   <li>{@code redirectReason} — optional: the reason a redirected button gives, when it is not the
  *       one the hidden actions give. Defaults to {@code reason}.</li>
  *   <li>{@code REPLACE}, entity level. Fails closed: an unusable {@code MCP_CONFIG} refuses every
- *       action through {@code neo_action}.</li>
+ *       action through {@code etendo_action}.</li>
  * </ul>
  */
 final class McpActionsSection {
@@ -89,6 +89,14 @@ final class McpActionsSection {
   private static final Set<String> ALLOWED_KEYS =
       Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES);
 
+  /**
+   * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
+   * every call, so two first callers registering concurrently handed the registry two different
+   * objects under one name, and the loser's call failed as a duplicate.
+   */
+  private static final McpConfigSection DECLARATION = McpConfigSection.of(NAME, ALLOWED_KEYS,
+      McpConfigSection.Merge.REPLACE, McpActionsSection::validate);
+
   /** The reason an agent reads when the configuration itself cannot be trusted. */
   static final String UNUSABLE_REASON = "its MCP configuration is invalid";
 
@@ -101,8 +109,7 @@ final class McpActionsSection {
    * @return the section, with its allowed keys, {@code REPLACE} merge and validator
    */
   static McpConfigSection declaration() {
-    return McpConfigSection.of(NAME, ALLOWED_KEYS, McpConfigSection.Merge.REPLACE,
-        McpActionsSection::validate);
+    return DECLARATION;
   }
 
   /**

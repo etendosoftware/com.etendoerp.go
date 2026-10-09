@@ -26,7 +26,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * The {@code neo_feedback} payload: the harness verdict schema, verbatim (D27).
+ * The {@code etendo_feedback} payload: the harness verdict schema, verbatim (D27).
  *
  * <h2>This shape is not ours to change</h2>
  *
@@ -149,13 +149,13 @@ final class McpFeedbackVerdict {
   /**
    * Validate the submitted verdict and rebuild it canonically for storage.
    *
-   * @param args the {@code neo_feedback} arguments
+   * @param args the {@code etendo_feedback} arguments
    * @return the normalized verdict, ready to be written to {@code ETGO_MCP_USAGE.Payload}
    * @throws InvalidVerdictException when a required field is missing or an enum value is unknown
    */
   static String normalize(JSONObject args) throws InvalidVerdictException {
     if (args == null) {
-      throw new InvalidVerdictException("neo_feedback needs a verdict body.");
+      throw new InvalidVerdictException("etendo_feedback needs a verdict body.");
     }
     try {
       JSONObject out = new JSONObject();

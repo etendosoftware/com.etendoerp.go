@@ -58,7 +58,7 @@ final class McpToolResponses {
       envelope.put(McpConstants.KEY_TOOL, toolName);
       // B3: the moment an agent is stuck is the moment its feedback is worth most.
       envelope.put(McpConstants.KEY_FEEDBACK, McpConstants.FEEDBACK_INVITATION);
-      return envelope.toString(2);
+      return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
       return "Error executing " + toolName + ": " + e.getMessage();
@@ -69,7 +69,7 @@ final class McpToolResponses {
    * Render anything else thrown out of a tool call as the IMP-5 envelope (ETP-4793 / IMP-17).
    *
    * <p>This is the last leak IMP-5 left open: every unanticipated failure came back as the bare line
-   * {@code "Error executing neo_list: …"} (evidence C14), so an agent could not tell a mistake it
+   * {@code "Error executing etendo_list: …"} (evidence C14), so an agent could not tell a mistake it
    * could fix from a server fault it could not, and had to parse prose to find out. The code is
    * deliberately {@code server_error} rather than {@code validation_error}: if the router could have
    * told the caller what to change, one of its typed paths would already have done it, and
@@ -88,7 +88,7 @@ final class McpToolResponses {
           + "re-sending the same call with corrected values will not help.");
       // B3: a server fault the agent cannot fix is exactly what we want reported.
       envelope.put(McpConstants.KEY_FEEDBACK, McpConstants.FEEDBACK_INVITATION);
-      return envelope.toString(2);
+      return McpResponseSanitizer.serialize(envelope);
     } catch (JSONException jsonEx) {
       log.error("Could not build error envelope for '{}'", toolName, jsonEx);
       return "Error executing " + toolName + ": " + e.getMessage();
@@ -107,7 +107,7 @@ final class McpToolResponses {
   }
 
   /**
-   * The single {@code neo_delete} success answer, {@code {"deleted": true, "id": recordId}}.
+   * The single {@code etendo_delete} success answer, {@code {"deleted": true, "id": recordId}}.
    * Shared by the generic removal path ({@link McpToolRouter#handleDelete}) and
    * {@link McpHookExecutor#runDeletePreHook} (a handler resolving the DELETE with 204 No Content)
    * so the two cannot diverge (ETP-5474).

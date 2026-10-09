@@ -67,6 +67,22 @@ public final class GoSessionSecurity {
    */
   public static final String MSG_ORIGIN_NOT_ALLOWED = "Origin not allowed";
 
+  /**
+   * Header carrying the account a browser tab believes it is signed in as (ETP-5675). The session
+   * cookie is shared by every tab of the browser profile, so a tab opened as one account keeps
+   * sending the cookie after another tab signed in as a different account — and a {@code GET}
+   * carries no CSRF proof, so it used to be answered with the OTHER account's tenant data under the
+   * first tab's UI. Optional: a request without it (MCP clients, API callers, an older SPA) is not
+   * checked.
+   */
+  public static final String ACCOUNT_HEADER = "X-Go-Account";
+
+  /**
+   * Refusal message when {@link #ACCOUNT_HEADER} names an account other than the session's. The
+   * client matches this exact text to show the session-conflict screen (ETP-5675): do not reword it.
+   */
+  public static final String MSG_ACCOUNT_MISMATCH = "Session belongs to another account";
+
   private static final String COOKIE_ATTRIBUTES = "; Secure; HttpOnly; Path=/; SameSite=Lax";
   private static final String ORIGIN_HEADER = "Origin";
   private static final String REFERER_HEADER = "Referer";
@@ -186,6 +202,24 @@ public final class GoSessionSecurity {
     return MessageDigest.isEqual(
         provided.getBytes(StandardCharsets.UTF_8),
         expectedCsrfToken.getBytes(StandardCharsets.UTF_8));
+  }
+
+  /**
+   * Whether the request's {@link #ACCOUNT_HEADER}, when present, names the session's account.
+   * Applies to every method, safe ones included: the point is to refuse READS from a tab whose
+   * account is no longer the cookie's. A missing header passes, and so does a session that records
+   * no account — there is nothing to compare, and a false conflict would push the user out of a
+   * session that is theirs. The comparison is not secret (the caller already holds the cookie), so
+   * a plain equality is enough.
+   *
+   * @param request          the incoming request
+   * @param sessionAccountId the account bound to the resolved session
+   * @return {@code false} only when the header is present and names another account
+   */
+  public static boolean isAccountConsistent(HttpServletRequest request, String sessionAccountId) {
+    String expected = StringUtils.trimToNull(request.getHeader(ACCOUNT_HEADER));
+    return expected == null || StringUtils.isBlank(sessionAccountId)
+        || expected.equals(sessionAccountId);
   }
 
   private static String extractOrigin(String url) {

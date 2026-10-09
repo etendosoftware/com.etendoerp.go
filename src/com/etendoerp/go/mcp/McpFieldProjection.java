@@ -27,7 +27,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * Pure (DAL-free) field projection for {@code neo_list} / {@code neo_get} responses (IMP-2).
+ * Pure (DAL-free) field projection for {@code etendo_list} / {@code etendo_get} responses (IMP-2).
  *
  * <p>Compliance-heavy specs return ~60 columns per row; an agent that only wants
  * {@code documentNo, businessPartner, invoiceDate, grandTotalAmount, outstandingAmount} should be
@@ -108,7 +108,7 @@ final class McpFieldProjection {
    *
    * <p>A projection is a whitelist, so a typo used to be indistinguishable from a field that simply
    * held no value: the key was absent either way and the caller had no signal. Naming the rejects
-   * mirrors what {@code neo_schema} already does for its own {@code fields} argument
+   * mirrors what {@code etendo_schema} already does for its own {@code fields} argument
    * (see {@link McpSchemaCreateView#unknownFields}) — the same argument name now behaves the same
    * way on both tools.
    *

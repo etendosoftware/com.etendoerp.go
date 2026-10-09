@@ -1132,8 +1132,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * {@code AmortizationHeaderHandler}:
    * <ol>
    *   <li>{@link NeoContext#getQueryParams()} — populated by the REST path through
-   *       {@code NeoDefaultsEndpoint} and by the MCP {@code neo_defaults} /
-   *       {@code neo_action} paths, but <b>not</b> by the MCP CRUD hook path
+   *       {@code NeoDefaultsEndpoint} and by the MCP {@code etendo_defaults} /
+   *       {@code etendo_action} paths, but <b>not</b> by the MCP CRUD hook path
    *       ({@code McpHookExecutor.buildHookContext} leaves it {@code null}), so it must
    *       always be null-guarded.</li>
    *   <li>{@link RequestContext} HTTP parameter — fallback for callers that do not yet
