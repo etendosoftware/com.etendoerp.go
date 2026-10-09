@@ -264,7 +264,24 @@ strict order:
    (`NeoMandatoryDefaultsService.injectMandatoryDefaults`, before step 2 runs).
 2. **Inject generic mandatory-column defaults** (`injectDefaultsForActiveColumns`) — plain
    `AD_Column` defaults, session context, parent-tab values — for any column the client did not
-   submit.
+   submit. Every active, non-key, non-audit column of the table is visited (ETP-4274), but the
+   per-column work is metadata only, answered in memory — classic computes no defaults at save
+   time and NEO must not turn this pass into per-row DB traffic (ETP-5676):
+   - **Sequence detection** reads the runtime model (`Property.isSequence()`, precomputed at
+     model load) plus the DocumentNo / `Value` + `IsUsedSequence` name rules — never a
+     per-column `SequenceConfig` query.
+   - **The DB-level `DEFAULT`** (`NeoDefaultsSqlHelper.resolveDbColumnDefault`, an indexed
+     `pg_attrdef` read) is the last resort only for a **mandatory** column with no
+     `AD_Column`/`ETGO_SF_FIELD` default, no preference and no doctype, whose reference is not
+     boolean or numeric. NEO does not pre-fill an optional column that has no
+     `AD_Column`/`ETGO_SF_FIELD` default; its DB `DEFAULT` still applies at INSERT, because DAL
+     entities are mapped `dynamic-insert="true"` (core `template.hbm.xml`) and a null property is
+     left out of the statement — in classic and NEO alike. Mandatory YesNo and numeric columns
+     with no AD default get `false`/`0` from the safe-type fallback, matching the generated
+     entity's `setDefaultValue` (a boolean with no AD default is generated as `false`) — **not**
+     the DB default: `C_BPartner.IsProspect` (DB `DEFAULT 'Y'`, no AD default) is created `N`,
+     as in classic. Visible effect: `/defaults` no longer returns those DB-level values to
+     pre-fill the form; the stored row is unchanged for optional columns.
 3. **Run the callout cascade** (`NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate`),
    passing the *step-1 snapshot* as `protectedFields` — never a snapshot taken after step 2.
 
@@ -925,6 +942,8 @@ Response (rich OBUISEL selector):
 3. **Table (ref 18) / Search (ref 30)** -- resolved via `AD_Ref_Table` (target table, key column, display column, optional where clause from `HQLWhereClause`, falling back to a translated `SQLWhereClause` -- see the ETP-4975 note below).
 
 OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
+
+**Search fragments and their alias (ETP-5670).** On a standard (non-custom) OBUISEL selector, a searchable field's `property` is a DAL path relative to the entity (`product.name`), so the search always qualifies it with the query alias (`e.product.name`), dotted or not. A `clause_left_part` (used only when `property` is blank) is raw HQL and keeps its own alias (`bp.name`). Custom-HQL selectors keep their original rule: a dotted fragment is used as written. An unqualified relative path used to bind to the outer row once the where clause was copied into the de-dup subquery of view-backed selectors (Value Field ≠ `id`), turning it into a correlated subquery that PostgreSQL re-ran once per candidate row.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
 
@@ -2641,7 +2660,7 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 {
   "status": 422,
   "error": "ambiguous_fk",
-  "detail": "'businessPartner'='Acme' matched 3 records. Pick one of the candidates' ids, or narrow the search text.",
+  "detail": "'businessPartner'='Acme' matched 3 records. Pick one of the candidates and resend it by its id or its exact label, or narrow the search text.",
   "field": "businessPartner",
   "candidates": [
     { "id": "…", "name": "Acme Corp" },
@@ -2677,6 +2696,17 @@ Both error shapes are returned as an MCP error content payload with HTTP-style
 > a parent outside the caller's tenant, or a batch `$ref` still unresolved → the context is the
 > pre-ETP-5535 one (a failed read is logged at WARN).
 > `etendo_update` is unchanged (tab + body context only).
+
+**Resending a candidate by its label (ETP-5535, CP-13).** The `candidates` of an `ambiguous_fk`
+are selector items labelled `"<name> - <category>"` (for example `Entregas IVA 21% - IVA Normal`),
+while the selector search matches the name only, so that label sent back used to answer `not_found`.
+When the plain search matches zero records and the value contains a `" - "` separator, the resolver
+re-queries the selector with each leading part before a separator and resolves the value to the id of
+the single candidate whose string property equals the whole value. Zero or several label matches stay
+`not_found`; unique matches, real ambiguity and the id probe are unchanged. At most the first three
+separators are probed, so a value carrying many of them cannot turn one failed resolution into an
+unbounded number of selector queries. It is shared code with no entity names, so it applies to
+`etendo_create`, `etendo_update` and `etendo_batch` alike.
 
 If the selector lookup itself fails (HTTP status ≥ 400 or a null body) or no `AD_Column` can be
 resolved for the key, the resolver logs a warning/debug line and leaves the value as-is rather than
@@ -2823,6 +2853,19 @@ no-op, no failing test and no log line. `ALWAYS_READABLE_PROPS` therefore holds 
 `emittableResponseKeys()` advertises that same name and never `creationDate`. The alias is read-side
 only — deliberately not merged into `apiKeyToPropName`, or `remapApiKeys` would turn a client-sent
 `created` into a writable `creationDate` on the write path.
+
+**Keys a customization injects are declared by it (ETP-5576).** A key added to every GET record by a
+handler's `afterHandle()` — not an `ETGO_SF_FIELD`, so `NeoFieldFilter` does not know it — hit the
+same self-contradiction: `fields:["followUp"]` on an invoice returned the value **and** listed it in
+`unknownFields` (likewise `arInvoiceSubtype` / `apInvoiceSubtype`). The handler declares those keys
+through `NeoHandler#responseEnrichedFields()`, and the MCP unions them into the emittable set
+(`McpServerResolvedFields.enrichedOnRead`, resolved like `serverResolvedCreateFields` through
+`NeoExtensionDispatcher.resolveOnly`, surface `READ`). The invoice headers declare `followUp`
+(from `FollowUpSupport.responseFields()`, only when a flow is registered) and their subtype key. It
+is read by the projection validator only: nothing is filtered, renamed or made writable by it. The
+goods shipment / receipt line handler (`AbstractInOutLineHandler`) declares `invoicedQuantity` and
+`productCode` (`orderQuantity` is a spec field already). The other keys the invoice headers inject on read (`linkedShipments` / `linkedReceipts`, `docTypeLocked`, `isRectificative`, …) are not
+declared yet and are still reported if requested explicitly.
 
 #### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
 
@@ -3352,7 +3395,8 @@ Same handler, same business validations, but the MCP channel refuses more, on pu
 | any PIS action (`pisTemplates`, `cancelPisPayment`, …), `psd2GenerateBankPayment` (by field or DB column name) | served | **405** — by `agentExcludedActions()` in code and again by `MCP_CONFIG.actions` (a person must authorize at the bank) |
 | `aPRMAddpayment` / `EM_APRM_Addpayment` | Classic button path (field not included: 404) | **405** with its own `redirectReason`, hint `registerPayment` |
 | `DELETE` / `etendo_delete` on a draft payment header | generic delete; **fails** on the payment-detail FK (known, not fixed; the SPA deletes through `eTPRRemovePayment` / `deletePayment`) | **405** — `MCP_CONFIG.verbs` hides it, `instead` = `deletePayment` |
-| `cloneRecord`, `createShipment`, `EM_Aeatsii_Send`, `EM_Tbai_Xmlgenerator` | served | **callable but not discoverable**: the header handlers serve them with no contract, so `etendo_schema`/`etendo_discover` do not list them (the two buttons' fields are not included) and their parameters are not validated. Known gap, tracked in the ETP-5558 follow-ups |
+| `createShipment` (sales) / `createGoodsReceipt` (purchase) | served | **discoverable since ETP-5576 (MCP-8)**: declared by `FollowUpSupport.actionContracts()` (one contract per registered follow-up flow, inputs from `TargetCreator.inputParams()` — `warehouseId`, optional), so `etendo_schema(view:"actions")` lists them and `etendo_action` validates the body against the contract; REST does not read the contract |
+| `cloneRecord`, `EM_Aeatsii_Send`, `EM_Tbai_Xmlgenerator` | served | **callable but not discoverable**: the header handlers serve them with no contract, so `etendo_schema`/`etendo_discover` do not list them (the two buttons' fields are not included) and their parameters are not validated. Known gap, tracked in the ETP-5558 follow-ups |
 | `post`, `unpost` (ETP-5692) | served; `unpost` refused **422** unless `documentStatus` is `CO` and `posted` is `Y` | same handler, same refusals, and **declared**: both headers publish them as `NeoActionContract`s (no parameters, `id` = the invoice id, preconditions in the description), so `view:"actions"` and `etendo_discover` list them and an unknown parameter is a **422** `unknownParameters`. Until ETP-5692 they were callable but undeclared and `unpost` had no status gate (§4.12.29) |
 | the `posted` AD button (by field or DB column name) | served (Classic toggle) | **405** — `MCP_CONFIG.actions.hidden`, with its own `reasons.posted` pointing at `post` / `unpost`; the field stays readable as a value |
 | `registerPayment` with `pis` or any key its contract does not declare | accepted (unread keys ignored) | **422** `unknownParameters` before anything runs |
@@ -3437,8 +3481,10 @@ The transfer (§4.12.1.5) follows the same pattern:
 The payment header's defaults read `@Isreceipt@`, which Classic supplies through the tab's
 auxiliary inputs (`AD_AuxiliarInput`); NEO create (`NeoMandatoryDefaultsService`) does not evaluate
 auxiliary inputs. So a
-REST `POST /sws/neo/payment-out/header` stores `FIN_Payment.isReceipt` with the DB default `'Y'` (a
-payment-out flagged as a collection, BUG-2) and leaves `documentType` without a value or selector
+REST `POST /sws/neo/payment-out/header` leaves `FIN_Payment.isReceipt` null — its AD default is an
+`@...@` expression, so the generated entity has no Java default either — and the DB `DEFAULT 'Y'`
+fills it at INSERT (dynamic-insert omits the null property): a payment-out flagged as a collection,
+BUG-2 and leaves `documentType` without a value or selector
 items (BUG-3). The SPA never takes that route (payments are created through `registerPayment`), and
 MCP no longer reaches it (`verbs` hides create on both payment headers). It is a generic REST gap,
 not a payment one: any tab whose defaults read an auxiliary input has it. Tracked outside
@@ -4650,9 +4696,9 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   needsInvoiceDoc = totalPending != 0 AND no LINKED invoice in DocStatus 'DR'
   ```
 
-  **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`CreateDraftInvoiceHandler#handleList`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
+  **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`OrderInvoiceListSupport#listInvoices`, shared by `CreateDraftInvoiceHandler` for sales and `CreatePurchaseInvoiceHandler` for `purchase-order`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
 
-  **`listInvoices` response shape.** `GET /sws/neo/<spec>/<entity>/<id>/action/listInvoices` (the SPA calls it on `sales-order/header` and `sales-quotation/quotation`) returns `{ "response": { "data": [ … ] } }`, sales invoices only (`IsSOTrx = 'Y'`), newest `invoiceDate` first, one item per invoice:
+  **`listInvoices` response shape.** `GET /sws/neo/<spec>/<entity>/<id>/action/listInvoices` (the SPA calls it on `sales-order/header`, `sales-quotation/quotation` and, since ETP-5539, `purchase-order/header`) returns `{ "response": { "data": [ … ] } }`, only invoices of the order's own transaction side (`IsSOTrx = 'Y'` for sales, `'N'` for `purchase-order`), newest `invoiceDate` first, one item per invoice:
 
   ```json
   { "id": "…", "documentNo": "FAC-0012", "documentStatus": "CO",
@@ -4687,7 +4733,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   | `InOutFollowUpCreator` | Reusable `TargetCreator` for goods movements, any source: `new InOutFollowUpCreator(direction, sourceMapper, lineLinker)`. The source side supplies a `SourceMapper` (source + pending lines + `inputs` → neutral `InOutTargetBuilder.Header`/`Line`s as a `Mapping`, warehouse/order resolution included; `NOT_FOUND` when the source is gone; persists nothing) and an `InOutTargetBuilder.LineLinker` (created movement line → its source line). Delegates to `InOutTargetBuilder.build`. | No |
   | `InOutTargetBuilder` | Identity-free **target builder** for goods movements: `Direction` (`SALES`: `IsSOTrx=Y`, `C-`, `MMS`; `PURCHASE`: `N`, `V+`, `MMR` — movement facts only; how a line links back to its source is the `LineLinker`'s business), neutral `Header` (client, org, BP, address, warehouse, currency, order) and `Line` (`sourceLineId` — opaque to the builder, handed back to the `LineLinker` to link the created line to its source line — product, UOM, ASI, qty, order line, description, stockable; `stockable` is set by the source mapping, e.g. `InvoiceInOutMapping` with `InOutLineFromOrderFactory.isStockable`), a `LineLinker` callback. Resolves doc type (non-return, default first), storage bin only when a line is stockable (anchored to the header warehouse), documentNo fallback; throws `MISSING_SETUP` before persisting anything. | No |
   | `InOutWarehouseResolver` | Warehouse of a follow-up movement for a source that does not designate one, source-agnostic (client + organization): caller's `warehouseId` input (validated) → the source's own warehouse → the caller's default warehouse → the only usable one → `WAREHOUSE_REQUIRED` with the options, or `null` (`MISSING_SETUP`) when none. See *Movement warehouse* below. | No |
-  | `InOutInvoiceLinks` | The one definition of invoice-line ↔ movement-line linkage (column + match table + the pre-existing order-line arm), shared by the invoice resolver/linker and the four related-documents queries. `MatchTable.forSalesTransaction(IsSOTrx)`. | No |
+  | `InOutInvoiceLinks` | The one definition of invoice-line ↔ movement-line linkage (column + match table + the pre-existing order-line arm), shared by the invoice resolver/linker, the four related-documents queries and the invoiced-quantity readers (receipt `invoiceStatus`, pending-to-invoice quantity, in/out line enrichment). `MatchTable.forSalesTransaction(IsSOTrx)`. | No |
   | `InvoicePendingResolver` | Invoice resolver, both directions: completed standard invoice, pending per line (SQL below), locks, `sourceEntity() = Invoice`. | Yes |
   | `InvoiceInOutMapping` | The invoice side of `InOutFollowUpCreator`: `map` (invoice → `Header`/`Line`s, warehouse and order resolution, storage-bin need per line = `InOutLineFromOrderFactory.isStockable(product)`) and `linker(direction)` (`InvoiceLineLinker.linkInvoiceLineToInOutLine` with the direction's match table). | Yes |
 
@@ -4716,7 +4762,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   ```
   Every registered key is always present, so "not offered" (key absent) differs from "not needed now". `available` lists the keys with `needed: true` **in registration order**: the client builds its option list from it and hides the action when it is empty. `pendingLines` is a line count (UOMs may differ), `0` when not needed. If one flow's lookup fails, it is logged at ERROR and only that key reads `needed: false, reason: FOLLOW_UP_LOOKUP_FAILED`. Each lookup runs inside a JDBC **savepoint** on the OBDal connection (so `loadSources` must query through `OBDal.getInstance()`): on PostgreSQL a failed statement would otherwise abort the transaction and break every later enricher and the GET itself. The former flat `needsFollowUpDoc`/`pendingFollowUpLines` fields of the first delivery were dropped before any consumer existed.
 
-  **Action request body (optional).** The POST may carry a JSON object whose top-level members are the caller's choices (`FollowUpInputs`); an empty or absent body means none, a `null` or blank member is treated as absent, unknown members are ignored. The only key read today is `warehouseId` (goods-movement creators, see *Movement warehouse*): `POST …/action/createGoodsReceipt` with `{"warehouseId":"<M_Warehouse_ID>"}`. Through MCP, the same members go in `neo_action`'s `params`.
+  **Action request body (optional).** The POST may carry a JSON object whose top-level members are the caller's choices (`FollowUpInputs`); an empty or absent body means none, a `null` or blank member is treated as absent, unknown members are ignored. The only key read today is `warehouseId` (goods-movement creators, see *Movement warehouse*): `POST …/action/createGoodsReceipt` with `{"warehouseId":"<M_Warehouse_ID>"}`. Through MCP, the same members go in `etendo_action`'s `params`.
 
   **Action response.** `201 {"response":{"data":{"id","documentNo","followUp":"<key>","spec","entity","lineCount"}}}`. Rejection: `{"error":{"code","status","message"}}` (same shape as `PRECONDITIONS_UNMET`), transaction rolled back. Messages are English; clients translate by `code`. A rejection that asks the caller for a choice also carries a generic `input` block — the client renders a selector for `input.key` from `input.options` and retries the same POST with `{"<key>":"<option id>"}`; it needs to know nothing about what is being chosen:
   ```json
@@ -4774,11 +4820,13 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   **Related documents, both directions.** `linkedShipments` / `linkedReceipts` (invoices) and `linkedInvoices` (goods shipment / receipt) now also read the match table, via `InOutInvoiceLinks.linkedInOutLineIdsSql` / `linkedInvoiceIdsSql`, so a second partial movement shows on both sides. The two pre-existing arms are unchanged — including the movement-side order-line arm, which still over-links an invoice line already linked to another movement (known, left as it was).
 
+  **"How much of this movement line is invoiced" readers, both directions.** Every reader that computes the invoiced quantity of a movement line reads the match table of the movement's direction as well as the column: the Goods Receipt header `invoiceStatus` (`GoodsReceiptHeaderHandler`, fixed to `M_MatchInv` via `InOutInvoiceLinks.matchedQtyPerInOutLineSql(PURCHASE)` — it read `M_MatchSI` before, so a second partial receipt showed *Facturado 0 %*); the pending-to-invoice quantity behind the *¿Registrar factura?* prompt, *Crear Factura* availability and the duplicate-invoice guard (`NeoInvoiceSupport.computePendingQtyPerLine*`, both `includeDrafts` variants); and the line enrichment `orderQuantity` / `invoicedQuantity` shared by Goods Shipment and Goods Receipt lines (`AbstractInOutLineHandler`). The last two serve both directions, so they pick the table per row from `m_inout.issotrx` (`InOutInvoiceLinks.matchedQtyByMovementDirectionExpr` / `matchedSourceInvoiceQtyByMovementDirectionExpr`, a `CASE` over `MatchTable.forSalesTransaction`) — structure, not identity. The column arm and the match arm are combined with `GREATEST`, never added: a completed first movement is linked by both the column and the match row `M_INOUT_POST` writes for it. The line `invoicedQuantity` is also capped at `ABS(MovementQty)`, like the receipt header, since core can over-match a movement line (e.g. *Add from order*). The Goods Shipment header was already reading `M_MatchSI` and is unchanged.
+
   **Concurrency and access.** `lockSource` takes `FOR UPDATE` on the invoice row, then on every order line its lines come from, in `C_OrderLine_ID` order — so two invoices of the same order line serialise on the shared cap, and overlapping lock sets are always acquired in the same sequence (no deadlock between two follow-ups). The order-line lock can still deadlock against a concurrent `M_INOUT_POST` that updates `C_OrderLine` in its own order; PostgreSQL detects the deadlock, aborts one side, and this request then returns the generic 500 — acceptable, the user retries. Before anything runs in admin mode, `FollowUpActionHandler` checks the record with `TenantOwnership.loadOwned` (readable clients and organizations of the role): the router only checks the role's access to the spec's window for the method (`NeoRequestRouter#handleWindowSpecRequest`), not that the record id belongs to the caller's tenant. Another tenant's invoice answers `FOLLOW_UP_SOURCE_NOT_FOUND`, like a missing one. The FAC check that gates the write (`isStandardInvoiceDocType`) fails **closed** on a lookup error, unlike the display-only `resolveSubtype`, which keeps failing open to `FAC`.
 
   **Match rows for 2nd+ partial movements and the delivery status.** A second or later partial movement keeps Classic's draft-time match row (`M_MatchSI`/`M_MatchInv` written when the draft is created, because `C_InvoiceLine.M_InOutLine_ID` already points elsewhere and `M_INOUT_POST` will not create one). So that a draft is not reported as delivered, `ETGO_GET_DELIVERY_STATUS` (behind the virtual column `C_Invoice.EM_ETGO_Delivery_Status`) counts only match rows whose movement is `CO` or `CL`. Voided movements are excluded too: before, a voided movement's original and reversal match rows were both summed through `ABS(qty)`, overstating delivery (no such rows exist today). A match row is also never trusted beyond what its movement line actually moved: core can insert a match whose `qty` exceeds the movement line (an invoice created with *Add from order* for 10 units, matched against a completed shipment line that moved 4, gets `M_MatchSI.qty = 10`, and the invoice read *Delivered 100%* instead of 40%). The function therefore aggregates the match rows of both tables per `M_InOutLine` first and caps each aggregate at `ABS(M_InOutLine.MovementQty)`, so several match rows of the same invoice line on the same movement line cannot together exceed it; the per-invoice-line cap at `ABS(QtyInvoiced)` still applies on top. **Known limitation:** matches from *different* invoice lines or invoices on the same movement line are not capped across them — e.g. one shipment line that moved 1 unit is matched by both FV1000003 and FV1000006, and each still reads 100%. Splitting one movement across several invoices would need an allocation rule, which is out of scope. Being a virtual (`SQLLogic`) column it is computed at read time — completing the movement is reflected immediately, no stored-column refresh involved. **Known risk, not addressed here:** an `M_MatchInv` row pointing at a DRAFT receipt line is an accountable record (`DocMatchInv`, `Processed='Y'`, `Posted='N'`); whether the accounting server can post it before the receipt is completed has not been verified.
 
-  **Channels.** REST action, MCP `neo_action` (`McpHookExecutor.buildActionHookContext` builds the same ACTION/POST context, its `params` being the request body, so `warehouseId` is accepted there too) and the GET annotation on `neo_get`/`neo_list` all go through the same handler. No divergence to declare in §4.12.9.
+  **Channels.** REST action, MCP `etendo_action` (`McpHookExecutor.buildActionHookContext` builds the same ACTION/POST context, its `params` being the request body, so `warehouseId` is accepted there too) and the GET annotation on `etendo_get`/`etendo_list` all go through the same handler. No divergence to declare in §4.12.9. **Discovery (MCP-8, obs. 11):** each registered flow is also declared as an action contract (`FollowUpSupport.actionContracts()`, added to the invoice headers' `actionContracts()`), so `etendo_schema(view:"actions")` lists `createShipment` / `createGoodsReceipt` next to the AD buttons for every invoice — the catalogue is per entity; whether a given record can run it is still `followUp.<key>.needed`. The MCP validates the body against that contract (only `warehouseId`, optional; any other key is a 422 `unknownParameters`), REST does not read it — the same declared asymmetry as the payment actions. `followUp` is declared as a response key (`NeoHandler#responseEnrichedFields`, §4.12.5), so `fields:["followUp"]` is no longer reported in `unknownFields`.
 
 **Real-world example — `FinancialAccountTransactionsHandler` field-acceptance by movement state (ETP-4500, tightened by ETP-4879):** `schemaforge/FinancialAccountTransactionsHandler.java` (wired on the `financial-account-transactions` entity) restricts which fields an `update` actually persists, keyed off the transaction's own `Processed`/`Posted` state rather than the request body's shape — `handleUpdate` dispatches to one of two private appliers:
 
@@ -5585,6 +5633,23 @@ start through its period end — further narrowed by BOTH `dateFrom` and `dateTo
 real effect (the opposite of Balance Sheet): P&L is a period-activity total of postings within the
 year, not a point-in-time snapshot. Both handlers' `orgId` uses ORG-TREE semantics
 (`ad_isorgincluded`), unlike `report-trial-balance`/`report-journal-entries`'s exact-match `orgId`.
+
+Both honour the account's `ShowValueCond` (ETP-5662), like Classic's `AccountTree`: a SUMMARY
+account with `P` (Positive ONLY) shows its balance only when strictly positive, `N` only when
+strictly negative; otherwise it is 0, that 0 is what rolls up to its parent, and every descendant
+of such an account shows 0. Formula accounts read the operand's value before its own clamp, which
+is how the PGC mirror accounts (`551` under Activo / `(551)` under Pasivo) show a balance on
+whichever side it is positive, so the balance sheet balances. Precondition: the tenant must have its
+`C_ElementValue_Operand` rows (data-fix `R39-elementvalue-operand-backfill`), otherwise the mirror
+has no formula to pick the value up. Mirrored by hand in `report-grouping.js` (SPA) and the two
+`sql.query` copies in the report contracts. `isGroupStart` is computed over the report's roots, not
+its visible rows, so a report with 2+ groups keeps the first visible group's header even when only
+one group has visible rows; this deviates from Classic (which prints those rows headerless) on
+purpose, display only. A second deliberate, display-only deviation: an account counts as reset
+only when its clamp actually changed the value (per period), so the breakdown of a KEPT P/N
+account stays visible (`551` 5 shows `5510` and `55100000`). Classic hides it whenever Compare To
+is off, because its reset flag is set on any failed condition (0 included) and the reference
+period's flag overwrites the main one. Totals are identical either way.
 
 `generate_report_journal_entries`'s response nests one object per journal entry
 (`fact_acct_group_id`) with header fields (`entry_no`, `dateacct` as `yyyy-MM-dd`,

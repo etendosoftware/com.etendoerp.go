@@ -107,7 +107,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
-   * invoice payment actions, {@code currencyOptions}, and {@code post} / {@code unpost}
+   * invoice payment actions, {@code currencyOptions}, the follow-up document actions
+   * ({@link FollowUpSupport#actionContracts()}, ETP-5576) and {@code post} / {@code unpost}
    * (ETP-5692). Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
@@ -116,6 +117,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     Map<String, NeoActionContract> contracts =
         new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(true));
     contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
+    contracts.putAll(followUp.actionContracts());
     // ETP-5692: post / unpost were served (DocumentPostingService) but undeclared, so an agent
     // had to guess them; the raw `posted` AD button is hidden by MCP_CONFIG in their favour.
     contracts.putAll(postingContracts());

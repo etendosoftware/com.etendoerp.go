@@ -44,6 +44,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -62,6 +64,7 @@ import com.etendoerp.go.schemaforge.NeoExtensionResult;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -384,6 +387,43 @@ class McpWindowDeclaredActionsTest {
     void adButtonPasses() throws Exception {
       assertNull(McpDeclaredActions.precheck(entity("W", null), "documentAction",
           new JSONObject("{\"docAction\":\"CO\"}")));
+    }
+
+    /**
+     * ETP-5576 (MCP-8): the invoice follow-up actions are judged by the contract the real invoice
+     * handlers declare. Their creator reads one optional input, {@code warehouseId}: a call without
+     * it or with it passes, any other key is refused before anything runs.
+     */
+    @ParameterizedTest(name = "{0} {1} {2}")
+    @CsvSource(delimiter = '|', value = {
+        "sales    | createShipment     | {}                  |",
+        "sales    | createShipment     | {\"warehouseId\":\"x\"} |",
+        "sales    | createShipment     | {\"foo\":1}           | foo",
+        "purchase | createGoodsReceipt | {}                  |",
+        "purchase | createGoodsReceipt | {\"warehouseId\":\"x\"} |",
+        "purchase | createGoodsReceipt | {\"foo\":1}           | foo" })
+    void followUpActionAcceptsOnlyTheWarehouse(String direction, String action, String body,
+        String unknownParameter) throws Exception {
+      Map<String, NeoActionContract> declared = "sales".equals(direction)
+          ? new SalesInvoiceHeaderHandler().actionContracts()
+          : new PurchaseInvoiceHeaderHandler().actionContracts();
+      when(handler.actionContracts()).thenReturn(declared);
+      SFEntity e = entity("W", null);
+      JSONObject params = new JSONObject(body);
+
+      if (unknownParameter == null) {
+        NeoActionContract contract = McpDeclaredActions.precheck(e, action, params);
+        assertNotNull(contract, action + " is a declared action");
+        assertEquals(action, contract.getName());
+        return;
+      }
+      McpRoutingException refused = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(e, action, params));
+      JSONObject env = refused.toEnvelope();
+      assertEquals(422, env.getInt(McpConstants.KEY_STATUS));
+      JSONArray unknown = env.getJSONArray("unknownParameters");
+      assertEquals(1, unknown.length(), unknown.toString());
+      assertEquals(unknownParameter, unknown.getString(0));
     }
 
     @Test
