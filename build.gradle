@@ -302,4 +302,24 @@ rootProject.afterEvaluate { rootProj ->
         t.maxParallelForks = rootTest.maxParallelForks
         t.forkEvery = rootTest.forkEvery
     }
+
+    // goTestUnit's own coverage, read by scripts/check-diff-coverage.py. jacocoRootReport merges
+    // every *.exec under build/jacoco, stale ones from earlier runs included; this report reads
+    // only goTestUnit.exec and only this module's classes, so it describes the run that just ended.
+    rootProj.tasks.create('goTestUnitCoverageReport', JacocoReport) { JacocoReport r ->
+        r.group = 'verification'
+        r.description = 'JaCoCo XML of the last goTestUnit run, com.etendoerp.go classes only.'
+        r.mustRunAfter rootProj.tasks.named('goTestUnit')
+        r.executionData.setFrom(rootProj.file("${rootProj.buildDir}/jacoco/goTestUnit.exec"))
+        r.sourceDirectories.setFrom(rootProj.files('modules/com.etendoerp.go/src'))
+        r.classDirectories.setFrom(rootProj.fileTree(dir: "${rootProj.buildDir}/classes",
+                include: 'com/etendoerp/go/**/*.class'))
+        r.reports {
+            xml.required = true
+            html.required = false
+            csv.required = false
+            xml.outputLocation = rootProj.file(
+                    "${rootProj.buildDir}/reports/jacoco/goTestUnit/goTestUnit.xml")
+        }
+    }
 }
