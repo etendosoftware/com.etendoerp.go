@@ -72,6 +72,8 @@ import org.openbravo.model.common.enterprise.Organization;
  *       able to tell that it failed, otherwise "paid but demo" is indistinguishable from success.
  *       </li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.payment.TenantPlanService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

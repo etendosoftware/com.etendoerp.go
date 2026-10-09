@@ -38,6 +38,8 @@ import org.openbravo.model.ad.system.Client;
  * role without read access on {@code AD_Preference} (any non-admin role) must still get an access
  * decision: production answered 401 to every NEO request of such users, because the DAL threw
  * "Entity ADPreference is not readable" and nothing caught it.
+ *
+ * @covers com.etendoerp.go.payment.TenantEnvironmentLifecycleService
  */
 public class TenantEnvironmentLifecycleServiceAdminModeTest {
 

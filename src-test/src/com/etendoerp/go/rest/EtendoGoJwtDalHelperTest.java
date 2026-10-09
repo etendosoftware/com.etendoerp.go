@@ -68,6 +68,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for {@link EtendoGoJwtDalHelper}.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtDalHelper
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
