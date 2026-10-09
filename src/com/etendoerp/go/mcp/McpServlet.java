@@ -98,6 +98,20 @@ public class McpServlet extends HttpServlet {
   static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
   /** JSON-RPC 2.0: internal JSON-RPC error. */
   static final int JSON_RPC_INTERNAL_ERROR = -32603;
+  /** {@code Result.resultType} of every final modern result (MCP 2026-07-28). */
+  private static final String RESULT_TYPE_COMPLETE = "complete";
+  /** {@code _meta} key under which a modern result names the server. */
+  static final String META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
+  /**
+   * Freshness hint for the per-caller catalog results (design §5.2): short enough that a config
+   * push or a role change reaches a modern client within minutes.
+   */
+  static final long CATALOG_TTL_MS = 300_000L;
+  /** {@code cacheScope} of a result that depends on the caller's role, scopes or language. */
+  static final String CACHE_SCOPE_PRIVATE = "private";
+  /** Modern methods whose result is a {@code CacheableResult} we compute per caller. */
+  private static final Set<String> PER_CALLER_CACHEABLE =
+      Set.of("tools/list", "resources/list", "resources/read");
   /** The legacy-era liveness method, removed by MCP 2026-07-28. */
   private static final String PING = "ping";
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
@@ -226,7 +240,8 @@ public class McpServlet extends HttpServlet {
       JSONObject rpcResponse = new JSONObject();
       rpcResponse.put("jsonrpc", "2.0");
       rpcResponse.put("id", id);
-      rpcResponse.put("result", result != null ? result : new JSONObject());
+      JSONObject answer = result != null ? result : new JSONObject();
+      rpcResponse.put("result", era.isModern() ? decorateModern(method, answer) : answer);
 
       String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
@@ -346,6 +361,34 @@ public class McpServlet extends HttpServlet {
     response.setStatus(refusal.httpStatus());
     response.getWriter().write(error.toString());
     return false;
+  }
+
+  /**
+   * Give a modern result the fields MCP 2026-07-28 requires of it (design §5.1, §5.2), in one place
+   * so a new method cannot forget them: {@code resultType}, the server's identity in {@code _meta},
+   * and cache hints on the catalog results. A field the handler already set is kept — so a result
+   * that carries the full {@code serverInfo} or its own hints is not overwritten. Legacy results
+   * never come here.
+   *
+   * @return {@code result}, decorated in place
+   */
+  static JSONObject decorateModern(String method, JSONObject result) throws JSONException {
+    result.put("resultType", RESULT_TYPE_COMPLETE);
+    JSONObject meta = result.optJSONObject("_meta");
+    if (meta == null) {
+      meta = new JSONObject();
+      result.put("_meta", meta);
+    }
+    if (!meta.has(META_SERVER_INFO)) {
+      // Name and version only: ~50 bytes on every response instead of the full Implementation.
+      meta.put(META_SERVER_INFO,
+          new JSONObject().put("name", SERVER_NAME).put("version", SERVER_VERSION));
+    }
+    if (PER_CALLER_CACHEABLE.contains(method) && !result.has("ttlMs")) {
+      result.put("ttlMs", CATALOG_TTL_MS);
+      result.put("cacheScope", CACHE_SCOPE_PRIVATE);
+    }
+    return result;
   }
 
   /**

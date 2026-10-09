@@ -631,9 +631,60 @@ public class McpServletTest {
       JSONObject answer = postModern("tools/list", null, MODERN);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
-      assertTrue(answer.getJSONObject("result").has("tools"));
+      JSONObject result = answer.getJSONObject("result");
+      assertTrue(result.has("tools"));
+      assertEquals("complete", result.getString("resultType"));
+      assertEquals(McpServlet.CATALOG_TTL_MS, result.getLong("ttlMs"));
+      assertEquals("private", result.getString("cacheScope"));
+      assertEquals("etendo-mcp", result.getJSONObject("_meta")
+          .getJSONObject(McpServlet.META_SERVER_INFO).getString("name"));
       verify(response, never()).setHeader(eq(McpUsageTelemetry.HEADER_SESSION_ID), anyString());
     }
+  }
+
+  @Test
+  public void legacyToolsListIsNotDecorated() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 42)
+        .put("method", "tools/list").toString());
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenReturn(new JSONObject().put("tools", new JSONArray()));
+
+      servlet.doPost(request, response);
+    }
+
+    JSONObject result = new JSONObject(getResponseBody()).getJSONObject("result");
+    assertFalse(result.has("resultType"));
+    assertFalse(result.has("ttlMs"));
+    assertFalse(result.has("_meta"));
+  }
+
+  @Test
+  public void decorateModernMarksEveryResultButCachesOnlyTheCatalog() throws Exception {
+    JSONObject call = McpServlet.decorateModern("tools/call",
+        new JSONObject().put("content", new JSONArray()));
+    assertEquals("complete", call.getString("resultType"));
+    assertFalse("a tool result is not cacheable", call.has("ttlMs"));
+
+    JSONObject read = McpServlet.decorateModern("resources/read", new JSONObject());
+    assertEquals("private", read.getString("cacheScope"));
+  }
+
+  @Test
+  public void decorateModernKeepsWhatTheHandlerAlreadySet() throws Exception {
+    JSONObject fullInfo = new JSONObject().put("name", "etendo-mcp").put("title", "Etendo MCP");
+    JSONObject own = new JSONObject().put("ttlMs", 1L).put("cacheScope", "public")
+        .put("_meta", new JSONObject().put(McpServlet.META_SERVER_INFO, fullInfo));
+
+    JSONObject decorated = McpServlet.decorateModern("tools/list", own);
+
+    assertEquals(1L, decorated.getLong("ttlMs"));
+    assertEquals("public", decorated.getString("cacheScope"));
+    assertEquals("Etendo MCP", decorated.getJSONObject("_meta")
+        .getJSONObject(McpServlet.META_SERVER_INFO).getString("title"));
   }
 
   /** K1: with the kill switch on, a modern request is served exactly as before the modern era. */
