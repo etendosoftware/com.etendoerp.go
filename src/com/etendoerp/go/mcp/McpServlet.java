@@ -98,6 +98,8 @@ public class McpServlet extends HttpServlet {
   static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
   /** JSON-RPC 2.0: internal JSON-RPC error. */
   static final int JSON_RPC_INTERNAL_ERROR = -32603;
+  /** The legacy-era liveness method, removed by MCP 2026-07-28. */
+  private static final String PING = "ping";
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
   static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
   /** The handshake method: the one request that carries no {@code MCP-Protocol-Version}. */
@@ -182,6 +184,7 @@ public class McpServlet extends HttpServlet {
     JSONObject callParams = null;
     String toolName = null;
     String method = null;
+    McpRequestEra.Classification era = McpRequestEra.Classification.legacy();
 
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
@@ -196,7 +199,12 @@ public class McpServlet extends HttpServlet {
 
       log.debug("MCP request: method={}, id={}", method, id);
 
-      if (!INITIALIZE.equals(method)) {
+      era = classifyEra(request, method, callParams);
+      if (era.isModern()) {
+        if (!acceptModern(response, id, method, callParams, era)) {
+          return; // 400 already written
+        }
+      } else if (!INITIALIZE.equals(method)) {
         // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
         McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
             McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
@@ -205,7 +213,7 @@ public class McpServlet extends HttpServlet {
       }
 
       // Dispatch the method
-      JSONObject result = dispatchMethod(identity, method, callParams, response);
+      JSONObject result = dispatchMethod(identity, method, callParams, response, era.isModern());
 
       // Notifications (no id) don't get a response body: 202 Accepted (Streamable HTTP,
       // MCP 2025-03-26 onwards).
@@ -236,7 +244,9 @@ public class McpServlet extends HttpServlet {
       // name, and an unknown method is never one.
       log.warn("MCP client called unsupported method '{}' (client={}) session={}", method,
           clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
-      writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage());
+      // The modern era answers 404 (Streamable HTTP, 2026-07-28); the legacy era keeps its 200.
+      writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage(),
+          era.isModern() ? HttpServletResponse.SC_NOT_FOUND : HttpServletResponse.SC_OK, null);
     } catch (Exception e) {
       log.error("Error processing MCP message: {} session={}", e.getMessage(),
           McpUsageTelemetry.sessionForLog(), e);
@@ -262,10 +272,27 @@ public class McpServlet extends HttpServlet {
    */
   private String writeRpcError(HttpServletResponse response, String body, int code,
       String message) throws IOException {
+    return writeRpcError(response, body, code, message, HttpServletResponse.SC_OK, null);
+  }
+
+  /**
+   * Same as {@link #writeRpcError(HttpServletResponse, String, int, String)}, with the HTTP status
+   * and the error's {@code data}: the modern era answers its protocol errors with {@code 400} /
+   * {@code 404}, because a dual-era client reads the status and body to tell a modern server from a
+   * legacy one (ETP-5640).
+   *
+   * @param data the error {@code data}, or {@code null} for none
+   */
+  private String writeRpcError(HttpServletResponse response, String body, int code,
+      String message, int httpStatus, JSONObject data) throws IOException {
     try {
       Object rpcId = new JSONObject(body).opt("id");
-      String rendered = buildJsonRpcError(rpcId, code, message).toString();
-      response.setStatus(HttpServletResponse.SC_OK);
+      JSONObject error = buildJsonRpcError(rpcId, code, message);
+      if (data != null) {
+        error.getJSONObject("error").put("data", data);
+      }
+      String rendered = error.toString();
+      response.setStatus(httpStatus);
       response.getWriter().write(rendered);
       return rendered;
     } catch (Exception ex) {
@@ -273,6 +300,52 @@ public class McpServlet extends HttpServlet {
       response.getWriter().write("{\"error\":\"Internal server error\"}");
       return null;
     }
+  }
+
+  /**
+   * The era to serve this request under (ETP-5640). Everything is legacy while the
+   * {@link com.etendoerp.go.featureflags.GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED} kill
+   * switch is on, which is exactly how the servlet behaved before the modern era existed.
+   */
+  private static McpRequestEra.Classification classifyEra(HttpServletRequest request,
+      String method, JSONObject params) {
+    if (McpRequestEra.SERVER_DISCOVER.equals(method) || !McpRequestEra.modernEnabled()) {
+      // server/discover is not answered yet: its probe must keep getting the legacy -32601 that
+      // makes a dual-era client fall back to initialize, so the probe is not classified modern.
+      return McpRequestEra.Classification.legacy();
+    }
+    return McpRequestEra.classify(method, params,
+        new McpRequestEra.Headers(request.getHeader(McpProtocolVersion.HEADER),
+            request.getHeader(McpRequestEra.HEADER_METHOD),
+            request.getHeader(McpRequestEra.HEADER_NAME)),
+        McpRequestEra.strict());
+  }
+
+  /**
+   * Report what a served modern request left out, or refuse a malformed one.
+   *
+   * @return {@code false} when the request was refused and the {@code 400} already written
+   */
+  private boolean acceptModern(HttpServletResponse response, Object id, String method,
+      JSONObject params, McpRequestEra.Classification era) throws IOException, JSONException {
+    String client = clientNameFor(params);
+    for (String issue : era.issues()) {
+      log.warn("MCP modern request served without: {} (method={}, client={}) session={}", issue,
+          method, client, McpUsageTelemetry.sessionForLog());
+    }
+    McpRequestEra.Refusal refusal = era.refusal();
+    if (refusal == null) {
+      return true;
+    }
+    log.warn("MCP modern request refused ({}): {} (method={}, client={}) session={}",
+        refusal.code(), refusal.message(), method, client, McpUsageTelemetry.sessionForLog());
+    JSONObject error = buildJsonRpcError(id, refusal.code(), refusal.message());
+    if (refusal.data() != null) {
+      error.getJSONObject("error").put("data", refusal.data());
+    }
+    response.setStatus(refusal.httpStatus());
+    response.getWriter().write(error.toString());
+    return false;
   }
 
   /**
@@ -625,14 +698,18 @@ public class McpServlet extends HttpServlet {
    * Route a JSON-RPC method to its handler.
    */
   private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params,
-      HttpServletResponse response) throws Exception {
+      HttpServletResponse response, boolean modern) throws Exception {
+    if (modern && PING.equals(method)) {
+      // Removed by MCP 2026-07-28: a modern client gets the modern "method not found".
+      throw new McpMethodNotFoundException("Method not found: " + method);
+    }
     switch (method) {
       case INITIALIZE:
         return handleInitialize(params, response);
       case "initialized":
       case "notifications/initialized":
         return null;
-      case "ping":
+      case PING:
         return new JSONObject();
       case "tools/list":
         return handleToolsList(identity);

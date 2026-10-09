@@ -99,6 +99,7 @@ public class McpServletTest {
 
   @After
   public void tearDown() {
+    System.clearProperty(KILL_SWITCH_PROPERTY);
     System.clearProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY);
     System.clearProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY);
   }
@@ -485,13 +486,27 @@ public class McpServletTest {
       assertTrue(warn, warn.contains("'2026-07-28'") && warn.contains("client=cursor"));
     }
 
+    // L3 (ETP-5640): an unknown header with no modern _meta is still a legacy request — served.
+    // A modern header value is no longer "unsupported": see modernHeaderWithoutMetaIsModern.
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
-    when(request.getHeader(McpProtocolVersion.HEADER)).thenReturn("2026-07-28");
+    when(request.getHeader(McpProtocolVersion.HEADER)).thenReturn("2027-01-01");
     setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 12).put("method", "ping")
         .toString());
     servlet.doPost(request, response);
     verify(response).setStatus(HttpServletResponse.SC_OK);
     assertTrue(new JSONObject(getResponseBody()).has("result"));
+  }
+
+  /** M10 (ETP-5640): a 2026-07-28 header without _meta is a modern request — ping is gone there. */
+  @Test
+  public void modernHeaderWithoutMetaIsModern() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    when(request.getHeader(McpProtocolVersion.HEADER))
+        .thenReturn(McpProtocolVersion.MODERN_LATEST);
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 13).put("method", "ping")
+        .toString());
+    servlet.doPost(request, response);
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
   }
 
   @Test
@@ -520,6 +535,126 @@ public class McpServletTest {
               && headers.contains("Mcp-Session-Id")),
           anyString(), eq(false)));
     }
+  }
+
+  // ── Dual era (ETP-5640) ─────────────────────────────────────────────────
+
+  private static final String MODERN = McpProtocolVersion.MODERN_LATEST;
+  private static final String KILL_SWITCH_PROPERTY =
+      "etendo.go.flags."
+          + com.etendoerp.go.featureflags.GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED;
+
+  private static JSONObject modernMeta(String version) throws Exception {
+    return new JSONObject()
+        .put(McpRequestEra.META_PROTOCOL_VERSION, version)
+        .put(McpRequestEra.META_CLIENT_CAPABILITIES, new JSONObject())
+        .put(McpServlet.META_CLIENT_INFO,
+            new JSONObject().put("name", "claude-code").put("version", "2.1.0"));
+  }
+
+  private void setModernHeaders(String version, String method, String name) {
+    when(request.getHeader(McpProtocolVersion.HEADER)).thenReturn(version);
+    when(request.getHeader(McpRequestEra.HEADER_METHOD)).thenReturn(method);
+    when(request.getHeader(McpRequestEra.HEADER_NAME)).thenReturn(name);
+  }
+
+  /** POST one modern request (well-formed headers for {@code version}) and parse the answer. */
+  private JSONObject postModern(String method, JSONObject params, String version)
+      throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setModernHeaders(version, method, null);
+    JSONObject withMeta = (params != null ? params : new JSONObject())
+        .put("_meta", modernMeta(version));
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 40).put("method", method)
+        .put("params", withMeta).toString());
+    servlet.doPost(request, response);
+    return new JSONObject(getResponseBody());
+  }
+
+  @Test
+  public void modernPingIsMethodNotFoundWith404() throws Exception {
+    JSONObject answer = postModern("ping", null, MODERN);
+
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals(-32601, answer.getJSONObject("error").getInt("code"));
+    assertEquals(40, answer.getInt("id"));
+  }
+
+  @Test
+  public void modernUnknownMethodIsMethodNotFoundWith404() throws Exception {
+    JSONObject answer = postModern("subscriptions/listen", null, MODERN);
+
+    verify(response).setStatus(HttpServletResponse.SC_NOT_FOUND);
+    assertEquals(-32601, answer.getJSONObject("error").getInt("code"));
+  }
+
+  @Test
+  public void modernUnsupportedVersionIs400WithTheSupportedList() throws Exception {
+    JSONObject answer = postModern("tools/list", null, "2027-01-01");
+
+    verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+    JSONObject error = answer.getJSONObject("error");
+    assertEquals(McpRequestEra.UNSUPPORTED_PROTOCOL_VERSION, error.getInt("code"));
+    assertEquals("2027-01-01", error.getJSONObject("data").getString("requested"));
+    assertEquals(MODERN, error.getJSONObject("data").getJSONArray("supported").getString(0));
+  }
+
+  @Test
+  public void modernHeaderThatContradictsTheBodyIs400HeaderMismatch() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setModernHeaders("2025-11-25", "tools/list", null);
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 41)
+        .put("method", "tools/list")
+        .put("params", new JSONObject().put("_meta", modernMeta(MODERN))).toString());
+
+    try (LogCapture logs = LogCapture.of(McpServlet.class)) {
+      servlet.doPost(request, response);
+      assertEquals(1, logs.messages(Level.WARN).size());
+      assertTrue(logs.messages(Level.ERROR).isEmpty());
+    }
+
+    verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+    assertEquals(McpRequestEra.HEADER_MISMATCH,
+        new JSONObject(getResponseBody()).getJSONObject("error").getInt("code"));
+  }
+
+  @Test
+  public void modernToolsListIsServedWithoutInitialize() throws Exception {
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class)) {
+      sessionMock.when(() -> McpSessionManager.resolveEffectiveClientId(anyString(),
+          anyString())).thenReturn("client1");
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenReturn(new JSONObject().put("tools", new JSONArray()));
+
+      JSONObject answer = postModern("tools/list", null, MODERN);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertTrue(answer.getJSONObject("result").has("tools"));
+      verify(response, never()).setHeader(eq(McpUsageTelemetry.HEADER_SESSION_ID), anyString());
+    }
+  }
+
+  /** K1: with the kill switch on, a modern request is served exactly as before the modern era. */
+  @Test
+  public void killSwitchServesModernRequestsUnderTheLegacyEra() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+
+    JSONObject answer = postModern("ping", null, MODERN);
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    assertEquals(0, answer.getJSONObject("result").length());
+  }
+
+  @Test
+  public void killSwitchKeepsAnUnsupportedModernVersionServed() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+
+    JSONObject answer = postModern("ping", null, "2027-01-01");
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    assertTrue(answer.has("result"));
   }
 
   // ── commercial access gate (ETP-5642) ───────────────────────────────────

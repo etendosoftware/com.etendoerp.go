@@ -37,8 +37,9 @@ import org.apache.logging.log4j.Logger;
  *       spec prescribes for a client that predates the header. An unsupported value is served with
  *       the session's negotiated version (or the latest) and logged once per request as a
  *       {@code WARN} — <b>lenient on purpose</b>: answering {@code 400} would cut off a client for a
- *       header it may be getting wrong while everything else works. It turns strict when the
- *       2026-07-28 era is added, where era detection depends on the header.</li>
+ *       header it may be getting wrong while everything else works. It stays lenient for legacy
+ *       requests only: a modern request is validated strictly by {@link McpRequestEra}, because a
+ *       dual-era client reads the {@code 400} to decide whether to fall back.</li>
  * </ul>
  */
 final class McpProtocolVersion {
