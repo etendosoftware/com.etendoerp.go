@@ -52,6 +52,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.Claim;
@@ -391,24 +392,33 @@ class EnvironmentRequestAuthenticatorTest {
     assertEquals(authenticated, outcome.isAuthenticated(), outcome.getMessage());
   }
 
-  /** Our own OBException messages are safe to show... */
+  // ============================== bind failures (ETP-5489) ==============================
+
+  /**
+   * The credential resolved and the server then failed to build its context: a 500, never a 401.
+   * A 401 is what made the client log a live session out and re-enter it in a loop. The
+   * OBExceptions raised while binding come from the platform core, so even their message stays
+   * in the log...
+   */
   @Test
-  void anOBExceptionWhileBindingKeepsItsMessage() {
+  void anOBExceptionWhileBindingIsA500ThatKeepsItsMessageInTheLog() {
     stubCookie();
     swsStatic.when(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()))
-        .thenThrow(new OBException("Role not granted"));
+        .thenThrow(new OBException("Current Client GOClient is not active!"));
     HttpServletRequest request = mock(HttpServletRequest.class);
 
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
-    assertEquals(401, outcome.getHttpStatus());
-    assertEquals("Role not granted", outcome.getMessage());
+    assertFalse(outcome.isAuthenticated());
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals("Environment context could not be established", outcome.getMessage());
   }
 
-  /** ...anything else (NPEs, driver errors) must not leak internals. */
+  /** ...and so does anything else (NPEs, driver errors). */
   @Test
-  void anyOtherFailureWhileBindingIsTheGenericInvalidToken() {
+  void anyOtherFailureWhileBindingIsA500WithTheGenericMessage() {
     stubCookie();
     swsStatic.when(() -> SecureWebServicesUtils.createContext(
         anyString(), anyString(), anyString(), any(), anyString()))
@@ -418,8 +428,55 @@ class EnvironmentRequestAuthenticatorTest {
     EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
 
     assertFalse(outcome.isAuthenticated());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals("Environment context could not be established", outcome.getMessage());
+  }
+
+  /** ETP-5488, the production case: an entity the role cannot read while setting up the context. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = AuthScheme.class, names = { "COOKIE", "JWT", "OAUTH2" })
+  void aSecurityExceptionWhileBindingIsA500ForEveryScheme(AuthScheme scheme) {
+    swsStatic.when(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()))
+        .thenThrow(new OBSecurityException("Entity ADPreference is not readable by the user"));
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(requestFor(scheme), SurfacePolicy.NEO_API);
+
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
+    assertEquals(scheme, outcome.getScheme());
+  }
+
+  /** The whole bind step is covered, not only createContext: the commercial check runs after it. */
+  @Test
+  void aFailureAfterTheContextIsBuiltIsStillA500() {
+    stubCookie();
+    when(lifecycleService.evaluateAccess(eq(CLIENT_ID), eq(true), any(Instant.class)))
+        .thenThrow(new IllegalStateException("lifecycle lookup failed"));
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    EnvironmentAuthOutcome outcome = authenticator.authenticate(request, SurfacePolicy.NEO_API);
+
+    assertEquals(Status.CONTEXT_UNAVAILABLE, outcome.getStatus());
+    assertEquals(500, outcome.getHttpStatus());
+    languageStatic.verify(() -> NeoLanguage.applyToContext(any()), never());
+  }
+
+  /** The other side of the boundary: an unexpected failure while resolving stays a 401. */
+  @Test
+  void anUnexpectedFailureWhileResolvingStaysA401() {
+    when(sessionAuthenticator.authenticate(any()))
+        .thenThrow(new IllegalStateException("session lookup failed"));
+
+    EnvironmentAuthOutcome outcome =
+        authenticator.authenticate(mock(HttpServletRequest.class), SurfacePolicy.NEO_API);
+
+    assertEquals(Status.UNAUTHENTICATED, outcome.getStatus());
     assertEquals(401, outcome.getHttpStatus());
     assertEquals("Invalid or expired token", outcome.getMessage());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
   }
 
   // ============================== identify (resolve without binding) ==============================
