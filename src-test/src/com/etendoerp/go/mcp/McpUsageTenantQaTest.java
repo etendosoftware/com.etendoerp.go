@@ -312,6 +312,8 @@ public class McpUsageTenantQaTest {
 
       assertEquals("claude-code", McpUsageTelemetry.currentClient().getName());
       org.junit.Assert.assertNull(McpUsageTelemetry.currentSessionKey());
+      // The feedback rate limit still has the caller to key on, session or not.
+      org.junit.Assert.assertNotNull(McpUsageTelemetry.rateLimitKey());
     } finally {
       McpUsageTelemetry.clearCurrentSessionKey();
       McpUsageTelemetry.clearCurrentClient();
