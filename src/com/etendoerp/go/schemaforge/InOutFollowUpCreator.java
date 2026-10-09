@@ -22,6 +22,8 @@ import java.util.Objects;
 
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
+
 /**
  * Reusable {@link TargetCreator} for goods movements (ETP-5576): creates the DRAFT goods shipment
  * ({@code SALES}) or goods receipt ({@code PURCHASE}) of ANY source. Identity-free: it never reads
@@ -99,6 +101,19 @@ final class InOutFollowUpCreator implements TargetCreator {
     this.direction = Objects.requireNonNull(direction, "direction");
     this.mapper = Objects.requireNonNull(mapper, "mapper");
     this.linker = Objects.requireNonNull(linker, "linker");
+  }
+
+  /** The one choice a goods movement creator reads: the warehouse ({@link InOutWarehouseResolver}). */
+  private static final List<NeoActionContract.Param> INPUT_PARAMS = List.of(
+      NeoActionContract.Param.optional(InOutWarehouseResolver.INPUT_WAREHOUSE_ID,
+          NeoActionContract.TYPE_STRING,
+          "Warehouse of the new document. Omit it: the source's warehouse, the session default or "
+              + "the only usable one is taken. Send it only when a previous call answered "
+              + "FOLLOW_UP_WAREHOUSE_REQUIRED, with one of the ids in its input.options."));
+
+  @Override
+  public List<NeoActionContract.Param> inputParams() {
+    return INPUT_PARAMS;
   }
 
   @Override

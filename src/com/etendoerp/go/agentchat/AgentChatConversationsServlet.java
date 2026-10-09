@@ -75,7 +75,7 @@ public class AgentChatConversationsServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(AgentChatConversationsServlet.class);
   private static final String ALLOWED_METHODS = "GET, POST, OPTIONS";
-  private static final String ALLOWED_HEADERS = "Authorization, Content-Type, X-Go-CSRF";
+  private static final String ALLOWED_HEADERS = "Authorization, Content-Type, X-Go-CSRF, X-Go-Account";
   private static final String CONVERSATIONS = "conversations";
   private static final String ARCHIVED = "archived";
   private static final String MESSAGES = "messages";

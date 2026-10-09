@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -33,6 +34,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -42,6 +44,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for the wiring a header handler holds to offer follow-up documents (ETP-5576):
@@ -78,6 +82,33 @@ class FollowUpSupportTest {
         .fieldName("createShipment").recordId("inv-1").build();
 
     assertNull(support.actionHandler().handle(ctx));
+    assertTrue(support.actionContracts().isEmpty(), "no flow, no declared action");
+    assertTrue(support.responseFields().isEmpty(), "no flow, no followUp key on the records");
+  }
+
+  /**
+   * MCP-8 / obs. 11: a registered flow is discoverable — its action is declared with the inputs
+   * its creator reads — and its annotation key is declared as a response key, so an MCP
+   * {@code fields:["followUp"]} projection does not call it unknown.
+   */
+  @Test
+  void registeredFlowDeclaresItsActionAndItsResponseKey() {
+    TargetCreator creator = mock(TargetCreator.class);
+    NeoActionContract.Param warehouse =
+        NeoActionContract.Param.optional("warehouseId", NeoActionContract.TYPE_STRING, "w");
+    when(creator.inputParams()).thenReturn(List.of(warehouse));
+    FollowUpFlow flow = FollowUpFlow.of(FollowUpTarget.GOODS_RECEIPT, mock(PendingResolver.class),
+        creator);
+    FollowUpSupport support = new FollowUpSupport(() -> List.of(flow));
+
+    Map<String, NeoActionContract> contracts = support.actionContracts();
+
+    assertEquals(List.of("createGoodsReceipt"), List.copyOf(contracts.keySet()));
+    NeoActionContract contract = contracts.get("createGoodsReceipt");
+    assertTrue(contract.isMutating());
+    assertNull(NeoActionContract.validate(contracts, "createGoodsReceipt",
+        new JSONObject()), "every input is optional: an empty body is a valid call");
+    assertEquals(Set.of(FollowUpDocumentService.FIELD_FOLLOW_UP), support.responseFields());
   }
 
   // ── FollowUpFlow ──────────────────────────────────────────────────────────

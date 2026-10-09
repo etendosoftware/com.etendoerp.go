@@ -136,7 +136,7 @@ public class McpServlet extends HttpServlet {
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
         "Content-Type, Authorization, Accept, Mcp-Session-Id, " + McpProtocolVersion.HEADER
-            + ", X-Go-CSRF",
+            + ", X-Go-CSRF, X-Go-Account",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }
 

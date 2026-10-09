@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -51,6 +52,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.hibernate.query.Query;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -92,6 +94,9 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  * this step, m_inout_post can't create m_matchinv when the receipt is later
  * completed, leaving the delivery status column at 0% on purchase invoices
  * even after a corresponding receipt is completed.
+ *
+ * @covers com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.OrderInvoiceListSupport
  */
 public class CreatePurchaseInvoiceHandlerTest {
 
@@ -1744,6 +1749,155 @@ public class CreatePurchaseInvoiceHandlerTest {
       // Not null (dispatched) and 200, not the createPurchaseInvoice branch's 400/null.
       assertNotNull(response);
       assertEquals(200, response.getHttpStatus());
+    }
+  }
+
+  // ─── handle() listInvoices (purchase-order only) ───────────────────────────
+
+  private static NeoContext listInvoicesContext(String spec, String method, String action,
+      String recordId) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod(method)
+        .fieldName(action)
+        .specName(spec)
+        .recordId(recordId)
+        .build();
+  }
+
+  private static Invoice listedInvoice(String id, String documentNo) {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getId()).thenReturn(id);
+    when(invoice.getDocumentNo()).thenReturn(documentNo);
+    when(invoice.getDocumentStatus()).thenReturn("CO");
+    return invoice;
+  }
+
+  /** Stubs the two queries OrderInvoiceListSupport runs: via lines first, then by header. */
+  @SuppressWarnings("unchecked")
+  private static Query<Invoice>[] stubListQueries(MockedStatic<OBDal> obDalMock,
+      List<Invoice> viaLines, List<Invoice> viaHeader) {
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    Query<Invoice> lineQuery = mock(Query.class);
+    Query<Invoice> headerQuery = mock(Query.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(dal);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createQuery(anyString(), eq(Invoice.class))).thenReturn(lineQuery, headerQuery);
+    when(lineQuery.setParameter(anyString(), any())).thenReturn(lineQuery);
+    when(lineQuery.setMaxResults(anyInt())).thenReturn(lineQuery);
+    when(lineQuery.list()).thenReturn(viaLines);
+    when(headerQuery.setParameter(anyString(), any())).thenReturn(headerQuery);
+    when(headerQuery.setMaxResults(anyInt())).thenReturn(headerQuery);
+    when(headerQuery.list()).thenReturn(viaHeader);
+    return new Query[] {lineQuery, headerQuery};
+  }
+
+  private static NeoResponse listPurchaseInvoices(List<Invoice> viaLines, List<Invoice> viaHeader,
+      Query<Invoice>[][] queriesOut) {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      queriesOut[0] = stubListQueries(obDalMock, viaLines, viaHeader);
+      return new CreatePurchaseInvoiceHandler()
+          .handle(listInvoicesContext("purchase-order", "GET", "listInvoices", "po-1"));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_listInvoicesGet_onPurchaseOrder_bindsPurchaseFlagInBothQueries()
+      throws Exception {
+    Query<Invoice>[][] q = new Query[1][];
+    NeoResponse response =
+        listPurchaseInvoices(Collections.emptyList(), Collections.emptyList(), q);
+
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    for (Query<Invoice> query : q[0]) {
+      verify(query).setParameter("salesTrx", false);
+      verify(query).setParameter("orderId", "po-1");
+      verify(query, never()).setParameter("salesTrx", true);
+    }
+    assertEquals(0, response.getBody().getJSONObject("response").getJSONArray("data").length());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_listInvoicesGet_returnsInvoiceLinkedOnlyThroughItsLines() throws Exception {
+    Invoice viaLines = listedInvoice("inv-l", "PINV-L");
+
+    NeoResponse response = listPurchaseInvoices(Collections.singletonList(viaLines),
+        Collections.emptyList(), new Query[1][]);
+
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(1, data.length());
+    assertEquals("inv-l", data.getJSONObject(0).getString("id"));
+    assertEquals("PINV-L", data.getJSONObject(0).getString("documentNo"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_listInvoicesGet_returnsInvoiceLinkedOnlyByHeader() throws Exception {
+    Invoice byHeader = listedInvoice("inv-h", "PINV-H");
+
+    NeoResponse response = listPurchaseInvoices(Collections.emptyList(),
+        Collections.singletonList(byHeader), new Query[1][]);
+
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(1, data.length());
+    assertEquals("inv-h", data.getJSONObject(0).getString("id"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_listInvoicesGet_invoiceLinkedBothWaysAppearsOnce() throws Exception {
+    Invoice both = listedInvoice("inv-b", "PINV-B");
+    Invoice headerOnly = listedInvoice("inv-h", "PINV-H");
+
+    NeoResponse response = listPurchaseInvoices(Collections.singletonList(both),
+        Arrays.asList(both, headerOnly), new Query[1][]);
+
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(2, data.length());
+    assertEquals("inv-b", data.getJSONObject(0).getString("id"));
+    assertEquals("inv-h", data.getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  public void handle_listInvoicesGet_withBlankRecordId_returns400() {
+    NeoResponse response = new CreatePurchaseInvoiceHandler()
+        .handle(listInvoicesContext("purchase-order", "GET", "listInvoices", "  "));
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  @Test
+  public void handle_listInvoicesGet_onGoodsReceiptSpec_isNotHandled() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new CreatePurchaseInvoiceHandler()
+          .handle(listInvoicesContext("goods-receipt", "GET", "listInvoices", "r-1")));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void handle_listInvoicesPost_onPurchaseOrder_isNotHandled() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new CreatePurchaseInvoiceHandler()
+          .handle(listInvoicesContext("purchase-order", "POST", "listInvoices", "po-1")));
+      obDalMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void handle_otherGetAction_onPurchaseOrder_isNotHandledByTheListBranch() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new CreatePurchaseInvoiceHandler()
+          .handle(listInvoicesContext("purchase-order", "GET", "someOtherAction", "po-1")));
+      obDalMock.verifyNoInteractions();
     }
   }
 

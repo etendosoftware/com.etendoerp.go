@@ -22,7 +22,6 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -339,58 +338,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * from classic Etendo UI that link via C_InvoiceLine.C_OrderLine_ID).
    */
   protected NeoResponse handleList(NeoContext context) {
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        // Find invoices via order lines (covers all creation flows)
-        String hql = "SELECT DISTINCT i FROM Invoice i JOIN i.invoiceLineList il " + "WHERE il.salesOrderLine.salesOrder.id = :orderId " + "AND i.salesTransaction = true " + "ORDER BY i.invoiceDate DESC";
-        List<Invoice> invoices = OBDal.getInstance().getSession().createQuery(hql, Invoice.class).setParameter(
-            "orderId", recordId).setMaxResults(100).list();
-
-        // Also include invoices with C_Order_ID set directly (created via our action)
-        // that may not have lines (edge case: empty invoice)
-        String hqlDirect = "FROM Invoice i WHERE i.salesOrder.id = :orderId " + "AND i.salesTransaction = true ORDER BY i.invoiceDate DESC";
-        List<Invoice> directInvoices = OBDal.getInstance().getSession().createQuery(hqlDirect,
-            Invoice.class).setParameter("orderId", recordId).setMaxResults(100).list();
-
-        // Merge both lists, deduplicate by ID
-        java.util.Map<String, Invoice> merged = new java.util.LinkedHashMap<>();
-        for (Invoice i : invoices) merged.put(i.getId(), i);
-        for (Invoice i : directInvoices) merged.putIfAbsent(i.getId(), i);
-
-        JSONArray arr = new JSONArray();
-        for (Invoice inv : merged.values()) {
-          JSONObject item = new JSONObject();
-          item.put("id", inv.getId());
-          item.put(FIELD_DOCUMENT_NO, inv.getDocumentNo());
-          item.put("documentStatus", inv.getDocumentStatus());
-          item.put("grandTotalAmount", inv.getGrandTotalAmount() != null ? inv.getGrandTotalAmount() : 0);
-          // ETP-5527 — same key the CRUD list returns, so the related-documents chip formats
-          // the amount in the invoice's own currency (form and preview read this field).
-          Currency currency = inv.getCurrency();
-          item.put("currency$_identifier", currency != null ? currency.getISOCode() : JSONObject.NULL);
-          if (inv.getInvoiceDate() != null) {
-            item.put("invoiceDate", new SimpleDateFormat("yyyy-MM-dd").format(inv.getInvoiceDate()));
-          }
-          arr.put(item);
-        }
-
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", arr);
-        JSONObject wrapper = new JSONObject();
-        wrapper.put(KEY_RESPONSE, responseData);
-        return new NeoResponse(200, wrapper);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error listing invoices for order {}: {}", recordId, e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
+    return OrderInvoiceListSupport.listInvoices(context, true);
   }
 
   /**

@@ -88,6 +88,9 @@ final class McpFkResolver {
   private static final String KEY_CANDIDATES = "candidates";
   private static final String KEY_FIELD = "field";
   private static final int SELECTOR_LIMIT = 10;
+  private static final String LABEL_SEPARATOR = " - ";
+  /** Caps how many label separators are probed, so one failed resolution stays cheap. */
+  private static final int MAX_LABEL_SEPARATOR_PROBES = 3;
 
   /** @return {@code true} when {@code value} already looks like a 32-char hex Etendo id. */
   static boolean looksLikeId(String value) {
@@ -263,6 +266,11 @@ final class McpFkResolver {
     int matchCount = items == null ? 0 : items.length();
     switch (decideOutcome(matchCount)) {
       case NOT_FOUND:
+        String labelMatchId = resolveByExactLabel(column, key, search, contextParams);
+        if (labelMatchId != null) {
+          body.put(key, labelMatchId);
+          return null;
+        }
         return buildNotFoundError(key, search);
       case AMBIGUOUS:
         return buildAmbiguousError(key, search, items);
@@ -271,6 +279,67 @@ final class McpFkResolver {
         body.put(key, items.getJSONObject(0).optString(KEY_ID));
         return null;
     }
+  }
+
+  /**
+   * Resolves a value that is exactly the label of one selector candidate (ETP-5535 / CP-13).
+   * <p>
+   * An {@code ambiguous_fk} error offers each candidate by its selector label (for example
+   * {@code "<name> - <category>"}), but the selector search matches the <i>name</i> only, so
+   * resending that label verbatim found nothing and answered {@code not_found}. Only reached after
+   * the plain search matched zero records, so unique matches, real ambiguity and not-found values
+   * without a label separator behave exactly as before. The label is split at each {@code " - "}
+   * separator, the leading part is searched, and the candidate whose string value equals the whole
+   * value is taken, provided exactly one does.
+   * <p>
+   * At most {@link #MAX_LABEL_SEPARATOR_PROBES} separators are probed, so a caller-supplied value
+   * carrying many separators cannot turn one failed resolution into an unbounded number of selector
+   * queries. A real label is split by its leading parts, well within that budget.
+   *
+   * @return the matched record id, or {@code null} when no single candidate carries that label
+   */
+  private static String resolveByExactLabel(Column column, String key, String search,
+      Map<String, String> contextParams) {
+    int sep = search.indexOf(LABEL_SEPARATOR);
+    for (int probes = 0; sep > 0 && probes < MAX_LABEL_SEPARATOR_PROBES; probes++) {
+      NeoResponse response = NeoSelectorService.querySelectorByColumn(column, key,
+          search.substring(0, sep), SELECTOR_LIMIT, 0, contextParams);
+      JSONArray items = response.getHttpStatus() >= 400 || response.getBody() == null ? null
+          : response.getBody().optJSONArray(KEY_ITEMS);
+      String id = uniqueLabelMatch(items, search);
+      if (id != null) {
+        return id;
+      }
+      sep = search.indexOf(LABEL_SEPARATOR, sep + 1);
+    }
+    return null;
+  }
+
+  /** @return the id of the only item having a string property equal to {@code label}, else null. */
+  static String uniqueLabelMatch(JSONArray items, String label) {
+    String found = null;
+    for (int i = 0; items != null && i < items.length(); i++) {
+      JSONObject item = items.optJSONObject(i);
+      if (item == null || !hasStringValue(item, label)) {
+        continue;
+      }
+      if (found != null) {
+        return null;
+      }
+      found = item.optString(KEY_ID, null);
+    }
+    return found;
+  }
+
+  private static boolean hasStringValue(JSONObject item, String expected) {
+    Iterator<?> names = item.keys();
+    while (names.hasNext()) {
+      String name = (String) names.next();
+      if (!KEY_ID.equals(name) && expected.equals(item.opt(name))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -315,7 +384,7 @@ final class McpFkResolver {
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_AMBIGUOUS_FK);
     error.put(McpConstants.KEY_DETAIL,
         "'" + field + "'='" + search + "' matched " + items.length() + " records. Pick one of "
-            + "the candidates' ids, or narrow the search text.");
+            + "the candidates and resend it by its id or its exact label, or narrow the search text.");
     error.put(KEY_FIELD, field);
     error.put(KEY_CANDIDATES, items);
     return error;

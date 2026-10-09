@@ -16,7 +16,10 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.Collections;
 import java.util.List;
+
+import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * The "how to create" half of a follow-up flow (ETP-5576): builds, persists and links the target
@@ -52,6 +55,18 @@ interface TargetCreator {
    */
   Result createTarget(String sourceId, List<PendingResolver.SourceLine> pendingLines,
       FollowUpInputs inputs);
+
+  /**
+   * The request-body keys this creator reads from {@code inputs}, as action-contract parameters —
+   * published to agents by {@link FollowUpSupport#actionContracts()} (ETP-5576, MCP-8). The creator
+   * is the only authority on them: it is the one that reads and validates them. Every key is
+   * optional; a required choice is asked for through {@link FollowUpException.RequiredInput}.
+   *
+   * @return the declared inputs; none by default
+   */
+  default List<NeoActionContract.Param> inputParams() {
+    return Collections.emptyList();
+  }
 
   /**
    * The created target document. Which follow-up it is (key, spec, entity) is the

@@ -781,6 +781,29 @@ public class NeoDefaultsCascadeHelper {
     return filtered;
   }
 
+  // injectSafeTypeDefault / hasSafeTypeDefault are the single owners of these reference
+  // constants: callers ask hasSafeTypeDefault instead of repeating the reference ids.
+  /** Amount (12), Number (22), Integer (11) and Quantity (29) references: safe default 0. */
+  private static final Set<String> NUMERIC_SAFE_TYPE_REFERENCES = Set.of("22", "29", "12", "11");
+  /** YesNo reference: safe default false. */
+  private static final String YES_NO_REFERENCE = "20";
+
+  private static String referenceId(Column col) {
+    return col.getReference() != null ? col.getReference().getId() : null;
+  }
+
+  /**
+   * True when {@link #injectSafeTypeDefault} can fill {@code col} (boolean or numeric base
+   * reference). Structural: decided by the AD reference type only.
+   */
+  static boolean hasSafeTypeDefault(Column col) {
+    String refId = referenceId(col);
+    if (refId == null) {
+      return false;
+    }
+    return YES_NO_REFERENCE.equals(refId) || NUMERIC_SAFE_TYPE_REFERENCES.contains(refId);
+  }
+
   /**
    * IMP-45: note that a protected field kept the caller's value over a callout-derived one.
    *
@@ -832,10 +855,13 @@ public class NeoDefaultsCascadeHelper {
 
   static void injectSafeTypeDefault(JSONObject body, String propName, Column col) {
     try {
-      String refId = col.getReference() != null ? col.getReference().getId() : null;
-      if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId) || "11".equals(refId)) {
+      String refId = referenceId(col);
+      if (refId == null) {
+        return;
+      }
+      if (NUMERIC_SAFE_TYPE_REFERENCES.contains(refId)) {
         body.put(propName, 0);
-      } else if ("20".equals(refId)) {
+      } else if (YES_NO_REFERENCE.equals(refId)) {
         body.put(propName, false);
       }
     } catch (Exception e) {

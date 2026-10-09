@@ -25,6 +25,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 import org.openbravo.dal.core.OBContext;
@@ -163,7 +164,8 @@ class SelectorQueryBuilder {
       }
     }
 
-    SelectorOrgFilter.appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
+    SelectorOrgFilter.appendCustomSearchFilter(baseHql,
+        SearchableFragment.expressions(meta.searchableProperties), alias, search, hasWhere);
 
     return new HqlWithParams(baseHql.toString(), queryParams);
   }
@@ -192,8 +194,8 @@ class SelectorQueryBuilder {
   }
 
   private static void appendSearchClause(StringBuilder hql,
-      List<String> searchableProperties, String alias, String search) {
-    SelectorOrgFilter.appendCustomSearchFilter(hql, searchableProperties, alias, search, hql.length() > 0);
+      List<SearchableFragment> searchableProperties, String alias, String search) {
+    SelectorOrgFilter.appendRichSearchFilter(hql, searchableProperties, alias, search, hql.length() > 0);
   }
 
 

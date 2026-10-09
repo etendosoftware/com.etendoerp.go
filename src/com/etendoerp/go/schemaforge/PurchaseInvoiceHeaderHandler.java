@@ -110,7 +110,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
-   * invoice payment actions and {@code currencyOptions}. Published by the MCP next to the AD
+   * invoice payment actions, {@code currencyOptions} and the follow-up document actions
+   * ({@link FollowUpSupport#actionContracts()}, ETP-5576). Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
   @Override
@@ -118,6 +119,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     Map<String, NeoActionContract> contracts =
         new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(false));
     contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
+    contracts.putAll(followUp.actionContracts());
     return contracts;
   }
 

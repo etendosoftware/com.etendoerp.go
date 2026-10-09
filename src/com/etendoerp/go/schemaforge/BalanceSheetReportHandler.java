@@ -232,12 +232,14 @@ public class BalanceSheetReportHandler extends AbstractAccountTreeReportHandler 
   @Override
   String ownAmountColumns() {
     return "COALESCE(SUM(f.dr_minus_cr), 0) AS own_amt, "
-        + "  COALESCE(SUM(f.dr_minus_cr_ref), 0) AS own_amt_ref ";
+        + "  COALESCE(SUM(f.dr_minus_cr_ref), 0) AS own_amt_ref, "
+        + "  ev.showvaluecond, ev.issummary ";
   }
 
   @Override
   String outerGroupBy() {
     return "GROUP BY t.node_id, t.parent_id, t.depth, t.sort_path, t.group_name, ev.value, "
-        + "  ev.name, ev.elementlevel, ev.isalwaysshown, ev.accountsign ";
+        + "  ev.name, ev.elementlevel, ev.isalwaysshown, ev.accountsign, "
+        + "  ev.showvaluecond, ev.issummary ";
   }
 }

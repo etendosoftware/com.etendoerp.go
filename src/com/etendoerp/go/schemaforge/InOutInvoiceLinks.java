@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.function.Function;
 
 /**
  * The one definition of "which shipment/receipt lines are linked to which invoice lines", shared
@@ -75,6 +76,82 @@ final class InOutInvoiceLinks {
     static MatchTable forSalesTransaction(boolean salesTransaction) {
       return salesTransaction ? SALES : PURCHASE;
     }
+  }
+
+  /**
+   * Invoice filter shared by every "how much of this movement line is invoiced" reader: active
+   * invoices that are not voided, closed or draft. {@code invoiceAlias} is a fixed SQL alias.
+   */
+  private static String countedInvoiceFilter(String invoiceAlias) {
+    return invoiceAlias + ".docstatus NOT IN ('VO','CL','DR') AND " + invoiceAlias
+        + ".isactive = 'Y'";
+  }
+
+  /**
+   * Sub-select yielding {@code (m_inoutline_id, qtymatched)}: per movement line, the total
+   * {@code |qty|} of the rows of {@code matchTable} that link it to a counted invoice (active, not
+   * voided, closed or draft). For a reader whose movement direction is fixed — e.g. the Goods
+   * Receipt header, always {@link MatchTable#PURCHASE}. Meant to be {@code LEFT JOIN}ed on
+   * {@code m_inoutline_id}.
+   */
+  static String matchedQtyPerInOutLineSql(MatchTable matchTable) {
+    return "SELECT mt.m_inoutline_id, SUM(ABS(mt.qty)) AS qtymatched "
+        + "FROM " + matchTable.tableName() + " mt "
+        + "JOIN c_invoiceline mil ON mil.c_invoiceline_id = mt.c_invoiceline_id "
+        + "JOIN c_invoice mi ON mi.c_invoice_id = mil.c_invoice_id "
+        + "WHERE " + countedInvoiceFilter("mi") + " "
+        + "GROUP BY mt.m_inoutline_id";
+  }
+
+  /**
+   * Scalar SQL expression choosing a per-direction sub-expression by the movement's own
+   * {@code IsSOTrx} — for readers shared by Goods Shipment and Goods Receipt. Selection is by
+   * structure ({@link MatchTable#forSalesTransaction}), never by a window or entity name.
+   * PostgreSQL evaluates only the {@code CASE} branch that applies, so one match table is read
+   * per row.
+   *
+   * @param isSoTrxRef SQL reference to the movement's {@code m_inout.issotrx} (a fixed alias)
+   * @param exprForTable builds the scalar sub-expression for one match table
+   */
+  private static String byMovementDirection(String isSoTrxRef,
+      Function<MatchTable, String> exprForTable) {
+    return "(CASE WHEN " + isSoTrxRef + " = 'Y' "
+        + "THEN (" + exprForTable.apply(MatchTable.forSalesTransaction(true)) + ") "
+        + "ELSE (" + exprForTable.apply(MatchTable.forSalesTransaction(false)) + ") END)";
+  }
+
+  /**
+   * Scalar SQL expression: total {@code |qty|} matched to the movement line {@code inOutLineRef}
+   * in the match table of the movement's direction ({@code isSoTrxRef}), counting only active
+   * invoices that are not voided, closed or draft. {@code NULL} when no row qualifies — wrap it in
+   * {@code COALESCE}. Both arguments are fixed SQL column references, never request input.
+   *
+   * <p>Readers combine it with the {@code C_InvoiceLine.M_InOutLine_ID} arm through
+   * {@code GREATEST}, never by adding: the first movement of an invoice line is linked by the
+   * column AND, once completed, by the match row {@code M_INOUT_POST} writes for it, so a sum
+   * would count it twice.
+   */
+  static String matchedQtyByMovementDirectionExpr(String inOutLineRef, String isSoTrxRef) {
+    return byMovementDirection(isSoTrxRef, mt ->
+        "SELECT SUM(ABS(mt.qty)) FROM " + mt.tableName() + " mt "
+        + "JOIN c_invoiceline mil ON mil.c_invoiceline_id = mt.c_invoiceline_id "
+        + "JOIN c_invoice mi ON mi.c_invoice_id = mil.c_invoice_id "
+        + "WHERE mt.m_inoutline_id = " + inOutLineRef + " AND " + countedInvoiceFilter("mi"));
+  }
+
+  /**
+   * Scalar SQL expression: the {@code QtyInvoiced} of the invoice line that the match table of the
+   * movement's direction links to {@code inOutLineRef} — the source invoice line of a second or
+   * later partial movement, which {@code C_InvoiceLine.M_InOutLine_ID} cannot point at. Mirrors
+   * the column-based source lookup (no invoice-status filter); {@code MAX} keeps it single-valued
+   * so it never multiplies the reader's rows.
+   */
+  static String matchedSourceInvoiceQtyByMovementDirectionExpr(String inOutLineRef,
+      String isSoTrxRef) {
+    return byMovementDirection(isSoTrxRef, mt ->
+        "SELECT MAX(mil.qtyinvoiced) FROM " + mt.tableName() + " mt "
+        + "JOIN c_invoiceline mil ON mil.c_invoiceline_id = mt.c_invoiceline_id "
+        + "WHERE mt.m_inoutline_id = " + inOutLineRef);
   }
 
   /** Number of {@code ?} placeholders in {@link #linkedInOutLineIdsSql}, all bound to the invoice id. */
