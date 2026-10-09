@@ -26,7 +26,7 @@ Line numbers below are from `feature/ETP-5640` (cut from `develop`, contains ETP
 | D1 | **Era is decided per request from the body, not from headers alone.** A request is *modern* when `params._meta["io.modelcontextprotocol/protocolVersion"]` is present, or its method is `server/discover`, or its `MCP-Protocol-Version` header names a modern version. Everything else is *legacy* and keeps ETP-5639 behaviour byte for byte. `initialize` is always legacy. |
 | D2 | **Strict where the spec's era detection depends on it, lenient where it does not.** Modern requests get spec error bodies with HTTP status (`400` + `-32022` / `-32020` / `-32602`, `404` + `-32601`). A *missing* mirror header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) or missing `clientCapabilities` is served with one WARN by default (`mcp.modern.strict=false`); a *mismatching* header is always `400 -32020`. Legacy requests keep the ETP-5639 lenient policy unchanged. |
 | D3 | **`server/discover` goes in last, as its own revertable commit.** It is the switch that moves Claude Code and the Claude.ai connector to modern mode; everything a modern client needs (result shape, errors, telemetry) ships before it. |
-| D4 | **Kill switch: backend feature flag `mcp-modern-era-disabled` (`GoFeatureFlags`, OpenFeature + ConfigCat).** Dual-era is ON by default: the flag unset, `false`, unreachable or failing all resolve to `false` = modern served. `true` restores today's behaviour exactly (row K1): `server/discover` → `-32601`, `_meta` ignored, every request legacy. No restart where ConfigCat is configured. A client that already cached "modern" keeps working (tool calls need no `initialize`). |
+| D4 | **Kill switch: backend feature flag `mcp-modern-era-disabled` (`GoFeatureFlags`, OpenFeature + ConfigCat).** Dual-era is ON by default: the flag unset, `false`, unreachable or failing all resolve to `false` = modern served. `true` restores today's behaviour exactly (row K1): `server/discover` → `-32601`, `_meta` ignored, every request legacy. No restart only where `etendo.go.configcat.sdkKey` is set (ConfigCat provider). Without an SDK key, `PropertiesFeatureProvider` reads `etendo.go.flags.mcp-modern-era-disabled` / `ETGO_FLAG_MCP_MODERN_ERA_DISABLED`, and flipping it needs a Tomcat restart. A client that already cached "modern" keeps working (tool calls need no `initialize`). |
 | D5 | **Telemetry: a server-derived session key for modern traffic.** Client name/version come from each request's `_meta`. The session key is minted per (user, client, role, client name) and renewed after 30 min of inactivity, prefixed `m-` so the era is visible without a schema change. No new column, no change to `McpUsageRow`'s shape. |
 | D6 | **Modern-only response decoration.** `resultType: "complete"` and a minimal `_meta.serverInfo` on every modern result; `ttlMs` + `cacheScope` on `server/discover`, `tools/list`, `resources/list`, `resources/read`. Legacy responses are not touched. |
 | D7 | **Resource not found → `-32602` in the modern era only.** Today it is not `-32002` but `-32603` plus an ERROR stack trace (§5.4); legacy keeps its code, both eras lose the stack trace. |
@@ -454,10 +454,14 @@ M-row for the answered probe; `:477` (header `2026-07-28` served leniently with 
    - `-32020` / `-32022` answers should be ~0; any burst means a client mismatch → rollback;
    - in `ETGO_MCP_USAGE`, share of rows with null `client_name` must not rise.
 
-**Rollback**: set the flag `mcp-modern-era-disabled` to `true` for the environment in ConfigCat — live
-within one poll interval (60 s), no restart. Where no ConfigCat SDK key is configured the flag comes
-from `etendo.go.flags.mcp-modern-era-disabled` / `ETGO_FLAG_MCP_MODERN_ERA_DISABLED`, which is a
-restart. Effect: new probes get `-32601` and fall back to
+**Rollback**: set the flag `mcp-modern-era-disabled` to `true` for the environment.
+- Where `etendo.go.configcat.sdkKey` is set: in the ConfigCat dashboard — live within one poll
+  interval (60 s), **no restart**.
+- Where it is not set: `PropertiesFeatureProvider` reads `etendo.go.flags.mcp-modern-era-disabled`
+  (JVM / `Openbravo.properties`) or `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` (environment), and the
+  change takes effect only after a **Tomcat restart**.
+
+Check which one an environment uses before relying on it for an incident. Effect: new probes get `-32601` and fall back to
 `initialize`; clients that cached "modern" keep working because tool calls never needed
 `initialize`, and the spec makes them treat a missing `resultType` as `complete`. Hard rollback:
 revert commit 9 alone.
@@ -471,7 +475,7 @@ revert commit 9 alone.
 | Derived sessions merge two concurrent conversations, or split across ECS tasks | Accepted for telemetry; offline SQL sessionisation stays authoritative (§6.2 E) |
 | `ttlMs` delays a tool-catalog change by up to 5 min for modern clients | Shorter than the per-session caching legacy clients already do |
 | `cacheScope: "public"` on discover shared across tokens | Content holds nothing user-specific; access is still enforced per request |
-| Rollback needs a restart where ConfigCat is not configured | Production has ConfigCat; local and CI use the property, where a restart is fine |
+| Rollback needs a restart where `etendo.go.configcat.sdkKey` is not set | Confirm the SDK key is configured in each shared environment before go-live; local and CI use the property, where a restart is fine |
 
 ### 8.5 The kill-switch flag
 
@@ -486,6 +490,10 @@ revert commit 9 alone.
   per-account answer would hand one cached decision to clients that the flag treats differently.
 - **Backend-only.** Nothing in the browser reads it and it must never be added to the web client's
   `flag-keys.js` (same rule as `bp-portal-link`).
+- **Restart or not.** Flipping it is live (one ConfigCat poll, 60 s) only where
+  `etendo.go.configcat.sdkKey` is set (ConfigCat provider). Without an SDK key,
+  `PropertiesFeatureProvider` reads `etendo.go.flags.mcp-modern-era-disabled` /
+  `ETGO_FLAG_MCP_MODERN_ERA_DISABLED`, and flipping it needs a Tomcat restart.
 - **Cost per request.** Evaluated once per POST. The context is a shared constant, so nothing is
   allocated per request beyond OpenFeature's own evaluation context. ConfigCat answers from its
   in-memory snapshot (auto-poll every 60 s); the properties provider reads a JVM/Openbravo property.
@@ -497,7 +505,10 @@ revert commit 9 alone.
 ## 9. Decisions on the open questions (user, 2026-10-09)
 
 1. **Kill switch:** the `GoFeatureFlags` flag of §8.5 instead of an `Openbravo.properties` switch.
-   Dual-era is on by default; the flag set to `true` rolls back without a restart.
+   Dual-era is on by default; the flag set to `true` rolls back. Without a restart only where
+   `etendo.go.configcat.sdkKey` is set (ConfigCat provider). Without an SDK key,
+   `PropertiesFeatureProvider` reads `etendo.go.flags.mcp-modern-era-disabled` /
+   `ETGO_FLAG_MCP_MODERN_ERA_DISABLED`, and flipping it needs a Tomcat restart (§8.3, §8.5).
 2. **Header strictness:** keep the lenient default for missing headers. `mcp.modern.strict` stays a
    plain property, default `false`.
 3. **Telemetry grouping:** the derived session key (30 min idle gap) is accepted.

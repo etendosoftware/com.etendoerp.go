@@ -152,7 +152,8 @@ public final class GoFeatureFlags {
    * {@code false} when it is missing, when ConfigCat is unreachable or when evaluation fails. A
    * flag that <em>enabled</em> the modern era would switch it off on any control-plane hiccup;
    * this one leaves the default in place and only a deliberate {@code true} rolls back — live
-   * within one ConfigCat poll, no restart.
+   * within one ConfigCat poll where {@value #CONFIGCAT_SDK_KEY_PROPERTY} is set; without an SDK
+   * key the value comes from {@code etendo.go.flags.mcp-modern-era-disabled} and needs a restart.
    *
    * <p><b>Environment level only — never target it per account.</b> MCP clients cache the era per
    * origin, and one origin serves every tenant, so a per-account answer would hand one cached
