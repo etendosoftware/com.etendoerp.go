@@ -25,9 +25,10 @@ import org.apache.logging.log4j.Logger;
 /**
  * The MCP protocol revisions this server speaks, and how one is chosen for a request (ETP-5639).
  *
- * <p>All supported revisions are {@code initialize}-based (the "legacy" era). The stateless
- * 2026-07-28 revision is not served: its {@code server/discover} probe gets {@code -32601}, which is
- * what makes a dual-era client fall back to {@code initialize}.</p>
+ * <p>Two eras are served (ETP-5640). The {@code initialize}-based revisions ({@link #SUPPORTED},
+ * the "legacy" era) and the stateless revisions ({@link #MODERN_SUPPORTED}), where every request
+ * carries its version in {@code params._meta}. Which era a request belongs to is decided by
+ * {@link McpRequestEra}; the rules below are the legacy era's.</p>
  *
  * <ul>
  *   <li>{@code initialize}: the client's {@code protocolVersion} is answered as is when supported,
@@ -50,9 +51,20 @@ final class McpProtocolVersion {
   static final String LATEST = "2025-11-25";
   /** What a request without the header is taken to speak (Streamable HTTP, 2025-06-18). */
   static final String HEADER_FALLBACK = "2025-03-26";
-  /** Every revision served, oldest first. */
+  /** Every {@code initialize}-based (legacy) revision served, oldest first. */
   static final List<String> SUPPORTED =
       List.of("2024-11-05", HEADER_FALLBACK, "2025-06-18", LATEST);
+  /** The newest stateless (modern) revision served. */
+  static final String MODERN_LATEST = "2026-07-28";
+  /** Every stateless (modern) revision served, oldest first. */
+  static final List<String> MODERN_SUPPORTED = List.of(MODERN_LATEST);
+  /**
+   * Every revision served, newest first, as {@code server/discover} and an
+   * {@code UnsupportedProtocolVersionError} list them. The legacy entries tell a dual-era client it
+   * can also fall back to {@code initialize}.
+   */
+  static final List<String> ALL_SUPPORTED =
+      List.of(MODERN_LATEST, LATEST, "2025-06-18", HEADER_FALLBACK, "2024-11-05");
 
   /** Bound on how much of an unexpected header value reaches the log. */
   private static final int MAX_LOGGED_VALUE = 40;
