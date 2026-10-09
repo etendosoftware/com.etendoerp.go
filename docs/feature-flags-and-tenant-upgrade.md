@@ -69,6 +69,7 @@ Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 |------|----------|---------------------|---------|
 | `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
 | `onboarding-tenant-pool` | `etendo.go.flags.onboarding-tenant-pool` | `ETGO_FLAG_ONBOARDING_TENANT_POOL` | absent ⇒ **`false`** |
+| `mcp-modern-era-disabled` | `etendo.go.flags.mcp-modern-era-disabled` | `ETGO_FLAG_MCP_MODERN_ERA_DISABLED` | absent ⇒ **`false`** (dual-era on) |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
@@ -239,6 +240,17 @@ account) and every run of the "Tenant Pool Filler" background process (account-l
 claim never touches the pool and the filler run does nothing — onboarding is byte-for-byte the
 classic path. The pool size and the other knobs are plain runtime properties, not flags. Full
 reference: [`onboarding-flow.md`](onboarding-flow.md), "Tenant pool".
+
+### `mcp-modern-era-disabled` (ETP-5640) — backend-only kill switch, inverted
+
+Turns off the stateless MCP era (spec 2026-07-28) on `/sws/mcp`: `true` makes `server/discover`
+answer `-32601` again and serves every request under the `initialize`-based era, exactly as before
+ETP-5640. **Inverted on purpose**: every flag resolves to `false` when it is missing or the control
+plane is unreachable, and that must leave the server dual-era rather than switch it off. Environment
+level only (evaluated with an empty context) — never target it per account, because MCP clients
+cache the era per origin and one origin serves every tenant. Its only caller is
+`McpRequestEra.modernEnabled()`. Retire it, keeping the modern path, once the modern era is stable in
+production. Full reference: [`neo-headless.md`](neo-headless.md) §4.12.29.
 
 ## 2. The onboarding paywall
 

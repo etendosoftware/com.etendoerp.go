@@ -204,12 +204,22 @@ public class TenantEnvironmentLifecycleService {
     if (activation == null) {
       return null;
     }
-    Client client = OBDal.getInstance().get(Client.class, clientId);
-    if (client == null) {
-      return null;
+    // Same reason as readPreference: the access check reaches this write with no OBContext (MCP)
+    // or as a role that cannot write AD_Preference.
+    OBContext.setAdminMode();
+    try {
+      Client client = OBDal.getInstance().get(Client.class, clientId);
+      if (client == null) {
+        return null;
+      }
+      setPreference(LEGACY_TRANSITION_STARTED_ATTRIBUTE, activation.toString(), client);
+      // Flush here, not at the end of the request: by then admin mode is restored, and on MCP
+      // there is no OBContext at all for the DAL interceptor to stamp the insert or update with.
+      OBDal.getInstance().flush();
+      return activation.toString();
+    } finally {
+      OBContext.restorePreviousMode();
     }
-    setPreference(LEGACY_TRANSITION_STARTED_ATTRIBUTE, activation.toString(), client);
-    return activation.toString();
   }
 
   /**

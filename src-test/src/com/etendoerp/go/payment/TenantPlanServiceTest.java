@@ -42,6 +42,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -71,6 +72,8 @@ import org.openbravo.model.common.enterprise.Organization;
  *       able to tell that it failed, otherwise "paid but demo" is indistinguishable from success.
  *       </li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.payment.TenantPlanService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -84,6 +87,7 @@ class TenantPlanServiceTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<Preferences> preferencesMock;
+  private MockedStatic<OBContext> obContextMock;
 
   private final TenantPlanService service = new TenantPlanService();
 
@@ -91,6 +95,7 @@ class TenantPlanServiceTest {
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
     preferencesMock = mockStatic(Preferences.class);
+    obContextMock = mockStatic(OBContext.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
   }
 
@@ -101,6 +106,9 @@ class TenantPlanServiceTest {
     }
     if (preferencesMock != null) {
       preferencesMock.close();
+    }
+    if (obContextMock != null) {
+      obContextMock.close();
     }
   }
 
@@ -232,6 +240,21 @@ class TenantPlanServiceTest {
           .thenThrow(new IllegalStateException("no session"));
 
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+
+    /**
+     * ETP-5640 (bug from ETP-5642): the MCP access check resolves the plan before any OBContext
+     * exists, so the lookup must run in admin mode or every tenant reads back as free.
+     */
+    @Test
+    void readsThePlanInAdminMode() {
+      givenStoredPreference(preferenceHolding(TenantPlanService.PLAN_PRODUCTIVE));
+
+      service.resolvePlan(CLIENT_ID);
+
+      obContextMock.verify(OBContext::setAdminMode);
+      obContextMock.verify(OBContext::restorePreviousMode);
     }
 
     @Test
