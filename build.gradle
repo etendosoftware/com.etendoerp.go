@@ -269,7 +269,21 @@ rootProject.afterEvaluate { rootProj ->
         t.description = 'Runs the com.etendoerp.go tests that need no database (see modules/com.etendoerp.go/build.gradle).'
 
         t.testClassesDirs = rootTest.testClassesDirs
-        t.classpath = rootTest.classpath
+        // Resources (Hibernate *.hbm.xml mappings, message bundles, META-INF/services) live next to
+        // the sources and reach build/classes only through Etendo's ant compile. A full Gradle
+        // recompile wipes them, and a pipeline with no install never runs that compile, so the
+        // tests that need them failed for a missing file. The same folders ant copies from go FIRST
+        // on the classpath: appended last, an older copy won instead, such as the message bundles
+        // inside a com.etendoerp.go jar that a local build leaves in WebContent/WEB-INF/lib. These
+        // folders hold no compiled classes, so class loading is unchanged.
+        def resourceDirs = ['src', 'src-gen'].collect { rootProj.file(it) }
+        ['modules', 'modules_core'].each { parent ->
+            def parentDir = rootProj.file(parent)
+            if (parentDir.isDirectory()) {
+                parentDir.eachDir { module -> resourceDirs << new File(module, 'src') }
+            }
+        }
+        t.classpath = rootProj.files(resourceDirs.findAll { it.isDirectory() }) + rootTest.classpath
 
         t.useJUnitPlatform()
         t.include '**/com/etendoerp/go/**/*Test.class'
