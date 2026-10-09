@@ -32,6 +32,10 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * Decides which MCP era a request belongs to, and whether a modern request is well formed
  * (ETP-5640, design {@code docs/plans/2026-10-09-etp-5640-mcp-dual-era-design.md} §2).
@@ -48,8 +52,10 @@ import org.codehaus.jettison.json.JSONObject;
  * reported for a WARN line, unless {@code strict}: refusing it would hand the client a recognised
  * modern error, so it would retry instead of falling back, and fail forever (design §2.2).</p>
  *
- * <p>Pure: no servlet, DAL or {@code OBContext}. Every branch is on protocol structure, never on
- * a spec or entity.</p>
+ * <p>{@link #classify} is pure: no servlet, DAL or {@code OBContext}. Every branch is on protocol
+ * structure, never on a spec or entity. The two switches around it are read separately:
+ * {@link #modernEnabled()} (the {@link GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED} kill
+ * switch) and {@link #strict()} ({@value #PROP_STRICT}).</p>
  */
 final class McpRequestEra {
 
@@ -78,6 +84,21 @@ final class McpRequestEra {
   static final int HEADER_MISMATCH = -32020;
   /** MCP 2026-07-28: the requested protocol version is not served. */
   static final int UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
+  /**
+   * Openbravo/JVM property: {@code true} refuses a modern request that omits a mirror header or
+   * {@code clientCapabilities}, instead of serving it with a WARN. Default {@code false} (design
+   * §2.2).
+   */
+  static final String PROP_STRICT = "mcp.modern.strict";
+  /** Environment-variable spelling of {@value #PROP_STRICT}. */
+  static final String ENV_STRICT = "ETGO_MCP_MODERN_STRICT";
+
+  /**
+   * The kill switch is environment level: no targeting key, no attributes (see
+   * {@link GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED}). Shared, so nothing is built per request.
+   */
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
 
   /** Methods that select legacy semantics whatever else the request carries. */
   private static final Set<String> LEGACY_HANDSHAKE =
@@ -156,6 +177,22 @@ final class McpRequestEra {
       return Classification.legacy();
     }
     return new ModernCheck(method, params, meta, declared, headers, headerVersion).run(strict);
+  }
+
+  /**
+   * Whether the modern era is served. {@code false} only when the
+   * {@link GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED} kill switch is positively on; a missing
+   * flag or an unreachable control plane keeps the server dual-era.
+   *
+   * @return {@code true} unless the kill switch is on
+   */
+  static boolean modernEnabled() {
+    return !GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED, ENVIRONMENT);
+  }
+
+  /** @return whether {@value #PROP_STRICT} is on (default {@code false}) */
+  static boolean strict() {
+    return GoRuntimeProperties.readBoolean(PROP_STRICT, ENV_STRICT, false);
   }
 
   /**

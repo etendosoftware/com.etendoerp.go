@@ -22,21 +22,29 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Properties;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 
 import com.etendoerp.go.mcp.McpRequestEra.Classification;
 import com.etendoerp.go.mcp.McpRequestEra.Era;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
 import com.etendoerp.go.mcp.McpRequestEra.Headers;
 
 /**
  * The era decision table of the ETP-5640 design (§2.3), row by row, on the pure classifier.
  *
  * @covers com.etendoerp.go.mcp.McpRequestEra
+ * @covers com.etendoerp.go.mcp.McpProtocolVersion
  */
 public class McpRequestEraTest {
 
@@ -249,5 +257,59 @@ public class McpRequestEraTest {
     assertTrue(McpProtocolVersion.ALL_SUPPORTED.containsAll(McpProtocolVersion.SUPPORTED));
     assertEquals(McpProtocolVersion.SUPPORTED.size() + 1,
         McpProtocolVersion.ALL_SUPPORTED.size());
+  }
+
+  // ── Switches ─────────────────────────────────────────────────────────────
+
+  private static final String KILL_SWITCH_PROPERTY =
+      "etendo.go.flags." + GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED;
+
+  /**
+   * Runs {@code body} with only the given JVM properties set: the ambient Openbravo.properties is
+   * replaced by an empty one, so a developer's local override cannot leak in.
+   */
+  private static void withProperties(String key, String value, Runnable body) {
+    OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+    when(provider.getOpenbravoProperties()).thenReturn(new Properties());
+    String previous = System.getProperty(key);
+    try (MockedStatic<OBPropertiesProvider> mocked = mockStatic(OBPropertiesProvider.class)) {
+      mocked.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+      if (value == null) {
+        System.clearProperty(key);
+      } else {
+        System.setProperty(key, value);
+      }
+      body.run();
+    } finally {
+      if (previous == null) {
+        System.clearProperty(key);
+      } else {
+        System.setProperty(key, previous);
+      }
+    }
+  }
+
+  @Test
+  public void modernEraIsOnWhenTheKillSwitchIsUnset() {
+    withProperties(KILL_SWITCH_PROPERTY, null,
+        () -> assertTrue(McpRequestEra.modernEnabled()));
+  }
+
+  @Test
+  public void modernEraIsOnWhenTheKillSwitchIsFalse() {
+    withProperties(KILL_SWITCH_PROPERTY, "false",
+        () -> assertTrue(McpRequestEra.modernEnabled()));
+  }
+
+  @Test
+  public void killSwitchTrueTurnsTheModernEraOff() {
+    withProperties(KILL_SWITCH_PROPERTY, "true",
+        () -> assertFalse(McpRequestEra.modernEnabled()));
+  }
+
+  @Test
+  public void strictIsOffByDefaultAndOnWhenConfigured() {
+    withProperties(McpRequestEra.PROP_STRICT, null, () -> assertFalse(McpRequestEra.strict()));
+    withProperties(McpRequestEra.PROP_STRICT, "true", () -> assertTrue(McpRequestEra.strict()));
   }
 }

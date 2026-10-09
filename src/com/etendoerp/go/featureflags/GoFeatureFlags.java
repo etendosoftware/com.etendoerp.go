@@ -142,6 +142,29 @@ public final class GoFeatureFlags {
   public static final String FLAG_ONBOARDING_TENANT_POOL = "onboarding-tenant-pool";
 
   /**
+   * ETP-5640 — kill switch for the stateless MCP era (spec 2026-07-28). <b>Inverted on
+   * purpose:</b> {@code true} turns the modern era <em>off</em> and {@code /sws/mcp} answers
+   * exactly as before it existed — {@code server/discover} gets {@code -32601}, per-request
+   * {@code _meta} is ignored and every request is served under the {@code initialize}-based era.
+   * Unset or {@code false} is the normal state: the server is dual-era.
+   *
+   * <p>The inversion follows from this class's failure behaviour: every flag resolves to
+   * {@code false} when it is missing, when ConfigCat is unreachable or when evaluation fails. A
+   * flag that <em>enabled</em> the modern era would switch it off on any control-plane hiccup;
+   * this one leaves the default in place and only a deliberate {@code true} rolls back — live
+   * within one ConfigCat poll, no restart.
+   *
+   * <p><b>Environment level only — never target it per account.</b> MCP clients cache the era per
+   * origin, and one origin serves every tenant, so a per-account answer would hand one cached
+   * decision to callers the flag treats differently. It is evaluated with an empty context.
+   *
+   * <p><b>Backend-only.</b> Nothing in the browser reads it; never add it to the web client's
+   * {@code flag-keys.js}. Its only caller is {@code McpRequestEra}. Retire it (keeping the modern
+   * path) once the modern era is stable in production.
+   */
+  public static final String FLAG_MCP_MODERN_ERA_DISABLED = "mcp-modern-era-disabled";
+
+  /**
    * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
    * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
    */
