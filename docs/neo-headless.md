@@ -7888,8 +7888,8 @@ Production logs are read in Datadog, so each MCP line below is one line, carries
 act on it, and never carries agent-written free text or a request body.
 
 **Unknown JSON-RPC method → one `WARN`, no stack trace.** A client asking for a method the server
-does not offer — mostly MCP 2026-07-28 clients probing with `server/discover` before falling back to
-`initialize`, plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
+does not offer — before ETP-5640 mostly MCP 2026-07-28 clients probing with `server/discover`
+(answered since, §4.12.29), plus the odd `resources/templates/list` — still gets JSON-RPC `-32601`, but is no
 longer logged as `ERROR Error processing MCP message` with a full stack trace (~570 a week before
 this change). `McpServlet` has a dedicated `catch (McpMethodNotFoundException)`:
 
@@ -7948,9 +7948,9 @@ production layout (`%d [%t] %-5p %c - %m%n`) prints no MDC, which is why the key
 #### 4.12.24 Protocol revision: 2025-11-25, negotiated (ETP-5639)
 
 The server speaks the four `initialize`-based revisions **`2024-11-05`, `2025-03-26`,
-`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. The stateless `2026-07-28`
-revision is not served (its `server/discover` probe answers `-32601`, which makes a dual-era client
-fall back to `initialize`; see §4.12.23).
+`2025-06-18`, `2025-11-25`** (latest), in `McpProtocolVersion`. Since ETP-5640 it also serves the
+stateless `2026-07-28` revision — see §4.12.29. The table below is the legacy era's; a request is
+only legacy when it carries no modern marker.
 
 | Request | Behaviour |
 |---|---|
@@ -7958,7 +7958,7 @@ fall back to `initialize`; see §4.12.23).
 | `initialize` with an unknown or missing `protocolVersion` | answered with the latest, `2025-11-25` (lifecycle rule) |
 | any later POST without `MCP-Protocol-Version` | served, taken as `2025-03-26` (spec fallback) |
 | any later POST with a supported header | served as sent |
-| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose; it turns strict when the 2026-07-28 era is added, where era detection depends on the header |
+| any later POST with an unsupported header | **served** with the session's negotiated version (or the latest) and one `WARN` `MCP client sent unsupported MCP-Protocol-Version '<value>' (client=…) session=…` — never `400`. Lenient on purpose, and still so for legacy requests; a header naming `2026-07-28` makes the request modern (§4.12.29), where errors are strict |
 | notification (no `id`) | `202 Accepted` (was `204 No Content`) |
 | `GET /sws/mcp` | **`405 Method Not Allowed`**, `Allow: POST, OPTIONS` — a Streamable HTTP server without an SSE stream MUST. The informational JSON it used to answer is gone |
 | `GET /sws/mcp/.well-known/oauth-protected-resource` | unchanged — RFC 9728 metadata, `200` |
@@ -8165,3 +8165,51 @@ legacy JWT fallback in `McpServlet.authenticate` does not honour the `GoLegacyBe
 and the cookie path does not run `GoSessionRoleReconciler` (ETP-5395). Moving `McpServlet` onto the
 shared authenticator would close both; it needs an `identify()` variant that keeps the commercial
 check, because MCP builds its own per-call `OBContext`.
+
+#### 4.12.29 Dual era: MCP 2026-07-28 next to `initialize` (ETP-5640)
+
+The server is **dual-era**: it serves the stateless revision `2026-07-28` (no `initialize`, no
+`Mcp-Session-Id`, version and client in every request's `params._meta`) on the same `/sws/mcp`
+endpoint as the four legacy revisions. Design and decision table:
+`docs/plans/2026-10-09-etp-5640-mcp-dual-era-design.md`.
+
+**Era detection** (`McpRequestEra.classify`, body first — headers only mirror it). A request is
+*modern* when `params._meta["io.modelcontextprotocol/protocolVersion"]` is present, when its method
+is `server/discover`, or when its `MCP-Protocol-Version` header is `2026-07-28`. `initialize` is
+always legacy. Anything else is legacy and behaves exactly as §4.12.24 describes.
+
+| Modern request | Answer |
+|---|---|
+| well formed | `200`, result + `resultType: "complete"` + `_meta["io.modelcontextprotocol/serverInfo"]` (`name`, `version`); `tools/list`, `resources/list`, `resources/read` also carry `ttlMs: 300000`, `cacheScope: "private"`; never an `Mcp-Session-Id` |
+| `server/discover` | `supportedVersions` (all five, newest first), the same `capabilities` and full `serverInfo` as `initialize`, `ttlMs: 3600000`, `cacheScope: "public"` |
+| `_meta` version not served (`2027-01-01`, or a legacy version sent per request) | `400`, `-32022` with `data.supported` / `data.requested` |
+| a mirror header present and different from the body (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` after Base64-sentinel decoding) | `400`, `-32020` |
+| `_meta` version not a string | `400`, `-32602` |
+| a mirror header, `_meta` version or `clientCapabilities` **missing** | served, one `WARN MCP modern request served without: …`; `400` (`-32020` / `-32602`) only with `mcp.modern.strict=true` |
+| `ping` or any unknown method | `404`, `-32601` |
+| `resources/read` of a missing or inaccessible resource | `-32602` `Resource not found: <uri>` (legacy keeps `-32603`); both eras log one `WARN`, no stack trace |
+
+Why missing headers are lenient by default: a dual-era client reads a `400` with a recognised
+modern error as "modern server, fix and retry", not "fall back" — refusing a client that omits a
+newly required header would loop it forever. A mismatch is always refused.
+
+**Kill switch.** Backend feature flag `mcp-modern-era-disabled`
+(`GoFeatureFlags.FLAG_MCP_MODERN_ERA_DISABLED`), environment level, never per account (clients cache
+the era per origin, and one origin serves every tenant). `true` restores the pre-ETP-5640
+behaviour: `server/discover` gets `200` + `-32601`, `_meta` is ignored, everything is legacy. Unset,
+`false` or an unreachable control plane keep the server dual-era. Live within one ConfigCat poll
+where ConfigCat is configured; a restart where the flag comes from
+`etendo.go.flags.mcp-modern-era-disabled`. A client that already cached "modern" keeps working
+after a rollback, because tool calls never needed `initialize`.
+
+**Telemetry.** A modern request's client name comes from its own `_meta` clientInfo and its session
+key is derived (`m-` prefix, renewed after 30 min idle) — see `docs/mcp-usage-telemetry.md`
+§*Modern clients*. One `INFO MCP modern session started: session=m-… client=<name>/<version>
+protocol=2026-07-28 traceparent=yes|no` per derived session is the rollout's evidence. This part
+runs whatever the kill switch says.
+
+**CORS**: `Mcp-Method` and `Mcp-Name` are in `Access-Control-Allow-Headers`.
+
+**Not served** (answer `404 -32601` in the modern era): `subscriptions/listen`,
+`resources/templates/list`, `logging/setLevel`, tasks, MRTR. We never need client input, so a
+result is always `complete`.

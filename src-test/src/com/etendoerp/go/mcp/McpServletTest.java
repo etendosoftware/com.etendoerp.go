@@ -763,6 +763,100 @@ public class McpServletTest {
     assertTrue(answer.has("result"));
   }
 
+  // ── server/discover and the compatibility matrix (ETP-5640) ─────────────
+
+  @Test
+  public void discoverAnswersEveryVersionTheCapabilitiesAndTheFullServerInfo() throws Exception {
+    JSONObject answer = postModern(McpRequestEra.SERVER_DISCOVER, null, MODERN);
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    JSONObject result = answer.getJSONObject("result");
+    assertEquals("complete", result.getString("resultType"));
+    JSONArray versions = result.getJSONArray("supportedVersions");
+    assertEquals(McpProtocolVersion.ALL_SUPPORTED.size(), versions.length());
+    assertEquals(MODERN, versions.getString(0));
+    assertTrue(result.getJSONObject("capabilities").has("tools"));
+    assertTrue(result.getJSONObject("capabilities").has("resources"));
+    JSONObject serverInfo = result.getJSONObject("_meta")
+        .getJSONObject(McpServlet.META_SERVER_INFO);
+    assertEquals("etendo-mcp", serverInfo.getString("name"));
+    assertEquals("Etendo MCP", serverInfo.getString("title"));
+    assertTrue(serverInfo.has("icons"));
+    assertEquals(McpServlet.DISCOVER_TTL_MS, result.getLong("ttlMs"));
+    assertEquals("public", result.getString("cacheScope"));
+    assertFalse("no instructions, as initialize", result.has("instructions"));
+    verify(response, never()).setHeader(eq(McpUsageTelemetry.HEADER_SESSION_ID), anyString());
+  }
+
+  /** Discover and initialize describe the server with the same builders. */
+  @Test
+  public void discoverAndInitializeAgreeOnCapabilitiesAndServerInfo() throws Exception {
+    JSONObject discover = postModern(McpRequestEra.SERVER_DISCOVER, null, MODERN)
+        .getJSONObject("result");
+    setUp();
+    JSONObject init = initializeAsking("2025-11-25");
+
+    assertEquals(init.getJSONObject("capabilities").toString(),
+        discover.getJSONObject("capabilities").toString());
+    assertEquals(init.getJSONObject("serverInfo").toString(), discover.getJSONObject("_meta")
+        .getJSONObject(McpServlet.META_SERVER_INFO).toString());
+  }
+
+  /** M9: a bare probe with no _meta is still a modern method — served (lenient) with one WARN. */
+  @Test
+  public void discoverWithoutMetaIsServedWithAWarn() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 50)
+        .put("method", McpRequestEra.SERVER_DISCOVER).toString());
+
+    try (LogCapture logs = LogCapture.of(McpServlet.class)) {
+      servlet.doPost(request, response);
+      assertFalse(logs.messages(Level.WARN).isEmpty());
+    }
+
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+    assertTrue(new JSONObject(getResponseBody()).getJSONObject("result")
+        .has("supportedVersions"));
+  }
+
+  /** K1: with the kill switch on, the probe gets exactly today's answer, so clients fall back. */
+  @Test
+  public void killSwitchAnswersDiscoverAsBefore() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+
+    try (LogCapture logs = LogCapture.of(McpServlet.class)) {
+      JSONObject answer = postModern(McpRequestEra.SERVER_DISCOVER, null, MODERN);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      assertEquals(-32601, answer.getJSONObject("error").getInt("code"));
+      assertTrue(logs.messages(Level.ERROR).isEmpty());
+      assertTrue(logs.messages(Level.WARN).get(0).contains("'server/discover'"));
+    }
+  }
+
+  /** Matrix — legacy client: initialize mints a session and the answer carries no modern field. */
+  @Test
+  public void legacyClientStillNegotiatesAndGetsASession() throws Exception {
+    JSONObject init = initializeAsking("2025-06-18");
+
+    assertEquals("2025-06-18", init.getString("protocolVersion"));
+    assertFalse(init.has("resultType"));
+    verify(response).setHeader(eq(McpUsageTelemetry.HEADER_SESSION_ID), anyString());
+  }
+
+  /** Matrix — modern-only client: an unknown version first, then a retry with a served one. */
+  @Test
+  public void modernOnlyClientRetriesWithAnAdvertisedVersion() throws Exception {
+    JSONObject refused = postModern(McpRequestEra.SERVER_DISCOVER, null, "2027-01-01");
+    String retryWith = refused.getJSONObject("error").getJSONObject("data")
+        .getJSONArray("supported").getString(0);
+    setUp();
+
+    JSONObject served = postModern(McpRequestEra.SERVER_DISCOVER, null, retryWith);
+
+    assertTrue(served.getJSONObject("result").has("supportedVersions"));
+  }
+
   // ── commercial access gate (ETP-5642) ───────────────────────────────────
 
   private void stubAccessDecision(EnvironmentAccessPolicy.Decision decision) {
@@ -963,9 +1057,10 @@ public class McpServletTest {
   }
 
   /**
-   * A client probing with a method we do not offer (2026-07-28 {@code server/discover}) is not a
-   * server failure: no ERROR, no stack trace, one WARN naming the method and the client, whose name
-   * comes from {@code params._meta} when the client never ran {@code initialize}.
+   * A client asking for a method we do not offer is not a server failure: no ERROR, no stack
+   * trace, one WARN naming the method and the client, whose name comes from {@code params._meta}
+   * when the client never ran {@code initialize}. (This used to be the {@code server/discover}
+   * probe; since ETP-5640 that is answered — see {@code killSwitchAnswersDiscoverAsBefore}.)
    */
   @Test
   public void unknownMethodLogsOneWarnWithClientFromMetaAndNoError() throws Exception {
@@ -973,7 +1068,7 @@ public class McpServletTest {
     String rpcBody = new JSONObject()
         .put("jsonrpc", "2.0")
         .put("id", 31)
-        .put("method", "server/discover")
+        .put("method", "resources/templates/list")
         .put("params", new JSONObject().put("_meta", new JSONObject()
             .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "claude-code"))))
         .toString();
@@ -988,7 +1083,7 @@ public class McpServletTest {
           logs.messages(Level.ERROR).isEmpty());
       assertEquals(1, logs.messages(Level.WARN).size());
       String warn = logs.messages(Level.WARN).get(0);
-      assertTrue(warn, warn.contains("'server/discover'"));
+      assertTrue(warn, warn.contains("'resources/templates/list'"));
       assertTrue(warn, warn.contains("client=claude-code"));
       assertTrue(warn, warn.contains("session=" + McpUsageTelemetry.NO_SESSION));
       assertNull("one line, no stack trace", logs.events(Level.WARN).get(0).getThrown());

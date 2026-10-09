@@ -107,6 +107,10 @@ public class McpServlet extends HttpServlet {
    * push or a role change reaches a modern client within minutes.
    */
   static final long CATALOG_TTL_MS = 300_000L;
+  /** Freshness hint of {@code server/discover}: its answer changes only with a deployment. */
+  static final long DISCOVER_TTL_MS = 3_600_000L;
+  /** {@code cacheScope} of a result that is the same for every caller. */
+  static final String CACHE_SCOPE_PUBLIC = "public";
   /** {@code cacheScope} of a result that depends on the caller's role, scopes or language. */
   static final String CACHE_SCOPE_PRIVATE = "private";
   /** Modern methods whose result is a {@code CacheableResult} we compute per caller. */
@@ -262,10 +266,9 @@ public class McpServlet extends HttpServlet {
           era.isModern() ? McpRequestEra.INVALID_PARAMS : JSON_RPC_INTERNAL_ERROR,
           e.getMessage());
     } catch (McpMethodNotFoundException e) {
-      // A client asking for something we do not offer — chiefly 2026-07-28 clients probing with
-      // server/discover before falling back to initialize. Not a server failure: one WARN line, no
-      // stack trace, and the same -32601 as before. No telemetry row: only tools/call has a tool
-      // name, and an unknown method is never one.
+      // A client asking for something we do not offer (or server/discover while the modern era is
+      // switched off). Not a server failure: one WARN line, no stack trace, and -32601. No
+      // telemetry row: only tools/call has a tool name, and an unknown method is never one.
       log.warn("MCP client called unsupported method '{}' (client={}) session={}", method,
           clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
       // The modern era answers 404 (Streamable HTTP, 2026-07-28); the legacy era keeps its 200.
@@ -334,9 +337,7 @@ public class McpServlet extends HttpServlet {
    */
   private static McpRequestEra.Classification classifyEra(HttpServletRequest request,
       String method, JSONObject params) {
-    if (McpRequestEra.SERVER_DISCOVER.equals(method) || !McpRequestEra.modernEnabled()) {
-      // server/discover is not answered yet: its probe must keep getting the legacy -32601 that
-      // makes a dual-era client fall back to initialize, so the probe is not classified modern.
+    if (!McpRequestEra.modernEnabled()) {
       return McpRequestEra.Classification.legacy();
     }
     return McpRequestEra.classify(method, params,
@@ -795,6 +796,12 @@ public class McpServlet extends HttpServlet {
         return null;
       case PING:
         return new JSONObject();
+      case McpRequestEra.SERVER_DISCOVER:
+        if (!modern) {
+          // Only reachable with the modern era switched off: answer exactly as before it existed.
+          throw new McpMethodNotFoundException("Method not found: " + method);
+        }
+        return handleDiscover();
       case "tools/list":
         return handleToolsList(identity);
       case TOOLS_CALL:
@@ -834,19 +841,43 @@ public class McpServlet extends HttpServlet {
 
     JSONObject result = new JSONObject();
     result.put("protocolVersion", negotiated);
+    result.put("capabilities", serverCapabilities());
+    result.put("serverInfo", serverInfo());
+    return result;
+  }
 
+  // ── Handler: server/discover (modern era) ───────────────────────────────
+
+  /**
+   * Answer {@code server/discover} (MCP 2026-07-28, ETP-5640): every version served, the same
+   * capabilities and server identity as {@code initialize} — one builder each, so the two eras
+   * cannot drift — and cache hints. The answer is the same for every caller, hence
+   * {@code public}. Answering it is what moves a dual-era client to the modern era.
+   */
+  private static JSONObject handleDiscover() throws JSONException {
+    JSONObject result = new JSONObject();
+    result.put("supportedVersions", new JSONArray(McpProtocolVersion.ALL_SUPPORTED));
+    result.put("capabilities", serverCapabilities());
+    result.put("_meta", new JSONObject().put(META_SERVER_INFO, serverInfo()));
+    result.put("ttlMs", DISCOVER_TTL_MS);
+    result.put("cacheScope", CACHE_SCOPE_PUBLIC);
+    return result;
+  }
+
+  /**
+   * What the server offers, as {@code initialize} and {@code server/discover} both answer it.
+   * {@code listChanged} is false: the server never pushes a list change, so a client's freshness
+   * signal is the result's TTL (modern) or the session (legacy).
+   */
+  private static JSONObject serverCapabilities() throws JSONException {
     JSONObject capabilities = new JSONObject();
+    capabilities.put("tools", new JSONObject().put("listChanged", false));
+    capabilities.put("resources", new JSONObject().put("listChanged", false));
+    return capabilities;
+  }
 
-    JSONObject toolsCap = new JSONObject();
-    toolsCap.put("listChanged", false);
-    capabilities.put("tools", toolsCap);
-
-    JSONObject resourcesCap = new JSONObject();
-    resourcesCap.put("listChanged", false);
-    capabilities.put("resources", resourcesCap);
-
-    result.put("capabilities", capabilities);
-
+  /** The server's full {@code Implementation}, as {@code initialize} and discovery answer it. */
+  private static JSONObject serverInfo() throws JSONException {
     JSONObject serverInfo = new JSONObject();
     serverInfo.put("name", SERVER_NAME);
     serverInfo.put("version", SERVER_VERSION);
@@ -858,9 +889,7 @@ public class McpServlet extends HttpServlet {
     icon.put("mimeType", SERVER_ICON_MIME_TYPE);
     icon.put("sizes", new JSONArray().put(SERVER_ICON_SIZES));
     serverInfo.put("icons", new JSONArray().put(icon));
-    result.put("serverInfo", serverInfo);
-
-    return result;
+    return serverInfo;
   }
 
   // ── Handler: tools/list ─────────────────────────────────────────────────
