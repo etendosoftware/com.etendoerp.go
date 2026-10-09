@@ -147,8 +147,11 @@ Known limits, accepted: two parallel conversations of one user with one agent me
 and with several Tomcat nodes one task can be split across nodes (the map is per node). Every row
 still carries the user, the client name and its timestamp, so SQL can regroup them cluster-wide.
 
-This applies whatever the `mcp-modern-era-disabled` kill switch says: a client that cached the
-modern era keeps sending `_meta` after a rollback, and its rows keep their client name. The client
+The client name is read whatever the `mcp-modern-era-disabled` kill switch says: a client that cached
+the modern era keeps sending `_meta` after a rollback, and its rows keep their client name. The
+derived session is not: with the kill switch on such a request is legacy, keeps its `Mcp-Session-Id`
+(if any, else `session=none`) and logs no "modern session started", so a rollback adds nothing to
+that evidence. The feedback bucket is still keyed on the caller. The client
 name is deliberately not part of the key: it is client-controlled, so a client that changes it on every
 request would otherwise mint a session per request. For the same reason the `etendo_feedback`
 rate-limit bucket is keyed on the authenticated caller (user, token client, role), not on the session

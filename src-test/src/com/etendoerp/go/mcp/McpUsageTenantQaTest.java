@@ -296,6 +296,28 @@ public class McpUsageTenantQaTest {
     }
   }
 
+  /**
+   * Kill switch on: a request declaring a modern version is legacy. It keeps its _meta client name
+   * but derives no m- session, so a rollback leaves no unused modern sessions behind.
+   */
+  @Test
+  public void aLegacyRequestDeclaringAModernVersionNamesItsClientWithoutASession()
+      throws Exception {
+    JSONObject params = new JSONObject().put("_meta", new JSONObject()
+        .put(McpRequestEra.META_PROTOCOL_VERSION, McpProtocolVersion.MODERN_LATEST)
+        .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "claude-code")));
+    try {
+      McpUsageTelemetry.bindModernCaller("u-legacy", "c1", "r1", params,
+          McpRequestEra.Classification.legacy());
+
+      assertEquals("claude-code", McpUsageTelemetry.currentClient().getName());
+      org.junit.Assert.assertNull(McpUsageTelemetry.currentSessionKey());
+    } finally {
+      McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentClient();
+    }
+  }
+
   /** W3: the map evicts the least recently ACTIVE session, never a busy one. */
   @Test
   public void anActiveSessionSurvivesEvictionPressure() {

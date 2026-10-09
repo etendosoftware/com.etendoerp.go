@@ -8212,8 +8212,9 @@ after a rollback, because tool calls never needed `initialize`.
 key is derived per (user, token client, role) — never per client name, which the client controls —
 with an `m-` prefix, renewed after 30 min idle; see `docs/mcp-usage-telemetry.md`
 §*Modern clients*. One `INFO MCP modern session started: session=m-… client=<name>/<version>
-protocol=2026-07-28 traceparent=yes|no` per derived session is the rollout's evidence. This part
-runs whatever the kill switch says.
+protocol=2026-07-28 traceparent=yes|no` per derived session is the rollout's evidence. The client name
+is read whatever the kill switch says; with the switch on, no `m-` session is derived and no such line
+is logged.
 
 **CORS**: `Mcp-Method` and `Mcp-Name` are in `Access-Control-Allow-Headers`.
 

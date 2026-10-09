@@ -907,6 +907,27 @@ public class McpServletTest {
     }
   }
 
+  /**
+   * K1: with the kill switch on, the probe derives no modern session — an m- key that nothing
+   * uses afterwards would pollute the rollout evidence exactly when the era is rolled back — but
+   * the WARN still names the client from its _meta.
+   */
+  @Test
+  public void killSwitchProbeOpensNoModernSessionButNamesTheClient() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+
+    try (LogCapture servletLogs = LogCapture.of(McpServlet.class);
+        LogCapture telemetryLogs = LogCapture.of(McpUsageTelemetry.class)) {
+      postModern(McpRequestEra.SERVER_DISCOVER, null, MODERN);
+
+      assertTrue(telemetryLogs.messages(Level.INFO).toString(), telemetryLogs
+          .messages(Level.INFO).stream().noneMatch(line -> line.contains("modern session")));
+      String warn = servletLogs.messages(Level.WARN).get(0);
+      assertTrue(warn, warn.contains("client=claude-code"));
+      assertTrue(warn, warn.contains("session=none"));
+    }
+  }
+
   /** Matrix — legacy client: initialize mints a session and the answer carries no modern field. */
   @Test
   public void legacyClientStillNegotiatesAndGetsASession() throws Exception {
@@ -1536,7 +1557,10 @@ public class McpServletTest {
     assertEquals(first, second);
   }
 
-  /** With the kill switch on, the protocol is legacy but the telemetry still reads _meta. */
+  /**
+   * With the kill switch on, the protocol is legacy: the row keeps the _meta client name, but no
+   * m- session is derived — the request carries no Mcp-Session-Id, so it has none.
+   */
   @Test
   public void killSwitchKeepsTheModernClientNameOnTheRow() throws Exception {
     System.setProperty(KILL_SWITCH_PROPERTY, "true");
@@ -1544,7 +1568,7 @@ public class McpServletTest {
     McpUsageRow row = recordedModernRow("claude-code-qa-3");
 
     assertEquals("claude-code-qa-3", row.clientName());
-    assertTrue(row.sessionKey().startsWith(McpUsageTelemetry.MODERN_SESSION_PREFIX));
+    assertNull(row.sessionKey());
   }
 
   @Test

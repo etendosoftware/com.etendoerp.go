@@ -217,9 +217,11 @@ final class McpUsageTelemetry {
    * client never sends and which is ignored if it does — and its rate-limit caller. A request that
    * is neither modern nor declares a modern version is left alone.
    *
-   * <p>Applies whatever the kill switch says: a client that cached the modern era keeps sending
-   * {@code _meta} after a rollback, and its rows should keep their client name. One INFO line marks
-   * each new derived session; it is the rollout's evidence.</p>
+   * <p>With the kill switch on, a request declaring a modern version is legacy: a client that
+   * cached the modern era keeps sending {@code _meta} after a rollback, so its client name and
+   * rate-limit caller are still bound, but no {@code m-} session is derived — the request keeps its
+   * legacy {@code Mcp-Session-Id}, if any. One INFO line marks each new derived session; it is the
+   * rollout's evidence, so a rolled-back era must not add to it.</p>
    *
    * @param userId   the caller's {@code AD_User_ID}
    * @param clientId the token's {@code AD_Client_ID}
@@ -236,6 +238,11 @@ final class McpUsageTelemetry {
     ClientInfo client = clientInfoFromMeta(params);
     CURRENT_CLIENT.set(client);
     CURRENT_CALLER.set(callerKey(userId, clientId, roleId));
+    if (!era.isModern()) {
+      // Kill switch on: keep the client name, but derive no m- session — one nothing uses
+      // afterwards would pollute the rollout evidence exactly when the era is rolled back.
+      return;
+    }
     ModernSession session = modernSession(userId, clientId, roleId, System.currentTimeMillis());
     CURRENT_SESSION.set(session.key());
     if (session.started()) {
@@ -243,7 +250,7 @@ final class McpUsageTelemetry {
       log.info("MCP modern session started: session={} client={}/{} protocol={} traceparent={}",
           session.key(), StringUtils.defaultString(client.getName(), NO_SESSION_CLIENT),
           StringUtils.defaultString(client.getVersion(), NO_SESSION_CLIENT),
-          McpRequestEra.printable(era.isModern() ? era.protocolVersion() : declared),
+          McpRequestEra.printable(era.protocolVersion()),
           meta != null && meta.has("traceparent") ? "yes" : "no");
     }
   }

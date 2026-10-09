@@ -344,9 +344,13 @@ switch — the coordinator's main concern.
 - **One INFO line per new derived session** (not per request):
   `MCP modern session started: session=m-… client=claude-code/<version> protocol=2026-07-28 traceparent=yes|no`.
   It is the rollout's main evidence (§8) and answers option B's open data question.
-- **Applies whatever the kill-switch flag says.** A modern-cached client keeps sending `_meta` after a
-  rollback; reading its `clientInfo` costs nothing and keeps the telemetry intact. Only the protocol
-  behaviour is switched off.
+- **The client name is read whatever the kill-switch flag says; the session is not derived.** A
+  modern-cached client keeps sending `_meta` after a rollback; reading its `clientInfo` costs nothing
+  and keeps the client name on its rows and log lines. But with the flag on the request is legacy,
+  so no `m-` session is derived and no "modern session started" line is logged — the request keeps
+  its `Mcp-Session-Id`, if any, else `session=none`. An `m-` key that nothing uses afterwards (the
+  `server/discover` probe falls back to `initialize`) would pollute the rollout evidence exactly
+  when the era has been rolled back.
 
 Impact by consumer:
 
