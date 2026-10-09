@@ -44,7 +44,9 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
  * @param clientId      {@code AD_Client_ID} the call ran under
  * @param orgId         {@code AD_Org_ID} the call ran under
  * @param userId        {@code AD_User_ID} the call ran under, used for the audit columns
- * @param sessionKey    MCP session the call belongs to, so a sequence reads as one task
+ * @param sessionKey    MCP session the call belongs to, so a sequence reads as one task: the
+ *                      {@code Mcp-Session-Id} minted at {@code initialize} (legacy), or a derived
+ *                      {@code m-} key (modern, ETP-5640)
  * @param toolName      the MCP tool invoked ({@code etendo_create}, {@code etendo_list}, …)
  * @param verb          the CRUD/action verb the call resolved to
  * @param targetEntity  the spec, or {@code spec/entity}, the call addressed. Named
@@ -59,8 +61,9 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
  * @param durationMs    wall-clock duration of the call
  * @param reqBytes      size of the request payload
  * @param respBytes     size of the response payload
- * @param clientName    client name from the MCP {@code initialize} handshake
- * @param clientVersion client version from the MCP {@code initialize} handshake
+ * @param clientName    client name from the {@code initialize} handshake (legacy) or from the
+ *                      request's {@code _meta} clientInfo (modern, ETP-5640)
+ * @param clientVersion client version, from the same source as {@code clientName}
  * @param rowType       {@link #ROW_TYPE_TOOL_CALL} or {@link #ROW_TYPE_FEEDBACK}
  * @param payload       reserved for feedback rows (Track B3); null on every tool-call row
  */

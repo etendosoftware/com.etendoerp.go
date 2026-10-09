@@ -324,7 +324,7 @@ switch — the coordinator's main concern.
   `src-db/database/model/tables/ETGO_MCP_USAGE.xml:36`). The tuple uses only values we already
   hold before dispatch (`AuthIdentity`, `McpServlet.java:918-932`) — the effective tenant is resolved
   later in `executeInContext`, but the token's client is stable for one caller, which is all the key
-  needs. The tuple is hashed in memory and never logged.
+  needs. The tuple is kept in memory only and never logged.
 - The key is bound with the existing `setCurrentSessionKey` (`McpServlet.java:183`), so every
   `session=` log line (§1) and the feedback rate limit work unchanged.
 - `McpCallObservation.sessionKey()` (`McpCallObservation.java:56`) stops re-reading the header and

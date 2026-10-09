@@ -79,4 +79,28 @@ class McpFeedbackToolTest {
         + "tools=[etendo_create, etendo_list]", line);
     assertFalse(line.contains("ACME"), "no free text from the report: " + line);
   }
+
+  /**
+   * ETP-5640: modern clients send no {@code Mcp-Session-Id}. Each gets its own derived session, so
+   * one client exhausting its allowance does not rate-limit every other modern client.
+   */
+  @Test
+  void distinctDerivedSessionsDoNotShareTheRateLimit() throws Exception {
+    JSONObject verdict = new JSONObject().put("outcome", "OKAY").put("summary", "ok")
+        .put("achieved", "ok");
+    try {
+      McpUsageTelemetry.setCurrentSessionKey("m-feedback-a");
+      for (int i = 0; i < McpFeedbackTool.MAX_PER_WINDOW; i++) {
+        assertFalse(McpFeedbackTool.handle(verdict).optBoolean("isError", false));
+      }
+      assertTrue(McpFeedbackTool.handle(verdict).optBoolean("isError", false),
+          "the eleventh report of one session is rate limited");
+
+      McpUsageTelemetry.setCurrentSessionKey("m-feedback-b");
+      assertFalse(McpFeedbackTool.handle(verdict).optBoolean("isError", false),
+          "another modern client keeps its own allowance");
+    } finally {
+      McpUsageTelemetry.clearCurrentSessionKey();
+    }
+  }
 }

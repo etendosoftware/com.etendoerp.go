@@ -180,6 +180,19 @@ final class McpRequestEra {
   }
 
   /**
+   * The protocol version a request declares in {@code params._meta}, whatever the era it is served
+   * under — telemetry reads it even with the kill switch on.
+   *
+   * @param params the request's {@code params}, may be {@code null}
+   * @return the declared version, or {@code null} when the request declares none as a string
+   */
+  static String declaredVersion(JSONObject params) {
+    JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+    Object declared = meta != null ? meta.opt(META_PROTOCOL_VERSION) : null;
+    return declared instanceof String ? StringUtils.trimToNull((String) declared) : null;
+  }
+
+  /**
    * Whether the modern era is served. {@code false} only when the
    * {@link GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED} kill switch is positively on; a missing
    * flag or an unreachable control plane keeps the server dual-era.

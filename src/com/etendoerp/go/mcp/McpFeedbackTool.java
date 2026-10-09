@@ -52,9 +52,10 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <h2>Rate limiting</h2>
  *
- * <p>Per MCP session, so a looping agent cannot flood the table. A client that does not echo
- * {@code Mcp-Session-Id} has no session of its own and shares one anonymous bucket — deliberately
- * the stricter reading, because an unidentified flooder is exactly the case the limit is for.</p>
+ * <p>Per MCP session, so a looping agent cannot flood the table. A modern (2026-07-28) client
+ * sends no {@code Mcp-Session-Id} but gets a derived session of its own (ETP-5640). A legacy client
+ * that does not echo the header has no session and shares one anonymous bucket — deliberately the
+ * stricter reading, because an unidentified flooder is exactly the case the limit is for.</p>
  */
 final class McpFeedbackTool {
 

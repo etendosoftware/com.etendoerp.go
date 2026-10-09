@@ -127,6 +127,31 @@ A client that ignores the header still works: its rows carry a null `session_key
 name. The registry holds at most 1 000 sessions and evicts oldest-first; losing an entry costs the
 client name on later rows of a very old session and can never fail a call.
 
+### Modern clients (MCP 2026-07-28, ETP-5640)
+
+The stateless revision has neither `initialize` nor `Mcp-Session-Id`. A modern client names itself on
+every request, in `params._meta["io.modelcontextprotocol/clientInfo"]`, and that is where
+`client_name` / `client_version` come from (`McpUsageTelemetry.clientInfoFromMeta`). A stale
+`Mcp-Session-Id` on such a request is ignored.
+
+The session key is **derived** (`McpUsageTelemetry.modernSession`): one per (user, token client, role,
+client name), renewed after 30 minutes without a call, and prefixed `m-` — so
+`session_key LIKE 'm-%'` (or `session=m-*` in Datadog) separates the eras without a column of its own.
+Each new derived session logs one INFO line:
+
+```
+MCP modern session started: session=m-… client=claude-code/<version> protocol=2026-07-28 traceparent=yes|no
+```
+
+Known limits, accepted: two parallel conversations of one user with one agent merge into one session,
+and with several Tomcat nodes one task can be split across nodes (the map is per node). Every row
+still carries the user, the client name and its timestamp, so SQL can regroup them cluster-wide.
+
+This applies whatever the `mcp-modern-era-disabled` kill switch says: a client that cached the
+modern era keeps sending `_meta` after a rollback, and its rows keep their client name. The derived
+key also gives each modern client its own `etendo_feedback` rate-limit bucket instead of the shared
+anonymous one.
+
 ## Opt-out (D28)
 
 On by default. An instance opts out with `mcp.telemetry.enabled=false` in `Openbravo.properties`.

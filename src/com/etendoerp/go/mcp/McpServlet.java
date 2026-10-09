@@ -214,6 +214,7 @@ public class McpServlet extends HttpServlet {
       log.debug("MCP request: method={}, id={}", method, id);
 
       era = classifyEra(request, method, callParams);
+      bindModernTelemetry(identity, callParams, era);
       if (era.isModern()) {
         if (!acceptModern(response, id, method, callParams, era)) {
           return; // 400 already written
@@ -249,8 +250,8 @@ public class McpServlet extends HttpServlet {
 
       // AFTER the business transaction has been committed and closed by McpSessionManager, and
       // after the caller already has its answer: nothing below can affect either.
-      recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
-          toolName, callParams, result, null);
+      recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(), body,
+          rendered, startedAtNanos), toolName, callParams, result, null);
 
     } catch (McpResourceNotFoundException e) {
       // Not a server failure: one WARN line, no stack trace. The modern era answers -32602, the
@@ -276,13 +277,14 @@ public class McpServlet extends HttpServlet {
 
       String rendered = writeRpcError(response, body, JSON_RPC_INTERNAL_ERROR, e.getMessage());
       if (rendered != null) {
-        recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
-            toolName, callParams, null, McpConstants.ERROR_SERVER);
+        recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(),
+            body, rendered, startedAtNanos), toolName, callParams, null, McpConstants.ERROR_SERVER);
       }
     } finally {
       // Servlet threads are pooled: a leaked session key would attribute one client's calls to
       // another client's session — and a leaked tenant would attribute it to another company.
       McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentClient();
       McpUsageTelemetry.clearCurrentTenant();
     }
   }
@@ -342,6 +344,34 @@ public class McpServlet extends HttpServlet {
             request.getHeader(McpRequestEra.HEADER_METHOD),
             request.getHeader(McpRequestEra.HEADER_NAME)),
         McpRequestEra.strict());
+  }
+
+  /**
+   * Telemetry for a modern-shaped request (ETP-5640): the client it names in {@code _meta} and its
+   * derived session key, replacing the {@code Mcp-Session-Id} a modern client never sends — which
+   * is ignored if it does. Applies whatever the kill switch says: a client that cached the modern
+   * era keeps sending {@code _meta} after a rollback, and its rows should keep their client name.
+   * One INFO line marks each new derived session; it is the rollout's evidence.
+   */
+  private static void bindModernTelemetry(AuthIdentity identity, JSONObject params,
+      McpRequestEra.Classification era) {
+    String declared = McpRequestEra.declaredVersion(params);
+    if (!era.isModern() && declared == null) {
+      return;
+    }
+    McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfoFromMeta(params);
+    McpUsageTelemetry.setCurrentClient(client);
+    McpUsageTelemetry.ModernSession session = McpUsageTelemetry.modernSession(identity.userId,
+        identity.clientId, identity.roleId, client.getName(), System.currentTimeMillis());
+    McpUsageTelemetry.setCurrentSessionKey(session.key());
+    if (session.started()) {
+      JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+      log.info("MCP modern session started: session={} client={}/{} protocol={} traceparent={}",
+          session.key(), StringUtils.defaultString(client.getName(), "unknown"),
+          StringUtils.defaultString(client.getVersion(), "unknown"),
+          era.isModern() ? era.protocolVersion() : declared,
+          meta != null && meta.has("traceparent") ? "yes" : "no");
+    }
   }
 
   /**
@@ -460,7 +490,10 @@ public class McpServlet extends HttpServlet {
       }
       JSONObject arguments = params != null ? params.optJSONObject("arguments") : null;
       String sessionKey = call.sessionKey();
-      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfo(sessionKey);
+      // A modern request names its client itself; a legacy one did so in initialize.
+      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.currentClient() != null
+          ? McpUsageTelemetry.currentClient()
+          : McpUsageTelemetry.clientInfo(sessionKey);
 
       boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
       String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);

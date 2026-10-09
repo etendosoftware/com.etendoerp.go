@@ -1269,13 +1269,24 @@ public class McpServletTest {
   private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,
       String resolvedOrg, String resolvedClient, boolean routerThrows, String toolName,
       JSONObject arguments) throws Exception {
+    return recordedRowForToolsCall(tokenClient, tokenOrg, resolvedOrg, resolvedClient,
+        routerThrows, toolName, arguments, null);
+  }
+
+  /** Same, with a {@code params._meta} — a modern-shaped call (ETP-5640) when it is not null. */
+  private McpUsageRow recordedRowForToolsCall(String tokenClient, String tokenOrg,
+      String resolvedOrg, String resolvedClient, boolean routerThrows, String toolName,
+      JSONObject arguments, JSONObject meta) throws Exception {
     setOAuth2FilterAttributes("user1", "role1", tokenClient, tokenOrg, "neo:read");
+    JSONObject params = new JSONObject().put("name", toolName).put("arguments", arguments);
+    if (meta != null) {
+      params.put("_meta", meta);
+    }
     setRequestBody(new JSONObject()
         .put("jsonrpc", "2.0")
         .put("id", 1)
         .put("method", "tools/call")
-        .put("params", new JSONObject().put("name", toolName)
-            .put("arguments", arguments))
+        .put("params", params)
         .toString());
 
     org.openbravo.dal.service.OBDal obDal = mock(org.openbravo.dal.service.OBDal.class);
@@ -1321,6 +1332,60 @@ public class McpServletTest {
       loggerMock.verify(() -> McpUsageLogger.enqueue(row.capture()));
       return row.getValue();
     }
+  }
+
+  // ── Modern telemetry (ETP-5640) ─────────────────────────────────────────
+
+  private McpUsageRow recordedModernRow(String clientName) throws Exception {
+    setModernHeaders(MODERN, "tools/call", "etendo_list");
+    JSONObject meta = modernMeta(MODERN);
+    meta.getJSONObject(McpServlet.META_CLIENT_INFO).put("name", clientName);
+    return recordedRowForToolsCall("client1", "org1", "org1", "client1", false, "etendo_list",
+        new JSONObject().put("spec", "sales-order"), meta);
+  }
+
+  /** The client name comes from each request's _meta, the session key is derived and marked. */
+  @Test
+  public void modernToolsCallRowCarriesTheMetaClientAndADerivedSession() throws Exception {
+    // A stale legacy session header on a modern request is ignored, never used.
+    when(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)).thenReturn("stale-legacy-key");
+
+    McpUsageRow row = recordedModernRow("claude-code-qa-1");
+
+    assertEquals("claude-code-qa-1", row.clientName());
+    assertEquals("2.1.0", row.clientVersion());
+    assertTrue(row.sessionKey(), row.sessionKey().startsWith(
+        McpUsageTelemetry.MODERN_SESSION_PREFIX));
+    assertNull("bound only for the request", McpUsageTelemetry.currentClient());
+  }
+
+  @Test
+  public void consecutiveModernCallsOfOneClientShareTheirSession() throws Exception {
+    String first = recordedModernRow("claude-code-qa-2").sessionKey();
+    setUp();
+    String second = recordedModernRow("claude-code-qa-2").sessionKey();
+
+    assertEquals(first, second);
+  }
+
+  /** With the kill switch on, the protocol is legacy but the telemetry still reads _meta. */
+  @Test
+  public void killSwitchKeepsTheModernClientNameOnTheRow() throws Exception {
+    System.setProperty(KILL_SWITCH_PROPERTY, "true");
+
+    McpUsageRow row = recordedModernRow("claude-code-qa-3");
+
+    assertEquals("claude-code-qa-3", row.clientName());
+    assertTrue(row.sessionKey().startsWith(McpUsageTelemetry.MODERN_SESSION_PREFIX));
+  }
+
+  @Test
+  public void legacyToolsCallKeepsTheEchoedSessionKey() throws Exception {
+    when(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)).thenReturn("legacy-key-1");
+
+    McpUsageRow row = recordedRowForToolsCall("client1", "org1", "org1", "client1", false);
+
+    assertEquals("legacy-key-1", row.sessionKey());
   }
 
   @Test
