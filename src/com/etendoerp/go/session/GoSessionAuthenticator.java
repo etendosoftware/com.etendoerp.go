@@ -24,7 +24,8 @@ import org.apache.commons.lang3.StringUtils;
 /**
  * Turns an incoming request's {@code __Host-} session cookie into an authentication decision
  * (ETP-4575). Resolves the opaque cookie to a live session via {@link GoSessionService} and
- * enforces the CSRF/Origin contract on unsafe methods via {@link GoSessionSecurity}.
+ * enforces the CSRF/Origin contract on unsafe methods via {@link GoSessionSecurity}, plus the
+ * optional account header on every method (ETP-5675).
  *
  * <p>This is the pure decision layer, free of {@code OBContext} side effects so it is unit-testable;
  * the servlet filter that consumes an {@link GoSessionAuthResult.Status#AUTHENTICATED} result is
@@ -57,6 +58,12 @@ public class GoSessionAuthenticator {
     GoSessionRecord sessionRecord = sessionService.resolve(rawToken);
     if (sessionRecord == null) {
       return GoSessionAuthResult.unauthenticated();
+    }
+    // ETP-5675 — checked before CSRF and for every method: a tab of another account must get the
+    // conflict answer, not a stale-CSRF one it would try to recover from, and its GETs must not
+    // read this session's tenant. Not renewing the idle expiry either: it is not this tab's session.
+    if (!GoSessionSecurity.isAccountConsistent(request, sessionRecord.getAccountId())) {
+      return GoSessionAuthResult.accountMismatch();
     }
     if (!GoSessionSecurity.isSafeMethod(request.getMethod())) {
       // ETP-5550: the origin goes first, so a cross-site request is never told its token is stale.

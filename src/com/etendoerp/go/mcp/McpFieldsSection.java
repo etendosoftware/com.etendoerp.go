@@ -117,6 +117,14 @@ final class McpFieldsSection {
   private static final Set<String> ALLOWED_KEYS =
       Set.of(KEY_VISIBILITY, KEY_INCLUDED, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL, KEY_REASON);
 
+  /**
+   * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
+   * every call, so two first callers registering concurrently handed the registry two different
+   * objects under one name, and the loser's call failed as a duplicate.
+   */
+  private static final McpConfigSection DECLARATION = McpConfigSection.of(NAME, ALLOWED_KEYS,
+      McpConfigSection.Merge.REPLACE, McpFieldsSection::validate);
+
   private McpFieldsSection() {
   }
 
@@ -126,8 +134,7 @@ final class McpFieldsSection {
    * @return the section, with its allowed keys, {@code REPLACE} merge and validator
    */
   static McpConfigSection declaration() {
-    return McpConfigSection.of(NAME, ALLOWED_KEYS, McpConfigSection.Merge.REPLACE,
-        McpFieldsSection::validate);
+    return DECLARATION;
   }
 
   /**

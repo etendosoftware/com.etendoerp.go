@@ -61,6 +61,7 @@ import com.etendoerp.go.schemaforge.util.NeoImageUploadTickets;
  * validation the server actually enforces.
  *
  * @covers com.etendoerp.go.mcp.McpImageTools
+ * @covers com.etendoerp.go.mcp.McpImageToolDefinitions
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -127,7 +128,7 @@ class McpImageToolsTest {
     @Test
     @DisplayName("etendo_request_image_upload advertises itself as the cheap path")
     void requestToolNamesTheCheapPath() {
-      String description = ToolRegistry.REQUEST_IMAGE_UPLOAD_DESCRIPTION;
+      String description = McpImageToolDefinitions.REQUEST_IMAGE_UPLOAD_DESCRIPTION;
       assertTrue(description.contains("curl"), description);
       assertTrue(description.contains(McpConstants.TOOL_NEO_UPLOAD_IMAGE),
           "it must tell the agent what it is cheaper than: " + description);
@@ -139,7 +140,7 @@ class McpImageToolsTest {
     @Test
     @DisplayName("etendo_upload_image states the cap and routes over-cap callers to the cheap path")
     void uploadToolStatesTheCapAndTheAlternative() {
-      String description = ToolRegistry.UPLOAD_IMAGE_DESCRIPTION;
+      String description = McpImageToolDefinitions.UPLOAD_IMAGE_DESCRIPTION;
       assertTrue(description.contains("256 KB"),
           "the cap in the description must match the enforced one: " + description);
       assertTrue(description.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD), description);
@@ -151,13 +152,13 @@ class McpImageToolsTest {
     @DisplayName("the documented cap is the enforced cap")
     void documentedCapMatchesTheConstant() {
       assertEquals(256 * 1024, McpConstants.IMAGE_BASE64_MAX_BYTES);
-      assertTrue(ToolRegistry.UPLOAD_IMAGE_DESCRIPTION.contains("256 KB"));
+      assertTrue(McpImageToolDefinitions.UPLOAD_IMAGE_DESCRIPTION.contains("256 KB"));
     }
 
     @Test
     @DisplayName("etendo_get_image_upload explains it is only for a lost PUT response")
     void statusToolExplainsItself() {
-      String description = ToolRegistry.GET_IMAGE_UPLOAD_DESCRIPTION;
+      String description = McpImageToolDefinitions.GET_IMAGE_UPLOAD_DESCRIPTION;
       assertTrue(description.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD), description);
       assertTrue(description.contains("imageId"), description);
     }

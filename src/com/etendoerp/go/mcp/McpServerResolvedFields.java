@@ -20,6 +20,7 @@ package com.etendoerp.go.mcp;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -73,26 +74,48 @@ final class McpServerResolvedFields {
   }
 
   /**
+   * The response keys the entity's customization adds to every GET record
+   * ({@link NeoHandler#responseEnrichedFields()}, ETP-5576): emittable although no spec field backs
+   * them, so the {@code fields:[…]} projection validator must not report them unknown.
+   *
+   * @param sfEntity the Schema Forge entity; {@code null} answers an empty set
+   * @return the names, never {@code null}
+   */
+  static Set<String> enrichedOnRead(SFEntity sfEntity) {
+    if (sfEntity == null) {
+      return Collections.emptySet();
+    }
+    return declaredByCustomization(sfEntity, NeoExtensionSurface.READ,
+        NeoHandler::responseEnrichedFields, "response-enriched");
+  }
+
+  /**
    * The customization's own declaration, looked up quietly: a resolution failure must not break
-   * {@code etendo_schema} or a create for an entity that declares nothing. Answering empty is the safe
-   * direction — the field stays {@code required}, which is today's behaviour.
+   * {@code etendo_schema}, a create or a read for an entity that declares nothing. Answering empty
+   * is the safe direction — on create the field stays {@code required}, on read an undeclared name
+   * is judged as before.
    */
   private static Set<String> declaredByCustomization(SFEntity sfEntity) {
+    return declaredByCustomization(sfEntity, NeoExtensionSurface.CREATE,
+        NeoHandler::serverResolvedCreateFields, "server-resolved create");
+  }
+
+  private static Set<String> declaredByCustomization(SFEntity sfEntity,
+      NeoExtensionSurface surface, Function<NeoHandler, Set<String>> declaration, String what) {
     try {
       SFSpec spec = sfEntity.getETGOSFSpec();
       NeoHandler customization = NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
           .qualifier(sfEntity.getJavaQualifier())
           .specName(spec != null ? spec.getName() : null)
           .entityName(sfEntity.getName())
-          .surface(NeoExtensionSurface.CREATE)
+          .surface(surface)
           .channel(NeoExtensionChannel.MCP)
           .build());
-      Set<String> declared = customization != null
-          ? customization.serverResolvedCreateFields() : null;
+      Set<String> declared = customization != null ? declaration.apply(customization) : null;
       return declared != null ? declared : Collections.emptySet();
     } catch (Exception e) {
-      log.warn("Could not read the server-resolved create fields of entity '{}': {}",
-          sfEntity.getName(), e.getMessage());
+      log.warn("Could not read the {} fields of entity '{}': {}", what, sfEntity.getName(),
+          e.getMessage());
       return Collections.emptySet();
     }
   }

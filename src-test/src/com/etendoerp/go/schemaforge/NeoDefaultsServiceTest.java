@@ -85,6 +85,11 @@ import com.etendoerp.sequences.SequenceUtils;
  * <p>Covers resolveDefaults, injectMandatoryDefaults, findMissingMandatoryFields,
  * buildVariablesSecureApp, resolveFirstOrgForClient, CalloutCascadeResult, and
  * parseSQLExpression. Also retains the original NeoCommercialLinePolicy tests.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsService
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsSqlHelper
+ * @covers com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService
+ * @covers com.etendoerp.go.schemaforge.NeoSequencePreviewHelper
  */
 public class NeoDefaultsServiceTest {
 
@@ -334,7 +339,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock =
@@ -348,7 +352,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "C_Reject_Reason_ID"))
           .thenReturn("rejectReason");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
       utilityMock.when(() -> Utility.getPreference(vars, "C_Reject_Reason_ID", ""))
           .thenReturn(null);
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx))
@@ -414,7 +417,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -425,7 +427,6 @@ public class NeoDefaultsServiceTest {
           .thenReturn(dalEntity);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, "IsActive"))
           .thenReturn("active");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
@@ -482,7 +483,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -494,7 +494,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "C_Order_ID"))
           .thenReturn("salesOrder");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, "PARENT-123");
 
@@ -549,7 +548,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -561,7 +559,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "PaymentRule"))
           .thenReturn("paymentRule");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
       // Utility.getDefault returns the literal "P"
       utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("PaymentRule"),
           eq("P"), anyString(), eq("")))
@@ -617,7 +614,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -629,7 +625,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "DocStatus"))
           .thenReturn("documentStatus");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
       // Should be called with the sfField default, NOT the column default
       utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("DocStatus"),
           eq("CUSTOM_VALUE"), anyString(), eq("")))
@@ -674,7 +669,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -733,7 +727,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -745,7 +738,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "Description"))
           .thenReturn("description");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
@@ -809,7 +801,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -821,7 +812,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "C_Tax_ID"))
           .thenReturn("taxRate");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
       utilityMock.when(() -> Utility.getPreference(vars, "C_Tax_ID", ""))
           .thenReturn(null);
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx))
@@ -886,7 +876,7 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -898,8 +888,8 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "DocumentNo"))
           .thenReturn("documentNo");
-      // isSequenceField returns true for DocumentNo
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumnDocNo)).thenReturn(false);
+      // The model does not flag DocumentNo as a sequence; the classic name rule makes it one.
+      stubModelSequenceProperty(modelMock, "C_Order", "DocumentNo", false);
       // resolveSequencePreviewWithDocType called with empty doctype strings
       utilityMock.when(() -> Utility.getDocumentNo(any(), eq(vars), anyString(),
           eq("C_Order"), eq(""), eq(""), eq(false), eq(false)))
@@ -951,6 +941,9 @@ public class NeoDefaultsServiceTest {
     when(sfFieldSeq.getDefaultValue()).thenReturn(null);
     when(adColumnSeq.getDBColumnName()).thenReturn("Value");
     when(adColumnSeq.isUseAutomaticSequence()).thenReturn(true);
+    Table seqTable = mock(Table.class);
+    when(seqTable.getDBTableName()).thenReturn("M_Product");
+    when(adColumnSeq.getTable()).thenReturn(seqTable);
 
     when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
     when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfFieldSeq));
@@ -976,7 +969,8 @@ public class NeoDefaultsServiceTest {
              mockStatic(NeoDefaultsCascadeHelper.class);
          MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
-         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
@@ -987,14 +981,17 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "Value"))
           .thenReturn("searchKey");
-      // SequenceUtils.isSequence returns true for this column
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumnSeq)).thenReturn(true);
+      // The DAL model (Property.isSequence, precomputed at model load) flags the column as a
+      // transactional sequence; the preview must come from it, not from a per-column
+      // SequenceConfig query.
+      stubModelSequenceProperty(modelMock, "M_Product", "Value", true);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
       assertEquals(200, response.getHttpStatus());
       JSONObject defaults = response.getBody().getJSONObject("defaults");
       assertEquals("<5000>", defaults.getString("searchKey"));
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
     }
   }
 
@@ -1054,7 +1051,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -1101,7 +1097,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -1265,7 +1260,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
@@ -1278,7 +1272,6 @@ public class NeoDefaultsServiceTest {
       obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
-      sequenceMock.when(() -> SequenceUtils.isSequence(nonMandatoryCol)).thenReturn(false);
       utilityMock.when(() -> Utility.getPreference(eq(vars), eq("OptionalCol"), anyString()))
           .thenReturn(null);
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(nonMandatoryCol), any()))
@@ -2413,8 +2406,8 @@ public class NeoDefaultsServiceTest {
     when(col.getDBColumnName()).thenReturn("DocumentNo");
     when(col.isUseAutomaticSequence()).thenReturn(false);
 
-    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class)) {
-      seqMock.when(() -> SequenceUtils.isSequence(col)).thenReturn(false);
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
+      stubNoModelEntity(modelMock);
 
       boolean result = (boolean) invokePrivate("isSequenceField",
           new Class<?>[]{ Column.class }, col);
@@ -2428,8 +2421,8 @@ public class NeoDefaultsServiceTest {
     when(col.getDBColumnName()).thenReturn("Value");
     when(col.isUseAutomaticSequence()).thenReturn(true);
 
-    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class)) {
-      seqMock.when(() -> SequenceUtils.isSequence(col)).thenReturn(false);
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
+      stubNoModelEntity(modelMock);
 
       boolean result = (boolean) invokePrivate("isSequenceField",
           new Class<?>[]{ Column.class }, col);
@@ -2443,8 +2436,8 @@ public class NeoDefaultsServiceTest {
     when(col.getDBColumnName()).thenReturn("Value");
     when(col.isUseAutomaticSequence()).thenReturn(false);
 
-    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class)) {
-      seqMock.when(() -> SequenceUtils.isSequence(col)).thenReturn(false);
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
+      stubNoModelEntity(modelMock);
 
       boolean result = (boolean) invokePrivate("isSequenceField",
           new Class<?>[]{ Column.class }, col);
@@ -2453,17 +2446,18 @@ public class NeoDefaultsServiceTest {
   }
 
   @Test
-  public void testIsSequenceFieldBySequenceUtils() throws Exception {
-    Column col = mock(Column.class);
-    when(col.getDBColumnName()).thenReturn("SomeCustomField");
-    when(col.isUseAutomaticSequence()).thenReturn(false);
+  public void testIsSequenceFieldFollowsModelNotSequenceUtils() throws Exception {
+    // The runtime model is the source of truth: a stale/divergent SequenceUtils answer must
+    // neither be consulted nor change the result.
+    Column col = metadataColumn("SomeCustomField", "C_Thing", "10", false);
 
-    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class)) {
+    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
       seqMock.when(() -> SequenceUtils.isSequence(col)).thenReturn(true);
+      stubModelSequenceProperty(modelMock, "C_Thing", "SomeCustomField", false);
 
-      boolean result = (boolean) invokePrivate("isSequenceField",
-          new Class<?>[]{ Column.class }, col);
-      assertTrue("SequenceUtils.isSequence=true should make it a sequence field", result);
+      assertFalse("Model isSequence=false wins over SequenceUtils", isSequenceField(col));
+      seqMock.verify(() -> SequenceUtils.isSequence(any()), never());
     }
   }
 
@@ -2473,8 +2467,8 @@ public class NeoDefaultsServiceTest {
     when(col.getDBColumnName()).thenReturn("Name");
     when(col.isUseAutomaticSequence()).thenReturn(false);
 
-    try (MockedStatic<SequenceUtils> seqMock = mockStatic(SequenceUtils.class)) {
-      seqMock.when(() -> SequenceUtils.isSequence(col)).thenReturn(false);
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class)) {
+      stubNoModelEntity(modelMock);
 
       boolean result = (boolean) invokePrivate("isSequenceField",
           new Class<?>[]{ Column.class }, col);
@@ -2995,6 +2989,27 @@ public class NeoDefaultsServiceTest {
   }
 
   @Test
+  public void testResolveDbColumnDefaultBpcharLiteralIsUnquoted() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    // char(1) column default as pg_get_expr renders it
+    when(rs.getString(1)).thenReturn("'Y'::bpchar");
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      assertEquals("Y", NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "IsActive"));
+    }
+  }
+
+  @Test
   public void testResolveDbColumnDefaultSqlExceptionReturnsNull() throws Exception {
     OBDal dal = mock(OBDal.class);
     Connection conn = mock(Connection.class);
@@ -3444,7 +3459,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<NeoParentValuesLoader> parentMock =
              mockStatic(NeoParentValuesLoader.class)) {
@@ -3458,7 +3472,6 @@ public class NeoDefaultsServiceTest {
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
           .thenReturn(dalEntity);
-      sequenceMock.when(() -> SequenceUtils.isSequence(calcTypeCol)).thenReturn(false);
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
       // Utility.getDefault called with "TI" (the SFField override), not "PE" (AD_Column default)
@@ -3605,7 +3618,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<NeoParentValuesLoader> parentMock =
              mockStatic(NeoParentValuesLoader.class)) {
@@ -3619,7 +3631,6 @@ public class NeoDefaultsServiceTest {
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
           .thenReturn(dalEntity);
-      sequenceMock.when(() -> SequenceUtils.isSequence(docStatusCol)).thenReturn(false);
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
       // Utility.getDefault is called with "DR" (the AD_Column default, because SFField has null)
@@ -3699,7 +3710,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoParentValuesLoader> parentMock =
@@ -3713,7 +3723,6 @@ public class NeoDefaultsServiceTest {
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
           .thenReturn(dalEntity);
-      sequenceMock.when(() -> SequenceUtils.isSequence(currencyCol)).thenReturn(false);
       utilityMock.when(() -> Utility.getPreference(eq(vars), eq("C_Currency_ID"), anyString()))
           .thenReturn(null);
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(currencyCol), any()))
@@ -3786,7 +3795,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
@@ -3799,7 +3807,6 @@ public class NeoDefaultsServiceTest {
       obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
-      sequenceMock.when(() -> SequenceUtils.isSequence(flagCol)).thenReturn(false);
       utilityMock.when(() -> Utility.getPreference(eq(vars), eq("ProcessingStatus"), anyString()))
           .thenReturn(null);
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(eq(flagCol), any()))
@@ -3815,6 +3822,85 @@ public class NeoDefaultsServiceTest {
       // does NOT short-circuit mandatory columns (NOT NULL parity preserved).
       cascadeMock.verify(() -> NeoDefaultsCascadeHelper.injectSafeTypeDefault(
           eq(body), eq("processingStatus"), eq(flagCol)));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — a business partner created without IsProspect gets
+  // N, as in classic, never the DB-level DEFAULT 'Y'
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsBusinessPartnerWithoutIsProspectGetsFalse() {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // C_BPartner.IsProspect: mandatory YesNo, no AD default, DB DEFAULT 'Y'.
+    Column isProspect = metadataColumn("IsProspect", "C_BPartner", "20", true);
+    when(isProspect.isActive()).thenReturn(true);
+    when(isProspect.isKeyColumn()).thenReturn(false);
+    Table table = isProspect.getTable();
+    when(table.getId()).thenReturn("291");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(isProspect));
+    when(adTab.getTable()).thenReturn(table);
+
+    Property prospectProp = mock(Property.class);
+    when(prospectProp.getName()).thenReturn("potentialCustomer");
+    when(prospectProp.isAuditInfo()).thenReturn(false);
+    when(dalEntity.getPropertyByColumnName("IsProspect")).thenReturn(prospectProp);
+    when(dalEntity.getPropertyByColumnName("IsProspect", false)).thenReturn(prospectProp);
+    when(vars.getSessionValue(anyString())).thenReturn("");
+
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-bp");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(
+             NeoDefaultsCascadeHelper.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("291")).thenReturn(dalEntity);
+      when(mp.getEntityByTableName("C_BPartner")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      // If the DB DEFAULT were consulted, this 'Y' would end up in the body.
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("Y");
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(isProspect)).thenReturn("20");
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx, null, false);
+
+      assertEquals("IsProspect omitted from the body must be created N, as in classic",
+          Boolean.FALSE, body.opt("potentialCustomer"));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
     }
   }
 
@@ -4706,7 +4792,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -4718,7 +4803,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "M_Locator_ID"))
           .thenReturn("storageBin");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
 
       // parentId omitted — the exact failure mode this feature exists to explain.
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
@@ -4777,7 +4861,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock =
@@ -4791,7 +4874,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "C_Reject_Reason_ID"))
           .thenReturn("rejectReason");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
       utilityMock.when(() -> Utility.getPreference(vars, "C_Reject_Reason_ID", ""))
           .thenReturn(null);
       docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx))
@@ -5021,7 +5103,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -5033,7 +5114,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "EM_OBTIK_Tax_ID_Key"))
           .thenReturn("oBTIKTaxIDKey");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
@@ -5089,7 +5169,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
       obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
@@ -5101,7 +5180,6 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "Invoicegrouping"))
           .thenReturn("invoicegrouping");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
@@ -5231,9 +5309,9 @@ public class NeoDefaultsServiceTest {
       when(adColumn.isUseAutomaticSequence()).thenReturn(false);
       VariablesSecureApp vars = mock(VariablesSecureApp.class);
 
-      try (MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+      try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
            MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
-        sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+        stubModelSequenceProperty(modelMock, "AD_User", columnName, false);
 
         NeoDefaultsService.FieldDefaultRequest request =
             new NeoDefaultsService.FieldDefaultRequest(adColumn, null, vars,
@@ -5303,7 +5381,7 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
@@ -5316,7 +5394,7 @@ public class NeoDefaultsServiceTest {
       cascadeMock.when(() -> NeoDefaultsCascadeHelper
           .resolvePropertyName(dalEntity, "Default_Ad_Client_ID"))
           .thenReturn("defaultClient");
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      stubModelSequenceProperty(modelMock, "AD_User", "Default_Ad_Client_ID", false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
@@ -5354,9 +5432,9 @@ public class NeoDefaultsServiceTest {
     when(adColumn.isUseAutomaticSequence()).thenReturn(false);
     VariablesSecureApp vars = mock(VariablesSecureApp.class);
 
-    try (MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      stubModelSequenceProperty(modelMock, "AD_User", "Default_Ad_Language", false);
       utilityMock.when(() -> Utility.getPreference(vars, "Default_Ad_Language", "WIN-1"))
           .thenReturn("en_US");
 
@@ -5438,7 +5516,7 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
@@ -5448,7 +5526,7 @@ public class NeoDefaultsServiceTest {
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
           .thenReturn(dalEntity);
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      stubModelSequenceProperty(modelMock, "AD_User", "Default_Ad_Role_ID", false);
 
       NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
 
@@ -5540,7 +5618,6 @@ public class NeoDefaultsServiceTest {
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
-         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
          MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
          MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
@@ -5553,7 +5630,6 @@ public class NeoDefaultsServiceTest {
       obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
-      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
       parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
           .thenReturn(java.util.Collections.emptyMap());
 
@@ -5776,7 +5852,6 @@ public class NeoDefaultsServiceTest {
            MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
            MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
                mockStatic(NeoDefaultsCascadeHelper.class);
-           MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
            MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
            MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
            MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
@@ -5789,7 +5864,6 @@ public class NeoDefaultsServiceTest {
         obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
         obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
         calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
-        sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
         parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
             .thenReturn(java.util.Collections.emptyMap());
 
@@ -5805,6 +5879,447 @@ public class NeoDefaultsServiceTest {
         selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
             any(), anyString(), any(), anyInt(), anyInt(), any()), never());
       }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveFieldDefault — per-column metadata work on create is answered from
+  // the in-memory DAL model, never from a per-column DB round trip
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Column mock carrying the metadata resolveFieldDefault reads: table name, base reference,
+   * mandatory flag, and no AD default / link-to-parent / automatic sequence.
+   */
+  private static Column metadataColumn(String dbColumnName, String tableName, String refId,
+      boolean mandatory) {
+    Column col = mock(Column.class);
+    Table table = mock(Table.class);
+    Reference reference = mock(Reference.class);
+    when(col.getDBColumnName()).thenReturn(dbColumnName);
+    when(col.getTable()).thenReturn(table);
+    when(table.getDBTableName()).thenReturn(tableName);
+    when(reference.getId()).thenReturn(refId);
+    when(col.getReference()).thenReturn(reference);
+    when(col.isMandatory()).thenReturn(mandatory);
+    when(col.isLinkToParentColumn()).thenReturn(false);
+    when(col.isUseAutomaticSequence()).thenReturn(false);
+    when(col.getDefaultValue()).thenReturn(null);
+    return col;
+  }
+
+  /** Stubs the runtime model so {@code tableName.dbColumnName} reports the given isSequence. */
+  private static void stubModelSequenceProperty(MockedStatic<ModelProvider> modelMock,
+      String tableName, String dbColumnName, boolean isSequence) {
+    ModelProvider mp = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(prop.isSequence()).thenReturn(isSequence);
+    modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+    when(mp.getEntityByTableName(tableName)).thenReturn(entity);
+    when(entity.getPropertyByColumnName(dbColumnName, false)).thenReturn(prop);
+  }
+
+  /** The runtime model resolves no entity for any table: no column is a model sequence. */
+  private static void stubNoModelEntity(MockedStatic<ModelProvider> modelMock) {
+    modelMock.when(ModelProvider::getInstance).thenReturn(mock(ModelProvider.class));
+  }
+
+  private static Object resolveCreateDefault(Column col) {
+    return NeoDefaultsService.resolveFieldDefault(new NeoDefaultsService.FieldDefaultRequest(
+        col, null, mock(VariablesSecureApp.class), null, "", null));
+  }
+
+  private static boolean isSequenceField(Column col) throws Exception {
+    return (boolean) invokePrivate("isSequenceField", new Class<?>[]{Column.class}, col);
+  }
+
+  @Test
+  public void testIsSequenceFieldReadsTransactionalSequenceFromModelWithoutQuery()
+      throws Exception {
+    Column identifier = metadataColumn("EM_Etgo_Identifier", "C_BPartner",
+        "B82E1C56F57749AD97DD9924624F08D3", false);
+    Column plain = metadataColumn("Description", "C_BPartner", "14", false);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      stubModelSequenceProperty(modelMock, "C_BPartner", "EM_Etgo_Identifier", true);
+      Entity entity = ModelProvider.getInstance().getEntityByTableName("C_BPartner");
+      Property plainProp = mock(Property.class);
+      when(entity.getPropertyByColumnName("Description", false)).thenReturn(plainProp);
+
+      assertTrue(isSequenceField(identifier));
+      assertFalse(isSequenceField(plain));
+
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
+      dalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void testIsSequenceFieldKeepsDocumentNoAndAutomaticValueRules() throws Exception {
+    Column documentNo = metadataColumn("DocumentNo", "C_Order", "10", true);
+    Column autoValue = metadataColumn("Value", "M_Product", "10", true);
+    when(autoValue.isUseAutomaticSequence()).thenReturn(true);
+    Column manualValue = metadataColumn("Value", "M_Product", "10", true);
+    // A column whose table has no runtime entity (e.g. a view) is not a sequence by model.
+    Column noEntity = metadataColumn("Name", "Some_View", "10", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class)) {
+      stubModelSequenceProperty(modelMock, "C_Order", "DocumentNo", false);
+      ModelProvider mp = ModelProvider.getInstance();
+      Entity productEntity = mock(Entity.class);
+      Property valueProp = mock(Property.class);
+      when(mp.getEntityByTableName("M_Product")).thenReturn(productEntity);
+      when(productEntity.getPropertyByColumnName("Value", false)).thenReturn(valueProp);
+
+      assertTrue("DocumentNo is a sequence field by name", isSequenceField(documentNo));
+      assertTrue("Value with automatic sequence is a sequence field", isSequenceField(autoValue));
+      assertFalse("Value without automatic sequence is not", isSequenceField(manualValue));
+      assertFalse("No runtime entity means no model sequence", isSequenceField(noEntity));
+
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
+    }
+  }
+
+  @Test
+  public void testMandatoryBooleanWithoutAdDefaultSkipsDbDefaultAndGetsFalse() throws Exception {
+    // C_BPartner.IsProspect: mandatory YesNo, no AD default, DB DEFAULT 'Y'. Classic stores N
+    // (YesNoUIDefinition / DAL entity default); the safe-type fallback gives false.
+    Column isProspect = metadataColumn("IsProspect", "C_BPartner", "20", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_BPartner", "IsProspect", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("Y");
+
+      assertNull(resolveCreateDefault(isProspect));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+
+      JSONObject body = new JSONObject();
+      NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, "potentialCustomer", isProspect);
+      assertEquals(Boolean.FALSE, body.get("potentialCustomer"));
+    }
+  }
+
+  @Test
+  public void testMandatoryNumericWithoutAdDefaultSkipsDbDefault() throws Exception {
+    Column line = metadataColumn("Line", "C_OrderLine", "11", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_OrderLine", "Line", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("10");
+
+      assertNull(resolveCreateDefault(line));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  @Test
+  public void testNonMandatoryColumnWithoutAdDefaultTouchesNoDatabase() throws Exception {
+    // An optional column with a DB-level default but no AD/ETGO_SF_FIELD default is stored
+    // NULL by classic (Hibernate writes explicit NULLs). NEO must not inject the DB default,
+    // and must reach that answer without any DB round trip (no SequenceConfig, no catalog).
+    Column optional = metadataColumn("IsTaxExempt", "C_BPartner", "10", false);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_BPartner", "IsTaxExempt", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("N");
+
+      assertNull(resolveCreateDefault(optional));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+      sequenceMock.verify(() -> SequenceUtils.isSequence(any()), never());
+      dalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void testMandatoryNonSafeTypeColumnStillUsesDbDefault() throws Exception {
+    // Mandatory string/list column with no AD default: the safe-type fallback cannot fill it,
+    // so the DB-level default remains the last resort (ETP-3660 rationale).
+    Column status = metadataColumn("Status", "C_Thing", "17", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "Status", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Thing", "Status"))
+          .thenReturn("DR");
+
+      assertEquals("DR", resolveCreateDefault(status));
+    }
+  }
+
+  @Test
+  public void testNonMandatoryColumnWithContextDefaultIsStillResolved() throws Exception {
+    // Optional columns keep their genuine AD default expressions (e.g. @C_Currency_ID@).
+    Column currency = metadataColumn("C_Currency_ID", "C_Thing", "19", false);
+    when(currency.getDefaultValue()).thenReturn("@C_Currency_ID@");
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "C_Currency_ID", false);
+      utilityMock.when(() -> Utility.getDefault(any(), any(), eq("C_Currency_ID"),
+          eq("@C_Currency_ID@"), anyString(), anyString())).thenReturn("CUR-EUR");
+
+      assertEquals("CUR-EUR", resolveCreateDefault(currency));
+    }
+  }
+
+  @Test
+  public void testResolveDbColumnDefaultReadsIndexedCatalog() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(dal.getConnection(false)).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn("'DR'::character varying");
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      assertEquals("DR", NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "DocStatus"));
+
+      org.mockito.ArgumentCaptor<String> sql = org.mockito.ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      assertTrue(sql.getValue().contains("pg_attrdef"));
+      assertTrue(sql.getValue().contains("to_regclass"));
+      assertFalse(sql.getValue().contains("information_schema"));
+      verify(ps).setString(1, "C_Order");
+      verify(ps).setString(2, "DocStatus");
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // B2 — the DB DEFAULT is read only for mandatory, non-_ID columns without a safe type default
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testMandatoryIdColumnNeverReadsDbDefault() throws Exception {
+    // A foreign key filled from a DB DEFAULT would point at an arbitrary row.
+    Column warehouse = metadataColumn("M_Warehouse_ID", "C_Thing", "19", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "M_Warehouse_ID", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("0");
+
+      assertNull(resolveCreateDefault(warehouse));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  @Test
+  public void testMandatoryColumnWithAdDefaultNeverReadsDbDefault() throws Exception {
+    // An AD_Column default that resolves wins outright; the DB DEFAULT is not consulted.
+    Column status = metadataColumn("Status", "C_Thing", "17", true);
+    when(status.getDefaultValue()).thenReturn("DR");
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "Status", false);
+      utilityMock.when(() -> Utility.getDefault(any(), any(), eq("Status"), eq("DR"),
+          anyString(), anyString())).thenReturn("DR");
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("XX");
+
+      assertEquals("DR", resolveCreateDefault(status));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  @Test
+  public void testMandatoryColumnPreferenceBeatsDbDefault() throws Exception {
+    Column status = metadataColumn("Status", "C_Thing", "17", true);
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class)) {
+      stubModelSequenceProperty(modelMock, "C_Thing", "Status", false);
+      utilityMock.when(() -> Utility.getPreference(any(), eq("Status"), anyString()))
+          .thenReturn("PREF");
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("DR");
+
+      assertEquals("PREF", resolveCreateDefault(status));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // B2 — /defaults (resolveDefaults) must not pre-fill from the DB DEFAULT
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsOptionalColumnWithDbDefaultIsAbsent() throws Exception {
+    // C_BPartner.IsTaxExempt: optional YesNo, no AD default, DB DEFAULT 'N'. Classic stores an
+    // explicit NULL, so the bootstrap must leave the property out of the response.
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = metadataColumn("IsTaxExempt", "C_BPartner", "20", false);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // Read-only keeps the combo-preselection fallback out of the way; the DB DEFAULT is the only source.
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+    when(prop.isPrimitive()).thenReturn(true);
+    when(dalEntity.getProperty("taxExempt")).thenReturn(prop);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "IsTaxExempt"))
+          .thenReturn("taxExempt");
+      stubModelSequenceProperty(modelMock, "C_BPartner", "IsTaxExempt", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("N");
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      assertFalse("An optional column with only a DB DEFAULT is not pre-filled",
+          defaults.has("taxExempt"));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsMandatoryBooleanIsNotFilledFromDbDefault() throws Exception {
+    // C_BPartner.IsProspect: mandatory YesNo, no AD default, DB DEFAULT 'Y'. The bootstrap must
+    // not carry the DB 'Y' into the response. The real cascade helper is kept so the safe-type
+    // check (hasSafeTypeDefault) is what decides whether the DB DEFAULT is read.
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = metadataColumn("IsProspect", "C_BPartner", "20", true);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // Read-only keeps the combo-preselection fallback out of the way, as for the test above.
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+    when(prop.isPrimitive()).thenReturn(true);
+    when(dalEntity.getProperty("potentialCustomer")).thenReturn(prop);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoDefaultsSqlHelper> sqlMock = mockStatic(NeoDefaultsSqlHelper.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "IsProspect"))
+          .thenReturn("potentialCustomer");
+      // The safe-type check decides whether the DB DEFAULT may be read. IsProspect is a YesNo, so
+      // the answer is true. It is stubbed rather than called for real: with the whole class
+      // mocked, the private referenceId(...) it relies on is mocked too and answers null, which
+      // made the real method say "no safe type" and let the DB DEFAULT through. The real
+      // hasSafeTypeDefault is covered by NeoDefaultsCascadeHelperTest.
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.hasSafeTypeDefault(any()))
+          .thenReturn(true);
+      stubModelSequenceProperty(modelMock, "C_BPartner", "IsProspect", false);
+      sqlMock.when(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()))
+          .thenReturn("Y");
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      // Only the certain part is asserted: the DB 'Y' must not reach the response. Nothing on
+      // this path writes false (the create path does, via injectSafeTypeDefault).
+      Object value = defaults.opt("potentialCustomer");
+      assertFalse("The DB DEFAULT 'Y' must not reach the /defaults response",
+          "Y".equals(value) || Boolean.TRUE.equals(value));
+      sqlMock.verify(() -> NeoDefaultsSqlHelper.resolveDbColumnDefault(anyString(), anyString()),
+          never());
     }
   }
 }

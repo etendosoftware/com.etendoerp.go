@@ -56,12 +56,14 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * Unit tests for {@link WidgetPendingTasksHandler}.
  *
  * <p>Covers: method guard (405), SQL correctness for the pending-receptions/
- * pending-deliveries queries (query {@code c_order} reproducing the
- * {@code DeliveryStatusPurchase}/{@code DeliveryStatus} virtual-column SQLLOGIC,
- * not {@code m_inout} drafts), navigation shape
+ * pending-deliveries queries (query {@code c_order} on the stored
+ * {@code em_etgo_deliv_status_purchase}/{@code em_etgo_delivery_status} columns the list
+ * filters on, not {@code m_inout} drafts), navigation shape
  * (window="purchase-order"/"sales-order", filter="pendingReception"/"pendingDelivery"),
  * zero-count suppression, taskKey singular/plural logic, link value, overdue
  * invoices, collections/payments due today, low-stock alerts, and the exception path.
+ *
+ * @covers com.etendoerp.go.schemaforge.WidgetPendingTasksHandler
  *
  * <p>Key regression covered (ETP-5487): pending-receptions/pending-deliveries must
  * query completed ({@code docstatus='CO'}) {@code c_order} rows whose delivery
@@ -165,12 +167,13 @@ class WidgetPendingTasksHandlerTest {
 
     // ETP-5487: addPendingReceptions/addPendingSalesDeliveries both query c_order via the
     // shared countOrdersPendingDelivery helper; the two calls differ only in the interpolated
-    // column (qtyreserved vs qtydelivered), which is what distinguishes their native SQL text.
-    when(session.createNativeQuery(contains("ol.qtyreserved"))).thenReturn(receptionQuery);
+    // stored status column (em_etgo_deliv_status_purchase vs em_etgo_delivery_status), which is
+    // what distinguishes their native SQL text.
+    when(session.createNativeQuery(contains("co.em_etgo_deliv_status_purchase"))).thenReturn(receptionQuery);
     when(receptionQuery.setParameter(anyString(), any())).thenReturn(receptionQuery);
     when(receptionQuery.uniqueResult()).thenReturn(0L);
 
-    when(session.createNativeQuery(contains("ol.qtydelivered"))).thenReturn(deliveryQuery);
+    when(session.createNativeQuery(contains("co.em_etgo_delivery_status"))).thenReturn(deliveryQuery);
     when(deliveryQuery.setParameter(anyString(), any())).thenReturn(deliveryQuery);
     when(deliveryQuery.uniqueResult()).thenReturn(0L);
   }
@@ -245,7 +248,7 @@ class WidgetPendingTasksHandlerTest {
     mockAllQueriesEmpty();
     handler.handle(getContext());
     verify(session).createNativeQuery(
-        and(contains("FROM c_order co"), contains("ol.qtyreserved")));
+        and(contains("FROM c_order co"), contains("co.em_etgo_deliv_status_purchase")));
   }
 
   /**
@@ -257,7 +260,7 @@ class WidgetPendingTasksHandlerTest {
   void addPendingReceptionsQueryFiltersPurchaseCompletedOrders() throws Exception {
     mockAllQueriesEmpty();
     handler.handle(getContext());
-    verify(session).createNativeQuery(and(contains("ol.qtyreserved"), contains("docstatus = 'CO'")));
+    verify(session).createNativeQuery(and(contains("co.em_etgo_deliv_status_purchase"), contains("docstatus = 'CO'")));
     verify(receptionQuery).setParameter("isSalesTransaction", "N");
   }
 
@@ -675,7 +678,7 @@ class WidgetPendingTasksHandlerTest {
     mockAllQueriesEmpty();
     handler.handle(getContext());
     verify(session).createNativeQuery(
-        and(contains("FROM c_order co"), contains("ol.qtydelivered")));
+        and(contains("FROM c_order co"), contains("co.em_etgo_delivery_status")));
   }
 
   /**
@@ -687,7 +690,7 @@ class WidgetPendingTasksHandlerTest {
   void addPendingSalesDeliveriesQueryFiltersSalesCompletedOrders() throws Exception {
     mockAllQueriesEmpty();
     handler.handle(getContext());
-    verify(session).createNativeQuery(and(contains("ol.qtydelivered"), contains("docstatus = 'CO'")));
+    verify(session).createNativeQuery(and(contains("co.em_etgo_delivery_status"), contains("docstatus = 'CO'")));
     verify(deliveryQuery).setParameter("isSalesTransaction", "Y");
   }
 

@@ -56,6 +56,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
  * artifacts/profit-loss/report-contract.json}'s {@code sql.query}/{@code sql.operandsQuery} plus
  * {@link AccountReportTree} (reused UNCHANGED from {@link BalanceSheetReportHandler}; its own
  * roll-up/formula rules are covered by {@code AccountReportTreeTest}, not here).
+ *
+ * @covers com.etendoerp.go.schemaforge.ProfitLossReportHandler
  */
 class ProfitLossReportHandlerTest {
 
@@ -424,6 +426,19 @@ class ProfitLossReportHandlerTest {
       assertEquals(0, responseData.getInt("count"));
       assertEquals(0, responseData.getJSONArray("data").length());
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // ShowValueCond columns (ETP-5662)
+  // -------------------------------------------------------------------------
+
+  @Test
+  @DisplayName("node SQL selects showvaluecond/issummary AFTER own_amt_ref")
+  void selectsShowValueCondColumnsAfterOwnAmtRef() {
+    String cols = handler.ownAmountColumns();
+    assertTrue(cols.indexOf("own_amt_ref") < cols.indexOf("ev.showvaluecond"),
+        "positional COL_* mapping relies on these coming last");
+    assertTrue(cols.indexOf("ev.showvaluecond") < cols.indexOf("ev.issummary"));
   }
 
   // -------------------------------------------------------------------------

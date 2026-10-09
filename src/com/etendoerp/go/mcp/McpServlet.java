@@ -20,6 +20,7 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,11 +38,14 @@ import org.codehaus.jettison.json.JSONObject;
 
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.ApiScopes;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
@@ -72,12 +76,14 @@ public class McpServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
-  private static final String PROTOCOL_VERSION = "2024-11-05";
   private static final String SERVER_NAME = "etendo-mcp";
   private static final String SERVER_VERSION = "1.0.0";
   /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
   private static final String SERVER_TITLE = "Etendo MCP";
   private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
+  /** {@code Implementation.description} (MCP 2025-11-25). */
+  static final String SERVER_DESCRIPTION = "Etendo ERP for agents: read and write documents, "
+      + "master data and processes, and run reports, within the permissions of your role.";
   /**
    * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
    * Same file for every environment, so a fixed production URL is fine. Clients that predate the
@@ -88,6 +94,14 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_ICON_SIZES = "513x513";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  /** JSON-RPC 2.0: the method does not exist or is not available. */
+  static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
+  /** JSON-RPC 2.0: internal JSON-RPC error. */
+  static final int JSON_RPC_INTERNAL_ERROR = -32603;
+  /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
+  static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
+  /** The handshake method: the one request that carries no {@code MCP-Protocol-Version}. */
+  private static final String INITIALIZE = "initialize";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
@@ -98,11 +112,31 @@ public class McpServlet extends HttpServlet {
   private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
 
+  // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
+  private static final int SC_PAYMENT_REQUIRED = 402;
+
+  private final transient TenantEnvironmentLifecycleService lifecycleService;
+
+  /** Production wiring: the tenant lifecycle policy every environment surface shares. */
+  public McpServlet() {
+    this(new TenantEnvironmentLifecycleService());
+  }
+
+  /**
+   * Wiring with an explicit lifecycle service, for tests.
+   *
+   * @param lifecycleService answers the commercial access decision for a client
+   */
+  McpServlet(TenantEnvironmentLifecycleService lifecycleService) {
+    this.lifecycleService = lifecycleService;
+  }
+
   // ── CORS ───────────────────────────────────────────────────────────────
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
     CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept, Mcp-Session-Id, X-Go-CSRF",
+        "Content-Type, Authorization, Accept, Mcp-Session-Id, " + McpProtocolVersion.HEADER
+            + ", X-Go-CSRF, X-Go-Account",
         "Mcp-Session-Id, WWW-Authenticate", false);
   }
 
@@ -132,6 +166,9 @@ public class McpServlet extends HttpServlet {
     if (identity == null) {
       return; // Response already sent by authenticate()
     }
+    if (refuseCommerciallyBlocked(request, response, identity)) {
+      return; // 402 already sent
+    }
 
     response.setContentType(CONTENT_TYPE_JSON);
 
@@ -141,12 +178,13 @@ public class McpServlet extends HttpServlet {
     long startedAtNanos = System.nanoTime();
     JSONObject callParams = null;
     String toolName = null;
+    String method = null;
 
     McpUsageTelemetry.setCurrentSessionKey(
         StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
       JSONObject rpcMessage = new JSONObject(body);
-      String method = rpcMessage.optString("method", "");
+      method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
       callParams = rpcMessage.optJSONObject("params");
       toolName = TOOLS_CALL.equals(method) && callParams != null
@@ -155,12 +193,21 @@ public class McpServlet extends HttpServlet {
 
       log.debug("MCP request: method={}, id={}", method, id);
 
+      if (!INITIALIZE.equals(method)) {
+        // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
+        McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
+            McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
+                .getProtocolVersion(),
+            clientNameFor(callParams));
+      }
+
       // Dispatch the method
       JSONObject result = dispatchMethod(identity, method, callParams, response);
 
-      // Notifications (no id) don't get a response body
+      // Notifications (no id) don't get a response body: 202 Accepted (Streamable HTTP,
+      // MCP 2025-03-26 onwards).
       if (id == null) {
-        response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+        response.setStatus(HttpServletResponse.SC_ACCEPTED);
         return;
       }
 
@@ -179,23 +226,22 @@ public class McpServlet extends HttpServlet {
       recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
           toolName, callParams, result, null);
 
+    } catch (McpMethodNotFoundException e) {
+      // A client asking for something we do not offer — chiefly 2026-07-28 clients probing with
+      // server/discover before falling back to initialize. Not a server failure: one WARN line, no
+      // stack trace, and the same -32601 as before. No telemetry row: only tools/call has a tool
+      // name, and an unknown method is never one.
+      log.warn("MCP client called unsupported method '{}' (client={}) session={}", method,
+          clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
+      writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage());
     } catch (Exception e) {
-      log.error("Error processing MCP message: {}", e.getMessage(), e);
+      log.error("Error processing MCP message: {} session={}", e.getMessage(),
+          McpUsageTelemetry.sessionForLog(), e);
 
-      try {
-        Object rpcId = new JSONObject(body).opt("id");
-        int errorCode = (e instanceof McpMethodNotFoundException) ? -32601 : -32603;
-        JSONObject errorResponse = buildJsonRpcError(rpcId, errorCode, e.getMessage());
-
-        String rendered = errorResponse.toString();
-        response.setStatus(HttpServletResponse.SC_OK);
-        response.getWriter().write(rendered);
-
+      String rendered = writeRpcError(response, body, JSON_RPC_INTERNAL_ERROR, e.getMessage());
+      if (rendered != null) {
         recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
             toolName, callParams, null, McpConstants.ERROR_SERVER);
-      } catch (Exception ex) {
-        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-        response.getWriter().write("{\"error\":\"Internal server error\"}");
       }
     } finally {
       // Servlet threads are pooled: a leaked session key would attribute one client's calls to
@@ -203,6 +249,51 @@ public class McpServlet extends HttpServlet {
       McpUsageTelemetry.clearCurrentSessionKey();
       McpUsageTelemetry.clearCurrentTenant();
     }
+  }
+
+  /**
+   * Write a JSON-RPC error answering the request in {@code body}.
+   *
+   * @return the rendered error, or {@code null} when it could not be built — a plain 500 was
+   *         written instead
+   */
+  private String writeRpcError(HttpServletResponse response, String body, int code,
+      String message) throws IOException {
+    try {
+      Object rpcId = new JSONObject(body).opt("id");
+      String rendered = buildJsonRpcError(rpcId, code, message).toString();
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.getWriter().write(rendered);
+      return rendered;
+    } catch (Exception ex) {
+      response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      response.getWriter().write("{\"error\":\"Internal server error\"}");
+      return null;
+    }
+  }
+
+  /**
+   * The calling client's name, for log lines about a request that has no tool row.
+   *
+   * <p>From the telemetry session when the client ran {@code initialize}; otherwise from
+   * {@code params._meta["io.modelcontextprotocol/clientInfo"].name}, which 2026-07-28 requests
+   * (such as a {@code server/discover} probe) carry; else {@code unknown}. Only the name is read —
+   * never the request body.</p>
+   *
+   * @param params the request's {@code params}, may be {@code null}
+   * @return the client name, never {@code null}
+   */
+  static String clientNameFor(JSONObject params) {
+    String fromSession =
+        McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey()).getName();
+    if (StringUtils.isNotBlank(fromSession)) {
+      return fromSession;
+    }
+    JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+    JSONObject clientInfo = meta != null ? meta.optJSONObject(META_CLIENT_INFO) : null;
+    String fromMeta = clientInfo != null ? StringUtils.trimToNull(clientInfo.optString("name"))
+        : null;
+    return fromMeta != null ? fromMeta : "unknown";
   }
 
   // ── Telemetry (Track B1) ────────────────────────────────────────────────
@@ -261,7 +352,7 @@ public class McpServlet extends HttpServlet {
       String identityClient = identity != null ? identity.clientId : null;
       String identityOrg = identity != null ? identity.orgId : null;
 
-      McpUsageLogger.enqueue(McpUsageRow.builder()
+      McpUsageRow row = McpUsageRow.builder()
           .clientId(tenant != null ? tenant.getClientId() : identityClient)
           .orgId(tenant != null ? tenant.getOrgId() : identityOrg)
           .userId(identity != null ? identity.userId : null)
@@ -279,7 +370,12 @@ public class McpServlet extends HttpServlet {
           .clientVersion(client.getVersion())
           .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
           .payload(payload)
-          .build());
+          .build();
+      McpUsageLogger.enqueue(row);
+      if (payload != null) {
+        // ETP-5639: Datadog sees an accepted report, and where to read it — counts only.
+        McpFeedbackTool.logReceived(row);
+      }
     } catch (Throwable t) { // NOSONAR — telemetry never escalates to the caller.
       log.debug("Could not record MCP usage for tool '{}'.", toolName, t);
     }
@@ -309,14 +405,16 @@ public class McpServlet extends HttpServlet {
   // ── GET: Server info / health check ────────────────────────────────────
 
   /**
-   * Handle GET /sws/mcp — return server info for discovery.
-   * Also handles GET /sws/mcp/.well-known/oauth-protected-resource for RFC 9728.
+   * Handle GET /sws/mcp/.well-known/oauth-protected-resource (RFC 9728).
+   *
+   * <p>Any other GET answers {@code 405 Method Not Allowed}: a Streamable HTTP server that offers no
+   * SSE stream MUST (MCP 2025-03-26 onwards). It used to answer an informational JSON, which a
+   * client opening the optional GET stream could mistake for one (ETP-5639).</p>
    */
   @Override
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     setCorsHeaders(request, response);
-    response.setContentType(CONTENT_TYPE_JSON);
 
     String pathInfo = request.getPathInfo();
     if ("/.well-known/oauth-protected-resource".equals(pathInfo)) {
@@ -324,17 +422,11 @@ public class McpServlet extends HttpServlet {
       return;
     }
 
-    response.setStatus(HttpServletResponse.SC_OK);
-    try {
-      JSONObject info = new JSONObject();
-      info.put("name", SERVER_NAME);
-      info.put("version", SERVER_VERSION);
-      info.put("protocolVersion", PROTOCOL_VERSION);
-      info.put("transport", "streamable-http");
-      response.getWriter().write(info.toString());
-    } catch (JSONException e) {
-      response.getWriter().write("{\"name\":\"" + SERVER_NAME + "\"}");
-    }
+    response.setHeader("Allow", "POST, OPTIONS");
+    // writeSimpleJsonError sets the JSON content type itself; setting it here too set it twice.
+    ProtocolErrorAdapters.writeSimpleJsonError(response,
+        HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        "This MCP server offers no SSE stream; send JSON-RPC messages with POST");
   }
 
   /**
@@ -351,6 +443,7 @@ public class McpServlet extends HttpServlet {
           HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Unable to resolve public MCP/OAuth2 URL");
       return;
     }
+    response.setContentType(CONTENT_TYPE_JSON);
     try {
       JSONObject meta = new JSONObject();
       meta.put("resource", mcpResourceUrl);
@@ -488,6 +581,41 @@ public class McpServlet extends HttpServlet {
         session.getCtxOrgId(), LEGACY_JWT_FALLBACK_SCOPES);
   }
 
+  /**
+   * Refuse an environment whose commercial access is cut (ETP-5642).
+   *
+   * <p>NEO, Copilot and the account endpoints answer 402 once a demo trial expires or a
+   * subscription's grace elapses, but this servlet resolves its identity on its own and never
+   * asked: an MCP client kept reading and writing the blocked tenant through every scheme. The
+   * check runs once, after {@link #authenticate} and before any method dispatch, so it covers the
+   * cookie session, OAuth2 and legacy JWT alike — and {@code initialize}/{@code tools/list} too:
+   * a tool catalog for an environment that cannot be used is of no use to the client.
+   *
+   * <p>The answer is an HTTP 402 rather than an in-band tool error, with NEO's exact wording, so a
+   * client stops instead of retrying and the SPA recognizes the same decision. The decision is
+   * evaluated on the effective client — a credential carrying the System wildcard runs under its
+   * role's client — so the check sees exactly the tenant the call would touch. A null decision is
+   * a tenant that predates lifecycle metadata: the controlled legacy transition, not a refusal,
+   * exactly as in {@code EnvironmentRequestAuthenticator}.
+   *
+   * @return true when the request was refused and the response already written
+   */
+  private boolean refuseCommerciallyBlocked(HttpServletRequest request,
+      HttpServletResponse response, AuthIdentity identity) throws IOException {
+    String clientId = McpSessionManager.resolveEffectiveClientId(identity.clientId,
+        identity.roleId);
+    EnvironmentAccessPolicy.Decision decision =
+        lifecycleService.evaluateAccess(clientId, true, Instant.now());
+    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
+      return false;
+    }
+    log.warn("Refused MCP request: environment {} is commercially blocked ({})", clientId,
+        decision);
+    sendJsonError(request, response, SC_PAYMENT_REQUIRED,
+        EnvironmentRequestAuthenticator.MSG_ACCESS_PREFIX + decision.name());
+    return true;
+  }
+
   // ── JSON-RPC method dispatch ────────────────────────────────────────────
 
   /**
@@ -496,7 +624,7 @@ public class McpServlet extends HttpServlet {
   private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params,
       HttpServletResponse response) throws Exception {
     switch (method) {
-      case "initialize":
+      case INITIALIZE:
         return handleInitialize(params, response);
       case "initialized":
       case "notifications/initialized":
@@ -529,15 +657,19 @@ public class McpServlet extends HttpServlet {
    */
   private JSONObject handleInitialize(JSONObject params, HttpServletResponse response)
       throws JSONException {
+    // ETP-5639: answer the client's version when we speak it, else our latest (lifecycle rule).
+    String negotiated = McpProtocolVersion.negotiate(
+        params != null ? params.optString("protocolVersion", null) : null);
     try {
-      response.setHeader(McpUsageTelemetry.HEADER_SESSION_ID, McpUsageTelemetry.openSession(params));
+      response.setHeader(McpUsageTelemetry.HEADER_SESSION_ID,
+          McpUsageTelemetry.openSession(params, negotiated));
     } catch (Exception e) {
       // Telemetry must never break the handshake.
       log.debug("Could not open an MCP telemetry session.", e);
     }
 
     JSONObject result = new JSONObject();
-    result.put("protocolVersion", PROTOCOL_VERSION);
+    result.put("protocolVersion", negotiated);
 
     JSONObject capabilities = new JSONObject();
 
@@ -556,6 +688,7 @@ public class McpServlet extends HttpServlet {
     serverInfo.put("version", SERVER_VERSION);
     serverInfo.put("title", SERVER_TITLE);
     serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
+    serverInfo.put("description", SERVER_DESCRIPTION);
     JSONObject icon = new JSONObject();
     icon.put("src", SERVER_ICON_URL);
     icon.put("mimeType", SERVER_ICON_MIME_TYPE);
@@ -594,12 +727,7 @@ public class McpServlet extends HttpServlet {
             JSONObject result = new JSONObject();
             JSONArray toolsArray = new JSONArray();
             for (McpToolDefinition tool : tools) {
-              JSONObject toolJson = new JSONObject();
-              toolJson.put("name", tool.getName());
-              toolJson.put("title", McpToolTitles.resolve(tool, language));
-              toolJson.put("description", tool.getDescription());
-              toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
-              toolsArray.put(toolJson);
+              toolsArray.put(describeTool(tool, language));
             }
             result.put("tools", toolsArray);
             return result;
@@ -607,6 +735,20 @@ public class McpServlet extends HttpServlet {
             OBContext.restorePreviousMode();
           }
         });
+  }
+
+  /**
+   * One {@code tools/list} entry: name, localized title, description, input schema and the four
+   * behaviour hints ({@link McpToolAnnotations}, ETP-5639).
+   */
+  JSONObject describeTool(McpToolDefinition tool, String language) throws JSONException {
+    JSONObject toolJson = new JSONObject();
+    toolJson.put("name", tool.getName());
+    toolJson.put("title", McpToolTitles.resolve(tool, language));
+    toolJson.put("description", tool.getDescription());
+    toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
+    toolJson.put("annotations", McpToolAnnotations.of(tool.getName()));
+    return toolJson;
   }
 
   // ── Handler: tools/call ─────────────────────────────────────────────────
@@ -682,7 +824,8 @@ public class McpServlet extends HttpServlet {
             JSONObject content = new JSONObject();
             content.put("uri", uri);
             content.put("mimeType", "application/json");
-            content.put("text", resourceContent.toString(2));
+            // IMP-53: compact, like every tool result — the reader is an agent, not a person.
+            content.put("text", resourceContent.toString());
             contents.put(content);
             result.put("contents", contents);
             return result;

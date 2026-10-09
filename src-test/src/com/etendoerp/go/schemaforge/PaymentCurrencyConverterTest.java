@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -28,6 +30,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
@@ -38,6 +42,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -81,7 +87,15 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *   <li>{@code invoiceAmountFor}: normal rounding at the invoice currency's precision, a currency
  *       with no declared precision falls back to scale 2, and a round-trip against
  *       {@link PaymentCurrencyConverter#convertedAmount} recovers the original amount</li>
+ *   <li>{@code consistentRate} (ETP-5657): the preferred rate verbatim when it reproduces the
+ *       transaction, else {@code txn / pay} at 6, 8, 10 then 12 decimals, then
+ *       {@code DECIMAL64}</li>
+ *   <li>{@code rateError} / {@code parseRate} / {@code resolveConversionRate}: the same literal
+ *       400 messages the two-step payment modal always answered with</li>
+ *   <li>{@code standardScale}: the currency's precision, 2 when unknown</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.PaymentCurrencyConverter
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -399,5 +413,214 @@ class PaymentCurrencyConverterTest {
 
     assertThrows(OBException.class,
         () -> PaymentCurrencyConverter.seedInvoiceRateIfAbsent(body, inv, acc));
+  }
+
+  // ── consistentRate (ETP-5657) ────────────────────────────────────────────
+
+  private static void assertReproduces(String pay, BigDecimal rate, String txn, int scale) {
+    assertEquals(0, new BigDecimal(pay).multiply(rate).setScale(scale, RoundingMode.HALF_UP)
+        .compareTo(new BigDecimal(txn)), pay + " x " + rate + " must round to " + txn);
+  }
+
+  @Test
+  void consistentRate_preferredRateThatReproduces_isReturnedVerbatim() {
+    BigDecimal typed = new BigDecimal("0.6813");
+
+    BigDecimal rate = PaymentCurrencyConverter.consistentRate(new BigDecimal("40.91"),
+        new BigDecimal("27.87"), typed, 2);
+
+    assertSame(typed, rate);
+  }
+
+  @Test
+  void consistentRate_noPreferredRate_derivesSixDecimals() {
+    BigDecimal rate = PaymentCurrencyConverter.consistentRate(new BigDecimal("40.91"),
+        new BigDecimal("27.87"), null, 2);
+
+    assertEquals("0.681252", rate.toPlainString());
+    assertReproduces("40.91", rate, "27.87", 2);
+  }
+
+  @Test
+  void consistentRate_preferredRateThatDoesNotReproduce_isReplacedByTheDerivedOne() {
+    BigDecimal rate = PaymentCurrencyConverter.consistentRate(new BigDecimal("40.91"),
+        new BigDecimal("27.87"), new BigDecimal("0.7"), 2);
+
+    assertEquals("0.681252", rate.toPlainString());
+  }
+
+  /**
+   * The more the payment amount grows, the more decimals the rate needs for {@code pay x rate} to
+   * round back to the transaction: each case below fails at every scale before the expected one.
+   */
+  @ParameterizedTest(name = "{0} -> {1} at {3} decimals")
+  @CsvSource({
+      "1000000,       123456.79,     0.12345679,     8",
+      "100000000,     12345678.91,   0.1234567891,   10",
+      "10000000000,   1234567891.23, 0.123456789123, 12" })
+  void consistentRate_escalatesTheScaleUntilTheRateReproduces(String pay, String txn,
+      String expectedRate, int expectedScale) {
+    BigDecimal rate = PaymentCurrencyConverter.consistentRate(new BigDecimal(pay),
+        new BigDecimal(txn), null, 2);
+
+    assertEquals(expectedRate, rate.toPlainString());
+    assertEquals(expectedScale, rate.scale());
+    assertReproduces(pay, rate, txn, 2);
+  }
+
+  @Test
+  void consistentRate_nothingUpToTwelveDecimalsReproduces_fallsBackToDecimal64() {
+    BigDecimal pay = new BigDecimal("1000000000000");
+    BigDecimal txn = new BigDecimal("123456789012.34");
+
+    BigDecimal rate = PaymentCurrencyConverter.consistentRate(pay, txn, null, 2);
+
+    assertEquals(txn.divide(pay, MathContext.DECIMAL64), rate);
+    assertTrue(rate.scale() > 12, "beyond the last fixed scale: " + rate.toPlainString());
+    assertReproduces("1000000000000", rate, "123456789012.34", 2);
+  }
+
+  @Test
+  void consistentRate_zeroPrecisionAccount_reproducesWholeUnits() {
+    BigDecimal rate = PaymentCurrencyConverter.consistentRate(new BigDecimal("100.00"),
+        new BigDecimal("15234"), null, 0);
+
+    assertEquals(0, new BigDecimal("152.34").compareTo(rate));
+    assertReproduces("100.00", rate, "15234", 0);
+  }
+
+  // ── rateError / parseRate / standardScale (ETP-5657) ─────────────────────
+
+  private static String message(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  @Test
+  void rateError_positiveRateOtherThanOne_isAccepted() {
+    assertNull(PaymentCurrencyConverter.rateError(new BigDecimal("0.92"), true));
+    assertNull(PaymentCurrencyConverter.rateError(new BigDecimal("0.92"), false));
+  }
+
+  @ParameterizedTest(name = "rate={0}, crossCurrency={1}")
+  @CsvSource(delimiter = '|', value = {
+      "0     | true  | Conversion rate must be greater than zero",
+      "-0.5  | false | Conversion rate must be greater than zero",
+      "1     | true  | A conversion rate other than 1 is required when the invoice and account "
+          + "currencies differ",
+      "1.000 | true  | A conversion rate other than 1 is required when the invoice and account "
+          + "currencies differ" })
+  void rateError_refusedRates_answerTheLiteral400(String rate, boolean crossCurrency,
+      String expectedMessage) throws Exception {
+    NeoResponse response = PaymentCurrencyConverter.rateError(new BigDecimal(rate), crossCurrency);
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(expectedMessage, message(response));
+  }
+
+  @Test
+  void rateError_rateOfOneInTheSameCurrency_isAccepted() {
+    assertNull(PaymentCurrencyConverter.rateError(BigDecimal.ONE, false));
+  }
+
+  @Test
+  void parseRate_trimsAndParses() {
+    PaymentCurrencyConverter.RateResolution resolution =
+        PaymentCurrencyConverter.parseRate(" 0.92 ", true);
+
+    assertNull(resolution.error());
+    assertEquals(0, new BigDecimal("0.92").compareTo(resolution.rate()));
+  }
+
+  @Test
+  void parseRate_malformed_isInvalidFormat() throws Exception {
+    PaymentCurrencyConverter.RateResolution resolution =
+        PaymentCurrencyConverter.parseRate("abc", true);
+
+    assertNull(resolution.rate());
+    assertEquals(400, resolution.error().getHttpStatus());
+    assertEquals("Invalid conversion rate format", message(resolution.error()));
+  }
+
+  @Test
+  void parseRate_appliesRateError() throws Exception {
+    PaymentCurrencyConverter.RateResolution crossOne =
+        PaymentCurrencyConverter.parseRate("1", true);
+    PaymentCurrencyConverter.RateResolution sameOne =
+        PaymentCurrencyConverter.parseRate("1", false);
+
+    assertNull(crossOne.rate());
+    assertEquals("A conversion rate other than 1 is required when the invoice and account "
+        + "currencies differ", message(crossOne.error()));
+    assertNull(sameOne.error());
+    assertEquals(0, BigDecimal.ONE.compareTo(sameOne.rate()));
+  }
+
+  @Test
+  void standardScale_currencyPrecisionOrTwo() {
+    assertEquals(0, PaymentCurrencyConverter.standardScale(currencyWithPrecision("JPY", 0)));
+    assertEquals(4, PaymentCurrencyConverter.standardScale(currencyWithPrecision("XX4", 4)));
+    assertEquals(2, PaymentCurrencyConverter.standardScale(currencyWithPrecision("XXX", null)));
+    assertEquals(2, PaymentCurrencyConverter.standardScale(null));
+  }
+
+  // ── resolveConversionRate: messages unchanged by the rateError/parseRate refactor ──
+
+  @ParameterizedTest(name = "conversionRate=''{0}'' cross={1}")
+  @CsvSource(delimiter = '|', value = {
+      "''    | true  | A conversion rate is required when the invoice and account currencies "
+          + "differ",
+      "abc   | true  | Invalid conversion rate format",
+      "abc   | false | Invalid conversion rate format",
+      "0     | true  | Conversion rate must be greater than zero",
+      "-1    | false | Conversion rate must be greater than zero",
+      "1     | true  | A conversion rate other than 1 is required when the invoice and account "
+          + "currencies differ" })
+  void resolveConversionRate_refusals_keepTheirLiteralMessages(String rawRate,
+      boolean crossCurrency, String expectedMessage) throws Exception {
+    Currency eur = currency(ACCOUNT_CURRENCY_ID);
+    Invoice inv = invoice(crossCurrency ? currency(INVOICE_CURRENCY_ID) : eur);
+    JSONObject body = new JSONObject().put("conversionRate", rawRate);
+
+    PaymentCurrencyConverter.RateResolution resolution =
+        PaymentCurrencyConverter.resolveConversionRate(body, inv, account(eur));
+
+    assertNull(resolution.rate());
+    assertEquals(400, resolution.error().getHttpStatus());
+    assertEquals(expectedMessage, message(resolution.error()));
+  }
+
+  @Test
+  void resolveConversionRate_sameCurrencyWithoutRate_defaultsToOne() {
+    Currency eur = currency(ACCOUNT_CURRENCY_ID);
+
+    PaymentCurrencyConverter.RateResolution resolution =
+        PaymentCurrencyConverter.resolveConversionRate(new JSONObject(), invoice(eur),
+            account(eur));
+
+    assertNull(resolution.error());
+    assertEquals(0, BigDecimal.ONE.compareTo(resolution.rate()));
+  }
+
+  @Test
+  void resolveConversionRate_sameCurrencyRateOfOne_isAccepted() throws Exception {
+    Currency eur = currency(ACCOUNT_CURRENCY_ID);
+
+    PaymentCurrencyConverter.RateResolution resolution =
+        PaymentCurrencyConverter.resolveConversionRate(
+            new JSONObject().put("conversionRate", "1"), invoice(eur), account(eur));
+
+    assertNull(resolution.error());
+    assertEquals(0, BigDecimal.ONE.compareTo(resolution.rate()));
+  }
+
+  @Test
+  void resolveConversionRate_crossCurrencyValidRate_isReturned() throws Exception {
+    PaymentCurrencyConverter.RateResolution resolution =
+        PaymentCurrencyConverter.resolveConversionRate(
+            new JSONObject().put("conversionRate", " 0.92 "),
+            invoice(currency(INVOICE_CURRENCY_ID)), account(currency(ACCOUNT_CURRENCY_ID)));
+
+    assertNull(resolution.error());
+    assertEquals(0, new BigDecimal("0.92").compareTo(resolution.rate()));
   }
 }
