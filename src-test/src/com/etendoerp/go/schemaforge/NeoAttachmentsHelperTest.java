@@ -53,6 +53,7 @@ import javax.servlet.http.Part;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
+import org.junit.BeforeClass;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.InOrder;
@@ -61,6 +62,7 @@ import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
@@ -92,6 +94,44 @@ import org.openbravo.model.common.enterprise.Organization;
  * @covers com.etendoerp.go.schemaforge.NeoAttachmentsDownloader
  */
 public class NeoAttachmentsHelperTest {
+
+  /**
+   * Initializes {@link AttachImplementationManager} before any test can mock it, with the
+   * one call its static initializer makes off the DB answered by a stub.
+   *
+   * <p>That class computes a static field from
+   * {@code ModelProvider.getInstance().getEntity(Attachment.class)}, so its {@code <clinit>}
+   * reads the model — and the model is loaded from the database, through a
+   * {@code ConnectionProviderImpl} built out of {@code OBPropertiesProvider}. Mockito's
+   * inline mock maker forces that {@code <clinit>} the first time anything in the JVM calls
+   * {@code mock(AttachImplementationManager.class)}, so the first such test decides whether
+   * the class initializes at all: once a static initializer has thrown, the JVM marks the
+   * class erroneous and every later mock of it dies with {@code NoClassDefFoundError}
+   * without the test ever running.</p>
+   *
+   * <p>That is what ETP-5526 hit. {@link #computeFileSizeReturnsExistingFileLength} stubs
+   * {@code OBPropertiesProvider} with a {@link Properties} holding only {@code attach.path},
+   * and now also builds the manager mock inside that scope; whenever JUnit happened to run it
+   * first, {@code ConnectionProviderImpl} read a null {@code bbdd.rdbms} from the stub and the
+   * {@code <clinit>} died, taking 17 untouched tests with it. Which test runs first is not
+   * something a test may depend on, and neither is a reachable database, so the initialization
+   * is pinned here instead: under a stubbed {@code ModelProvider} it needs neither.</p>
+   */
+  @BeforeClass
+  public static void initializeAttachImplementationManager() throws Exception {
+    Property dataType = mock(Property.class);
+    when(dataType.getFieldLength()).thenReturn(60);
+    Entity attachmentEntity = mock(Entity.class);
+    when(attachmentEntity.getProperty(Attachment.PROPERTY_DATATYPE)).thenReturn(dataType);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntity(Attachment.class)).thenReturn(attachmentEntity);
+
+    try (MockedStatic<ModelProvider> modelMock = Mockito.mockStatic(ModelProvider.class)) {
+      modelMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+      Class.forName(AttachImplementationManager.class.getName(), true,
+          AttachImplementationManager.class.getClassLoader());
+    }
+  }
 
   @After
   public void clearCacheAfterEachTest() {
