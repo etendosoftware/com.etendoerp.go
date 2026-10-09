@@ -507,6 +507,9 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
   private static final int COL_ACCOUNT_SIGN = 9;
   private static final int COL_OWN_AMT = 10;
   private static final int COL_OWN_AMT_REF = 11;
+  // Appended AFTER own_amt_ref by ownAmountColumns() (ETP-5662) so the positions above never shift.
+  private static final int COL_SHOW_VALUE_COND = 12;
+  private static final int COL_IS_SUMMARY = 13;
 
   private List<AccountReportTree.NodeRow> queryNodeRows(TreeQuery q) {
     List<Object[]> rawRows = queryRawNodeRows(q);
@@ -524,6 +527,8 @@ abstract class AbstractAccountTreeReportHandler extends AbstractSqlReportHandler
           .accountSign(str(r[COL_ACCOUNT_SIGN]))
           .ownAmt(toBigDecimal(r[COL_OWN_AMT]))
           .ownAmtRef(toBigDecimal(r[COL_OWN_AMT_REF]))
+          .showValueCond(str(r[COL_SHOW_VALUE_COND]))
+          .summary("Y".equals(str(r[COL_IS_SUMMARY])))
           .build());
     }
     return rows;

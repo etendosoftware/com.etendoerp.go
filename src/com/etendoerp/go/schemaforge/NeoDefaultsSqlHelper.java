@@ -284,14 +284,23 @@ final class NeoDefaultsSqlHelper {
   }
 
   /**
-   * Read the DB-level column DEFAULT from {@code information_schema.columns}.
+   * Read the DB-level column DEFAULT from the PostgreSQL catalog.
    * Used as a last-resort fallback when {@code AD_Column.DefaultValue} is null/empty and
-   * no preference or doctype default can be resolved.
+   * no preference or doctype default can be resolved, for mandatory columns the safe-type
+   * fallback cannot fill.
+   *
+   * <p>Reads {@code pg_attribute}/{@code pg_attrdef} by {@code to_regclass}, an indexed lookup,
+   * instead of {@code information_schema.columns} with {@code LOWER()} on both sides (a
+   * privilege-checked catalog scan, ~10x slower). {@code pg_get_expr} is what
+   * {@code information_schema.columns.column_default} itself returns, so the parsing below is
+   * unchanged. The table is resolved through the connection's {@code search_path}.</p>
    */
   static String resolveDbColumnDefault(String tableName, String columnName) {
     try {
-      String sql = "SELECT column_default FROM information_schema.columns "
-          + "WHERE LOWER(table_name) = LOWER(?) AND LOWER(column_name) = LOWER(?)";
+      String sql = "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attribute a "
+          + "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
+          + "WHERE a.attrelid = to_regclass(lower(?)) AND a.attname = lower(?) "
+          + "AND NOT a.attisdropped";
       try (PreparedStatement ps =
           OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
         ps.setString(1, tableName);

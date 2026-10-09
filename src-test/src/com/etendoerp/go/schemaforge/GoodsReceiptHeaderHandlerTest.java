@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -63,6 +64,8 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  *   <li>{@code afterHandle()} batch (list) mode — invoiceStatus per record.</li>
  *   <li>Error resilience — DB error in enrichment returns null instead of propagating.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.GoodsReceiptHeaderHandler
  */
 public class GoodsReceiptHeaderHandlerTest {
 
@@ -877,6 +880,62 @@ public class GoodsReceiptHeaderHandlerTest {
       assertEquals("PL-CLIENT-DEFAULT", receiptRec.getString("resolvedPriceListId"));
       assertEquals("Client Default Purchase List",
           receiptRec.getString("resolvedPriceList$_identifier"));
+    }
+  }
+
+  // ── ETP-5576: invoiceStatus reads the purchase-side match table ─────────
+
+  /**
+   * A receipt is matched to its invoice in M_MatchInv, never in M_MatchSI. A second partial
+   * receipt of an invoice line is linked ONLY there (the C_InvoiceLine.M_InOutLine_ID column
+   * already points at the first receipt), so an invoiceStatus query reading M_MatchSI showed it as
+   * 0 % invoiced.
+   */
+  @Test
+  public void afterHandle_singleRecord_invoiceStatusReadsMatchInvNotMatchSi() throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+
+    JSONObject body = new JSONObject().put("response", new JSONObject()
+        .put("data", new JSONArray().put(new JSONObject().put("id", "r-partial"))));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("r-partial")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      Connection roConn = mock(Connection.class);
+      PreparedStatement roPs = mock(PreparedStatement.class);
+      ResultSet roRs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(roConn);
+      when(roConn.prepareStatement(any())).thenReturn(roPs);
+      when(roPs.executeQuery()).thenReturn(roRs);
+      when(roRs.next()).thenReturn(false);
+
+      handler.afterHandle(ctx);
+
+      org.mockito.ArgumentCaptor<String> sqlCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      verify(conn, Mockito.atLeastOnce()).prepareStatement(sqlCaptor.capture());
+      String statusSql = sqlCaptor.getAllValues().stream()
+          .filter(s -> s.contains("LEAST(100"))
+          .findFirst()
+          .orElseThrow(() -> new AssertionError("invoiceStatus query was not executed"));
+      assertTrue("invoiceStatus must read M_MatchInv", statusSql.contains("FROM m_matchinv mt"));
+      assertFalse("invoiceStatus must not read M_MatchSI", statusSql.contains("m_matchsi"));
     }
   }
 }

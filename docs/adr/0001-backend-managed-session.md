@@ -132,6 +132,35 @@ Set-Cookie: __Host-go_session=<opaque>; Secure; HttpOnly; Path=/; SameSite=Lax
 - Precedent for the double-submit shape: `EtendoGoGoogleIdentityVerifier.validateCsrfTokenIfPresent`
   (`g_csrf_token`, constant-time compare).
 
+#### D4.1 — Account header (ETP-5675)
+
+The cookie belongs to the **browser profile**, not to a tab, and production is one domain for every
+customer. A person with two accounts therefore signs every tab in as whichever account logged in
+last. A tab still showing the previous account kept sending the cookie, and because a `GET` carries
+no CSRF proof, its reads were answered with the **other account's tenant data** under the first
+tab's name (reproduced 2026-10-08: account B's tab listed account C's contacts and loaded C's form
+defaults). Its writes were already refused (stale proof), and a later logout's ETP-5550 retry
+re-read the live proof and revoked the other account's session.
+
+- The SPA sends the account it believes it is signed in as in `X-Go-Account` (the `account.id` of
+  `GET /sws/go/session`) on **every** method. `GoSessionAuthenticator` compares it with the session
+  record's account **before** the CSRF check and answers `403 "Session belongs to another account"`
+  (`GoSessionSecurity.MSG_ACCOUNT_MISMATCH`, matched as text by the client — do not reword it).
+  The idle expiry is not renewed for a refused request.
+- **Optional**: a request without the header (MCP clients, API callers, an older SPA) is not checked.
+  The session read (`GET /sws/go/session`), login and register never send it — they are how a tab
+  learns or chooses its account.
+- It reuses `GoSessionAuthResult.Status.CSRF_FAILED` on purpose: it is the same family (a tab-bound
+  proof that does not match the session), so every consumer already answers it with 403 and the
+  refusal message without a new branch.
+- Not a credential and not secret (the caller already holds the cookie), so a plain equality is
+  enough. Cookie traffic is same-origin, so the custom header never adds a CORS preflight; it is
+  still listed next to `X-Go-CSRF` wherever allowed headers are enumerated.
+- Client side (`app-shell-core/src/auth/sessionConflict.js`): the 403 raises a "another session is
+  open" screen; a `BroadcastChannel` announcement from the tab that signed in, and a throttled
+  re-check when a tab returns to the foreground, raise it before any request is sent. The revoke on
+  logout names its account and never retries against another account's session.
+
 ### D5 — HTTP contract `/sws/go/session*`
 
 | Method + path | Replaces | Request | Response to JS | Effect |

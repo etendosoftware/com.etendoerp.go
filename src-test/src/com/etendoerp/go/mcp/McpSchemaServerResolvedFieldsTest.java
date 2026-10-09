@@ -17,10 +17,12 @@
 
 package com.etendoerp.go.mcp;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -53,6 +55,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
+import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.SalesQuotationLineHandler;
@@ -75,6 +79,9 @@ import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
  * deleting that one line leaves every other test passing, and the method needs an OBContext, a
  * live DAL and an AD_Tab, so it cannot be reached from a unit test. That is the case
  * {@link McpSourceScanner} exists for.</p>
+ *
+ * <p>The same helper also answers the read side ({@link McpServerResolvedFields#enrichedOnRead},
+ * ETP-5576): the keys a customization injects on every GET record.</p>
  *
  * @covers com.etendoerp.go.mcp.McpServerResolvedFields
  */
@@ -237,6 +244,63 @@ class McpSchemaServerResolvedFieldsTest {
   }
 
   // ── ETP-5535: the etendo_create mandatory pre-check does NOT skip declared fields ─────
+
+  /** A customization that injects two keys on every GET record (ETP-5576). */
+  private static final NeoHandler DECLARES_ENRICHED_KEYS = new NeoHandler() {
+    @Override
+    public NeoResponse handle(NeoContext context) {
+      return null;
+    }
+
+    @Override
+    public Set<String> responseEnrichedFields() {
+      return Set.of("followUp", "arInvoiceSubtype");
+    }
+  };
+
+  @Test
+  @DisplayName("enrichedOnRead of a null entity is empty")
+  void enrichedOnReadOfNullEntityIsEmpty() {
+    assertTrue(McpServerResolvedFields.enrichedOnRead(null).isEmpty());
+  }
+
+  /** Rows: case, how {@code NeoExtensionDispatcher.resolveOnly} is stubbed, the expected keys. */
+  static Stream<Arguments> readCustomizations() {
+    Consumer<MockedStatic<NeoExtensionDispatcher>> throwing = dispatcher -> dispatcher
+        .when(() -> NeoExtensionDispatcher.resolveOnly(any()))
+        .thenThrow(new IllegalStateException("CDI not ready"));
+    Consumer<MockedStatic<NeoExtensionDispatcher>> declaring = dispatcher -> dispatcher
+        .when(() -> NeoExtensionDispatcher.resolveOnly(any())).thenReturn(DECLARES_ENRICHED_KEYS);
+    return Stream.of(
+        Arguments.of("the resolution throws", throwing, Set.of()),
+        Arguments.of("the customization declares keys", declaring,
+            Set.of("followUp", "arInvoiceSubtype")));
+  }
+
+  /**
+   * The read side asks the customization bound to the READ surface — not the CREATE one
+   * {@code forCreate} asks — and answers its declaration; a resolution failure answers empty, so
+   * the projection validator judges every name as it did before ETP-5576 instead of failing the
+   * read.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("readCustomizations")
+  void enrichedOnReadAnswersTheReadCustomizationsDeclaration(String scenario,
+      Consumer<MockedStatic<NeoExtensionDispatcher>> stubDispatcher, Set<String> expected) {
+    SFEntity sfEntity = quotationLineEntity();
+
+    try (MockedStatic<NeoExtensionDispatcher> dispatcher =
+        mockStatic(NeoExtensionDispatcher.class)) {
+      stubDispatcher.accept(dispatcher);
+
+      Set<String> keys = assertDoesNotThrow(
+          () -> McpServerResolvedFields.enrichedOnRead(sfEntity), scenario);
+
+      assertEquals(expected, keys, scenario);
+      dispatcher.verify(() -> NeoExtensionDispatcher.resolveOnly(
+          argThat((NeoExtensionRequest request) -> request.surface() == NeoExtensionSurface.READ)));
+    }
+  }
 
   /**
    * Rows: case, whether {@link SalesQuotationLineHandler} is bound, the names the selector policy
