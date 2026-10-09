@@ -45,7 +45,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *     "redirect": { "aPRMAddpayment": "registerPayment" },
  *     "values":   { "aPRMProcessPayment": ["P"] },
  *     "reason":   "PIS needs a person to authorize at the bank",
- *     "redirectReason": "the classic Add Payment button is not the Etendo payment flow"
+ *     "redirectReason": "the classic Add Payment button is not the Etendo payment flow",
+ *     "reasons":  { "posted": "a blind toggle; use the post and unpost actions" }
  *   }
  * }
  * </pre>
@@ -69,6 +70,12 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  *   <li>{@code reason} — mandatory; it reaches the agent in the refusal.</li>
  *   <li>{@code redirectReason} — optional: the reason a redirected button gives, when it is not the
  *       one the hidden actions give. Defaults to {@code reason}.</li>
+ *   <li>{@code reasons} — optional {@code action → reason} (ETP-5692): the reason ONE hidden or
+ *       redirected action gives, in place of the section-wide {@code reason} /
+ *       {@code redirectReason}. For a section that hides actions for unrelated causes — the invoice
+ *       headers hide the PIS actions (SCA) and the {@code posted} toggle (use post / unpost) — so
+ *       an agent refused one of them is not handed the other's explanation. Each key must name an
+ *       action of {@code hidden} or {@code redirect}.</li>
  *   <li>{@code REPLACE}, entity level. Fails closed: an unusable {@code MCP_CONFIG} refuses every
  *       action through {@code etendo_action}.</li>
  * </ul>
@@ -85,9 +92,10 @@ final class McpActionsSection {
   static final String KEY_REASON = "reason";
   static final String KEY_REDIRECT_REASON = "redirectReason";
   static final String KEY_VALUES = "values";
+  static final String KEY_REASONS = "reasons";
 
   private static final Set<String> ALLOWED_KEYS =
-      Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES);
+      Set.of(KEY_HIDDEN, KEY_REDIRECT, KEY_REASON, KEY_REDIRECT_REASON, KEY_VALUES, KEY_REASONS);
 
   /**
    * The one instance of this section (ETP-5639). {@link #declaration()} used to build a new one on
@@ -127,6 +135,7 @@ final class McpActionsSection {
     validateValues(body, problems);
     validateHidden(body, problems);
     validateRedirect(body, problems);
+    validateReasons(body, problems);
     if (body.has(KEY_REDIRECT_REASON)
         && !(body.opt(KEY_REDIRECT_REASON) instanceof String
             && StringUtils.isNotBlank(body.optString(KEY_REDIRECT_REASON)))) {
@@ -173,6 +182,42 @@ final class McpActionsSection {
     }
   }
 
+  /**
+   * {@code reasons}: a non-empty object whose every key is an action the section hides or
+   * redirects, and whose every value is a non-blank reason. A reason for an action the section
+   * does not refuse would never be read, which is a typo rather than a choice.
+   */
+  private static void validateReasons(JSONObject body, List<String> problems) {
+    if (!body.has(KEY_REASONS)) {
+      return;
+    }
+    JSONObject reasons = body.optJSONObject(KEY_REASONS);
+    if (reasons == null || reasons.length() == 0) {
+      problems.add(KEY_REASONS + " must be a non-empty object {action: reason}");
+      return;
+    }
+    Set<String> refused = new LinkedHashSet<>();
+    JSONArray hidden = body.optJSONArray(KEY_HIDDEN);
+    for (int i = 0; hidden != null && i < hidden.length(); i++) {
+      refused.add(hidden.optString(i));
+    }
+    JSONObject redirect = body.optJSONObject(KEY_REDIRECT);
+    for (Iterator<?> it = redirect == null ? Collections.emptyIterator() : redirect.keys();
+        it.hasNext();) {
+      refused.add(String.valueOf(it.next()));
+    }
+    for (Iterator<?> it = reasons.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      Object reason = reasons.opt(key);
+      if (!(reason instanceof String) || StringUtils.isBlank((String) reason)) {
+        problems.add(KEY_REASONS + "." + key + " must be a non-blank reason");
+      } else if (!refused.contains(key)) {
+        problems.add(KEY_REASONS + "." + key + " names no action of " + KEY_HIDDEN + " or "
+            + KEY_REDIRECT);
+      }
+    }
+  }
+
   private static void validateValues(JSONObject body, List<String> problems) {
     if (!body.has(KEY_VALUES)) {
       return;
@@ -209,20 +254,26 @@ final class McpActionsSection {
     private final String reason;
     private final String redirectReason;
     private final boolean unusable;
+    /** {@code action → reason} overrides (ETP-5692); empty when the section declares none. */
+    private final Map<String, String> reasons;
 
     private View(Set<String> hidden, Map<String, String> redirect, String reason,
         String redirectReason, boolean unusable) {
-      this(hidden, redirect, Collections.emptyMap(), reason, redirectReason, unusable);
+      this(hidden, redirect, Collections.emptyMap(), reason, redirectReason, unusable,
+          Collections.emptyMap());
     }
 
+    @SuppressWarnings("java:S107") // the section's resolved parts; a holder would only rename them
     private View(Set<String> hidden, Map<String, String> redirect,
-        Map<String, Set<String>> values, String reason, String redirectReason, boolean unusable) {
+        Map<String, Set<String>> values, String reason, String redirectReason, boolean unusable,
+        Map<String, String> reasons) {
       this.hidden = hidden;
       this.redirect = redirect;
       this.values = values;
       this.reason = reason;
       this.redirectReason = redirectReason;
       this.unusable = unusable;
+      this.reasons = reasons;
     }
 
     /**
@@ -231,6 +282,30 @@ final class McpActionsSection {
      */
     Set<String> allowedValuesOf(String action) {
       return action == null ? null : values.get(action);
+    }
+
+    /**
+     * The reason {@code action} is refused (ETP-5692): its own entry in {@code reasons}, else the
+     * section-wide {@code reason}.
+     *
+     * @param action the refused action, under the name it was matched by
+     * @return the reason, never {@code null} when the section is configured
+     */
+    String reasonOf(String action) {
+      String own = action == null ? null : reasons.get(action);
+      return own != null ? own : reason;
+    }
+
+    /**
+     * The reason the redirected {@code action} gives (ETP-5692): its own entry in {@code reasons},
+     * else {@link #getRedirectReason()}.
+     *
+     * @param action the redirected button, under the name it was matched by
+     * @return the reason
+     */
+    String redirectReasonOf(String action) {
+      String own = action == null ? null : reasons.get(action);
+      return own != null ? own : getRedirectReason();
     }
 
     /** @return the reason a redirected button gives: {@code redirectReason}, else {@code reason} */
@@ -306,7 +381,19 @@ final class McpActionsSection {
         values.put(key, Collections.unmodifiableSet(allowed));
       }
     }
+    Map<String, String> reasons = new LinkedHashMap<>();
+    JSONObject ownReasons = body.optJSONObject(KEY_REASONS);
+    if (ownReasons != null) {
+      for (Iterator<?> it = ownReasons.keys(); it.hasNext();) {
+        String key = String.valueOf(it.next());
+        String reason = StringUtils.trimToNull(ownReasons.optString(key, null));
+        if (reason != null) {
+          reasons.put(key, reason);
+        }
+      }
+    }
     return new View(hidden, redirect, values, StringUtils.trim(body.optString(KEY_REASON, "")),
-        StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false);
+        StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false,
+        Collections.unmodifiableMap(reasons));
   }
 }

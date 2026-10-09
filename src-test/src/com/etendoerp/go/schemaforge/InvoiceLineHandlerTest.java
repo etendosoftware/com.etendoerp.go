@@ -55,6 +55,8 @@ import org.openbravo.model.common.order.OrderLine;
 
 /**
  * Unit tests for {@link InvoiceLineHandler}.
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceLineHandler
  */
 @ExtendWith(MockitoExtension.class)
 class InvoiceLineHandlerTest {
@@ -1598,6 +1600,50 @@ class InvoiceLineHandlerTest {
 
         assertNull(result);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5692 — completed-invoice write fence on lines
+  // ---------------------------------------------------------------------------
+
+  /**
+   * ETP-5692: a line of a Completed invoice accepts only project / costcenter; any other field
+   * (here {@code description}, which no core trigger protects) is refused by the line handler.
+   */
+  @Test
+  public void etp5692PatchOfLineDescriptionOnCompletedInvoiceIsRefused() throws Exception {
+    java.util.Map<String, Object> stored = new java.util.HashMap<>();
+    stored.put("description", "old");
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isProcessed()).thenReturn(true);
+    lenient().when(invoice.getDocumentStatus()).thenReturn("CO");
+    lenient().when(invoice.getPosted()).thenReturn("N");
+    InvoiceLine line = mock(InvoiceLine.class);
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(entity.hasProperty(anyString())).thenAnswer(inv -> stored.containsKey(inv.getArgument(0)));
+    when(line.getEntity()).thenReturn(entity);
+    when(line.get(anyString())).thenAnswer(inv -> stored.get(inv.<String>getArgument(0)));
+    when(line.getInvoice()).thenReturn(invoice);
+    JSONObject body = new JSONObject();
+    body.put("description", "new");
+    NeoContext context = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId("LINE-5692")
+        .requestBody(body)
+        .build();
+    try (MockedStatic<OBContext> obc = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(InvoiceLine.class, "LINE-5692")).thenReturn(line);
+
+      NeoResponse response = new InvoiceLineHandler().handle(context);
+
+      assertEquals(422, response.getHttpStatus());
+      assertEquals("description",
+          response.getBody().getJSONObject("error").getJSONArray("fields").getString(0));
     }
   }
 }

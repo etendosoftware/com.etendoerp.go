@@ -648,6 +648,77 @@ public class InvoiceExchangeRateHandlerTest {
     }
   }
 
+  // ----- handle(): posted invoice (ETP-5692) -----
+
+  /**
+   * ETP-5692: a posted invoice's rate is what its ledger was booked with. The edit is refused with
+   * a clear 422 BEFORE the new rate is mirrored onto the header — core's trigger alone would only
+   * refuse the row, after the header had already been changed through DAL.
+   */
+  @Test
+  public void testHandleUpdateOnPostedInvoiceIsRefusedBeforeTheHeaderSync() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "0.7");
+    ConversionRateDoc doc = docWith(new BigDecimal("100"), new BigDecimal("0.68"), new BigDecimal("68"));
+    when(doc.getInvoice().getPosted()).thenReturn("Y");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = stubDocLookup(obDal, doc);
+
+      NeoResponse response = handler.handle(crudPatch("DOC1", body));
+
+      assertEquals(422, response.getHttpStatus());
+      JSONObject error = response.getBody().getJSONObject("error");
+      assertEquals(InvoiceExchangeRateHandler.CODE_RATE_LOCKED_POSTED, error.getString("code"));
+      assertEquals(InvoiceExchangeRateHandler.MSG_RATE_LOCKED_POSTED,
+          error.getJSONArray("messageKeys").getString(0));
+      Mockito.verify(doc.getInvoice(), Mockito.never()).setETGOCurrencyRate(Mockito.any());
+      Mockito.verify(dal, Mockito.never()).save(Mockito.any());
+      assertFalse(body.has("foreignAmount"));
+    }
+  }
+
+  /** ETP-5692: adding a rate to a posted invoice is refused the same way. */
+  @Test
+  public void testHandleCreateOnPostedInvoiceIsRefused() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("invoice", INVOICE_ID);
+    body.put("rate", "0.7");
+    Invoice invoice = invoiceWith(new BigDecimal("100"));
+    when(invoice.getPosted()).thenReturn("Y");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
+
+      NeoResponse response = handler.handle(crudPost(body));
+
+      assertEquals(422, response.getHttpStatus());
+      Mockito.verify(invoice, Mockito.never()).setETGOCurrencyRate(Mockito.any());
+      assertFalse(body.has("currency"));
+    }
+  }
+
+  /** ETP-5657 kept: a completed invoice that is NOT posted still takes the edit and the sync. */
+  @Test
+  public void testHandleUpdateOnUnpostedCompletedInvoiceStillSyncsTheHeader() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "0.7");
+    ConversionRateDoc doc = docWith(new BigDecimal("100"), new BigDecimal("0.68"), new BigDecimal("68"));
+    when(doc.getInvoice().getPosted()).thenReturn("N");
+    when(doc.getInvoice().getDocumentStatus()).thenReturn("CO");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = stubDocLookup(obDal, doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      Mockito.verify(doc.getInvoice()).setETGOCurrencyRate(Mockito.any());
+      Mockito.verify(dal).save(doc.getInvoice());
+    }
+  }
+
   // ----- afterHandle() -----
 
   @Test

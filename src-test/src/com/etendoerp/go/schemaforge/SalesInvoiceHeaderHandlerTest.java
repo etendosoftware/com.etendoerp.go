@@ -1394,4 +1394,74 @@ public class SalesInvoiceHeaderHandlerTest {
     }
     return buildArgs.get();
   }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5692 — completed-invoice write fence, wired into the header handler
+  // ---------------------------------------------------------------------------
+
+  /** A processed invoice whose stored {@code paymentMethod} / {@code costcenter} are "PM-1" / "CC-1". */
+  private static Invoice etp5692Invoice(String docStatus, String posted) {
+    java.util.Map<String, Object> stored = new java.util.HashMap<>();
+    org.openbravo.base.structure.BaseOBObject pm = mock(org.openbravo.base.structure.BaseOBObject.class);
+    when(pm.getId()).thenReturn("PM-1");
+    org.openbravo.base.structure.BaseOBObject cc = mock(org.openbravo.base.structure.BaseOBObject.class);
+    when(cc.getId()).thenReturn("CC-1");
+    stored.put("paymentMethod", pm);
+    stored.put("costcenter", cc);
+    Invoice invoice = mock(Invoice.class);
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(entity.hasProperty(anyString())).thenAnswer(inv -> stored.containsKey(inv.getArgument(0)));
+    when(invoice.getEntity()).thenReturn(entity);
+    when(invoice.get(anyString())).thenAnswer(inv -> stored.get(inv.<String>getArgument(0)));
+    when(invoice.isProcessed()).thenReturn(true);
+    when(invoice.getDocumentStatus()).thenReturn(docStatus);
+    when(invoice.getPosted()).thenReturn(posted);
+    return invoice;
+  }
+
+  private static NeoResponse etp5692Patch(NeoHandler handler, Invoice invoice, String key,
+      String value) throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(key, value);
+    NeoContext context = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId("INV-5692")
+        .requestBody(body)
+        .build();
+    try (MockedStatic<OBContext> obc = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> dal = Mockito.mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dal.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(Invoice.class, "INV-5692")).thenReturn(invoice);
+      return handler.handle(context);
+    }
+  }
+
+  /**
+   * ETP-5692 BUG-3 repro: a REST/MCP PATCH of a field the SPA locks on a Completed invoice used to
+   * answer 200. The header handler now refuses it before the CRUD write.
+   */
+  @Test
+  public void etp5692PatchOfLockedFieldOnCompletedInvoiceIsRefused() throws Exception {
+    NeoResponse response = etp5692Patch(new SalesInvoiceHeaderHandler(),
+        etp5692Invoice("CO", "N"), "paymentMethod", "PM-2");
+
+    assertNotNull(response);
+    assertEquals(422, response.getHttpStatus());
+    assertEquals("completed_invoice_fields_locked",
+        response.getBody().getJSONObject("error").getString("code"));
+  }
+
+  /** ETP-5692 BUG-2 repro: the header cost center of a POSTED invoice used to answer 200. */
+  @Test
+  public void etp5692PatchOfCostCenterOnPostedInvoiceIsRefused() throws Exception {
+    NeoResponse response = etp5692Patch(new SalesInvoiceHeaderHandler(),
+        etp5692Invoice("CO", "Y"), "costcenter", "CC-2");
+
+    assertNotNull(response);
+    assertEquals(422, response.getHttpStatus());
+    assertEquals("posted_invoice_fields_locked",
+        response.getBody().getJSONObject("error").getString("code"));
+  }
 }

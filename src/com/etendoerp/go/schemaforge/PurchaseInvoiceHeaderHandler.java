@@ -110,7 +110,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   /**
    * The actions this header serves through its delegates, declared for agents (ETP-5558): the
-   * invoice payment actions and {@code currencyOptions}. Published by the MCP next to the AD
+   * invoice payment actions, {@code currencyOptions}, and {@code post} / {@code unpost}
+   * (ETP-5692). Published by the MCP next to the AD
    * buttons; REST and the SPA do not read it.
    */
   @Override
@@ -118,7 +119,19 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     Map<String, NeoActionContract> contracts =
         new LinkedHashMap<>(PaymentActionHandlerSupport.actionContracts(false));
     contracts.put(CurrencyOptionsHandler.CONTRACT.getName(), CurrencyOptionsHandler.CONTRACT);
+    // ETP-5692: post / unpost were served (DocumentPostingService) but undeclared, so an agent
+    // had to guess them; the raw `posted` AD button is hidden by MCP_CONFIG in their favour.
+    contracts.putAll(postingContracts());
     return contracts;
+  }
+
+  /**
+   * {@inheritDoc} Purchase invoices also keep {@code orderReference} (the supplier's invoice
+   * number) editable once completed (ETP-4839).
+   */
+  @Override
+  protected Set<String> completedEditableHeaderFields() {
+    return CompletedInvoiceWriteFence.PURCHASE_HEADER_EDITABLE_WHEN_COMPLETED;
   }
 
   /** The PIS actions: served to the SPA, never to an agent (ETP-5558). */
@@ -133,6 +146,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
+    }
+    // ETP-5692: completed-invoice write fence + unpost status gate, before anything is captured.
+    NeoResponse invoiceGuard = guardInvoiceWrites(context);
+    if (invoiceGuard != null) {
+      return invoiceGuard;
     }
     NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);

@@ -217,6 +217,29 @@ class McpConfigSourcedataTest {
   }
 
   /**
+   * ETP-5692: the AD {@code posted} button is a blind toggle — "Process completed successfully" on
+   * a draft while doing nothing. Agents get the declared {@code post} / {@code unpost} actions
+   * instead, so the button is hidden, with its own {@code reasons} entry naming both — the PIS
+   * {@code reason} of the section stays for the PIS actions.
+   */
+  @Test
+  @DisplayName("the invoice headers hide the posted toggle in favour of post / unpost")
+  void invoiceHeadersHideThePostedToggle() throws IOException, JSONException {
+    for (String id : INVOICE_HEADERS) {
+      JSONObject actions = payloadOf(id).getJSONObject(McpActionsSection.NAME);
+      assertTrue(setOf(actions.getJSONArray(McpActionsSection.KEY_HIDDEN)).contains("posted"),
+          id + " must hide the posted button");
+      String posted = actions.getJSONObject(McpActionsSection.KEY_REASONS).getString("posted");
+      assertTrue(posted.contains("post action") && posted.contains("unpost action"),
+          id + ": posted's own reason must point at post and unpost: " + posted);
+      assertFalse(posted.contains("SCA"), id + ": not the PIS reason");
+      String reason = actions.getString(McpActionsSection.KEY_REASON);
+      assertTrue(reason.contains("SCA"), id + ": the PIS reason is kept");
+      assertFalse(reason.contains("posted"), id + ": the PIS reason says nothing about posted");
+    }
+  }
+
+  /**
    * ETP-5558: a draft payment header shows only Delete and Confirm in the UI — Save is disabled and
    * no field is editable — so MCP hides update on both payment headers. Delete is hidden too: the
    * generic delete of a draft fails on the payment-detail foreign key (measured live), while the

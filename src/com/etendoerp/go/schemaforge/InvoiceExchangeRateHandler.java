@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.Collections;
 
 import javax.inject.Named;
 
@@ -49,8 +50,10 @@ import org.openbravo.model.common.invoice.Invoice;
  * this same pair in sync in the other direction (header → this row) — so editing either the
  * header currency or this tab keeps both consistent.
  *
- * <p>On POST the final rate is mirrored onto the header the same way (ETP-5657). DELETE is not
- * handled here: it goes through the default NEO delete (DAL), where
+ * <p>On POST the final rate is mirrored onto the header the same way (ETP-5657). A create or a
+ * rate edit on a <em>posted</em> invoice is refused with a 422 before anything is mirrored
+ * (ETP-5692, {@link #rejectIfInvoicePosted}). DELETE is not handled here: it goes through the
+ * default NEO delete (DAL), where
  * {@code ConversionRateDocDeleteGuardObserver} (module {@code com.smf.currency.conversionrate})
  * refuses removing the rate of a non-draft invoice.
  *
@@ -69,6 +72,8 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
   private static final String PROPERTY_FOREIGN_AMOUNT = "foreignAmount";
   private static final String FIELD_DEFAULTS = "defaults";
   private static final int RATE_SCALE = 12;
+  static final String MSG_RATE_LOCKED_POSTED = "ETGO_InvoiceExchangeRateLockedPosted";
+  static final String CODE_RATE_LOCKED_POSTED = "posted_invoice_exchange_rate_locked";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -90,6 +95,41 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
   }
 
   /**
+   * ETP-5692: the exchange rates of a posted invoice are what its ledger was booked with, so a
+   * create or a rate edit here is refused with a clear 422 while the invoice is posted
+   * (it is editable again after an {@code unpost}, which is the correction flow). Core's
+   * {@code C_CONVERSION_RATE_DOCUMENT_TRG} refuses the row write too, but only with the generic
+   * {@code @20501@}, and only after {@link #handleUpdate} / {@link #handleCreate} have already
+   * mirrored the new rate onto the invoice header through DAL. Refusing here, first, keeps the
+   * header untouched and names the reason. A completed invoice that is not posted stays editable
+   * (ETP-5657).
+   *
+   * <p>Checked right after {@link #handleCreate} / {@link #handleUpdate} load the invoice, so no
+   * extra read. An edit that touches neither {@code rate} nor {@code foreignAmount} mirrors nothing
+   * and is left to the core trigger. DELETE is not checked here: the default delete of the rate of
+   * any non-draft invoice is already refused by {@code ConversionRateDocDeleteGuardObserver}.</p>
+   *
+   * @param invoice the parent invoice, may be {@code null}
+   * @return the refusal, or {@code null} when the invoice is not posted or unknown
+   */
+  static NeoResponse rejectIfInvoicePosted(Invoice invoice) {
+    if (invoice == null || !"Y".equals(invoice.getPosted())) {
+      return null;
+    }
+    try {
+      return CompletedInvoiceWriteFence.reject(CODE_RATE_LOCKED_POSTED, MSG_RATE_LOCKED_POSTED,
+          Collections.emptyList(), null, null,
+          "This invoice is posted, so its exchange rates cannot be changed. Unpost it first.",
+          "Run the invoice header action 'unpost' first, then retry; post the invoice again "
+              + "afterwards.");
+    } catch (Exception e) {
+      log.error("Could not build the posted-invoice refusal for exchange rate", e);
+      return NeoResponse.error(422,
+          "This invoice is posted, so its exchange rates cannot be changed.");
+    }
+  }
+
+  /**
    * POST: resolve the parent invoice from the body, default the {@code currency} / {@code toCurrency}
    * pair, derive the missing side of {@code rate} / {@code foreignAmount}, and mirror the resulting
    * rate onto the invoice header's {@code eTGOCurrencyRate} via
@@ -105,6 +145,10 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
     Invoice invoice = loadInvoice(invoiceId);
     if (invoice == null) {
       return null;
+    }
+    NeoResponse postedLock = rejectIfInvoicePosted(invoice);
+    if (postedLock != null) {
+      return postedLock;
     }
     try {
       if ((!body.has(PROPERTY_CURRENCY) || body.isNull(PROPERTY_CURRENCY))
@@ -160,6 +204,10 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
     ConversionRateDoc doc = loadConversionRateDoc(recordId);
     if (doc == null || doc.getInvoice() == null) {
       return null;
+    }
+    NeoResponse postedLock = rejectIfInvoicePosted(doc.getInvoice());
+    if (postedLock != null) {
+      return postedLock;
     }
     try {
       BigDecimal effectiveDocRate = resolveEffectiveDocRate(body, doc, newRate, newForeign);
