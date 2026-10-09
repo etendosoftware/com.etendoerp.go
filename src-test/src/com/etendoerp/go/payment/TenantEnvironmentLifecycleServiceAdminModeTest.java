@@ -12,10 +12,13 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -84,25 +87,53 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
   public void aTenantProductiveOnlyByItsPlanIsAllowedWithoutPreferenceAccess() {
     Map<String, String> stored = new HashMap<>();
     stored.put(TenantPlanService.PREFERENCE_ATTRIBUTE, TenantPlanService.PLAN_PRODUCTIVE);
-    AtomicInteger saved = new AtomicInteger();
+    Writes writes = new Writes();
     TenantEnvironmentLifecycleService withRealPlan =
         new TenantEnvironmentLifecycleService(new TenantPlanService());
-    withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(stored, saved,
+    withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(stored, writes,
         () -> assertEquals(EnvironmentAccessPolicy.Decision.ALLOWED,
             withRealPlan.evaluateAccess(CLIENT_ID, true, NOW))));
-    assertEquals("a productive tenant gets no transition start", 0, saved.get());
+    assertEquals("a productive tenant gets no transition start", 0, writes.saved.size());
   }
 
   /** The legacy-transition start is a write on the same no-context path; it needs admin mode too. */
   @Test
   public void aFreeTenantGetsItsTransitionStartWithoutPreferenceAccess() {
-    AtomicInteger saved = new AtomicInteger();
+    Writes writes = new Writes();
     TenantEnvironmentLifecycleService withRealPlan =
         new TenantEnvironmentLifecycleService(new TenantPlanService());
-    withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(new HashMap<>(), saved,
+    withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(new HashMap<>(), writes,
         () -> assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED,
             withRealPlan.evaluateAccess(CLIENT_ID, true, NOW))));
-    assertEquals("the transition start is persisted once", 1, saved.get());
+    assertEquals("the transition start is persisted once", 1, writes.saved.size());
+    assertEquals("and flushed while admin mode is active", 1, writes.flushed.get());
+  }
+
+  /**
+   * An existing blank transition row is updated in place. The update is dirty-checked at flush,
+   * and the end-of-request flush runs after admin mode was restored — with no OBContext on MCP,
+   * where the DAL interceptor fails and the request's transaction rolls back. So the write must
+   * be flushed while admin mode is still active.
+   */
+  @Test
+  public void aBlankTransitionRowIsUpdatedAndFlushedUnderAdminMode() {
+    Map<String, String> stored = new HashMap<>();
+    stored.put(TenantEnvironmentLifecycleService.LEGACY_TRANSITION_STARTED_ATTRIBUTE, " ");
+    Writes writes = new Writes();
+    TenantEnvironmentLifecycleService withRealPlan =
+        new TenantEnvironmentLifecycleService(new TenantPlanService());
+    withTransitionActivation(TRANSITION_ACTIVATION, () -> runAsNonAdmin(stored, writes,
+        () -> assertEquals(EnvironmentAccessPolicy.Decision.DEMO_TRIAL_EXPIRED,
+            withRealPlan.evaluateAccess(CLIENT_ID, true, NOW))));
+    assertEquals(1, writes.saved.size());
+    verify(writes.saved.get(0)).setSearchKey(TRANSITION_ACTIVATION);
+    assertEquals("the update is flushed while admin mode is active", 1, writes.flushed.get());
+  }
+
+  /** What the harness let through: the saved rows and the flushes, both under admin mode. */
+  private static final class Writes {
+    private final List<Preference> saved = new ArrayList<>();
+    private final AtomicInteger flushed = new AtomicInteger();
   }
 
   private static void withTransitionActivation(String activation, Runnable body) {
@@ -121,15 +152,16 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
   }
 
   private static void runAsNonAdmin(Map<String, String> stored, Runnable body) {
-    runAsNonAdmin(stored, new AtomicInteger(), body);
+    runAsNonAdmin(stored, new Writes(), body);
   }
 
   /**
    * Runs {@code body} with a DAL that rejects preference queries and saves unless admin mode is
    * active, the way {@code OBDal} does for a role without read access on {@code AD_Preference}
-   * and, with no OBContext at all, for every caller. {@code saved} counts the accepted saves.
+   * and, with no OBContext at all, for every caller. A flush outside admin mode fails too: with
+   * no OBContext the DAL interceptor cannot stamp the row. {@code writes} records what passed.
    */
-  private static void runAsNonAdmin(Map<String, String> stored, AtomicInteger saved,
+  private static void runAsNonAdmin(Map<String, String> stored, Writes writes,
       Runnable body) {
     AtomicInteger adminDepth = new AtomicInteger();
     OBDal dalInstance = mock(OBDal.class);
@@ -159,8 +191,14 @@ public class TenantEnvironmentLifecycleServiceAdminModeTest {
       if (adminDepth.get() == 0) {
         throw new OBSecurityException("Entity ADPreference is not writable by the user U1");
       }
-      return saved.incrementAndGet();
+      return writes.saved.add(invocation.getArgument(0));
     }).when(dalInstance).save(any());
+    doAnswer(invocation -> {
+      if (adminDepth.get() == 0) {
+        throw new NullPointerException("OBContext is null at flush");
+      }
+      return writes.flushed.incrementAndGet();
+    }).when(dalInstance).flush();
     OBProvider provider = mock(OBProvider.class);
     when(provider.get(Preference.class)).thenAnswer(invocation -> mock(Preference.class));
 

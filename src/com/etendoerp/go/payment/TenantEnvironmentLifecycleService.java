@@ -213,6 +213,9 @@ public class TenantEnvironmentLifecycleService {
         return null;
       }
       setPreference(LEGACY_TRANSITION_STARTED_ATTRIBUTE, activation.toString(), client);
+      // Flush here, not at the end of the request: by then admin mode is restored, and on MCP
+      // there is no OBContext at all for the DAL interceptor to stamp the insert or update with.
+      OBDal.getInstance().flush();
       return activation.toString();
     } finally {
       OBContext.restorePreviousMode();
