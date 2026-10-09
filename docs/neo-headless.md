@@ -264,7 +264,24 @@ strict order:
    (`NeoMandatoryDefaultsService.injectMandatoryDefaults`, before step 2 runs).
 2. **Inject generic mandatory-column defaults** (`injectDefaultsForActiveColumns`) — plain
    `AD_Column` defaults, session context, parent-tab values — for any column the client did not
-   submit.
+   submit. Every active, non-key, non-audit column of the table is visited (ETP-4274), but the
+   per-column work is metadata only, answered in memory — classic computes no defaults at save
+   time and NEO must not turn this pass into per-row DB traffic (ETP-5676):
+   - **Sequence detection** reads the runtime model (`Property.isSequence()`, precomputed at
+     model load) plus the DocumentNo / `Value` + `IsUsedSequence` name rules — never a
+     per-column `SequenceConfig` query.
+   - **The DB-level `DEFAULT`** (`NeoDefaultsSqlHelper.resolveDbColumnDefault`, an indexed
+     `pg_attrdef` read) is the last resort only for a **mandatory** column with no
+     `AD_Column`/`ETGO_SF_FIELD` default, no preference and no doctype, whose reference is not
+     boolean or numeric. NEO does not pre-fill an optional column that has no
+     `AD_Column`/`ETGO_SF_FIELD` default; its DB `DEFAULT` still applies at INSERT, because DAL
+     entities are mapped `dynamic-insert="true"` (core `template.hbm.xml`) and a null property is
+     left out of the statement — in classic and NEO alike. Mandatory YesNo and numeric columns
+     with no AD default get `false`/`0` from the safe-type fallback, matching the generated
+     entity's `setDefaultValue` (a boolean with no AD default is generated as `false`) — **not**
+     the DB default: `C_BPartner.IsProspect` (DB `DEFAULT 'Y'`, no AD default) is created `N`,
+     as in classic. Visible effect: `/defaults` no longer returns those DB-level values to
+     pre-fill the form; the stored row is unchanged for optional columns.
 3. **Run the callout cascade** (`NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate`),
    passing the *step-1 snapshot* as `protectedFields` — never a snapshot taken after step 2.
 
@@ -3447,8 +3464,10 @@ The transfer (§4.12.1.5) follows the same pattern:
 The payment header's defaults read `@Isreceipt@`, which Classic supplies through the tab's
 auxiliary inputs (`AD_AuxiliarInput`); NEO create (`NeoMandatoryDefaultsService`) does not evaluate
 auxiliary inputs. So a
-REST `POST /sws/neo/payment-out/header` stores `FIN_Payment.isReceipt` with the DB default `'Y'` (a
-payment-out flagged as a collection, BUG-2) and leaves `documentType` without a value or selector
+REST `POST /sws/neo/payment-out/header` leaves `FIN_Payment.isReceipt` null — its AD default is an
+`@...@` expression, so the generated entity has no Java default either — and the DB `DEFAULT 'Y'`
+fills it at INSERT (dynamic-insert omits the null property): a payment-out flagged as a collection,
+BUG-2 and leaves `documentType` without a value or selector
 items (BUG-3). The SPA never takes that route (payments are created through `registerPayment`), and
 MCP no longer reaches it (`verbs` hides create on both payment headers). It is a generic REST gap,
 not a payment one: any tab whose defaults read an auxiliary input has it. Tracked outside
