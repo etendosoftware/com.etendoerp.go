@@ -196,16 +196,8 @@ final class McpActionsSection {
       problems.add(KEY_REASONS + " must be a non-empty object {action: reason}");
       return;
     }
-    Set<String> refused = new LinkedHashSet<>();
-    JSONArray hidden = body.optJSONArray(KEY_HIDDEN);
-    for (int i = 0; hidden != null && i < hidden.length(); i++) {
-      refused.add(hidden.optString(i));
-    }
-    JSONObject redirect = body.optJSONObject(KEY_REDIRECT);
-    for (Iterator<?> it = redirect == null ? Collections.emptyIterator() : redirect.keys();
-        it.hasNext();) {
-      refused.add(String.valueOf(it.next()));
-    }
+    Set<String> refused = parseHidden(body);
+    refused.addAll(parseRedirect(body).keySet());
     for (Iterator<?> it = reasons.keys(); it.hasNext();) {
       String key = String.valueOf(it.next());
       Object reason = reasons.opt(key);
@@ -355,32 +347,63 @@ final class McpActionsSection {
     if (body == null) {
       return View.NONE;
     }
+    return new View(parseHidden(body), parseRedirect(body), parseValues(body),
+        StringUtils.trim(body.optString(KEY_REASON, "")),
+        StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false,
+        parseReasons(body));
+  }
+
+  /** {@code hidden}: the action names, in declaration order; empty when absent. */
+  private static Set<String> parseHidden(JSONObject body) {
     Set<String> hidden = new LinkedHashSet<>();
     JSONArray names = body.optJSONArray(KEY_HIDDEN);
     for (int i = 0; names != null && i < names.length(); i++) {
       hidden.add(names.optString(i));
     }
+    return hidden;
+  }
+
+  /** {@code redirect}: {@code button → action}, in declaration order; empty when absent. */
+  private static Map<String, String> parseRedirect(JSONObject body) {
     Map<String, String> redirect = new LinkedHashMap<>();
     JSONObject targets = body.optJSONObject(KEY_REDIRECT);
-    if (targets != null) {
-      for (Iterator<?> it = targets.keys(); it.hasNext();) {
-        String key = String.valueOf(it.next());
-        redirect.put(key, targets.optString(key));
-      }
+    if (targets == null) {
+      return redirect;
     }
+    for (Iterator<?> it = targets.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      redirect.put(key, targets.optString(key));
+    }
+    return redirect;
+  }
+
+  /** {@code values}: {@code button → allowed values}, each set unmodifiable; empty when absent. */
+  private static Map<String, Set<String>> parseValues(JSONObject body) {
     Map<String, Set<String>> values = new LinkedHashMap<>();
     JSONObject narrowed = body.optJSONObject(KEY_VALUES);
-    if (narrowed != null) {
-      for (Iterator<?> it = narrowed.keys(); it.hasNext();) {
-        String key = String.valueOf(it.next());
-        Set<String> allowed = new LinkedHashSet<>();
-        JSONArray list = narrowed.optJSONArray(key);
-        for (int i = 0; list != null && i < list.length(); i++) {
-          allowed.add(list.optString(i));
-        }
-        values.put(key, Collections.unmodifiableSet(allowed));
-      }
+    if (narrowed == null) {
+      return values;
     }
+    for (Iterator<?> it = narrowed.keys(); it.hasNext();) {
+      String key = String.valueOf(it.next());
+      values.put(key, Collections.unmodifiableSet(parseAllowedValues(narrowed.optJSONArray(key))));
+    }
+    return values;
+  }
+
+  private static Set<String> parseAllowedValues(JSONArray list) {
+    Set<String> allowed = new LinkedHashSet<>();
+    for (int i = 0; list != null && i < list.length(); i++) {
+      allowed.add(list.optString(i));
+    }
+    return allowed;
+  }
+
+  /**
+   * {@code reasons} (ETP-5692): {@code action → reason}, trimmed, blank entries dropped;
+   * unmodifiable, empty when absent.
+   */
+  private static Map<String, String> parseReasons(JSONObject body) {
     Map<String, String> reasons = new LinkedHashMap<>();
     JSONObject ownReasons = body.optJSONObject(KEY_REASONS);
     if (ownReasons != null) {
@@ -392,8 +415,6 @@ final class McpActionsSection {
         }
       }
     }
-    return new View(hidden, redirect, values, StringUtils.trim(body.optString(KEY_REASON, "")),
-        StringUtils.trimToNull(body.optString(KEY_REDIRECT_REASON, null)), false,
-        Collections.unmodifiableMap(reasons));
+    return Collections.unmodifiableMap(reasons);
   }
 }

@@ -123,7 +123,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     contracts.putAll(followUp.actionContracts());
     // ETP-5692: post / unpost were served (DocumentPostingService) but undeclared, so an agent
     // had to guess them; the raw `posted` AD button is hidden by MCP_CONFIG in their favour.
-    contracts.putAll(postingContracts());
+    contracts.putAll(InvoicePostingGate.CONTRACTS);
     return contracts;
   }
 
@@ -150,7 +150,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
       return paymentMethodSelector;
     }
     // ETP-5692: completed-invoice write fence + unpost status gate, before anything is captured.
-    NeoResponse invoiceGuard = guardInvoiceWrites(context);
+    NeoResponse invoiceGuard =
+        InvoicePostingGate.checkHeaderRequest(context, completedEditableHeaderFields());
     if (invoiceGuard != null) {
       return invoiceGuard;
     }

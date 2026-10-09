@@ -48,8 +48,6 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.utils.SIIUtils;
 
-import com.etendoerp.go.schemaforge.util.NeoActionContract;
-
 /**
  * Abstract base class for AP and AR invoice header handlers.
  *
@@ -243,41 +241,15 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * The header fields this window can still change once the invoice is completed (ETP-5692). The
-   * sales default; {@link PurchaseInvoiceHeaderHandler} adds {@code orderReference}. Both sets are
-   * declared once, in {@link CompletedInvoiceWriteFence}.
+   * The header fields this window can still change once the invoice is completed (ETP-5692) — the
+   * one extension point of the invoice write guards ({@link InvoicePostingGate#checkHeaderRequest}).
+   * The sales default; {@link PurchaseInvoiceHeaderHandler} adds {@code orderReference}. Both sets
+   * are declared once, in {@link CompletedInvoiceWriteFence}.
    *
    * @return the allowlist the completed-invoice write fence applies to this header
    */
   protected Set<String> completedEditableHeaderFields() {
     return CompletedInvoiceWriteFence.headerEditableWhenCompleted();
-  }
-
-  /**
-   * The ETP-5692 guards every invoice header request passes before anything else runs: the
-   * completed-invoice write fence on a CRUD update ({@link CompletedInvoiceWriteFence}) and the
-   * status gate on an {@code unpost} action ({@link InvoicePostingGate}). Both are the invoice
-   * customization, so they hold on REST and on MCP alike.
-   *
-   * @param context the current request
-   * @return the refusal, or {@code null} to continue
-   */
-  protected NeoResponse guardInvoiceWrites(NeoContext context) {
-    NeoResponse fence =
-        CompletedInvoiceWriteFence.checkHeader(context, completedEditableHeaderFields());
-    if (fence != null) {
-      return fence;
-    }
-    return InvoicePostingGate.checkUnpost(context);
-  }
-
-  /**
-   * The {@code post}/{@code unpost} contracts both invoice headers declare for agents (ETP-5692).
-   *
-   * @return the two contracts, in declaration order
-   */
-  protected static Map<String, NeoActionContract> postingContracts() {
-    return InvoicePostingGate.CONTRACTS;
   }
 
   /**

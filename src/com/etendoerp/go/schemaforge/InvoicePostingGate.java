@@ -21,6 +21,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -100,6 +101,23 @@ public final class InvoicePostingGate {
   }
 
   private InvoicePostingGate() {
+  }
+
+  /**
+   * The ETP-5692 guards every invoice header request passes before anything else runs: the
+   * completed-invoice write fence on a CRUD update ({@link CompletedInvoiceWriteFence}) and the
+   * status gate on an {@code unpost} action ({@link #checkUnpost}). Both are the invoice
+   * customization, so they hold on REST and on MCP alike.
+   *
+   * @param context               the current request
+   * @param editableWhenCompleted the calling window's header allowlist
+   *                              ({@code AbstractInvoiceHeaderHandler#completedEditableHeaderFields})
+   * @return the refusal, or {@code null} to continue
+   */
+  public static NeoResponse checkHeaderRequest(NeoContext context,
+      Set<String> editableWhenCompleted) {
+    NeoResponse fence = CompletedInvoiceWriteFence.checkHeader(context, editableWhenCompleted);
+    return fence != null ? fence : checkUnpost(context);
   }
 
   /**
