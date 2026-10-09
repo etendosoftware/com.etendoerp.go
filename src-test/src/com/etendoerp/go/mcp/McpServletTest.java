@@ -39,6 +39,7 @@ import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
@@ -867,7 +868,10 @@ public class McpServletTest {
         .getJSONObject(McpModernResults.META_SERVER_INFO).toString());
   }
 
-  /** M9: a bare probe with no _meta is still a modern method — served (lenient) with one WARN. */
+  /**
+   * M9: a bare probe with no _meta is still a modern method — served (lenient) with one WARN. The
+   * WARN carries the derived session, so Datadog can correlate it with the calls that follow.
+   */
   @Test
   public void discoverWithoutMetaIsServedWithAWarn() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
@@ -876,7 +880,11 @@ public class McpServletTest {
 
     try (LogCapture logs = LogCapture.of(McpServlet.class)) {
       servlet.doPost(request, response);
-      assertFalse(logs.messages(Level.WARN).isEmpty());
+      List<String> warns = logs.messages(Level.WARN);
+      assertFalse(warns.isEmpty());
+      assertTrue(warns.toString(), warns.stream()
+          .filter(line -> line.contains("served without"))
+          .allMatch(line -> line.contains("session=m-")));
     }
 
     verify(response).setStatus(HttpServletResponse.SC_OK);

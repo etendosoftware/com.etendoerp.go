@@ -337,10 +337,10 @@ final class McpUsageTelemetry {
       return ClientInfo.UNKNOWN;
     }
     String name = StringUtils.abbreviate(
-        McpRequestEra.printable(StringUtils.trimToNull(info.optString("name", null))),
+        McpRequestEra.withoutControls(StringUtils.trimToNull(info.optString("name", null))),
         MAX_CLIENT_FIELD);
     String version = StringUtils.abbreviate(
-        McpRequestEra.printable(StringUtils.trimToNull(info.optString("version", null))),
+        McpRequestEra.withoutControls(StringUtils.trimToNull(info.optString("version", null))),
         MAX_CLIENT_FIELD);
     return name == null && version == null ? ClientInfo.UNKNOWN : new ClientInfo(name, version);
   }

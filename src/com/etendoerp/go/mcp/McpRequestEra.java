@@ -186,10 +186,18 @@ final class McpRequestEra {
    * @return the printable value, or {@code null}
    */
   static String printable(String value) {
-    if (value == null) {
-      return null;
-    }
-    return StringUtils.abbreviate(CONTROL.matcher(value).replaceAll("?"), MAX_ECHOED_VALUE);
+    return StringUtils.abbreviate(withoutControls(value), MAX_ECHOED_VALUE);
+  }
+
+  /**
+   * {@link #printable(String)} without the bound, for a value whose caller applies its own (such
+   * as a stored column width).
+   *
+   * @param value the value, may be {@code null}
+   * @return the value with every control character replaced by {@code ?}, or {@code null}
+   */
+  static String withoutControls(String value) {
+    return value == null ? null : CONTROL.matcher(value).replaceAll("?");
   }
 
   /**

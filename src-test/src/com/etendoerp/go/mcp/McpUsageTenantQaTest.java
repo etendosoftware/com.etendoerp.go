@@ -337,8 +337,8 @@ public class McpUsageTenantQaTest {
     JSONObject params = new JSONObject().put("_meta", new JSONObject().put(
         McpServlet.META_CLIENT_INFO, new JSONObject().put("name", longName)));
 
-    org.junit.Assert.assertTrue(
-        McpUsageTelemetry.clientInfoFromMeta(params).getName().length() <= 100);
+    // Bounded at the stored width (100), not at the shorter bound of an echoed log value.
+    assertEquals(100, McpUsageTelemetry.clientInfoFromMeta(params).getName().length());
   }
 
   @Test

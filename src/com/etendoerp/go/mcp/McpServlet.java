@@ -287,11 +287,13 @@ public class McpServlet extends HttpServlet {
   private boolean admit(HttpServletRequest request, HttpServletResponse response,
       AuthIdentity identity, Object id, String method, JSONObject params,
       McpRequestEra.Classification era) throws IOException, JSONException {
-    if (era.isModern() && !acceptModern(response, id, method, params, era)) {
+    if (era.isModern() && refuseModern(response, id, method, params, era)) {
       return false;
     }
     McpUsageTelemetry.bindModernCaller(identity.userId, identity.clientId, identity.roleId,
         params, era);
+    // After binding, so the line carries the derived session and correlates with the calls.
+    reportServedWithout(method, params, era);
     if (!era.isModern() && !INITIALIZE.equals(method)) {
       // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
       McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
@@ -329,20 +331,21 @@ public class McpServlet extends HttpServlet {
   }
 
   /**
-   * Report what a served modern request left out, or refuse a malformed one.
+   * Refuse a malformed modern request. Runs before any derived session is bound, so a refused
+   * request never opens one.
    *
-   * @return {@code false} when the request was refused and the {@code 400} already written
+   * @return {@code true} when the request was refused and the {@code 400} already written
    */
-  private boolean acceptModern(HttpServletResponse response, Object id, String method,
+  private boolean refuseModern(HttpServletResponse response, Object id, String method,
       JSONObject params, McpRequestEra.Classification era) throws IOException, JSONException {
-    String client = clientNameFor(params);
-    for (String issue : era.issues()) {
-      log.warn("MCP modern request served without: {} (method={}, client={}) session={}", issue,
-          method, client, McpUsageTelemetry.sessionForLog());
-    }
     McpRequestEra.Refusal refusal = era.refusal();
     if (refusal == null) {
-      return true;
+      return false;
+    }
+    String client = clientNameFor(params);
+    for (String issue : era.issues()) {
+      log.warn("MCP modern request refused without: {} (method={}, client={})", issue, method,
+          client);
     }
     log.warn("MCP modern request refused ({}): {} (method={}, client={}) session={}",
         refusal.code(), refusal.message(), method, client, McpUsageTelemetry.sessionForLog());
@@ -352,7 +355,20 @@ public class McpServlet extends HttpServlet {
     }
     response.setStatus(refusal.httpStatus());
     response.getWriter().write(error.toString());
-    return false;
+    return true;
+  }
+
+  /** One WARN per piece a served modern request left out (lenient mode). */
+  private static void reportServedWithout(String method, JSONObject params,
+      McpRequestEra.Classification era) {
+    if (!era.isModern() || era.issues().isEmpty()) {
+      return;
+    }
+    String client = clientNameFor(params);
+    for (String issue : era.issues()) {
+      log.warn("MCP modern request served without: {} (method={}, client={}) session={}", issue,
+          method, client, McpUsageTelemetry.sessionForLog());
+    }
   }
 
   /**
