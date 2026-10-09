@@ -3901,6 +3901,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (onboardingRequest == null) {
       return null;
     }
+    // ETP-5689: an additional environment arrives without a full name; fall back to the
+    // account's name (then its email) here, once, so both the pooled and the classic path name
+    // the owner after the person instead of the client-suffixed username.
+    onboardingRequest.fullName = EtendoGoJwtSupport.resolveOwnerDisplayName(
+        onboardingRequest.fullName, authenticated.account.getName(), accountEmail);
     String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
     if (currencyId == null
         || rejectWhenPaidOnboardingIsNotOwned(accountEmail, onboardingRequest, response)) {
@@ -4407,9 +4412,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
       data.address = body.optString(FIELD_ADDRESS, "").trim();
-      // Full name of the person onboarding. Optional in the payload; when present
-      // it becomes the display name of the client admin user (otherwise Etendo's
-      // InitialClientSetup leaves it as the username/email).
+      // Full name of the person onboarding. Optional in the payload; it becomes the display
+      // name of the client admin user. When blank, prepareOnboarding falls back to the account's
+      // name, then its email (ETP-5689).
       data.fullName = body.optString(FIELD_FULL_NAME, "").trim();
       // Tax ID (ETP-4749): optional in the wizard, so a blank value here is expected and
       // must not fail the request — wireOrgInfo() only persists it when non-blank.

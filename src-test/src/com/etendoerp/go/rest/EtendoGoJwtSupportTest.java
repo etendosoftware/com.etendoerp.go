@@ -576,6 +576,47 @@ class EtendoGoJwtSupportTest {
   }
 
   @Nested
+  @DisplayName("resolveOwnerDisplayName")
+  class ResolveOwnerDisplayName {
+
+    @Test
+    @DisplayName("prefers the full name typed in the onboarding form")
+    void prefersRequestFullName() {
+      assertEquals("Jane Doe", EtendoGoJwtSupport.resolveOwnerDisplayName(" Jane Doe ",
+          "Account Name", "jane@example.com"));
+    }
+
+    @Test
+    @DisplayName("ETP-5689: falls back to the account name when the form sends none")
+    void fallsBackToAccountName() {
+      assertEquals("Account Name", EtendoGoJwtSupport.resolveOwnerDisplayName("  ",
+          "Account Name", "jane@example.com"));
+    }
+
+    @Test
+    @DisplayName("ETP-5689: falls back to the bare email, never a suffixed username")
+    void fallsBackToEmail() {
+      assertEquals("jane@example.com",
+          EtendoGoJwtSupport.resolveOwnerDisplayName(null, null, "jane@example.com"));
+    }
+
+    @Test
+    @DisplayName("truncates to the AD_User.Name width")
+    void truncatesToFullNameLimit() {
+      String longName = "x".repeat(OnboardingFieldLimits.FULL_NAME + 10);
+
+      assertEquals(OnboardingFieldLimits.FULL_NAME,
+          EtendoGoJwtSupport.resolveOwnerDisplayName(null, longName, "jane@example.com").length());
+    }
+
+    @Test
+    @DisplayName("returns null when every candidate is blank")
+    void nullWhenAllBlank() {
+      assertNull(EtendoGoJwtSupport.resolveOwnerDisplayName("", " ", null));
+    }
+  }
+
+  @Nested
   @DisplayName("applyClientAdminEmail")
   class ApplyClientAdminEmail {
 

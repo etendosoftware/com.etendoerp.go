@@ -357,6 +357,25 @@ public final class EtendoGoJwtSupport {
   }
 
   /**
+   * ETP-5689 — the display name the owner {@code AD_User} of a new environment gets: the full name
+   * typed in the onboarding form, else the account's own {@code ETGO_ACCOUNT.NAME}, else the bare
+   * account email. Never the username, which carries a {@code +company} suffix (see {@link
+   * #buildClientUsername}) whenever the email is already a username elsewhere in the instance —
+   * exactly the additional-environment case, where the form sends no full name. Capped at {@link
+   * OnboardingFieldLimits#FULL_NAME}, the width of {@code AD_User.Name}.
+   *
+   * @param requestFullName full name sent by the onboarding form, possibly blank
+   * @param accountName {@code ETGO_ACCOUNT.NAME} of the onboarding account, possibly blank
+   * @param accountEmail email of the onboarding account
+   * @return the first non-blank of the three, trimmed and truncated; {@code null} if all are blank
+   */
+  static String resolveOwnerDisplayName(String requestFullName, String accountName,
+      String accountEmail) {
+    String name = StringUtils.firstNonBlank(requestFullName, accountName, accountEmail);
+    return name == null ? null : StringUtils.left(name.trim(), OnboardingFieldLimits.FULL_NAME);
+  }
+
+  /**
    * Sets the display name of the client admin user (looked up by username) to the
    * given full name. No-op when the name is blank or the user is not found. The
    * change is saved on the current DAL transaction (committed by the caller).
