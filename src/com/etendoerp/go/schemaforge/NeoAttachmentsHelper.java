@@ -569,26 +569,12 @@ public final class NeoAttachmentsHelper {
         return;
       }
 
-      AttachImplementationManager aim = getAttachManager();
-      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-      try (ZipOutputStream zip = new ZipOutputStream(buffer)) {
-        for (Attachment attachment : recordAttachments) {
-          if (requestedIds != null && !requestedIds.contains(attachment.getId())) {
-            continue;
-          }
-          ByteArrayOutputStream fileBuffer = new ByteArrayOutputStream();
-          aim.download(attachment.getId(), fileBuffer);
-          zip.putNextEntry(new ZipEntry(attachment.getName()));
-          zip.write(fileBuffer.toByteArray());
-          zip.closeEntry();
-        }
-      }
+      byte[] bytes = buildAttachmentsZip(recordAttachments, requestedIds);
 
       response.setStatus(HttpServletResponse.SC_OK);
       response.setContentType(ZIP_CONTENT_TYPE);
       response.setHeader(CONTENT_DISPOSITION,
           buildContentDisposition("attachments_" + recordId + ".zip"));
-      byte[] bytes = buffer.toByteArray();
       response.setContentLength(bytes.length);
       try (OutputStream out = response.getOutputStream()) {
         out.write(bytes);
@@ -606,6 +592,46 @@ public final class NeoAttachmentsHelper {
         writeError(response, 500, "Internal error downloading attachments archive");
       }
     }
+  }
+
+  /**
+   * Builds the zip archive served by {@link #handleDownloadAll(String, String, String,
+   * HttpServletResponse)} and returns its bytes.
+   *
+   * <p>Entries are written in the order {@code recordAttachments} comes in (the criteria's
+   * own order), under each attachment's own name. When {@code requestedIds} is non-null,
+   * attachments outside it are skipped — and never read from storage at all, so an
+   * unselected file costs nothing. Ownership is NOT checked here: the caller has already
+   * refused the whole request if any requested id was foreign, which is why nothing is
+   * streamed in that case.</p>
+   *
+   * <p>Purely an assembly step: it neither catches nor wraps anything, so an
+   * {@link OBException} from {@link AttachImplementationManager#download} and an
+   * {@link IOException} from the zip stream both propagate to the caller's existing
+   * handlers unchanged.</p>
+   *
+   * @param recordAttachments every attachment of the record, in the order to zip them
+   * @param requestedIds      the subset to include, or {@code null} for all of them
+   * @return the complete archive, ready to write to the response
+   * @throws IOException if the zip stream fails
+   */
+  private static byte[] buildAttachmentsZip(List<Attachment> recordAttachments,
+      Set<String> requestedIds) throws IOException {
+    AttachImplementationManager aim = getAttachManager();
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    try (ZipOutputStream zip = new ZipOutputStream(buffer)) {
+      for (Attachment attachment : recordAttachments) {
+        if (requestedIds != null && !requestedIds.contains(attachment.getId())) {
+          continue;
+        }
+        ByteArrayOutputStream fileBuffer = new ByteArrayOutputStream();
+        aim.download(attachment.getId(), fileBuffer);
+        zip.putNextEntry(new ZipEntry(attachment.getName()));
+        zip.write(fileBuffer.toByteArray());
+        zip.closeEntry();
+      }
+    }
+    return buffer.toByteArray();
   }
 
   /**
