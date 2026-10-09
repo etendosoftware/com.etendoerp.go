@@ -19,11 +19,36 @@ package com.etendoerp.go.onboarding.pool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
-/** ETP-5389 — which requests the pool can serve, and the size bounds. */
+import com.etendoerp.go.common.GoRuntimeProperties;
+
+/**
+ * ETP-5389 — which requests the pool can serve, and the size bounds.
+ *
+ * @covers com.etendoerp.go.onboarding.pool.TenantPoolConfig
+ */
 public class TenantPoolConfigTest {
+
+  /**
+   * Makes the pool size read as set nowhere (no JVM property, no {@code Openbravo.properties} entry,
+   * no environment variable) while every other setting is still read for real. Without it a test
+   * read this machine's own configuration and failed wherever a developer sizes the local pool.
+   *
+   * @return the static mock to close when the test is done
+   */
+  public static MockedStatic<GoRuntimeProperties> poolSizeUnset() {
+    MockedStatic<GoRuntimeProperties> props =
+        Mockito.mockStatic(GoRuntimeProperties.class, Mockito.CALLS_REAL_METHODS);
+    props.when(() -> GoRuntimeProperties.readValue(eq(TenantPoolConfig.PROP_SIZE),
+        eq(TenantPoolConfig.ENV_SIZE), anyString())).thenAnswer(call -> call.getArgument(2));
+    return props;
+  }
 
   @Test
   public void onlyTheEurSpainSpanishCombinationIsSupported() {
@@ -52,7 +77,9 @@ public class TenantPoolConfigTest {
 
   @Test
   public void defaultsWhenNothingIsConfigured() {
-    assertEquals(TenantPoolConfig.DEFAULT_SIZE, TenantPoolConfig.poolSize());
+    try (MockedStatic<GoRuntimeProperties> props = poolSizeUnset()) {
+      assertEquals(TenantPoolConfig.DEFAULT_SIZE, TenantPoolConfig.poolSize());
+    }
     String property = "etendo.go.flags.onboarding-tenant-pool";
     String previous = System.getProperty(property);
     try {
