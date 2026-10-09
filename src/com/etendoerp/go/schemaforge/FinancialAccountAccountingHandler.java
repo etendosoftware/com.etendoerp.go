@@ -431,6 +431,8 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     if (StringUtils.isBlank(name)) {
       return code;
     }
-    return StringUtils.isNotBlank(code) ? code + " — " + name : name;
+    // ETP-5681: "<code> - <name>", the label every other account selector shows (the generic
+    // ValidCombination selector and the Esquema contable catalog).
+    return StringUtils.isNotBlank(code) ? code + " - " + name : name;
   }
 }
