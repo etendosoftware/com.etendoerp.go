@@ -568,26 +568,36 @@ public class GoSessionEndpointsTest {
    */
   private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord)
       throws Exception {
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
+        "R1", new JSONArray().put(roleEntry("R1", "O1")));
+    return enterEnvironment(sessionRecord, roleListData, new JSONObject()
+        .put("userId", "U1")
+        .put("roleId", "R1")
+        .put("orgId", "O1"), "R1");
+  }
+
+  /**
+   * Posts {@code /session/environment} with {@code requestBody}, the user holding the roles in
+   * {@code roleListData}; only {@code enteredRoleId} resolves to a {@link Role}, so entering with
+   * any other role fails instead of passing by accident.
+   */
+  private CapturedResponse enterEnvironment(GoSessionRecord sessionRecord,
+      EtendoGoJwtSupport.RoleListData roleListData, JSONObject requestBody, String enteredRoleId)
+      throws Exception {
     when(goSessionService.resolve("tok")).thenReturn(sessionRecord);
 
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(EMAIL);
 
-    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
-        "R1",
-        new JSONArray().put(new JSONObject()
-            .put("id", "R1")
-            .put("orgList", new JSONArray().put(new JSONObject().put("id", "O1")))));
-
     User user = mock(User.class);
     Role role = mock(Role.class);
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "U1")).thenReturn(user);
-    when(obDal.get(Role.class, "R1")).thenReturn(role);
+    when(obDal.get(Role.class, enteredRoleId)).thenReturn(role);
 
     DecodedJWT decoded = mock(DecodedJWT.class);
     Claim userClaim = claim("U1");
-    Claim roleClaim = claim("R1");
+    Claim roleClaim = claim(enteredRoleId);
     Claim clientClaim = claim("C1");
     Claim orgClaim = claim("O1");
     Claim warehouseClaim = claim("W1");
@@ -611,13 +621,77 @@ public class GoSessionEndpointsTest {
       sws.when(() -> SecureWebServicesUtils.generateToken(user, role)).thenReturn("jwt");
       sws.when(() -> SecureWebServicesUtils.decodeToken("jwt")).thenReturn(decoded);
 
-      servlet.doPost(postEnv(new JSONObject()
-              .put("userId", "U1")
-              .put("roleId", "R1")
-              .put("orgId", "O1").toString(), "tok", CSRF),
-          resp.response);
+      servlet.doPost(postEnv(requestBody.toString(), "tok", CSRF), resp.response);
     }
     return resp;
+  }
+
+  /** The role the session was rotated into: what every later request is authorized with. */
+  private String rotatedRoleId() {
+    ArgumentCaptor<GoSessionRecord> captor = ArgumentCaptor.forClass(GoSessionRecord.class);
+    verify(goSessionService).rotate(captor.capture());
+    return captor.getValue().getRoleId();
+  }
+
+  private static JSONObject roleEntry(String roleId, String... orgIds) throws Exception {
+    JSONArray orgList = new JSONArray();
+    for (String orgId : orgIds) {
+      orgList.put(new JSONObject().put("id", orgId));
+    }
+    return new JSONObject().put("id", roleId).put("orgList", orgList);
+  }
+
+  /** The client never sends a role, only its first organization (EnvSelectStep/loginEnvironment). */
+  private static JSONObject entryWithoutRole() throws Exception {
+    return new JSONObject().put("userId", "U1").put("orgId", "O1");
+  }
+
+  /** ETP-5096 — an entry with no role enters with the user's default role, not the oldest one. */
+  @Test
+  public void environmentEntryWithoutARoleUsesTheDefaultRole() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newsess", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData("R-OLD", "R-DEF",
+        new JSONArray().put(roleEntry("R-OLD", "O1")).put(roleEntry("R-DEF", "O1")));
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O1"), roles,
+        entryWithoutRole(), "R-DEF");
+
+    assertEquals(200, resp.status);
+    assertEquals("R-DEF", rotatedRoleId());
+  }
+
+  /**
+   * ETP-5096 — the default role cannot open the organization the client sends, so entry keeps the
+   * oldest role it used before instead of answering a 403 to someone who could enter yesterday.
+   */
+  @Test
+  public void environmentEntryKeepsTheOldestRoleWhenTheDefaultCannotOpenTheOrg() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newsess", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData("R-OLD", "R-DEF",
+        new JSONArray().put(roleEntry("R-OLD", "O1")).put(roleEntry("R-DEF", "O2")));
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O1"), roles,
+        entryWithoutRole(), "R-OLD");
+
+    assertEquals(200, resp.status);
+    assertEquals("R-OLD", rotatedRoleId());
+  }
+
+  /** An explicit role is still honoured as requested, default or not. */
+  @Test
+  public void environmentEntryWithAnExplicitRoleIgnoresTheDefault() throws Exception {
+    when(goSessionService.rotate(any())).thenReturn(
+        new IssuedGoSession("newsess", "newref", "newcsrf", new GoSessionRecord()));
+    EtendoGoJwtSupport.RoleListData roles = new EtendoGoJwtSupport.RoleListData("R-OLD", "R-DEF",
+        new JSONArray().put(roleEntry("R-OLD", "O1")).put(roleEntry("R-DEF", "O1")));
+
+    CapturedResponse resp = enterEnvironment(sessionInEnvironment("O1"), roles,
+        entryWithoutRole().put("roleId", "R-OLD"), "R-OLD");
+
+    assertEquals(200, resp.status);
+    assertEquals("R-OLD", rotatedRoleId());
   }
 
   @Test
