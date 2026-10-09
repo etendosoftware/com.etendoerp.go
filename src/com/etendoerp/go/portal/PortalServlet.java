@@ -44,6 +44,7 @@ import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.common.CompanyLogoResolver;
+import com.etendoerp.go.schemaforge.NeoAttachmentsDownloader;
 import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -361,7 +362,7 @@ public class PortalServlet extends HttpBaseServlet {
    * served is the attachment currently marked "main" for the {@code C_Invoice} record — the same
    * one the backoffice sidebar shows and the same one a signed email download link serves
    * (ETP-4315). {@link NeoAttachmentsHelper#handleGetMain} resolves it and
-   * {@link NeoAttachmentsHelper#handleDownload} streams it; both are the public entry points that
+   * {@link NeoAttachmentsDownloader#handleDownload} streams it; both are the public entry points that
    * {@code NeoDocumentDownloadService} sits beside, so there is one implementation of "this
    * document's file" for all three callers.
    *
@@ -388,7 +389,7 @@ public class PortalServlet extends HttpBaseServlet {
       sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
       return;
     }
-    NeoAttachmentsHelper.handleDownload(attachmentId, response);
+    NeoAttachmentsDownloader.handleDownload(attachmentId, response);
   }
 
   private String resolveMainAttachmentId(String invoiceId) {

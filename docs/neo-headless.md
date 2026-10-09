@@ -1083,8 +1083,10 @@ Errors from either type return HTTP 400 with `"status": "error"`.
 
 A built-in endpoint over Etendo's real `Attachment`/`C_File` table, backing both the generic
 "Adjuntos" tab and, via the "main document" marker below, the sidebar/preview panel of every
-document window. Implemented in `NeoAttachmentsHelper.java`, routed from
-`NeoBuiltInEndpointHandler.java`.
+document window. Implemented in `NeoAttachmentsHelper.java` — plus
+`NeoAttachmentsDownloader.java` for the two shapes that stream binary content (the
+single-file download and the zip, which write the response body themselves instead of
+returning a `NeoResponse`) — and routed from `NeoBuiltInEndpointHandler.java`.
 
 **Base path:** `/sws/neo/attachments`
 

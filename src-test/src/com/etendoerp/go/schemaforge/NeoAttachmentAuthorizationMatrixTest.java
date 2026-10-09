@@ -128,7 +128,7 @@ public class NeoAttachmentAuthorizationMatrixTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubDownloadManager(weld);
 
-      NeoAttachmentsHelper.handleDownload(FOREIGN_ATTACHMENT_ID, response);
+      NeoAttachmentsDownloader.handleDownload(FOREIGN_ATTACHMENT_ID, response);
 
       // The bytes of another tenant's file reach the caller.
       verify(response).setStatus(HttpServletResponse.SC_OK);
@@ -159,7 +159,7 @@ public class NeoAttachmentAuthorizationMatrixTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubDownloadManager(weld);
 
-      NeoAttachmentsHelper.handleDownload(FOREIGN_ATTACHMENT_ID, response);
+      NeoAttachmentsDownloader.handleDownload(FOREIGN_ATTACHMENT_ID, response);
 
       // Uploader-controlled content type is trusted verbatim.
       verify(response).setContentType("text/html");
@@ -184,7 +184,7 @@ public class NeoAttachmentAuthorizationMatrixTest {
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       obDal.when(OBDal::getInstance).thenReturn(missingDal);
-      NeoAttachmentsHelper.handleDownload(MISSING_ATTACHMENT_ID, missingResponse);
+      NeoAttachmentsDownloader.handleDownload(MISSING_ATTACHMENT_ID, missingResponse);
     }
     verify(missingResponse).setStatus(HttpServletResponse.SC_NOT_FOUND);
     assertTrue("The 404 must carry an error body, unlike the unauthorized case below",
@@ -201,7 +201,7 @@ public class NeoAttachmentAuthorizationMatrixTest {
          MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
       obDal.when(OBDal::getInstance).thenReturn(foreignDal);
       stubDownloadManager(weld);
-      NeoAttachmentsHelper.handleDownload(FOREIGN_ATTACHMENT_ID, foreignResponse);
+      NeoAttachmentsDownloader.handleDownload(FOREIGN_ATTACHMENT_ID, foreignResponse);
     }
     verify(foreignResponse).setStatus(HttpServletResponse.SC_OK);
     assertEquals("Missing and unauthorized must not be distinguishable",

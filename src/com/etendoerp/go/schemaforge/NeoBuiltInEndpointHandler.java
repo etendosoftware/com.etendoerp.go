@@ -296,7 +296,9 @@ class NeoBuiltInEndpointHandler {
 
   /**
    * Dispatches {@code /sws/neo/attachments/*} requests to the cross-cutting
-   * {@link NeoAttachmentsHelper}. Supported shapes:
+   * {@link NeoAttachmentsHelper}, or to {@link NeoAttachmentsDownloader} for the two
+   * shapes that stream binary content (the single-file download and the zip).
+   * Supported shapes:
    * <ul>
    *   <li>{@code GET    /attachments/config}                        — the upload policy
    *       (max size + accepted types) enforced by the upload endpoint below</li>
@@ -408,7 +410,7 @@ class NeoBuiltInEndpointHandler {
       return;
     }
     if (ATTACHMENTS_SEGMENT_ZIP.equals(subresource)) {
-      NeoAttachmentsHelper.handleDownloadAll(tableName, recordId,
+      NeoAttachmentsDownloader.handleDownloadAll(tableName, recordId,
           request.getParameter(ATTACHMENT_IDS_PARAM), response);
     } else if (ATTACHMENTS_SEGMENT_MAIN.equals(subresource)) {
       servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
@@ -438,7 +440,7 @@ class NeoBuiltInEndpointHandler {
     }
 
     if ("GET".equals(method)) {
-      NeoAttachmentsHelper.handleDownload(attachmentId, response);
+      NeoAttachmentsDownloader.handleDownload(attachmentId, response);
       return;
     }
     // ETP-5205 — every remaining verb writes: delete and description need the write tier.
