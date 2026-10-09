@@ -30,6 +30,8 @@ import org.junit.Test;
  *
  * <p>Covers the cookie contract (SEC-10) and cross-site CSRF acceptance criteria without touching
  * the database: cookie attribute building and Origin/CSRF validation on unsafe methods.
+ *
+ * @covers com.etendoerp.go.session.GoSessionSecurity
  */
 public class GoSessionSecurityTest {
 
@@ -151,5 +153,39 @@ public class GoSessionSecurityTest {
     when(req.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn(csrfHeader);
     when(req.getRequestURL()).thenReturn(new StringBuffer(APP_URL));
     return req;
+  }
+
+  // ===================== ETP-5675 — account header =====================
+
+  @Test
+  public void accountHeaderAbsentIsConsistent() {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn(null);
+
+    assertTrue(GoSessionSecurity.isAccountConsistent(req, "ACCOUNT-B"));
+  }
+
+  @Test
+  public void accountHeaderNamingTheSessionAccountIsConsistent() {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn(" ACCOUNT-B ");
+
+    assertTrue(GoSessionSecurity.isAccountConsistent(req, "ACCOUNT-B"));
+  }
+
+  @Test
+  public void sessionWithoutAccountIsNotCompared() {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn("ACCOUNT-C");
+
+    assertTrue(GoSessionSecurity.isAccountConsistent(req, null));
+  }
+
+  @Test
+  public void accountHeaderNamingAnotherAccountIsInconsistent() {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn("ACCOUNT-C");
+
+    assertFalse(GoSessionSecurity.isAccountConsistent(req, "ACCOUNT-B"));
   }
 }

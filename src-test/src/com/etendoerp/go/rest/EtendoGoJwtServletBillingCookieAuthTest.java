@@ -100,6 +100,27 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     verifyNoInteractions(fixture.portalService);
   }
 
+  // ETP-5675 — the cookie is the browser profile's, so a tab still showing another account sends
+  // this session's cookie with its own account in X-Go-Account. It must not read this account's
+  // billing: refused before anything is looked up.
+  @Test
+  public void cookieGetSubscriptionFromATabOfAnotherAccountIsForbiddenAndTouchesNothing()
+      throws Exception {
+    Fixture fixture = new Fixture();
+    when(fixture.goSessionService.resolve(SESSION_TOKEN)).thenReturn(fixture.validSession());
+
+    HttpServletRequest req = cookieGet(SUBSCRIPTION_PATH, SESSION_TOKEN, false);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn("another-account");
+    ResponseCapture resp = mockResponse();
+    try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      fixture.servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(403, resp.status);
+    verifyNoInteractions(fixture.requestStore, fixture.portalService);
+  }
+
   @Test
   public void invalidOrExpiredCookieAnswers401AndTouchesNothing() throws Exception {
     Fixture fixture = new Fixture();
@@ -390,6 +411,10 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
           String.valueOf(call.getArgument(0)).toLowerCase().contains("customer")
               ? FOREIGN_CUSTOMER : FOREIGN_SUBSCRIPTION);
       when(req.getHeader(anyString())).thenReturn(FOREIGN_SUBSCRIPTION);
+      // ETP-5675 — X-Go-Account is not an arbitrary header: it names the account the tab believes
+      // it is signed in as, and a foreign value is refused outright (covered below). Absent here,
+      // so this case keeps proving that foreign ids elsewhere never pick the account.
+      when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn(null);
     }
     when(req.getHeader("Authorization")).thenReturn(null);
     if (cookieValue != null) {
