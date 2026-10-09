@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -167,6 +168,19 @@ class McpFkResolverTest {
       return NeoResponse.ok(payload);
     }
 
+    private NeoResponse labelledHits(String... idAndLabelPairs) throws Exception {
+      JSONArray items = new JSONArray();
+      for (int i = 0; i < idAndLabelPairs.length; i += 2) {
+        JSONObject item = new JSONObject();
+        item.put("id", idAndLabelPairs[i]);
+        item.put("label", idAndLabelPairs[i + 1]);
+        items.put(item);
+      }
+      JSONObject payload = new JSONObject();
+      payload.put("items", items);
+      return NeoResponse.ok(payload);
+    }
+
     @Test
     @DisplayName("a 32-char hex id resolves on shape alone — no DAL probe, no selector call")
     void uuidShortCircuits() throws Exception {
@@ -235,6 +249,104 @@ class McpFkResolverTest {
         // The id path already ran, so this advice would send the agent back to what it just did.
         assertFalse(error.getString(McpConstants.KEY_DETAIL).contains("exact record id"));
         assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("etendo_selectors"));
+      }
+    }
+
+    @Test
+    @DisplayName("the exact label of an ambiguous_fk candidate resolves to that candidate's id")
+    void candidateLabelResolvesToItsId() throws Exception {
+      String label = "Entregas IVA 21% - IVA Normal";
+      String otherLabel = "Entregas IVA 21% ISP - IVA Normal ISP";
+      JSONObject body = bodyWith(label);
+      Column column = mock(Column.class);
+      NeoResponse byLabel = labelledHits(UUID_ID, label, "A2A2A8B50A254B2AAE6774B8C2F28120", otherLabel);
+      NeoResponse none = selectorHits();
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        // The selector searches the name only: the full label finds nothing, its name part finds both.
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq(label),
+            anyInt(), anyInt(), any())).thenReturn(none);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY),
+            eq("Entregas IVA 21%"), anyInt(), anyInt(), any())).thenReturn(byLabel);
+
+        assertNull(McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log));
+        assertEquals(UUID_ID, body.getString(KEY));
+      }
+    }
+
+    @Test
+    @DisplayName("a label no candidate carries, or that two candidates share, stays not_found")
+    void unmatchedOrDuplicatedLabelStaysNotFound() throws Exception {
+      String label = "Foo - Bar";
+      Column column = mock(Column.class);
+      NeoResponse noneCarriesIt = labelledHits(UUID_ID, "Foo - Baz");
+      NeoResponse twoCarryIt = labelledHits(UUID_ID, label, "A2A2A8B50A254B2AAE6774B8C2F28120", label);
+      for (NeoResponse prefixHits : new NeoResponse[] {noneCarriesIt, twoCarryIt}) {
+        JSONObject body = bodyWith(label);
+        NeoResponse none = selectorHits();
+        try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+            MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+            MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+          obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+          fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity))
+              .thenReturn(column);
+          selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq(label),
+              anyInt(), anyInt(), any())).thenReturn(none);
+          selector.when(() -> NeoSelectorService.querySelectorByColumn(eq(column), eq(KEY), eq("Foo"),
+              anyInt(), anyInt(), any())).thenReturn(prefixHits);
+
+          JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+          assertNotNull(error);
+          assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
+          assertEquals(label, body.getString(KEY));
+        }
+      }
+    }
+
+    @Test
+    @DisplayName("a value with many separators cannot run an unbounded number of selector queries")
+    void labelProbesAreCapped() throws Exception {
+      // Seven separators: without the cap this would be one plain search plus seven label probes.
+      String label = "A - B - C - D - E - F - G - H";
+      JSONObject body = bodyWith(label);
+      Column column = mock(Column.class);
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
+            anyInt(), anyInt(), any())).thenReturn(selectorHits());
+
+        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+
+        assertNotNull(error);
+        assertEquals(McpConstants.ERROR_NOT_FOUND, error.getString(McpConstants.KEY_ERROR));
+        // One plain search for the whole value, then at most three label probes.
+        selector.verify(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(),
+            anyString(), anyInt(), anyInt(), any()), times(4));
+      }
+    }
+
+    @Test
+    @DisplayName("the ambiguous_fk detail tells the agent candidates can be resent by id or label")
+    void ambiguousDetailMentionsIdOrLabel() throws Exception {
+      JSONObject body = bodyWith("Acme");
+      Column column = mock(Column.class);
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+          MockedStatic<NeoSelectorService> selector = mockStatic(NeoSelectorService.class);
+          MockedStatic<McpSchemaFieldBuilder> fields = mockStatic(McpSchemaFieldBuilder.class)) {
+        obDal.when(OBDal::getInstance).thenReturn(obDalInstance);
+        fields.when(() -> McpSchemaFieldBuilder.findColumn(adTab, KEY, dalEntity)).thenReturn(column);
+        selector.when(() -> NeoSelectorService.querySelectorByColumn(any(), anyString(), anyString(),
+            anyInt(), anyInt(), any())).thenReturn(selectorHits(UUID_ID, LEGACY_ID));
+
+        JSONObject error = McpFkResolver.resolveFkNames(body, dalEntity, adTab, Map.of(), log);
+        assertEquals(McpConstants.ERROR_AMBIGUOUS_FK, error.getString(McpConstants.KEY_ERROR));
+        assertTrue(error.getString(McpConstants.KEY_DETAIL).contains("id or its exact label"));
       }
     }
 
