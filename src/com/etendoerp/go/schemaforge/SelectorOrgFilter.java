@@ -29,10 +29,13 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.schemaforge.selector.meta.SearchableFragment;
+
 /**
  * Organization filter helpers extracted from {@link SelectorQueryBuilder}.
  * Move here: resolveSelectorOrgFilter, buildReadableOrgsPredicate, buildOrganizationPredicate,
- * appendReadableOrgsFilter, appendCustomSearchFilter, resolveSearchableExpression.
+ * appendReadableOrgsFilter, appendCustomSearchFilter, resolveSearchableExpression,
+ * appendRichSearchFilter, resolveRichSearchableExpression.
  */
 public final class SelectorOrgFilter {
 
@@ -134,7 +137,8 @@ public final class SelectorOrgFilter {
   }
 
   /**
-   * Append a full-text search predicate across all searchable properties.
+   * Append a full-text search predicate across all searchable properties of a custom-HQL selector.
+   * Standard rich selectors use {@link #appendRichSearchFilter} instead.
    *
    * <p>Emits an OR clause: {@code (lower(COALESCE(cast(<expr> as string), '')) LIKE :search)}.
    * No-op when {@code search} is blank or {@code searchableProps} is empty.
@@ -147,16 +151,41 @@ public final class SelectorOrgFilter {
    */
   static void appendCustomSearchFilter(StringBuilder hql,
       List<String> searchableProps, String alias, String search, boolean hasWhere) {
-    if (StringUtils.isBlank(search) || searchableProps.isEmpty()) {
+    List<String> expressions = new ArrayList<>();
+    for (String fragment : searchableProps) {
+      expressions.add(resolveSearchableExpression(alias, fragment));
+    }
+    appendSearchPredicate(hql, expressions, search, hasWhere);
+  }
+
+  /**
+   * Append the full-text search predicate of a standard rich (non-custom) selector.
+   *
+   * <p>Same predicate as {@link #appendCustomSearchFilter}, but each fragment is resolved via
+   * {@link #resolveRichSearchableExpression(String, SearchableFragment)}, so a relative DAL path
+   * such as {@code product.name} is always qualified with the alias. A bare path would bind to
+   * the outer query once the where clause is copied into the de-dup subquery (ETP-5670).
+   */
+  static void appendRichSearchFilter(StringBuilder hql,
+      List<SearchableFragment> searchableProps, String alias, String search, boolean hasWhere) {
+    List<String> expressions = new ArrayList<>();
+    for (SearchableFragment fragment : searchableProps) {
+      expressions.add(resolveRichSearchableExpression(alias, fragment));
+    }
+    appendSearchPredicate(hql, expressions, search, hasWhere);
+  }
+
+  private static void appendSearchPredicate(StringBuilder hql, List<String> expressions,
+      String search, boolean hasWhere) {
+    if (StringUtils.isBlank(search) || expressions.isEmpty()) {
       return;
     }
     hql.append(hasWhere ? SelectorQueryBuilder.SQL_AND : SelectorQueryBuilder.SQL_WHERE).append("(");
-    for (int i = 0; i < searchableProps.size(); i++) {
+    for (int i = 0; i < expressions.size(); i++) {
       if (i > 0) {
         hql.append(" OR ");
       }
-      String expr = resolveSearchableExpression(alias, searchableProps.get(i));
-      hql.append("lower(COALESCE(cast(").append(expr).append(" as string), '')) LIKE :search");
+      hql.append("lower(COALESCE(cast(").append(expressions.get(i)).append(" as string), '')) LIKE :search");
     }
     hql.append(")");
   }
@@ -176,5 +205,22 @@ public final class SelectorOrgFilter {
       return fragment;
     }
     return fragment.contains(".") ? fragment : alias + "." + fragment;
+  }
+
+  /**
+   * Resolve a searchable fragment of a standard rich (non-custom) selector into an HQL expression.
+   *
+   * <p>A relative DAL path ({@code SelectorField.property} or the searchable fallback) is always
+   * prefixed with {@code alias.}, dotted or not: {@code product.name} becomes
+   * {@code e.product.name}. A {@code clause_left_part} fragment keeps the rule of
+   * {@link #resolveSearchableExpression(String, String)}.
+   *
+   * <p>Package-private for unit testing.
+   */
+  static String resolveRichSearchableExpression(String alias, SearchableFragment fragment) {
+    if (fragment.relativePath && StringUtils.isNotBlank(fragment.expression)) {
+      return alias + "." + fragment.expression;
+    }
+    return resolveSearchableExpression(alias, fragment.expression);
   }
 }

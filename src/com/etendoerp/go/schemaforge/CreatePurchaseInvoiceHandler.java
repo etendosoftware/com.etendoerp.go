@@ -68,6 +68,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreatePurchaseInvoiceHandler.class);
   private static final String ACTION_NAME = "createPurchaseInvoice";
+  private static final String LIST_ACTION = "listInvoices";
   private static final String PENDING_LINES_ACTION = "pendingInvoiceLines";
   private static final String PRODUCT_PRICES_ACTION = "productPrices";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
@@ -136,6 +137,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         dispatchGoodsReceiptOnlyAction(context, specName, fieldName, method);
     if (readOnlyOrPricingResponse != null) {
       return readOnlyOrPricingResponse;
+    }
+
+    // GET listInvoices — purchase invoices linked to the order by header or only by lines
+    if (SPEC_PURCHASE_ORDER.equals(specName) && LIST_ACTION.equals(fieldName) && "GET".equals(method)) {
+      return OrderInvoiceListSupport.listInvoices(context, false);
     }
 
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(method)) {

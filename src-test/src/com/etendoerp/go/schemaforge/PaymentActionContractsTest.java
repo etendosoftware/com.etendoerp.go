@@ -46,6 +46,9 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
  * to send something that does nothing.</p>
  *
  * @covers com.etendoerp.go.schemaforge.PaymentActionHandlerSupport
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PurchaseInvoiceHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.FollowUpSupport
  */
 @DisplayName("ETP-5558 — invoice payment action contracts")
 class PaymentActionContractsTest {
@@ -203,7 +206,8 @@ class PaymentActionContractsTest {
   }
 
   @Test
-  @DisplayName("both invoice headers publish the payment actions plus currencyOptions over GET")
+  @DisplayName("both invoice headers publish the payment actions, currencyOptions over GET and "
+      + "their follow-up action")
   void headersPublishTheUnion() {
     Map<String, NeoActionContract> sales = new SalesInvoiceHeaderHandler().actionContracts();
     Map<String, NeoActionContract> purchase = new PurchaseInvoiceHeaderHandler().actionContracts();
@@ -213,6 +217,11 @@ class PaymentActionContractsTest {
     assertEquals("GET", sales.get("currencyOptions").getHttpMethod(),
         "currencyOptions only answers GET; the MCP must call it that way");
     assertEquals("POST", sales.get("registerPayment").getHttpMethod());
+    // ETP-5576 MCP-8: the follow-up actions are discoverable, with the one input the creator reads.
+    assertEquals(List.of("warehouseId"), names(sales.get("createShipment")));
+    assertEquals(List.of("warehouseId"), names(purchase.get("createGoodsReceipt")));
+    assertFalse(sales.containsKey("createGoodsReceipt"));
+    assertFalse(purchase.containsKey("createShipment"));
   }
 
   @Test

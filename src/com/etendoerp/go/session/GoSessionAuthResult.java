@@ -21,8 +21,9 @@ package com.etendoerp.go.session;
  * <ul>
  *   <li>{@link Status#NO_SESSION} — no session cookie; the caller may fall back to legacy Bearer.</li>
  *   <li>{@link Status#UNAUTHENTICATED} — a cookie was present but invalid/expired/revoked → {@code 401}.</li>
- *   <li>{@link Status#CSRF_FAILED} — valid session but the unsafe request failed CSRF/Origin → {@code 403};
- *       {@link #getRefusalMessage()} says which of the two proofs failed.</li>
+ *   <li>{@link Status#CSRF_FAILED} — valid session but the request failed one of its tab-bound proofs
+ *       → {@code 403}: CSRF or Origin on an unsafe method, or (any method) an {@code X-Go-Account}
+ *       naming another account (ETP-5675). {@link #getRefusalMessage()} says which proof failed.</li>
  *   <li>{@link Status#AUTHENTICATED} — resolved session available via {@link #getRecord()}.</li>
  * </ul>
  */
@@ -53,6 +54,18 @@ public final class GoSessionAuthResult {
   /** @return a result meaning a cookie was present but the session is invalid/expired/revoked */
   public static GoSessionAuthResult unauthenticated() {
     return new GoSessionAuthResult(Status.UNAUTHENTICATED, null);
+  }
+
+  /**
+   * ETP-5675 — the request came from a tab signed in as another account than the cookie's. Shares
+   * {@link Status#CSRF_FAILED} on purpose: it is the same family (a tab-bound proof that does not
+   * match the session), so every surface already answers it with 403 and the refusal message,
+   * without a new branch in each consumer.
+   *
+   * @return a result meaning the request's account header does not match the session's account
+   */
+  public static GoSessionAuthResult accountMismatch() {
+    return new GoSessionAuthResult(Status.CSRF_FAILED, null, GoSessionSecurity.MSG_ACCOUNT_MISMATCH);
   }
 
   /** @return a result meaning a valid session sent a missing or stale CSRF token on an unsafe method */
