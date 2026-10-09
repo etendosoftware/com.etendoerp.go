@@ -241,12 +241,13 @@ public class McpUsageTenantQaTest {
 
   @Test
   public void derivedSessionIsStableWithinTheIdleGapAndRenewedAfterIt() {
+    long gap = McpUsageTelemetry.MODERN_SESSION_IDLE_MS;
     McpUsageTelemetry.ModernSession first =
-        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", "claude-code", T0);
-    McpUsageTelemetry.ModernSession again = McpUsageTelemetry.modernSession("u-gap", "c1", "r1",
-        "claude-code", T0 + McpUsageTelemetry.MODERN_SESSION_IDLE_MS);
-    McpUsageTelemetry.ModernSession later = McpUsageTelemetry.modernSession("u-gap", "c1", "r1",
-        "claude-code", T0 + 2 * McpUsageTelemetry.MODERN_SESSION_IDLE_MS + 1);
+        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", T0);
+    McpUsageTelemetry.ModernSession again =
+        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", T0 + gap);
+    McpUsageTelemetry.ModernSession later =
+        McpUsageTelemetry.modernSession("u-gap", "c1", "r1", T0 + 2 * gap + 1);
 
     org.junit.Assert.assertTrue(first.started());
     org.junit.Assert.assertFalse(again.started());
@@ -257,14 +258,61 @@ public class McpUsageTenantQaTest {
   }
 
   @Test
-  public void derivedSessionsAreDistinctPerUserRoleAndClientName() {
-    String base = McpUsageTelemetry.modernSession("u-per", "c1", "r1", "claude-code", T0).key();
+  public void derivedSessionsAreDistinctPerAuthenticatedCaller() {
+    String base = McpUsageTelemetry.modernSession("u-per", "c1", "r1", T0).key();
     org.junit.Assert.assertNotEquals(base,
-        McpUsageTelemetry.modernSession("u-per2", "c1", "r1", "claude-code", T0).key());
+        McpUsageTelemetry.modernSession("u-per2", "c1", "r1", T0).key());
     org.junit.Assert.assertNotEquals(base,
-        McpUsageTelemetry.modernSession("u-per", "c1", "r2", "claude-code", T0).key());
+        McpUsageTelemetry.modernSession("u-per", "c2", "r1", T0).key());
     org.junit.Assert.assertNotEquals(base,
-        McpUsageTelemetry.modernSession("u-per", "c1", "r1", "cursor", T0).key());
+        McpUsageTelemetry.modernSession("u-per", "c1", "r2", T0).key());
+  }
+
+  /**
+   * W3: the self-reported client name is not part of the key, so rotating it neither opens new
+   * sessions nor flushes other callers' sessions out of the bounded map.
+   */
+  @Test
+  public void rotatingTheClientNameKeepsOneSession() throws Exception {
+    String first = boundSessionFor("u-rot", "name-1");
+    String second = boundSessionFor("u-rot", "name-2");
+
+    assertEquals(first, second);
+  }
+
+  private static String boundSessionFor(String user, String clientName) throws Exception {
+    JSONObject params = new JSONObject().put("_meta", new JSONObject()
+        .put(McpRequestEra.META_PROTOCOL_VERSION, McpProtocolVersion.MODERN_LATEST)
+        .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", clientName)));
+    try {
+      McpUsageTelemetry.bindModernCaller(user, "c1", "r1", params,
+          McpRequestEra.classify("tools/list", params, new McpRequestEra.Headers(
+              McpProtocolVersion.MODERN_LATEST, "tools/list", null), false));
+      assertEquals(clientName, McpUsageTelemetry.currentClient().getName());
+      return McpUsageTelemetry.currentSessionKey();
+    } finally {
+      McpUsageTelemetry.clearCurrentSessionKey();
+      McpUsageTelemetry.clearCurrentClient();
+    }
+  }
+
+  /** W3: the map evicts the least recently ACTIVE session, never a busy one. */
+  @Test
+  public void anActiveSessionSurvivesEvictionPressure() {
+    long now = T0;
+    String active = McpUsageTelemetry.modernSession("u-active", "c1", "r1", now).key();
+    for (int i = 0; i < 3_000; i++) {
+      McpUsageTelemetry.modernSession("u-filler-" + i, "c1", "r1", now);
+      if (i % 500 == 0) {
+        // The active caller keeps calling while other callers come and go.
+        McpUsageTelemetry.modernSession("u-active", "c1", "r1", now);
+      }
+    }
+
+    McpUsageTelemetry.ModernSession again =
+        McpUsageTelemetry.modernSession("u-active", "c1", "r1", now);
+    org.junit.Assert.assertFalse("still tracked", again.started());
+    assertEquals(active, again.key());
   }
 
   @Test

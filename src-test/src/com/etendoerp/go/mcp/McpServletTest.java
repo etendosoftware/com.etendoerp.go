@@ -67,6 +67,7 @@ import com.etendoerp.go.usageevents.LogCapture;
  * dispatch, error handling, GET endpoints, and inner classes.
  *
  * @covers com.etendoerp.go.mcp.McpServlet
+ * @covers com.etendoerp.go.mcp.McpModernResults
  */
 public class McpServletTest {
 
@@ -407,7 +408,7 @@ public class McpServletTest {
     assertEquals("1.0.0", serverInfo.getString("version"));
     assertEquals("Etendo MCP", serverInfo.getString("title"));
     assertEquals("https://app.etendo.ai", serverInfo.getString("websiteUrl"));
-    assertEquals(McpServlet.SERVER_DESCRIPTION, serverInfo.getString("description"));
+    assertEquals(McpModernResults.SERVER_DESCRIPTION, serverInfo.getString("description"));
 
     JSONArray icons = serverInfo.getJSONArray("icons");
     assertEquals(1, icons.length());
@@ -634,10 +635,10 @@ public class McpServletTest {
       JSONObject result = answer.getJSONObject("result");
       assertTrue(result.has("tools"));
       assertEquals("complete", result.getString("resultType"));
-      assertEquals(McpServlet.CATALOG_TTL_MS, result.getLong("ttlMs"));
+      assertEquals(McpModernResults.CATALOG_TTL_MS, result.getLong("ttlMs"));
       assertEquals("private", result.getString("cacheScope"));
       assertEquals("etendo-mcp", result.getJSONObject("_meta")
-          .getJSONObject(McpServlet.META_SERVER_INFO).getString("name"));
+          .getJSONObject(McpModernResults.META_SERVER_INFO).getString("name"));
       verify(response, never()).setHeader(eq(McpUsageTelemetry.HEADER_SESSION_ID), anyString());
     }
   }
@@ -704,6 +705,70 @@ public class McpServletTest {
     assertEquals("Resource not found: etendo://specs/secret", error.getString("message"));
   }
 
+  /** Read a resource whose entity the provider cannot find (an McpRoutingException not_found). */
+  private JSONObject readMissingEntity() throws Exception {
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedConstruction<McpResourceProvider> providerMock = mockConstruction(
+             McpResourceProvider.class, (provider, ctx) -> when(provider.readResource(anyString()))
+                 .thenThrow(McpRoutingException.entityNotFound("nope", "sales-order",
+                     java.util.List.of("header"))))) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(anyString(), anyString(),
+          anyString(), anyString(), org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenAnswer(inv -> ((Callable<?>) inv.getArgument(5)).call());
+
+      try (LogCapture logs = LogCapture.of(McpServlet.class)) {
+        servlet.doPost(request, response);
+        assertTrue("an unknown entity is no server failure: " + logs.messages(Level.ERROR),
+            logs.messages(Level.ERROR).isEmpty());
+        assertEquals(1, logs.messages(Level.WARN).size());
+        assertNull(logs.events(Level.WARN).get(0).getThrown());
+      }
+    }
+    return new JSONObject(getResponseBody()).getJSONObject("error");
+  }
+
+  @Test
+  public void modernUnknownEntityResourceIsInvalidParams() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "etendo:read");
+    setModernHeaders(MODERN, "resources/read", "etendo://specs/sales-order/nope");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 45)
+        .put("method", "resources/read")
+        .put("params", new JSONObject().put("uri", "etendo://specs/sales-order/nope")
+            .put("_meta", modernMeta(MODERN))).toString());
+
+    JSONObject error = readMissingEntity();
+
+    assertEquals(McpRequestEra.INVALID_PARAMS, error.getInt("code"));
+    assertEquals("Resource not found: etendo://specs/sales-order/nope", error.getString("message"));
+  }
+
+  @Test
+  public void legacyUnknownEntityResourceKeepsItsCodeWithoutAStackTrace() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "etendo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0").put("id", 46)
+        .put("method", "resources/read")
+        .put("params", new JSONObject().put("uri", "etendo://specs/sales-order/nope")).toString());
+
+    JSONObject error = readMissingEntity();
+
+    assertEquals(McpServlet.JSON_RPC_INTERNAL_ERROR, error.getInt("code"));
+    verify(response).setStatus(HttpServletResponse.SC_OK);
+  }
+
+  /** S1: a refused modern request opens no derived session and logs no session start. */
+  @Test
+  public void refusedModernRequestOpensNoSession() throws Exception {
+    try (LogCapture logs = LogCapture.of(McpUsageTelemetry.class)) {
+      postModern("tools/list", null, "2027-01-01");
+
+      verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
+      assertTrue(logs.messages(Level.INFO).toString(), logs.messages(Level.INFO).stream()
+          .noneMatch(line -> line.contains("modern session started")));
+    }
+  }
+
   @Test
   public void legacyMissingResourceKeepsItsCodeWithoutAStackTrace() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "etendo:read");
@@ -719,12 +784,12 @@ public class McpServletTest {
 
   @Test
   public void decorateModernMarksEveryResultButCachesOnlyTheCatalog() throws Exception {
-    JSONObject call = McpServlet.decorateModern("tools/call",
+    JSONObject call = McpModernResults.decorate("tools/call",
         new JSONObject().put("content", new JSONArray()));
     assertEquals("complete", call.getString("resultType"));
     assertFalse("a tool result is not cacheable", call.has("ttlMs"));
 
-    JSONObject read = McpServlet.decorateModern("resources/read", new JSONObject());
+    JSONObject read = McpModernResults.decorate("resources/read", new JSONObject());
     assertEquals("private", read.getString("cacheScope"));
   }
 
@@ -732,14 +797,14 @@ public class McpServletTest {
   public void decorateModernKeepsWhatTheHandlerAlreadySet() throws Exception {
     JSONObject fullInfo = new JSONObject().put("name", "etendo-mcp").put("title", "Etendo MCP");
     JSONObject own = new JSONObject().put("ttlMs", 1L).put("cacheScope", "public")
-        .put("_meta", new JSONObject().put(McpServlet.META_SERVER_INFO, fullInfo));
+        .put("_meta", new JSONObject().put(McpModernResults.META_SERVER_INFO, fullInfo));
 
-    JSONObject decorated = McpServlet.decorateModern("tools/list", own);
+    JSONObject decorated = McpModernResults.decorate("tools/list", own);
 
     assertEquals(1L, decorated.getLong("ttlMs"));
     assertEquals("public", decorated.getString("cacheScope"));
     assertEquals("Etendo MCP", decorated.getJSONObject("_meta")
-        .getJSONObject(McpServlet.META_SERVER_INFO).getString("title"));
+        .getJSONObject(McpModernResults.META_SERVER_INFO).getString("title"));
   }
 
   /** K1: with the kill switch on, a modern request is served exactly as before the modern era. */
@@ -778,11 +843,11 @@ public class McpServletTest {
     assertTrue(result.getJSONObject("capabilities").has("tools"));
     assertTrue(result.getJSONObject("capabilities").has("resources"));
     JSONObject serverInfo = result.getJSONObject("_meta")
-        .getJSONObject(McpServlet.META_SERVER_INFO);
+        .getJSONObject(McpModernResults.META_SERVER_INFO);
     assertEquals("etendo-mcp", serverInfo.getString("name"));
     assertEquals("Etendo MCP", serverInfo.getString("title"));
     assertTrue(serverInfo.has("icons"));
-    assertEquals(McpServlet.DISCOVER_TTL_MS, result.getLong("ttlMs"));
+    assertEquals(McpModernResults.DISCOVER_TTL_MS, result.getLong("ttlMs"));
     assertEquals("public", result.getString("cacheScope"));
     assertFalse("no instructions, as initialize", result.has("instructions"));
     verify(response, never()).setHeader(eq(McpUsageTelemetry.HEADER_SESSION_ID), anyString());
@@ -799,7 +864,7 @@ public class McpServletTest {
     assertEquals(init.getJSONObject("capabilities").toString(),
         discover.getJSONObject("capabilities").toString());
     assertEquals(init.getJSONObject("serverInfo").toString(), discover.getJSONObject("_meta")
-        .getJSONObject(McpServlet.META_SERVER_INFO).toString());
+        .getJSONObject(McpModernResults.META_SERVER_INFO).toString());
   }
 
   /** M9: a bare probe with no _meta is still a modern method — served (lenient) with one WARN. */

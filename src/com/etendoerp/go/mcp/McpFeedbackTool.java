@@ -53,7 +53,8 @@ import org.codehaus.jettison.json.JSONObject;
  * <h2>Rate limiting</h2>
  *
  * <p>Per MCP session, so a looping agent cannot flood the table. A modern (2026-07-28) client
- * sends no {@code Mcp-Session-Id} but gets a derived session of its own (ETP-5640). A legacy client
+ * sends no {@code Mcp-Session-Id}; its bucket is its authenticated caller (user, token client,
+ * role), which a rotating self-reported client name cannot change (ETP-5640). A legacy client
  * that does not echo the header has no session and shares one anonymous bucket — deliberately the
  * stricter reading, because an unidentified flooder is exactly the case the limit is for.</p>
  */
@@ -99,10 +100,10 @@ final class McpFeedbackTool {
   }
 
   private static JSONObject dispatch(JSONObject args) throws JSONException {
-    String sessionKey = StringUtils.defaultIfBlank(
-        McpUsageTelemetry.currentSessionKey(), ANONYMOUS_BUCKET);
+    String bucket = StringUtils.defaultIfBlank(
+        McpUsageTelemetry.rateLimitKey(), ANONYMOUS_BUCKET);
 
-    if (!accept(sessionKey)) {
+    if (!accept(bucket)) {
       return McpToolRouter.wrapAsErrorContent(
           errorBody("rate_limited",
               "This session has already submitted " + MAX_PER_WINDOW + " feedback reports in the "
@@ -119,7 +120,8 @@ final class McpFeedbackTool {
     }
 
     // The INFO line, with the usage row id, is McpServlet's once the row exists (logReceived).
-    log.debug("etendo_feedback accepted for session {}", sessionKey);
+    // The session, never the bucket: a modern bucket is a caller tuple of user identifiers.
+    log.debug("etendo_feedback accepted for session {}", McpUsageTelemetry.sessionForLog());
     return McpToolRouter.wrapAsTextContent(acknowledgement());
   }
 

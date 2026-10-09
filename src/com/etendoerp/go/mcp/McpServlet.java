@@ -76,46 +76,15 @@ public class McpServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
   private static final Logger log = LogManager.getLogger(McpServlet.class);
 
-  private static final String SERVER_NAME = "etendo-mcp";
-  private static final String SERVER_VERSION = "1.0.0";
-  /** Human-readable name clients may show instead of {@link #SERVER_NAME} (MCP 2025-11-25). */
-  private static final String SERVER_TITLE = "Etendo MCP";
-  private static final String SERVER_WEBSITE_URL = "https://app.etendo.ai";
-  /** {@code Implementation.description} (MCP 2025-11-25). */
-  static final String SERVER_DESCRIPTION = "Etendo ERP for agents: read and write documents, "
-      + "master data and processes, and run reports, within the permissions of your role.";
-  /**
-   * Public, unauthenticated icon advertised in {@code serverInfo.icons} (MCP 2025-11-25, SEP-973).
-   * Same file for every environment, so a fixed production URL is fine. Clients that predate the
-   * field ignore it.
-   */
-  private static final String SERVER_ICON_URL = "https://app.etendo.ai/favicon.png";
-  private static final String SERVER_ICON_MIME_TYPE = "image/png";
-  private static final String SERVER_ICON_SIZES = "513x513";
-
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
   /** JSON-RPC 2.0: the method does not exist or is not available. */
   static final int JSON_RPC_METHOD_NOT_FOUND = -32601;
   /** JSON-RPC 2.0: internal JSON-RPC error. */
   static final int JSON_RPC_INTERNAL_ERROR = -32603;
-  /** {@code Result.resultType} of every final modern result (MCP 2026-07-28). */
-  private static final String RESULT_TYPE_COMPLETE = "complete";
-  /** {@code _meta} key under which a modern result names the server. */
-  static final String META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
-  /**
-   * Freshness hint for the per-caller catalog results (design §5.2): short enough that a config
-   * push or a role change reaches a modern client within minutes.
-   */
-  static final long CATALOG_TTL_MS = 300_000L;
-  /** Freshness hint of {@code server/discover}: its answer changes only with a deployment. */
-  static final long DISCOVER_TTL_MS = 3_600_000L;
-  /** {@code cacheScope} of a result that is the same for every caller. */
-  static final String CACHE_SCOPE_PUBLIC = "public";
-  /** {@code cacheScope} of a result that depends on the caller's role, scopes or language. */
-  static final String CACHE_SCOPE_PRIVATE = "private";
-  /** Modern methods whose result is a {@code CacheableResult} we compute per caller. */
-  private static final Set<String> PER_CALLER_CACHEABLE =
-      Set.of("tools/list", "resources/list", "resources/read");
+  /** What a log line prints for a client that named itself nowhere. */
+  private static final String UNKNOWN_CLIENT = "unknown";
+  /** Message prefix of a JSON-RPC "method not found". */
+  private static final String METHOD_NOT_FOUND_PREFIX = "Method not found: ";
   /** The legacy-era liveness method, removed by MCP 2026-07-28. */
   private static final String PING = "ping";
   /** Where MCP 2026-07-28 requests carry the client's identity, under {@code params._meta}. */
@@ -217,18 +186,9 @@ public class McpServlet extends HttpServlet {
 
       log.debug("MCP request: method={}, id={}", method, id);
 
-      era = classifyEra(request, method, callParams);
-      bindModernTelemetry(identity, callParams, era);
-      if (era.isModern()) {
-        if (!acceptModern(response, id, method, callParams, era)) {
-          return; // 400 already written
-        }
-      } else if (!INITIALIZE.equals(method)) {
-        // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
-        McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
-            McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
-                .getProtocolVersion(),
-            clientNameFor(callParams));
+      era = McpRequestEra.forRequest(request, method, callParams);
+      if (!admit(request, response, identity, id, method, callParams, era)) {
+        return; // 400 already written
       }
 
       // Dispatch the method
@@ -246,7 +206,7 @@ public class McpServlet extends HttpServlet {
       rpcResponse.put("jsonrpc", "2.0");
       rpcResponse.put("id", id);
       JSONObject answer = result != null ? result : new JSONObject();
-      rpcResponse.put("result", era.isModern() ? decorateModern(method, answer) : answer);
+      rpcResponse.put("result", era.isModern() ? McpModernResults.decorate(method, answer) : answer);
 
       String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
@@ -257,23 +217,8 @@ public class McpServlet extends HttpServlet {
       recordToolCall(identity, new McpCallObservation(McpUsageTelemetry.currentSessionKey(), body,
           rendered, startedAtNanos), toolName, callParams, result, null);
 
-    } catch (McpResourceNotFoundException e) {
-      // Not a server failure: one WARN line, no stack trace. The modern era answers -32602, the
-      // code MCP 2026-07-28 gives it; the legacy era keeps the -32603 it always answered.
-      log.warn("MCP client read a missing resource: {} (client={}) session={}", e.getMessage(),
-          clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
-      writeRpcError(response, body,
-          era.isModern() ? McpRequestEra.INVALID_PARAMS : JSON_RPC_INTERNAL_ERROR,
-          e.getMessage());
-    } catch (McpMethodNotFoundException e) {
-      // A client asking for something we do not offer (or server/discover while the modern era is
-      // switched off). Not a server failure: one WARN line, no stack trace, and -32601. No
-      // telemetry row: only tools/call has a tool name, and an unknown method is never one.
-      log.warn("MCP client called unsupported method '{}' (client={}) session={}", method,
-          clientNameFor(callParams), McpUsageTelemetry.sessionForLog());
-      // The modern era answers 404 (Streamable HTTP, 2026-07-28); the legacy era keeps its 200.
-      writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, e.getMessage(),
-          era.isModern() ? HttpServletResponse.SC_NOT_FOUND : HttpServletResponse.SC_OK, null);
+    } catch (McpResourceNotFoundException | McpMethodNotFoundException e) {
+      answerClientRefusal(response, body, method, callParams, era, e);
     } catch (Exception e) {
       log.error("Error processing MCP message: {} session={}", e.getMessage(),
           McpUsageTelemetry.sessionForLog(), e);
@@ -331,48 +276,56 @@ public class McpServlet extends HttpServlet {
   }
 
   /**
-   * The era to serve this request under (ETP-5640). Everything is legacy while the
-   * {@link com.etendoerp.go.featureflags.GoFeatureFlags#FLAG_MCP_MODERN_ERA_DISABLED} kill
-   * switch is on, which is exactly how the servlet behaved before the modern era existed.
+   * Admit a request under its era (ETP-5640): refuse a malformed modern one, bind the modern
+   * telemetry of an accepted one, and run the legacy version check on a legacy one.
+   *
+   * <p>The modern telemetry is bound only once the request is accepted, so a refused request opens
+   * no derived session.</p>
+   *
+   * @return {@code false} when the request was refused and the {@code 400} already written
    */
-  private static McpRequestEra.Classification classifyEra(HttpServletRequest request,
-      String method, JSONObject params) {
-    if (!McpRequestEra.modernEnabled()) {
-      return McpRequestEra.Classification.legacy();
+  private boolean admit(HttpServletRequest request, HttpServletResponse response,
+      AuthIdentity identity, Object id, String method, JSONObject params,
+      McpRequestEra.Classification era) throws IOException, JSONException {
+    if (era.isModern() && !acceptModern(response, id, method, params, era)) {
+      return false;
     }
-    return McpRequestEra.classify(method, params,
-        new McpRequestEra.Headers(request.getHeader(McpProtocolVersion.HEADER),
-            request.getHeader(McpRequestEra.HEADER_METHOD),
-            request.getHeader(McpRequestEra.HEADER_NAME)),
-        McpRequestEra.strict());
+    McpUsageTelemetry.bindModernCaller(identity.userId, identity.clientId, identity.roleId,
+        params, era);
+    if (!era.isModern() && !INITIALIZE.equals(method)) {
+      // ETP-5639: validated, never refused — see McpProtocolVersion for the lenient policy.
+      McpProtocolVersion.forRequest(request.getHeader(McpProtocolVersion.HEADER),
+          McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey())
+              .getProtocolVersion(),
+          clientNameFor(params));
+    }
+    return true;
   }
 
   /**
-   * Telemetry for a modern-shaped request (ETP-5640): the client it names in {@code _meta} and its
-   * derived session key, replacing the {@code Mcp-Session-Id} a modern client never sends — which
-   * is ignored if it does. Applies whatever the kill switch says: a client that cached the modern
-   * era keeps sending {@code _meta} after a rollback, and its rows should keep their client name.
-   * One INFO line marks each new derived session; it is the rollout's evidence.
+   * Answer a request the client got wrong, not the server: a missing resource or an unknown
+   * method. One WARN line, no stack trace, no telemetry row (only {@code tools/call} has a tool
+   * name). The modern era answers with the codes and statuses MCP 2026-07-28 gives them — a missing
+   * resource {@code -32602}, an unknown method {@code 404}; the legacy era keeps what it always
+   * answered ({@code -32603} and {@code 200}).
    */
-  private static void bindModernTelemetry(AuthIdentity identity, JSONObject params,
-      McpRequestEra.Classification era) {
-    String declared = McpRequestEra.declaredVersion(params);
-    if (!era.isModern() && declared == null) {
+  private void answerClientRefusal(HttpServletResponse response, String body, String method,
+      JSONObject params, McpRequestEra.Classification era, Exception refusal) throws IOException {
+    String client = clientNameFor(params);
+    if (refusal instanceof McpResourceNotFoundException) {
+      log.warn("MCP client read a missing resource: {} (client={}) session={}",
+          McpRequestEra.printable(refusal.getMessage()), client,
+          McpUsageTelemetry.sessionForLog());
+      writeRpcError(response, body,
+          era.isModern() ? McpRequestEra.INVALID_PARAMS : JSON_RPC_INTERNAL_ERROR,
+          refusal.getMessage());
       return;
     }
-    McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfoFromMeta(params);
-    McpUsageTelemetry.setCurrentClient(client);
-    McpUsageTelemetry.ModernSession session = McpUsageTelemetry.modernSession(identity.userId,
-        identity.clientId, identity.roleId, client.getName(), System.currentTimeMillis());
-    McpUsageTelemetry.setCurrentSessionKey(session.key());
-    if (session.started()) {
-      JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
-      log.info("MCP modern session started: session={} client={}/{} protocol={} traceparent={}",
-          session.key(), StringUtils.defaultString(client.getName(), "unknown"),
-          StringUtils.defaultString(client.getVersion(), "unknown"),
-          era.isModern() ? era.protocolVersion() : declared,
-          meta != null && meta.has("traceparent") ? "yes" : "no");
-    }
+    // Also server/discover while the modern era is switched off.
+    log.warn("MCP client called unsupported method '{}' (client={}) session={}",
+        McpRequestEra.printable(method), client, McpUsageTelemetry.sessionForLog());
+    writeRpcError(response, body, JSON_RPC_METHOD_NOT_FOUND, refusal.getMessage(),
+        era.isModern() ? HttpServletResponse.SC_NOT_FOUND : HttpServletResponse.SC_OK, null);
   }
 
   /**
@@ -403,34 +356,6 @@ public class McpServlet extends HttpServlet {
   }
 
   /**
-   * Give a modern result the fields MCP 2026-07-28 requires of it (design §5.1, §5.2), in one place
-   * so a new method cannot forget them: {@code resultType}, the server's identity in {@code _meta},
-   * and cache hints on the catalog results. A field the handler already set is kept — so a result
-   * that carries the full {@code serverInfo} or its own hints is not overwritten. Legacy results
-   * never come here.
-   *
-   * @return {@code result}, decorated in place
-   */
-  static JSONObject decorateModern(String method, JSONObject result) throws JSONException {
-    result.put("resultType", RESULT_TYPE_COMPLETE);
-    JSONObject meta = result.optJSONObject("_meta");
-    if (meta == null) {
-      meta = new JSONObject();
-      result.put("_meta", meta);
-    }
-    if (!meta.has(META_SERVER_INFO)) {
-      // Name and version only: ~50 bytes on every response instead of the full Implementation.
-      meta.put(META_SERVER_INFO,
-          new JSONObject().put("name", SERVER_NAME).put("version", SERVER_VERSION));
-    }
-    if (PER_CALLER_CACHEABLE.contains(method) && !result.has("ttlMs")) {
-      result.put("ttlMs", CATALOG_TTL_MS);
-      result.put("cacheScope", CACHE_SCOPE_PRIVATE);
-    }
-    return result;
-  }
-
-  /**
    * The calling client's name, for log lines about a request that has no tool row.
    *
    * <p>From the telemetry session when the client ran {@code initialize}; otherwise from
@@ -445,13 +370,14 @@ public class McpServlet extends HttpServlet {
     String fromSession =
         McpUsageTelemetry.clientInfo(McpUsageTelemetry.currentSessionKey()).getName();
     if (StringUtils.isNotBlank(fromSession)) {
-      return fromSession;
+      return McpRequestEra.printable(fromSession);
     }
-    JSONObject meta = params != null ? params.optJSONObject("_meta") : null;
+    JSONObject meta = params != null ? params.optJSONObject(McpModernResults.META) : null;
     JSONObject clientInfo = meta != null ? meta.optJSONObject(META_CLIENT_INFO) : null;
     String fromMeta = clientInfo != null ? StringUtils.trimToNull(clientInfo.optString("name"))
         : null;
-    return fromMeta != null ? fromMeta : "unknown";
+    // Self-reported and logged: never let it carry a line break into a log line.
+    return fromMeta != null ? McpRequestEra.printable(fromMeta) : UNKNOWN_CLIENT;
   }
 
   // ── Telemetry (Track B1) ────────────────────────────────────────────────
@@ -491,10 +417,7 @@ public class McpServlet extends HttpServlet {
       }
       JSONObject arguments = params != null ? params.optJSONObject("arguments") : null;
       String sessionKey = call.sessionKey();
-      // A modern request names its client itself; a legacy one did so in initialize.
-      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.currentClient() != null
-          ? McpUsageTelemetry.currentClient()
-          : McpUsageTelemetry.clientInfo(sessionKey);
+      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientFor(sessionKey);
 
       boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
       String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
@@ -786,7 +709,7 @@ public class McpServlet extends HttpServlet {
       HttpServletResponse response, boolean modern) throws Exception {
     if (modern && PING.equals(method)) {
       // Removed by MCP 2026-07-28: a modern client gets the modern "method not found".
-      throw new McpMethodNotFoundException("Method not found: " + method);
+      throw new McpMethodNotFoundException(METHOD_NOT_FOUND_PREFIX + method);
     }
     switch (method) {
       case INITIALIZE:
@@ -799,9 +722,9 @@ public class McpServlet extends HttpServlet {
       case McpRequestEra.SERVER_DISCOVER:
         if (!modern) {
           // Only reachable with the modern era switched off: answer exactly as before it existed.
-          throw new McpMethodNotFoundException("Method not found: " + method);
+          throw new McpMethodNotFoundException(METHOD_NOT_FOUND_PREFIX + method);
         }
-        return handleDiscover();
+        return McpModernResults.discover();
       case "tools/list":
         return handleToolsList(identity);
       case TOOLS_CALL:
@@ -811,7 +734,7 @@ public class McpServlet extends HttpServlet {
       case "resources/read":
         return handleResourcesRead(identity, params);
       default:
-        throw new McpMethodNotFoundException("Method not found: " + method);
+        throw new McpMethodNotFoundException(METHOD_NOT_FOUND_PREFIX + method);
     }
   }
 
@@ -841,55 +764,9 @@ public class McpServlet extends HttpServlet {
 
     JSONObject result = new JSONObject();
     result.put("protocolVersion", negotiated);
-    result.put("capabilities", serverCapabilities());
-    result.put("serverInfo", serverInfo());
+    result.put("capabilities", McpModernResults.capabilities());
+    result.put("serverInfo", McpModernResults.serverInfo());
     return result;
-  }
-
-  // ── Handler: server/discover (modern era) ───────────────────────────────
-
-  /**
-   * Answer {@code server/discover} (MCP 2026-07-28, ETP-5640): every version served, the same
-   * capabilities and server identity as {@code initialize} — one builder each, so the two eras
-   * cannot drift — and cache hints. The answer is the same for every caller, hence
-   * {@code public}. Answering it is what moves a dual-era client to the modern era.
-   */
-  private static JSONObject handleDiscover() throws JSONException {
-    JSONObject result = new JSONObject();
-    result.put("supportedVersions", new JSONArray(McpProtocolVersion.ALL_SUPPORTED));
-    result.put("capabilities", serverCapabilities());
-    result.put("_meta", new JSONObject().put(META_SERVER_INFO, serverInfo()));
-    result.put("ttlMs", DISCOVER_TTL_MS);
-    result.put("cacheScope", CACHE_SCOPE_PUBLIC);
-    return result;
-  }
-
-  /**
-   * What the server offers, as {@code initialize} and {@code server/discover} both answer it.
-   * {@code listChanged} is false: the server never pushes a list change, so a client's freshness
-   * signal is the result's TTL (modern) or the session (legacy).
-   */
-  private static JSONObject serverCapabilities() throws JSONException {
-    JSONObject capabilities = new JSONObject();
-    capabilities.put("tools", new JSONObject().put("listChanged", false));
-    capabilities.put("resources", new JSONObject().put("listChanged", false));
-    return capabilities;
-  }
-
-  /** The server's full {@code Implementation}, as {@code initialize} and discovery answer it. */
-  private static JSONObject serverInfo() throws JSONException {
-    JSONObject serverInfo = new JSONObject();
-    serverInfo.put("name", SERVER_NAME);
-    serverInfo.put("version", SERVER_VERSION);
-    serverInfo.put("title", SERVER_TITLE);
-    serverInfo.put("websiteUrl", SERVER_WEBSITE_URL);
-    serverInfo.put("description", SERVER_DESCRIPTION);
-    JSONObject icon = new JSONObject();
-    icon.put("src", SERVER_ICON_URL);
-    icon.put("mimeType", SERVER_ICON_MIME_TYPE);
-    icon.put("sizes", new JSONArray().put(SERVER_ICON_SIZES));
-    serverInfo.put("icons", new JSONArray().put(icon));
-    return serverInfo;
   }
 
   // ── Handler: tools/list ─────────────────────────────────────────────────
@@ -1017,6 +894,12 @@ public class McpServlet extends HttpServlet {
               // An unknown spec and a spec the role cannot see: one answer, so the error does not
               // reveal which specs exist (ETP-5640).
               throw new McpResourceNotFoundException(uri, e);
+            } catch (McpRoutingException e) {
+              // An unknown entity in etendo://specs/{spec}/{entity}: missing, not a server failure.
+              if (McpConstants.ERROR_NOT_FOUND.equals(e.getErrorCode())) {
+                throw new McpResourceNotFoundException(uri, e);
+              }
+              throw e;
             }
 
             JSONObject result = new JSONObject();

@@ -103,4 +103,29 @@ class McpFeedbackToolTest {
       McpUsageTelemetry.clearCurrentSessionKey();
     }
   }
+
+  /**
+   * W3: a modern caller's bucket is its authenticated identity, not its self-reported client name —
+   * rotating {@code _meta} clientInfo.name must not mint a fresh allowance.
+   */
+  @Test
+  void rotatingTheClientNameDoesNotResetTheBucket() throws Exception {
+    JSONObject verdict = new JSONObject().put("outcome", "OKAY").put("summary", "ok")
+        .put("achieved", "ok");
+    for (int i = 0; i <= McpFeedbackTool.MAX_PER_WINDOW; i++) {
+      JSONObject params = new JSONObject().put("_meta", new JSONObject()
+          .put(McpRequestEra.META_PROTOCOL_VERSION, McpProtocolVersion.MODERN_LATEST)
+          .put(McpServlet.META_CLIENT_INFO, new JSONObject().put("name", "rotating-" + i)));
+      try {
+        McpUsageTelemetry.bindModernCaller("u-feedback-rotate", "c1", "r1", params,
+            McpRequestEra.classify("tools/call", params, new McpRequestEra.Headers(
+                McpProtocolVersion.MODERN_LATEST, "tools/call", null), false));
+        boolean refused = McpFeedbackTool.handle(verdict).optBoolean("isError", false);
+        assertEquals(i == McpFeedbackTool.MAX_PER_WINDOW, refused, "report #" + (i + 1));
+      } finally {
+        McpUsageTelemetry.clearCurrentSessionKey();
+        McpUsageTelemetry.clearCurrentClient();
+      }
+    }
+  }
 }
