@@ -89,6 +89,7 @@ import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
@@ -2550,8 +2551,7 @@ public class EtendoGoJwtServletCoverageTest {
   @Test
   public void aFailedDraftClearRollsBackItsOwnWork() throws Exception {
     Account account = mock(Account.class);
-    org.openbravo.base.exception.OBSecurityException refused =
-        new org.openbravo.base.exception.OBSecurityException("Client (0) is not present");
+    OBSecurityException refused = new OBSecurityException("Client (0) is not present");
     try (var context = mockStatic(OBContext.class);
          var dal = mockStatic(EtendoGoJwtDalHelper.class);
          var transactions = mockStatic(EtendoGoDalHelper.class)) {

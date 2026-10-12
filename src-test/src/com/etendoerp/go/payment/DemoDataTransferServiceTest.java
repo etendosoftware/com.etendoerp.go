@@ -22,9 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -36,6 +38,7 @@ import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -178,12 +181,12 @@ class DemoDataTransferServiceTest {
         .thenAnswer(invocation -> current[0] = "system");
     contextStatic.when(() -> OBContext.setOBContext(worker))
         .thenAnswer(invocation -> current[0] = "worker");
-    List<String> seen = new java.util.ArrayList<>();
-    org.mockito.Mockito.doAnswer(invocation -> seen.add("rollback as " + current[0]))
+    List<String> seen = new ArrayList<>();
+    doAnswer(invocation -> seen.add("rollback as " + current[0]))
         .when(obDal).rollbackAndClose();
     preferencesStatic.when(() -> Preferences.setPreferenceValue(
         eq("ETGO_DemoDataTransferStatus"), eq(DemoDataTransferService.STATUS_FAILED), eq(false),
-        org.mockito.ArgumentMatchers.any(Client.class), eq(null), eq(null), eq(null), eq(null),
+        any(Client.class), eq(null), eq(null), eq(null), eq(null),
         eq(null))).thenAnswer(invocation -> {
           seen.add("failure recorded as " + current[0]);
           return null;
