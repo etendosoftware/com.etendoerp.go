@@ -135,6 +135,10 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * {@code isProductiveNameTakenByAccount} and {@code isAssociatedDemo}: each runs as System and
  * hands the caller back its own OBContext and admin-mode depth, on every path.
  *
+ * <p>And the specs for {@code fillSubscriptionPeriodBestEffort} (ETP-5047): a paid onboarding reads
+ * its new subscription's billing period after the onboarding commit, commits it on its own, and
+ * survives any failure of that step.
+ *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class EtendoGoJwtServletCoverageTest {
@@ -2355,6 +2359,190 @@ public class EtendoGoJwtServletCoverageTest {
   @Test
   public void classicBooleanFailureAlsoProducesOneSettledErrorAlert() throws Exception {
     assertProvisioningAlertOutcome(false, false, true, false, false);
+  }
+
+  // ===================== fillSubscriptionPeriodBestEffort — the post-commit period read ========
+  //
+  // A paid onboarding opens the subscription row without a billing period: the purchase's first
+  // lifecycle webhooks arrived before the row existed and were ignored for good. So, after the
+  // onboarding commit, the servlet asks SubscriptionService to read the period from the provider,
+  // in its own transaction, and nothing that step does may fail a tenant that is already
+  // committed and paid for.
+
+  private static final String PERIOD_STEP = "subscription billing period";
+
+  @Test
+  public void aFilledPeriodIsCommittedInItsOwnTransaction() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.fillPeriodFromProvider("client-1")).thenReturn(true);
+    servlet.subscriptionService = subscriptions;
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
+
+      transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq(PERIOD_STEP), any()));
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()),
+          never());
+    }
+    verify(subscriptions).fillPeriodFromProvider("client-1");
+  }
+
+  @Test
+  public void aFillThatWritesNothingCommitsNothing() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.fillPeriodFromProvider("client-1")).thenReturn(false);
+    servlet.subscriptionService = subscriptions;
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
+
+      transactions.verifyNoInteractions();
+    }
+    verify(subscriptions).fillPeriodFromProvider("client-1");
+  }
+
+  @Test
+  public void aFailingFillIsRolledBackAndNeverEscapes() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    IllegalStateException failure = new IllegalStateException("no session");
+    when(subscriptions.fillPeriodFromProvider("client-1")).thenThrow(failure);
+    servlet.subscriptionService = subscriptions;
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+          () -> servlet.fillSubscriptionPeriodBestEffort("client-1"));
+
+      transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()), never());
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(PERIOD_STEP),
+          eq(failure), any()));
+    }
+  }
+
+  @Test
+  public void aFailingPeriodCommitIsRolledBackAndNeverEscapes() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.fillPeriodFromProvider("client-1")).thenReturn(true);
+    servlet.subscriptionService = subscriptions;
+    IllegalStateException failure = new IllegalStateException("commit refused");
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      transactions.when(() -> EtendoGoDalHelper.commitDalChanges(eq(PERIOD_STEP), any()))
+          .thenThrow(failure);
+
+      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+          () -> servlet.fillSubscriptionPeriodBestEffort("client-1"));
+
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(PERIOD_STEP),
+          eq(failure), any()));
+    }
+  }
+
+  /**
+   * The step sits between the onboarding commit and the closing of the checkout: after the commit,
+   * so the provider call never holds the onboarding's locks and the row it reads exists; before
+   * {@code completeCommittedOnboarding}, so the environment is reported ready with its period.
+   */
+  @Test
+  public void aPaidOnboardingFillsThePeriodAfterItsCommitAndBeforeClosingTheCheckout()
+      throws Exception {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    List<String> steps = new ArrayList<>();
+    when(subscriptions.fillPeriodFromProvider("client-1")).thenAnswer(invocation -> {
+      steps.add("fill");
+      return true;
+    });
+
+    String body = runCommittedPaidOnboarding(subscriptions, steps);
+
+    assertEquals(List.of("commit:onboarding", "fill", "commit:" + PERIOD_STEP,
+        "recordProvisioned"), steps);
+    verify(subscriptions).fillPeriodFromProvider("client-1");
+    assertTrue(body, body.contains("\"success\":true"));
+  }
+
+  /** The tenant is committed and paid for: a failing period read costs the period, nothing else. */
+  @Test
+  public void aPaidOnboardingStillSucceedsWhenThePeriodFillThrows() throws Exception {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    List<String> steps = new ArrayList<>();
+    when(subscriptions.fillPeriodFromProvider("client-1")).thenAnswer(invocation -> {
+      steps.add("fill");
+      throw new IllegalStateException("provider read exploded");
+    });
+
+    String body = runCommittedPaidOnboarding(subscriptions, steps);
+
+    assertEquals(List.of("commit:onboarding", "fill", "rollback:" + PERIOD_STEP,
+        "recordProvisioned"), steps);
+    assertTrue(body, body.contains("\"success\":true"));
+    assertEquals("The client keeps exactly one result line", 1, countResultLines(body));
+  }
+
+  /**
+   * Drives a pooled paid onboarding to a successful commit, recording, in order, every DAL commit
+   * and rollback by operation name and the closing of the checkout request.
+   *
+   * @param subscriptions the subscription service the servlet uses
+   * @param steps where the steps are recorded; the caller's own stubs may add to it
+   * @return the NDJSON body written to the client
+   */
+  private String runCommittedPaidOnboarding(SubscriptionService subscriptions,
+      List<String> steps) throws Exception {
+    ResponseCapture response = mockResponse();
+    HttpServletRequest request = jsonRequest("/onboarding",
+        "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\","
+            + "\"paymentToken\":\"purchase-1\"}");
+    when(request.getHeader("Authorization")).thenReturn("Bearer valid-token");
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com")).thenReturn(true);
+    when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com")).thenReturn(1L);
+    doAnswer(invocation -> steps.add("recordProvisioned")).when(store)
+        .recordProvisioned("purchase-1", "client-1", 1L);
+    TenantPaywallService paywall = new TenantPaywallService();
+    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
+    confirmation.setAccessible(true);
+    confirmation.set(paywall, (TenantPaywallService.PaymentConfirmation) (token, email, name) -> true);
+    servlet.tenantPaywallService = paywall;
+    servlet.pooledTenantClaimService = mock(PooledTenantClaimService.class);
+    when(servlet.pooledTenantClaimService.claim(any(), any(), anyString())).thenReturn("client-1");
+    servlet.devProvisioningFailureFixtureService = mock(DevProvisioningFailureFixtureService.class);
+    servlet.subscriptionService = subscriptions;
+    servlet.tenantPlanService = mock(TenantPlanService.class);
+    when(servlet.tenantPlanService.markProductive("client-1", "star-org")).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
+    when(servlet.tenantEnvironmentLifecycleService.markProductive("client-1")).thenReturn(true);
+    servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
+    servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
+    servlet.onboardingWarehouseAddressService =
+        mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
+    servlet.onboardingCostingScheduleService =
+        mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");
+    UserRoles admin = mock(UserRoles.class); Role role = mock(Role.class); User user = mock(User.class);
+    when(role.getId()).thenReturn("role-1"); when(user.getId()).thenReturn("user-1");
+    when(admin.getRole()).thenReturn(role); when(admin.getUserContact()).thenReturn(user);
+    Organization org = mock(Organization.class); when(org.getId()).thenReturn("org-1");
+    try (var context = mockStatic(OBContext.class);
+         var support = mockStatic(EtendoGoJwtSupport.class);
+         var dal = mockStatic(EtendoGoJwtDalHelper.class);
+         var transactions = mockStatic(EtendoGoDalHelper.class)) {
+      Account authenticated = stubAuthenticatedAccount(dal);
+      when(authenticated.getId()).thenReturn("account-1");
+      dal.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR")).thenReturn(currency);
+      dal.when(() -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com")).thenReturn(1);
+      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com")).thenReturn(true);
+      dal.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1")).thenReturn(admin);
+      support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
+      dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
+      transactions.when(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()))
+          .thenAnswer(invocation -> steps.add("commit:" + invocation.getArgument(0)));
+      transactions.when(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()))
+          .thenAnswer(invocation -> steps.add("rollback:" + invocation.getArgument(0)));
+      servlet.doPost(request, response.response);
+    }
+    return response.body();
   }
 
   /**

@@ -22,10 +22,18 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -39,6 +47,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import org.hibernate.Session;
+import org.hibernate.Transaction;
 import org.hibernate.exception.ConstraintViolationException;
 import org.hibernate.query.NativeQuery;
 import org.junit.After;
@@ -93,6 +103,12 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * rows it creates itself; the productive clients of this database are never read, written or
  * deleted. The {@code AD_CLIENT} insert trigger creates ~99 {@code AD_SEQUENCE} rows per client,
  * so cleanup removes those too.
+ *
+ * <p>Group 4 (ETP-5047) covers {@link SubscriptionService#fillPeriodFromProvider}: its conditional
+ * HQL {@code UPDATE} is only meaningful against committed rows and a real concurrent writer, so it
+ * runs here with only the Stripe period reader mocked.
+ *
+ * @covers com.etendoerp.go.payment.SubscriptionService
  */
 public class SubscriptionServiceIntegrationTest extends OBBaseTest {
 
@@ -312,6 +328,179 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
             "SNAPSHOT_AMOUNT")));
     assertEquals("An existing subscriber keeps the currency they bought", "EUR",
         rawColumn(subscriptionId, "SNAPSHOT_CURRENCY"));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 4 — the billing period filled from the provider (ETP-5047)
+  // ---------------------------------------------------------------------------------------------
+
+  private static final Instant PROVIDER_START = Instant.parse("2026-10-01T10:15:30Z");
+  private static final Instant PROVIDER_END = Instant.parse("2026-11-01T10:15:30Z");
+  private static final Instant WEBHOOK_START = Instant.parse("2026-10-02T08:00:00Z");
+  private static final Instant WEBHOOK_END = Instant.parse("2026-11-02T08:00:00Z");
+
+  /**
+   * The fill writes the two period boundaries and nothing a lifecycle event owns: {@code STATUS},
+   * {@code GRACE_ANCHOR} and the {@code LAST_EVENT_AT} watermark keep exactly what the database
+   * held, and the row is stamped as system.
+   */
+  @Test
+  public void testTheFillWritesBothPeriodColumnsAndNothingTheLifecycleOwns() {
+    String tenant = createTenant("fill");
+    String subscriptionId = openCommitted(tenant, createPricedPlan());
+    String stripeSubscriptionId = (String) rawColumn(subscriptionId, "STRIPE_SUBSCRIPTION_ID");
+    Timestamp graceAnchor = new Timestamp(Instant.parse("2026-09-20T12:00:00Z").toEpochMilli());
+    Timestamp lastEventAt = new Timestamp(Instant.parse("2026-09-21T12:00:00Z").toEpochMilli());
+    Timestamp staleUpdated = new Timestamp(System.currentTimeMillis() - 86_400_000L);
+    nativeUpdateCommitted("UPDATE ETGO_SUBSCRIPTION SET STATUS = :status, "
+            + "GRACE_ANCHOR = :grace, LAST_EVENT_AT = :lastEvent, UPDATED = :updated, "
+            + "UPDATEDBY = '100' WHERE ETGO_SUBSCRIPTION_ID = :id",
+        "status", SubscriptionService.STATUS_PAST_DUE, "grace", graceAnchor,
+        "lastEvent", lastEventAt, "updated", staleUpdated, "id", subscriptionId);
+    StripeSubscriptionPeriodReader reader = mock(StripeSubscriptionPeriodReader.class);
+    when(reader.read(tenant, stripeSubscriptionId)).thenReturn(
+        new SubscriptionLifecycleApplier.BillingPeriod(PROVIDER_START, PROVIDER_END));
+    Timestamp beforeCall = new Timestamp(System.currentTimeMillis() - 1000L);
+
+    assertTrue("A period was written and needs committing", fillCommitted(reader, tenant));
+
+    assertEquals(PROVIDER_START, rawInstant(subscriptionId, "CURRENT_PERIOD_START"));
+    assertEquals(PROVIDER_END, rawInstant(subscriptionId, "CURRENT_PERIOD_END"));
+    assertEquals("STATUS belongs to the lifecycle events", SubscriptionService.STATUS_PAST_DUE,
+        rawColumn(subscriptionId, "STATUS"));
+    assertEquals("GRACE_ANCHOR belongs to the lifecycle events", graceAnchor,
+        rawColumn(subscriptionId, "GRACE_ANCHOR"));
+    assertEquals("LAST_EVENT_AT is the lifecycle watermark and must not move", lastEventAt,
+        rawColumn(subscriptionId, "LAST_EVENT_AT"));
+    assertNull("The row stays open", rawColumn(subscriptionId, "END_DATE"));
+    assertEquals("The fill is written as system", ZERO, rawColumn(subscriptionId, "UPDATEDBY"));
+    assertFalse("The fill stamps a fresh UPDATED",
+        ((Timestamp) rawColumn(subscriptionId, "UPDATED")).before(beforeCall));
+  }
+
+  /** A row that already carries a period is left alone, and the provider is not even asked. */
+  @Test
+  public void testTheFillLeavesAPeriodTheWebhookWroteFirst() {
+    String tenant = createTenant("fill-first");
+    String subscriptionId = openCommitted(tenant, createPricedPlan());
+    nativeUpdateCommitted("UPDATE ETGO_SUBSCRIPTION SET CURRENT_PERIOD_START = :start, "
+            + "CURRENT_PERIOD_END = :end WHERE ETGO_SUBSCRIPTION_ID = :id",
+        "start", Timestamp.from(WEBHOOK_START), "end", Timestamp.from(WEBHOOK_END),
+        "id", subscriptionId);
+    StripeSubscriptionPeriodReader reader = mock(StripeSubscriptionPeriodReader.class);
+
+    assertFalse("Nothing to write", fillCommitted(reader, tenant));
+
+    verifyNoInteractions(reader);
+    assertEquals(WEBHOOK_START, rawInstant(subscriptionId, "CURRENT_PERIOD_START"));
+    assertEquals(WEBHOOK_END, rawInstant(subscriptionId, "CURRENT_PERIOD_END"));
+  }
+
+  /**
+   * The race the conditional {@code UPDATE} exists for: the row is periodless when the fill reads
+   * it, and a lifecycle webhook commits a period on another connection while the provider is
+   * answering. The webhook's period wins, the fill reports nothing written, and the in-session row
+   * is refreshed to what the database holds.
+   */
+  @Test
+  public void testAWebhookPeriodCommittedWhileTheProviderAnswersIsNotOverwritten() {
+    String tenant = createTenant("fill-race");
+    String subscriptionId = openCommitted(tenant, createPricedPlan());
+    String stripeSubscriptionId = (String) rawColumn(subscriptionId, "STRIPE_SUBSCRIPTION_ID");
+    StripeSubscriptionPeriodReader reader = mock(StripeSubscriptionPeriodReader.class);
+    when(reader.read(tenant, stripeSubscriptionId)).thenAnswer(invocation -> {
+      commitPeriodOnAnotherConnection(subscriptionId, WEBHOOK_START, WEBHOOK_END);
+      return new SubscriptionLifecycleApplier.BillingPeriod(PROVIDER_START, PROVIDER_END);
+    });
+    SubscriptionService filling = new SubscriptionService(reader);
+
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      assertFalse("The webhook wrote first: nothing to commit",
+          filling.fillPeriodFromProvider(tenant));
+      Subscription inSession = filling.findOpen(tenant).orElseThrow();
+      assertEquals("The in-session row is refreshed to the webhook's period",
+          WEBHOOK_START, inSession.getCurrentPeriodStart().toInstant());
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+
+    assertEquals(WEBHOOK_START, rawInstant(subscriptionId, "CURRENT_PERIOD_START"));
+    assertEquals(WEBHOOK_END, rawInstant(subscriptionId, "CURRENT_PERIOD_END"));
+  }
+
+  /**
+   * Re-subscription: the tenant's closed row and its new open row each name a Stripe
+   * subscription. Only the open row is read and filled; the closed row is not touched at all.
+   */
+  @Test
+  public void testOnAResubscriptionOnlyTheNewOpenRowGetsThePeriod() {
+    String tenant = createTenant("fill-resub");
+    String planId = createPricedPlan();
+    String closedId = openCommitted(tenant, planId);
+    closeCommitted(closedId);
+    Timestamp closedUpdated = new Timestamp(System.currentTimeMillis() - 86_400_000L);
+    nativeUpdateCommitted("UPDATE ETGO_SUBSCRIPTION SET UPDATED = :updated "
+        + "WHERE ETGO_SUBSCRIPTION_ID = :id", "updated", closedUpdated, "id", closedId);
+    Object closedEndDate = rawColumn(closedId, "END_DATE");
+    String closedStripeId = (String) rawColumn(closedId, "STRIPE_SUBSCRIPTION_ID");
+    String openId = openCommitted(tenant, planId);
+    String openStripeId = (String) rawColumn(openId, "STRIPE_SUBSCRIPTION_ID");
+    StripeSubscriptionPeriodReader reader = mock(StripeSubscriptionPeriodReader.class);
+    when(reader.read(tenant, openStripeId)).thenReturn(
+        new SubscriptionLifecycleApplier.BillingPeriod(PROVIDER_START, PROVIDER_END));
+
+    assertTrue(fillCommitted(reader, tenant));
+
+    verify(reader, never()).read(anyString(), eq(closedStripeId));
+    assertEquals(PROVIDER_START, rawInstant(openId, "CURRENT_PERIOD_START"));
+    assertEquals(PROVIDER_END, rawInstant(openId, "CURRENT_PERIOD_END"));
+    assertNull("The closed row gets no period", rawColumn(closedId, "CURRENT_PERIOD_START"));
+    assertNull(rawColumn(closedId, "CURRENT_PERIOD_END"));
+    assertEquals("The closed row is not written at all", closedUpdated,
+        rawColumn(closedId, "UPDATED"));
+    assertEquals("The closed row stays closed", closedEndDate, rawColumn(closedId, "END_DATE"));
+    assertEquals(1L, rawOpenCount(tenant));
+  }
+
+  /**
+   * Runs the fill the way the servlet does after the onboarding commit — as the test user, the
+   * service switching to system for the write — and commits.
+   *
+   * @return what {@link SubscriptionService#fillPeriodFromProvider} answered
+   */
+  private boolean fillCommitted(StripeSubscriptionPeriodReader reader, String tenant) {
+    setTestUserContext();
+    boolean written = new SubscriptionService(reader).fillPeriodFromProvider(tenant);
+    OBDal.getInstance().commitAndClose();
+    return written;
+  }
+
+  /**
+   * Stands in for a lifecycle webhook on another request thread: its own session and connection,
+   * committed independently of the session the fill runs in.
+   */
+  @SuppressWarnings("rawtypes")
+  private static void commitPeriodOnAnotherConnection(String subscriptionId, Instant start,
+      Instant end) {
+    try (Session other = OBDal.getInstance().getSession().getSessionFactory().openSession()) {
+      Transaction transaction = other.beginTransaction();
+      NativeQuery update = other.createNativeQuery("UPDATE ETGO_SUBSCRIPTION SET "
+          + "CURRENT_PERIOD_START = :start, CURRENT_PERIOD_END = :end "
+          + "WHERE ETGO_SUBSCRIPTION_ID = :id");
+      bind(update, "start", Timestamp.from(start), "end", Timestamp.from(end),
+          "id", subscriptionId);
+      update.executeUpdate();
+      transaction.commit();
+    }
+  }
+
+  /** @return the committed timestamp column as an instant, or null */
+  private Instant rawInstant(String subscriptionId, String column) {
+    Timestamp value = (Timestamp) rawColumn(subscriptionId, column);
+    return value == null ? null : value.toInstant();
   }
 
   // ---------------------------------------------------------------------------------------------
