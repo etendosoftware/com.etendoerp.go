@@ -47,6 +47,8 @@ import com.sun.net.httpserver.HttpServer;
  * the whole feature above this class loses the ability to tell "that price id does not exist"
  * from "the provider is down" — and it will report the first when it means the second, to a user
  * who then edits a price id that was correct all along.
+ *
+ * @covers com.etendoerp.go.payment.HttpUrlConnectionStripeApiClient
  */
 class StripeApiClientTest {
 
@@ -229,6 +231,22 @@ class StripeApiClientTest {
     });
 
     StripeApiClient client = new HttpUrlConnectionStripeApiClient();
+
+    assertThrows(StripeTransportException.class, () -> client.get("/v1/prices/price_123"));
+  }
+
+  @Test
+  @DisplayName("explicit timeouts win over the configured ones (ETP-5047)")
+  void explicitTimeoutsWinOverTheConfiguredOnes() throws Exception {
+    // The billing-period read must not wait the full checkout budget: a generous configured read
+    // timeout, a short explicit one, and the explicit one is what fires.
+    System.setProperty(READ_TIMEOUT_PROPERTY, "60000");
+    givenProviderBehaves(exchange -> {
+      awaitSlowExchangeRelease();
+      respond(exchange, 200, PRICE_BODY);
+    });
+
+    StripeApiClient client = new HttpUrlConnectionStripeApiClient(1000, 200);
 
     assertThrows(StripeTransportException.class, () -> client.get("/v1/prices/price_123"));
   }

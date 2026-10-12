@@ -68,6 +68,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  *
  * <p>The webhook runs its lifecycle work under {@code SystemContext}; {@link OBContext} is mocked
  * statically for every spec so that runs with no DAL.
+ *
+ * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
 public class SubscriptionLifecycleCorrelationTest {
 
@@ -195,6 +197,33 @@ public class SubscriptionLifecycleCorrelationTest {
     verify(lifecycle, never()).targetForTenant(anyString(), any());
     verify(lifecycle, never()).applySubscriptionEvent(any(), any(), any());
     verify(eventStore, never()).markApplied(anyString());
+  }
+
+  /**
+   * An invoice not tied to a known purchase may carry {@code "customer": null}. The customer
+   * fallback must then look up the empty string, never the text "null" Jettison's
+   * {@code optString} would make of it — a purchase stored with that text would otherwise claim
+   * the event. Nothing resolves, so the event is ignored as unresolved.
+   */
+  @Test
+  public void aNullCustomerIsLookedUpAsBlankNeverAsTheWordNull() throws Exception {
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest storedWithTheWordNull = purchaseWithClient("wrong-tenant");
+    when(requestStore.findByStripeCustomer("null")).thenReturn(storedWithTheWordNull);
+    JSONObject event = new JSONObject("{\"data\":{\"object\":{"
+        + "\"subscription\":\"sub-unknown\",\"customer\":null,\"period_end\":1793750400}}}");
+
+    invokeLifecycle(servlet(requestStore, eventStore, lifecycle), "evt-null-customer",
+        "invoice.payment_failed", event);
+
+    verify(requestStore).findByStripeSubscription("sub-unknown");
+    verify(requestStore).findByStripeCustomer("");
+    verify(requestStore, never()).findByStripeCustomer("null");
+    verify(eventStore).markIgnored("evt-null-customer", "unresolved subscription");
+    verify(lifecycle, never()).targetForTenant(anyString(), any());
+    verify(lifecycle, never()).applySubscriptionEvent(any(), any(), any());
   }
 
   @Test

@@ -89,6 +89,7 @@ import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
+import com.etendoerp.go.payment.StripeJson;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
@@ -1552,9 +1553,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     // The customer and subscription ids are read here and nowhere else: this is the only event
     // that carries them alongside the correlation id, and every later subscription or invoice
-    // event arrives keyed by the subscription rather than by the request.
-    boolean recorded = checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
-        object.optString("subscription", ""));
+    // event arrives keyed by the subscription rather than by the request. Both are read as
+    // nullable: a payment-mode checkout sends "subscription": null, which a bare optString would
+    // store as the text "null" (ETP-5047).
+    boolean recorded = checkoutRequestStore.recordPaid(requestId,
+        StripeJson.text(object, "customer"),
+        StripeJson.text(object, "subscription"));
     if (!recorded) {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
@@ -1654,7 +1658,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
     if (purchase == null) {
-      purchase = checkoutRequestStore.findByStripeCustomer(object.optString("customer", ""));
+      purchase = checkoutRequestStore.findByStripeCustomer(
+          StripeJson.text(object, "customer"));
     }
     if (purchase == null || purchase.getCreatedClient() == null) {
       return null;
@@ -3484,16 +3489,35 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
   }
 
+  /**
+   * Clears the account's saved onboarding draft once the environment is committed.
+   *
+   * <p><b>Written as system</b> (ETP-5047). The draft lives on {@code ETGO_ACCOUNT}, a client-0
+   * row, and this runs after the onboarding commit with the thread in the new tenant's context:
+   * the DAL write check refuses a client-0 row from there at flush ({@code OBSecurityException:
+   * Client (0) ... is not present in ClientList}). That went unnoticed because the dirty account
+   * stayed in the session and the ready email, which commits as system, persisted it by accident
+   * — and on the paid-from-demo path a system context leaked by the demo transfer made the clear
+   * itself succeed until that leak was fixed. {@link SystemContext} hands the tenant's context
+   * back afterwards.
+   *
+   * <p>A failure is rolled back, so a refused account write never stays pending for the next
+   * commit on this thread. {@code updateOnboardingDraft} commits its own work on success. The
+   * rollback can also discard a checkout close left pending by a failed {@code recordProvisioned};
+   * see {@link #startDemoDataTransferBestEffort} for that edge.
+   *
+   * @param account the account that drove the onboarding, may be null
+   */
   private void clearOnboardingDraftBestEffort(Account account) {
     if (account == null) {
       return;
     }
     try {
-      // updateOnboardingDraft flushes and commits internally
-      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
-      EtendoGoJwtDalHelper.updateOnboardingDraft(account, null);
+      SystemContext.run("clearing the onboarding draft",
+          () -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null));
     } catch (RuntimeException e) {
       log.warn("Clearing onboarding draft failed without blocking onboarding", e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding draft clear", e, log);
     }
   }
 
@@ -4149,6 +4173,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
+    if (paidUpgrade) {
+      // ETP-5047: after the checkout is closed, never before — see the method.
+      fillSubscriptionPeriodBestEffort(clientId);
+    }
     // ETP-5426: after the commit (a failure here can no longer undo the tenant) and before the
     // costing schedule is activated (so the background costing never races the import).
     importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
@@ -4241,6 +4269,49 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
       log.error("ETP-5575 demo period window failed for client {}", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+    }
+  }
+
+  /**
+   * ETP-5047 — gives the subscription row a paid onboarding just opened its Stripe billing period,
+   * read from the provider. The purchase's first {@code invoice.paid} and
+   * {@code customer.subscription.updated} arrived before the row existed and were ignored for
+   * good, so without this the row stays periodless until its first renewal.
+   *
+   * <p><b>Runs after {@code completeCommittedOnboarding}, not right after the commit.</b> Until
+   * {@code recordProvisioned} closes the checkout request it is not {@code PROVISIONED} and names
+   * no created client; a retry after a crash in that window (once the provisioning lease expires)
+   * cannot find the tenant, which by then carries its requested name, and would provision a second
+   * one for the same payment. The provider call takes seconds at worst, so it must not widen that
+   * window. Nothing here needs the checkout open: the fill reads only the subscription row.
+   *
+   * <p>The service requires an empty DAL session: it closes the session before the provider call,
+   * so neither a lock nor a pooled connection is held while Stripe answers, and writes the period
+   * in a fresh transaction that is committed here. Each step of
+   * {@code completeCommittedOnboarding} commits its own work when it succeeds; a failed demo data
+   * transfer start, draft clear (which runs as system, the account being a client-0 row) or ready
+   * email rolls its own work back. Only a failed checkout close ({@code recordProvisioned}) just
+   * logs, by design: if its fenced {@code PROVISIONED} update ran and only the flush or commit
+   * after it failed, the update is still pending in the transaction and the next successful commit
+   * persists it, where a rollback would discard a correct close. When it is still pending here,
+   * the service's session close before the provider call commits it, as the sample data and
+   * costing steps after this one would otherwise. See {@link #startDemoDataTransferBestEffort} for
+   * the edge where a later step's rollback discards it instead. It never fails the
+   * onboarding: the row is already committed, and on any failure (the commit included, which is
+   * why it sits inside the try) only this step rolls back. Provider failures are WARNs from the
+   * reader; see {@link SubscriptionService#fillPeriodFromProviderAfterCommit}.
+   *
+   * @param clientId the tenant just committed
+   */
+  void fillSubscriptionPeriodBestEffort(String clientId) {
+    try {
+      if (subscriptionService.fillPeriodFromProviderAfterCommit(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("subscription billing period", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("The subscription of client {} could not be given its billing period; it stays "
+          + "without one until its next lifecycle event", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("subscription billing period", e, log);
     }
   }
 
@@ -4606,6 +4677,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * when the purchase has no demo source. Best-effort in its own right: a failure here is logged
    * as a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
+   * <p>A failure is also rolled back (ETP-5047). The service commits each of its writes, but one
+   * that fails between writing a preference and its own commit leaves that preference pending, and
+   * the next commit on this thread — the draft clear, the billing period fill — would persist a
+   * half-written transfer. The tenant has committed by then, and so has a selection this call
+   * recorded before the start failed, so neither is lost.
+   *
+   * <p><b>One edge, accepted rather than handled.</b> The checkout close normally has committed by
+   * then too. Only when {@code recordProvisioned}'s fenced {@code PROVISIONED} update ran and the
+   * flush or commit right after it failed (it only logs, by design) is that update still pending,
+   * and this rollback — like the draft clear's and the ready email's — then discards it. The
+   * tenant stays committed, productive and subscribed, but its checkout request stays
+   * {@code PROVISIONING} with no created client. Nothing re-closes it: a retry once the lease
+   * expires is refused by {@code rejectDuplicateProductiveName}, because the account now owns a
+   * productive environment of that name, and the request records the non-retryable
+   * {@code CLIENT_NAME_IN_USE} failure — no second tenant is built, but the request needs a manual
+   * close. It takes two failures in a row on one thread, so it is not worth a different design.
+   *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
    * @param clientId {@code AD_CLIENT_ID} of the productive environment just provisioned
@@ -4624,6 +4712,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       log.error("Environment (client {}) was provisioned but its demo data transfer could not be "
           + "started", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("demo data transfer start", e, log);
     }
   }
 

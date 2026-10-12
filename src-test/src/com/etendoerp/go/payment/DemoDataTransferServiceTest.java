@@ -22,9 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -36,6 +38,7 @@ import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -84,6 +87,8 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
  * They still exercise real DAL calls and entity setters through Mockito: an existing target row
  * must be reused, its lookup must stay tenant-scoped, and blank CIF/Tax ID must be copied instead
  * of being routed through the interactive import validator.
+ *
+ * @covers com.etendoerp.go.payment.DemoDataTransferService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -141,6 +146,66 @@ class DemoDataTransferServiceTest {
         system, null, null, null, null, null));
     verify(obDal).flush();
     verify(obDal).commitAndClose();
+  }
+
+  /**
+   * ETP-5047 — the selection is written as system, and the caller gets its own context back. The
+   * paid onboarding calls this from {@code completeCommittedOnboarding} and keeps working on that
+   * thread afterwards; a system context left behind makes every later step run as system.
+   */
+  @Test
+  void handsTheCallerItsOwnContextBackAfterWritingAsSystem() {
+    OBContext caller = mock(OBContext.class);
+    contextStatic.when(OBContext::getOBContext).thenReturn(caller);
+    when(obDal.get(Client.class, SYSTEM_ID)).thenReturn(mock(Client.class));
+    givenPreferenceReads((Preference) null);
+
+    service.recordSelection(REQUEST_ID, true, false);
+
+    contextStatic.verify(() -> OBContext.setOBContext(SYSTEM_ID, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID));
+    contextStatic.verify(() -> OBContext.setOBContext(caller));
+  }
+
+  /**
+   * ETP-5047 — the worker's failure path: the rollback and the recorded failure both run as
+   * system, and the worker gets its own context back afterwards rather than a system context left
+   * behind by chance.
+   */
+  @Test
+  void aFailedTransferIsRolledBackAndRecordedAsSystemAndHandsTheWorkerItsContextBack()
+      throws Exception {
+    OBContext worker = mock(OBContext.class);
+    String[] current = { "worker" };
+    contextStatic.when(OBContext::getOBContext).thenReturn(worker);
+    contextStatic.when(() -> OBContext.setOBContext(SYSTEM_ID, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID))
+        .thenAnswer(invocation -> current[0] = "system");
+    contextStatic.when(() -> OBContext.setOBContext(worker))
+        .thenAnswer(invocation -> current[0] = "worker");
+    List<String> seen = new ArrayList<>();
+    doAnswer(invocation -> seen.add("rollback as " + current[0]))
+        .when(obDal).rollbackAndClose();
+    preferencesStatic.when(() -> Preferences.setPreferenceValue(
+        eq("ETGO_DemoDataTransferStatus"), eq(DemoDataTransferService.STATUS_FAILED), eq(false),
+        any(Client.class), eq(null), eq(null), eq(null), eq(null),
+        eq(null))).thenAnswer(invocation -> {
+          seen.add("failure recorded as " + current[0]);
+          return null;
+        });
+    Client target = mock(Client.class);
+    when(obDal.get(Client.class, TARGET_ID)).thenReturn(target);
+    // Running, with a source that no longer exists: the transfer throws.
+    givenPreferenceReads(preference(DemoDataTransferService.STATUS_RUNNING),
+        preference(SOURCE_ID));
+    Method run = DemoDataTransferService.class.getDeclaredMethod("run", String.class);
+    run.setAccessible(true);
+
+    run.invoke(service, TARGET_ID);
+
+    assertEquals(List.of("rollback as system", "failure recorded as system"), seen);
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        "ETGO_DemoDataTransferFailure", "Transfer environment is unavailable", false,
+        target, null, null, null, null, null));
+    assertEquals("worker", current[0], "the worker must get its own context back");
   }
 
   @Test

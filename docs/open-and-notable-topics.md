@@ -490,6 +490,12 @@ Develop's ETP-5443 wired the Stripe lifecycle webhooks (`invoice.paid`, `invoice
      subscription) or `no open subscription row` (the first event of a new purchase, before
      onboarding opens its row). Neither may revive or overwrite anything.
 
+The first events of a brand-new tenant's purchase never reach step 2 either: until onboarding
+closes the checkout request it names no created client, so they are `IGNORED` as `unresolved
+subscription`. Stripe never redelivers an acknowledged event, so the paid onboarding reads the
+billing period from the provider itself once the row is open (see `CURRENT_PERIOD_START/END`
+below).
+
 The row gets `STATUS` (`CURRENT→active`, `PAST_DUE→past_due`, `EXPIRED→canceled`),
 `GRACE_ANCHOR` (the applier's grace anchor; `null` clears it), the Stripe billing period in
 `CURRENT_PERIOD_START/END` when the event reports one, and `LAST_EVENT_AT` (the ordering
@@ -549,7 +555,25 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
     subscription (or its first item, `billing_mode: flexible`) on `customer.subscription.*`, and
     from the invoice **lines** on `invoice.paid` (the invoice's own `period_*` looks back one
     period). An event that reports no period leaves it alone; `invoice.payment_failed` never
-    writes one.
+    writes one. `openSubscription` itself writes neither column; a paid onboarding fills them
+    once, right after it has closed the checkout request and before the sample-data import
+    (`EtendoGoJwtServlet.fillSubscriptionPeriodBestEffort` →
+    `SubscriptionService.fillPeriodFromProviderAfterCommit`): it commits and closes the DAL
+    session, reads `GET /v1/subscriptions/{id}` (`StripeSubscriptionPeriodReader`: 3 s connect,
+    5 s read, DNS not bounded; parsed with `subscriptionPeriodBoundary`, both payload shapes),
+    then writes the pair with one conditional HQL `UPDATE` guarded by **both** boundaries being
+    NULL — so a lifecycle event's period always wins, even one applied while Stripe was answering.
+    It runs under `SystemContext` (`UPDATEDBY = '0'`) and never touches `STATUS`, `GRACE_ANCHOR`
+    or `LAST_EVENT_AT`. Best effort: any failure (no secret key, transport, 4xx, a body without a
+    whole, ordered period) is one WARN from the reader — the transport may add its own for a
+    timeout, DNS/TLS failure, 5xx or 429 — and the row stays periodless until its next lifecycle event; the
+    onboarding is never affected. A row with no Stripe id (payment-mode checkout) is skipped with
+    an INFO, and a demo onboarding never calls it. (Before ETP-5047 a payment-mode checkout's JSON
+    `null` subscription was stored as the text `'null'`, because jettison's `optString` turns JSON
+    `null` into that text. Every nullable Stripe string is now read through `StripeJson.text`
+    (`com.etendoerp.go.payment`), which replaced three private copies; never use a bare
+    `optString` on a Stripe object. A row still holding `'null'` gets a 404 and the WARN — none
+    on the development database.)
   - `LAST_EVENT_AT` — the `created` instant of the last applied lifecycle event, forward-only.
     `ETGO_SubscriptionEventAt` is **written** only for a tenant with no row. On the row route it is
     still **read**, but only as a read-only fallback while the row's `LAST_EVENT_AT` is NULL — a row
@@ -1010,9 +1034,12 @@ calendar month"; restated in the invariants table), and ETP-5051 reads it from
 Stripe anchor is preserved (PRD §8, ETP-5053).
 
 **What ETP-5051 must know:** since ETP-5047 `CURRENT_PERIOD_START/END` hold **Stripe's billing
-period and nothing else** — the grace anchor moved to `GRACE_ANCHOR` (§3.7). They are filled by
-the first `customer.subscription.updated` or `invoice.paid` a row receives, so a row is periodless
-until then: `openSubscription` writes neither column, and rows written before ETP-5047 may still
+period and nothing else** — the grace anchor moved to `GRACE_ANCHOR` (§3.7). `openSubscription`
+writes neither column; a paid onboarding reads the period from Stripe once it is open (§3.7, the
+`CURRENT_PERIOD_START/END` writer list), and every later `customer.subscription.updated` or
+`invoice.paid` keeps it current. A new row is therefore periodless only when that read failed (one
+WARN, `Could not read the billing period of Stripe subscription …`) or it names no Stripe
+subscription — then until its first period-bearing event. Rows written before ETP-5047 may still
 carry the old grace anchor in `CURRENT_PERIOD_END` with `CURRENT_PERIOD_START` NULL (read that
 shape as "no period"). §5.9 covers the periodless cases.
 
@@ -1056,19 +1083,24 @@ deferred in PRD §16, yet the schema already accepts them.)
 **To raise with:** Sebastián Barrozo — the evaluator's answer, and the per-subscription period of
 §1.2.
 
-Periodless rows (§5.5): a row until its first period-bearing event, rows backfilled by R37
+Periodless rows (§5.5): a new row whose post-onboarding Stripe read failed, or that names no Stripe
+subscription, until its first period-bearing event; rows backfilled by R37
 (period NULL, design §7.0) and rows in the pre-ETP-5047 shape. A `canceled` row keeps its last
 period since ETP-5047 (it is closed, `END_DATE` set — §3.7), so it has a window but no longer a
 current one. Latent today only because `legacy-productive` has no quota rows (§5.1); the first
 quota on a plan such a tenant can be on makes it live.
 
-**Partly decided (Sebastián Barrozo, 2026-09-28): fix periodless rows by hand.** The current
-billing period is read from Stripe and the subscription row updated manually. A helper **bash
-script** that crosses the Stripe API with the SQL data is enough; it only looks up and must never
-update data automatically. It is not a button or process in the back-office UI — that comes only if
-it has to be run more than once. The manual period only bridges a gap: a row with a real Stripe
-subscription fills its own period at its first `customer.subscription.updated` / `invoice.paid`
-(§5.5), so the fix covers the time until the next renewal.
+**Partly decided (Sebastián Barrozo, 2026-09-28): fix periodless rows by hand.** Since ETP-5047
+a new purchase normally gets its period automatically — the paid onboarding reads it from Stripe
+(§5.5) — so the manual fix applies only to the periodless rows that remain: R37 backfills,
+pre-ETP-5047 rows, and new rows whose post-onboarding Stripe read failed or that name no Stripe
+subscription. For those, the current billing period is read from Stripe and the subscription row
+updated manually. A helper **bash script** that crosses the Stripe API with the SQL data is
+enough; it only looks up and must never update data automatically. It is not a button or process
+in the back-office UI — that comes only if it has to be run more than once. The manual period only
+bridges a gap: such a row with a real Stripe subscription fills its own period at its first
+`customer.subscription.updated` / `invoice.paid` (§5.5), so the fix covers the time until the next
+renewal; a row with no Stripe subscription has nothing to read and is covered by §1.2.
 
 **Still open:**
 

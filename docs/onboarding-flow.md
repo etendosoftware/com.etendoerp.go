@@ -710,7 +710,10 @@ Endpoints (session-token auth, same Bearer model as `/me`):
 
 The draft is cleared automatically (best-effort, non-blocking) by
 `POST /sws/go/onboarding` right after the environment commit succeeds, so a
-completed onboarding never resurrects a stale wizard.
+completed onboarding never resurrects a stale wizard. The clear is written as
+system (`SystemContext`, ETP-5047) because `ETGO_ACCOUNT` is a client-0 row the
+new tenant's context may not write, and a failed clear is rolled back without
+blocking the onboarding.
 
 The frontend (`OnboardingPage.jsx`) fetches the draft when an authenticated
 account has zero environments, restores step + form, shows a one-time

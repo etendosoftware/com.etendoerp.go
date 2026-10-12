@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import java.io.BufferedReader;
 import java.io.PrintWriter;
@@ -83,9 +85,11 @@ import org.junit.Before;
 import org.junit.After;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
@@ -134,6 +138,10 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * <p>And the specs for the scoped system context of the two ETP-5548 checks,
  * {@code isProductiveNameTakenByAccount} and {@code isAssociatedDemo}: each runs as System and
  * hands the caller back its own OBContext and admin-mode depth, on every path.
+ *
+ * <p>And the specs for {@code fillSubscriptionPeriodBestEffort} (ETP-5047): a paid onboarding reads
+ * its new subscription's billing period after the onboarding commit, commits it on its own, and
+ * survives any failure of that step.
  *
  * @covers com.etendoerp.go.rest.EtendoGoJwtServlet
  */
@@ -2357,6 +2365,297 @@ public class EtendoGoJwtServletCoverageTest {
     assertProvisioningAlertOutcome(false, false, true, false, false);
   }
 
+  // ===================== applyCheckoutPaid — nullable Stripe ids (ETP-5047) ================
+
+  /**
+   * A payment-mode checkout reports {@code subscription} (and may report {@code customer}) as
+   * JSON {@code null}. Jettison's {@code optString} turns that marker into the text "null", which
+   * used to be stored as the Stripe subscription id — and the post-onboarding period read then
+   * asked Stripe for {@code /v1/subscriptions/null}. A JSON null must reach the store as blank.
+   */
+  @Test
+  public void aCheckoutPaidWithNullProviderIdsRecordsThemBlankNeverAsTheWordNull()
+      throws Exception {
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    servlet.billingEventStore = mock(com.etendoerp.go.payment.BillingEventStore.class);
+    when(store.recordPaid(anyString(), anyString(), anyString())).thenReturn(true);
+    JSONObject event = new JSONObject("{\"type\":\"checkout.session.completed\",\"data\":"
+        + "{\"object\":{\"id\":\"cs_1\",\"mode\":\"payment\",\"customer\":null,"
+        + "\"subscription\":null,\"metadata\":{\"request_id\":\"purchase-1\","
+        + "\"account_email\":\"user@test.com\"}}}}");
+    Method applyCheckoutPaid = EtendoGoJwtServlet.class.getDeclaredMethod("applyCheckoutPaid",
+        String.class, String.class, JSONObject.class);
+    applyCheckoutPaid.setAccessible(true);
+
+    applyCheckoutPaid.invoke(servlet, "evt_1", "checkout.session.completed", event);
+
+    verify(store).recordPaid("purchase-1", "", "");
+  }
+
+  // ===================== fillSubscriptionPeriodBestEffort — the post-commit period read ========
+  //
+  // A paid onboarding opens the subscription row without a billing period: the purchase's first
+  // lifecycle webhooks arrived before the row existed and were ignored for good. So, after the
+  // onboarding commit, the servlet asks SubscriptionService to read the period from the provider,
+  // in its own transaction, and nothing that step does may fail a tenant that is already
+  // committed and paid for.
+
+  private static final String PERIOD_STEP = "subscription billing period";
+
+  @Test
+  public void aFilledPeriodIsCommittedInItsOwnTransaction() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenReturn(true);
+    servlet.subscriptionService = subscriptions;
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
+
+      transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq(PERIOD_STEP), any()));
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()),
+          never());
+    }
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
+  }
+
+  @Test
+  public void aFillThatWritesNothingCommitsNothing() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenReturn(false);
+    servlet.subscriptionService = subscriptions;
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
+
+      transactions.verifyNoInteractions();
+    }
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
+  }
+
+  @Test
+  public void aFailingFillIsRolledBackAndNeverEscapes() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    IllegalStateException failure = new IllegalStateException("no session");
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenThrow(failure);
+    servlet.subscriptionService = subscriptions;
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      // The contract under test: nothing escapes. JUnit 4 fails the spec on any throw here.
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
+
+      transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()), never());
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(PERIOD_STEP),
+          eq(failure), any()));
+    }
+  }
+
+  @Test
+  public void aFailingPeriodCommitIsRolledBackAndNeverEscapes() {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenReturn(true);
+    servlet.subscriptionService = subscriptions;
+    IllegalStateException failure = new IllegalStateException("commit refused");
+
+    try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
+      transactions.when(() -> EtendoGoDalHelper.commitDalChanges(eq(PERIOD_STEP), any()))
+          .thenThrow(failure);
+
+      // The contract under test: nothing escapes. JUnit 4 fails the spec on any throw here.
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
+
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(PERIOD_STEP),
+          eq(failure), any()));
+    }
+  }
+
+  /**
+   * The step runs after the checkout is closed and before the costing schedule is activated:
+   * after the onboarding commit, so the row it reads exists; after {@code recordProvisioned}, so a
+   * slow provider call never widens the window in which the checkout is not {@code PROVISIONED}
+   * and names no created client — a crash there lets a retry provision a second tenant for the
+   * same payment.
+   */
+  @Test
+  public void aPaidOnboardingFillsThePeriodAfterClosingTheCheckout() throws Exception {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    List<String> steps = new ArrayList<>();
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenAnswer(invocation -> {
+      steps.add("fill");
+      return true;
+    });
+
+    String body = runCommittedPaidOnboarding(true, subscriptions, steps);
+
+    assertEquals(List.of("commit:onboarding", "recordProvisioned", "fill",
+        "commit:" + PERIOD_STEP, "activateSchedule"), steps);
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
+    assertTrue(body, body.contains("\"success\":true"));
+  }
+
+  /** The tenant is committed and paid for: a failing period read costs the period, nothing else. */
+  @Test
+  public void aPaidOnboardingStillSucceedsWhenThePeriodFillThrows() throws Exception {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    List<String> steps = new ArrayList<>();
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenAnswer(invocation -> {
+      steps.add("fill");
+      throw new IllegalStateException("provider read exploded");
+    });
+
+    String body = runCommittedPaidOnboarding(true, subscriptions, steps);
+
+    assertEquals(List.of("commit:onboarding", "recordProvisioned", "fill",
+        "rollback:" + PERIOD_STEP, "activateSchedule"), steps);
+    assertTrue(body, body.contains("\"success\":true"));
+    assertEquals("The client keeps exactly one result line", 1, countResultLines(body));
+  }
+
+  // ===================== clearOnboardingDraftBestEffort — the account is a client-0 row ======
+
+  private static final String DRAFT_CLEAR_STEP = "onboarding draft clear";
+
+  /**
+   * The draft lives on {@code ETGO_ACCOUNT}, a client-0 row, and the clear runs after the
+   * onboarding commit with the thread still in the new tenant's context. The DAL write check
+   * refuses a client-0 row from there at flush, so the clear must run as system — and hand the
+   * tenant's context back afterwards.
+   */
+  @Test
+  public void theDraftClearWritesTheClientZeroAccountAsSystem() throws Exception {
+    Account account = mock(Account.class);
+    OBContext tenant = mock(OBContext.class);
+    List<String> steps = new ArrayList<>();
+    try (var context = mockStatic(OBContext.class);
+         var dal = mockStatic(EtendoGoJwtDalHelper.class);
+         var transactions = mockStatic(EtendoGoDalHelper.class)) {
+      context.when(OBContext::getOBContext).thenReturn(tenant);
+      context.when(() -> OBContext.setOBContext("0", "0", "0", "0"))
+          .thenAnswer(invocation -> steps.add("system"));
+      context.when(() -> OBContext.setOBContext(tenant))
+          .thenAnswer(invocation -> steps.add("tenant"));
+      dal.when(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null))
+          .thenAnswer(invocation -> steps.add("clear"));
+
+      invokeClearOnboardingDraft(account);
+
+      assertEquals(List.of("system", "clear", "tenant"), steps);
+      transactions.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A refused clear must not leave the dirty account in the session: the next commit on the
+   * thread — the period fill, the ready email — would flush it again, in whatever context it runs.
+   */
+  @Test
+  public void aFailedDraftClearRollsBackItsOwnWork() throws Exception {
+    Account account = mock(Account.class);
+    OBSecurityException refused = new OBSecurityException("Client (0) is not present");
+    try (var context = mockStatic(OBContext.class);
+         var dal = mockStatic(EtendoGoJwtDalHelper.class);
+         var transactions = mockStatic(EtendoGoDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null)).thenThrow(refused);
+
+      // The contract under test: nothing escapes. JUnit 4 fails the spec on any throw here.
+      invokeClearOnboardingDraft(account);
+
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(DRAFT_CLEAR_STEP),
+          eq(refused), any()));
+    }
+  }
+
+  private void invokeClearOnboardingDraft(Account account) throws Exception {
+    Method clear = EtendoGoJwtServlet.class.getDeclaredMethod("clearOnboardingDraftBestEffort",
+        Account.class);
+    clear.setAccessible(true);
+    clear.invoke(servlet, account);
+  }
+
+  /**
+   * The classic path (no pooled tenant: here a half-built client this purchase left behind, which
+   * the attempt resumes) commits the tenant the same way, so it must fill the period at the same
+   * point: after the checkout is closed, before the costing schedule.
+   */
+  @Test
+  public void aClassicPaidOnboardingAlsoFillsThePeriodAfterClosingTheCheckout()
+      throws Exception {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    List<String> steps = new ArrayList<>();
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenAnswer(invocation -> {
+      steps.add("fill");
+      return true;
+    });
+
+    String body = runCommittedPaidOnboarding(false, subscriptions, steps);
+
+    assertEquals(List.of("dataset", "commit:onboarding", "recordProvisioned", "fill",
+        "commit:" + PERIOD_STEP, "activateSchedule"), steps);
+    verify(servlet.pooledTenantClaimService, never()).claim(any(), any(), anyString());
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
+    assertTrue(body, body.contains("\"success\":true"));
+  }
+
+  /**
+   * Drives a paid onboarding to a successful commit, recording, in order, every DAL commit and
+   * rollback by operation name, the closing of the checkout request and the costing schedule.
+   *
+   * <p>Pooled: the pool hands out {@code client-1}. Classic: {@code client-1} is the half-built
+   * client this purchase left under its provisioning name, resumed with its organization in
+   * place; the provisioning chain's dataset pass is stubbed (recorded as {@code dataset}) and the
+   * requested-name step finds no client to rename.
+   *
+   * @param pooled which path the tenant takes
+   * @param subscriptions the subscription service the servlet uses
+   * @param steps where the steps are recorded; the caller's own stubs may add to it
+   * @return the NDJSON body written to the client
+   */
+  private String runCommittedPaidOnboarding(boolean pooled, SubscriptionService subscriptions,
+      List<String> steps) throws Exception {
+    if (!pooled) {
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+           MockedConstruction<OnboardingProvisioningChain> chains = mockConstruction(
+               OnboardingProvisioningChain.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+               (chain, context) -> doAnswer(invocation -> steps.add("dataset")).when(chain)
+                   .ensureOnboardingDataset(any(), anyString(), anyString(), anyString(),
+                       anyString(), any()))) {
+        obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+        return runCommittedPaidOnboardingOnPath(false, subscriptions, steps);
+      }
+    }
+    return runCommittedPaidOnboardingOnPath(true, subscriptions, steps);
+  }
+
+  private String runCommittedPaidOnboardingOnPath(boolean pooled,
+      SubscriptionService subscriptions, List<String> steps) throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(pooled);
+    doAnswer(invocation -> steps.add("recordProvisioned")).when(stage.store)
+        .recordProvisioned("purchase-1", "client-1", 1L);
+    servlet.subscriptionService = subscriptions;
+    when(servlet.tenantPlanService.markProductive("client-1", "star-org")).thenReturn(true);
+    when(servlet.tenantEnvironmentLifecycleService.markProductive("client-1")).thenReturn(true);
+    servlet.onboardingWarehouseAddressService =
+        mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
+    servlet.onboardingCostingScheduleService =
+        mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    doAnswer(invocation -> steps.add("activateSchedule"))
+        .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
+          .thenReturn(true);
+      if (!pooled) {
+        support.when(() -> EtendoGoJwtSupport.findClientIdByName(PAID_PROVISIONING_NAME))
+            .thenReturn("client-1");
+        support.when(() -> EtendoGoJwtSupport.organizationExists("client-1")).thenReturn(true);
+      }
+      transactions.when(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()))
+          .thenAnswer(invocation -> steps.add("commit:" + invocation.getArgument(0)));
+      transactions.when(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()))
+          .thenAnswer(invocation -> steps.add("rollback:" + invocation.getArgument(0)));
+    }, (support, dal, transactions) -> { });
+    return stage.response.body();
+  }
+
   /**
    * ETP-5548: the productive marker is the last write before the commit. A step that fails after
    * the tenant exists (here the pooled org-info wiring) must leave no plan, lifecycle or override
@@ -2942,6 +3241,54 @@ public class EtendoGoJwtServletCoverageTest {
    */
   private PaidOnboardingRun runPaidOnboarding(boolean pooled, boolean productiveNameTaken)
       throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(pooled);
+    doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+    when(servlet.tenantPlanService.resolvePlan("own-productive"))
+        .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
+          .thenReturn(productiveNameTaken ? List.of("other-account-acme", "own-productive")
+              : List.of());
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail(
+          "own-productive", "user@test.com")).thenReturn(true);
+      transactions.when(() -> EtendoGoDalHelper.rollbackDalChangesAndConfirm(eq("onboarding"), any(), any()))
+          .thenReturn(true);
+    }, (support, dal, transactions) ->
+        transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq("onboarding"), any()), never()));
+    return new PaidOnboardingRun(stage.response, stage.store);
+  }
+
+  /** What one staged paid onboarding sends and the checkout store it closes. */
+  private static final class PaidOnboardingStage {
+    final ResponseCapture response;
+    final HttpServletRequest request;
+    final CheckoutRequestStore store;
+
+    PaidOnboardingStage(ResponseCapture response, HttpServletRequest request,
+        CheckoutRequestStore store) {
+      this.response = response;
+      this.request = request;
+      this.store = store;
+    }
+  }
+
+  /** Per-spec stubs or verifications on the static mocks of a staged paid onboarding. */
+  @FunctionalInterface
+  private interface StagedStatics {
+    void apply(MockedStatic<EtendoGoJwtSupport> support, MockedStatic<EtendoGoJwtDalHelper> dal,
+        MockedStatic<EtendoGoDalHelper> transactions);
+  }
+
+  /**
+   * The setup every paid onboarding spec shares: a confirmed purchase {@code purchase-1} the
+   * account {@code account-1} has claimed, the tenant {@code client-1} (pooled or classic), and
+   * mocked plan, lifecycle, force-test-mode and org-info services. Spec-specific stubs go on the
+   * returned stage or on the servlet's mocks before {@link #runStagedPaidOnboarding}.
+   *
+   * @param pooled whether the pool hands out {@code client-1}
+   */
+  private PaidOnboardingStage stagePaidOnboarding(boolean pooled) throws Exception {
     ResponseCapture response = mockResponse();
     HttpServletRequest request = jsonRequest("/onboarding",
         "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\","
@@ -2964,8 +3311,18 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
     servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
-    doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+    return new PaidOnboardingStage(response, request, store);
+  }
+
+  /**
+   * Posts a staged paid onboarding with the authenticated account, its currency and the
+   * {@code client-1} admin role and organizations resolved, inside the static mocks.
+   *
+   * @param before spec stubs applied before the request
+   * @param after spec verifications run before the static mocks close
+   */
+  private void runStagedPaidOnboarding(PaidOnboardingStage stage, StagedStatics before,
+      StagedStatics after) throws Exception {
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");
     UserRoles admin = mock(UserRoles.class); Role role = mock(Role.class); User user = mock(User.class);
     when(role.getId()).thenReturn("role-1"); when(user.getId()).thenReturn("user-1");
@@ -2980,22 +3337,13 @@ public class EtendoGoJwtServletCoverageTest {
       dal.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR")).thenReturn(currency);
       dal.when(() -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com")).thenReturn(1);
       dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com")).thenReturn(true);
-      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
-          .thenReturn(productiveNameTaken ? List.of("other-account-acme", "own-productive")
-              : List.of());
-      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail(
-          "own-productive", "user@test.com")).thenReturn(true);
-      when(servlet.tenantPlanService.resolvePlan("own-productive"))
-          .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
       dal.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1")).thenReturn(admin);
       support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
       dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
-      transactions.when(() -> EtendoGoDalHelper.rollbackDalChangesAndConfirm(eq("onboarding"), any(), any()))
-          .thenReturn(true);
-      servlet.doPost(request, response.response);
-      transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq("onboarding"), any()), never());
+      before.apply(support, dal, transactions);
+      servlet.doPost(stage.request, stage.response.response);
+      after.apply(support, dal, transactions);
     }
-    return new PaidOnboardingRun(response, store);
   }
 
   private void assertProvisioningAlertOutcome(boolean pooled, boolean complete,
