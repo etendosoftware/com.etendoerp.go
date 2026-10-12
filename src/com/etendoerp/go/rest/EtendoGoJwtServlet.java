@@ -4146,6 +4146,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         elapsedMillis(residualStartedAt));
     if (!paidUpgrade) {
       openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
+    } else {
+      fillSubscriptionPeriodBestEffort(clientId);
     }
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
@@ -4241,6 +4243,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
       log.error("ETP-5575 demo period window failed for client {}", clientId, e);
       EtendoGoDalHelper.rollbackDalChanges("demo period window", e, log);
+    }
+  }
+
+  /**
+   * ETP-5047 — gives the subscription row a paid onboarding just opened its Stripe billing period,
+   * read from the provider. The purchase's first {@code invoice.paid} and
+   * {@code customer.subscription.updated} arrived before the row existed and were ignored for
+   * good, so without this the row stays periodless until its first renewal.
+   *
+   * <p>Runs after the onboarding commit, in its own transaction, so the provider call never holds
+   * the onboarding's locks, and never fails the onboarding: the row is already committed, and on
+   * any failure (the commit included, which is why it sits inside the try) only this step rolls
+   * back. Provider failures are WARNs from the reader; see
+   * {@link SubscriptionService#fillPeriodFromProvider}.
+   *
+   * @param clientId the tenant just committed
+   */
+  void fillSubscriptionPeriodBestEffort(String clientId) {
+    try {
+      if (subscriptionService.fillPeriodFromProvider(clientId)) {
+        EtendoGoDalHelper.commitDalChanges("subscription billing period", log);
+      }
+    } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure
+      log.warn("The subscription of client {} could not be given its billing period; it stays "
+          + "without one until its next lifecycle event", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("subscription billing period", e, log);
     }
   }
 

@@ -6,6 +6,7 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -21,8 +22,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -72,6 +75,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  *       subscriber against a later re-pricing of the plan, and nothing at runtime would report its
  *       absence.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.payment.SubscriptionService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -940,6 +945,150 @@ class SubscriptionServiceTest {
       verify(session, never()).createQuery(anyString());
       verify(obProvider, never()).get(Subscription.class);
       verify(obDal, never()).save(any());
+    }
+  }
+
+  /**
+   * ETP-5047 — a just-opened row gets its Stripe billing period from the provider, because the
+   * purchase's first lifecycle webhooks arrived before the row existed and were ignored for good.
+   */
+  @Nested
+  class FillPeriodFromProvider {
+
+    private static final String ROW_ID = "6A1B2C3D4E5F40718293A4B5C6D7E8F9";
+
+    private final Instant periodStart = Instant.parse("2026-10-12T08:00:00Z");
+    private final Instant periodEnd = Instant.parse("2026-11-12T08:00:00Z");
+
+    private StripeSubscriptionPeriodReader reader;
+    private SubscriptionService filling;
+    private Session session;
+    @SuppressWarnings("rawtypes")
+    private org.hibernate.query.Query periodStatement;
+    private org.openbravo.model.ad.access.User systemUser;
+
+    @BeforeEach
+    void givenAReaderAndASession() {
+      reader = mock(StripeSubscriptionPeriodReader.class);
+      when(reader.read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID)).thenReturn(
+          new SubscriptionLifecycleApplier.BillingPeriod(periodStart, periodEnd));
+      filling = new SubscriptionService(reader);
+      session = mock(Session.class);
+      periodStatement = mock(org.hibernate.query.Query.class, org.mockito.Mockito.RETURNS_SELF);
+      when(periodStatement.executeUpdate()).thenReturn(1);
+      when(session.createQuery(anyString())).thenReturn(periodStatement);
+      when(obDal.getSession()).thenReturn(session);
+      systemUser = mock(org.openbravo.model.ad.access.User.class);
+      OBContext context = mock(OBContext.class);
+      when(context.getUser()).thenReturn(systemUser);
+      obContextMock.when(OBContext::getOBContext).thenReturn(context);
+    }
+
+    private Subscription openRow(String stripeSubscriptionId) {
+      Subscription row = subscriptionOf(CLIENT_ID);
+      when(row.getId()).thenReturn(ROW_ID);
+      when(row.getStripeSubscription()).thenReturn(stripeSubscriptionId);
+      when(subscriptionQuery.uniqueResult()).thenReturn(row);
+      return row;
+    }
+
+    @Test
+    void writesBothBoundariesReadFromTheProvider() {
+      Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
+
+      assertTrue(filling.fillPeriodFromProvider(CLIENT_ID));
+
+      verify(reader).read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID);
+      verify(periodStatement).setParameter("periodStart", Date.from(periodStart));
+      verify(periodStatement).setParameter("periodEnd", Date.from(periodEnd));
+      verify(periodStatement).setParameter("id", ROW_ID);
+      verify(periodStatement).setParameter("updatedBy", systemUser);
+      verify(session).refresh(row);
+      // Its own transaction is the caller's to commit, after the onboarding commit.
+      verify(obDal, never()).commitAndClose();
+    }
+
+    @Test
+    void theWriteIsConditionalSoAPeriodAWebhookWroteMeanwhileWins() {
+      openRow(STRIPE_SUBSCRIPTION_ID);
+
+      filling.fillPeriodFromProvider(CLIENT_ID);
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(session).createQuery(hql.capture());
+      // A lifecycle event may land while the provider is answering. A read-then-save would
+      // overwrite its period with ours; the null guards in the statement itself cannot.
+      assertTrue(hql.getValue().startsWith("update ETGO_SUBSCRIPTION set "
+          + "currentPeriodStart = :periodStart, currentPeriodEnd = :periodEnd, "
+          + "updated = :updated, updatedBy = :updatedBy where id = :id"), hql.getValue());
+      assertTrue(hql.getValue().endsWith(
+          " and currentPeriodStart is null and currentPeriodEnd is null"), hql.getValue());
+    }
+
+    @Test
+    void touchesNeitherTheStatusNorTheGraceAnchorNorTheWatermark() {
+      Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
+
+      filling.fillPeriodFromProvider(CLIENT_ID);
+
+      ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
+      verify(session).createQuery(hql.capture());
+      assertTrue(!hql.getValue().contains("subscriptionStatus")
+          && !hql.getValue().contains("graceAnchor") && !hql.getValue().contains("lastEventAt"),
+          hql.getValue());
+      verify(row, never()).setSubscriptionStatus(any());
+      verify(row, never()).setGraceAnchor(any());
+      verify(row, never()).setLastEventAt(any());
+      verify(obDal, never()).save(any());
+    }
+
+    @Test
+    void reportsNothingWrittenWhenAWebhookFilledThePeriodFirst() {
+      Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
+      when(periodStatement.executeUpdate()).thenReturn(0);
+
+      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+      verify(session).refresh(row);
+    }
+
+    @Test
+    void neverReadsTheProviderForARowThatAlreadyHasAPeriod() {
+      Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
+      when(row.getCurrentPeriodEnd()).thenReturn(Date.from(periodEnd));
+
+      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+
+      verify(reader, never()).read(anyString(), anyString());
+      verify(session, never()).createQuery(anyString());
+    }
+
+    @Test
+    void aRowWithoutAStripeSubscriptionHasNothingToRead() {
+      openRow("   ");
+
+      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+
+      verify(reader, never()).read(any(), any());
+      verify(session, never()).createQuery(anyString());
+    }
+
+    @Test
+    void aTenantWithoutAnOpenRowHasNothingToFill() {
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
+
+      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+
+      verify(reader, never()).read(any(), any());
+    }
+
+    @Test
+    void aProviderFailureLeavesTheRowAsItWasOpened() {
+      openRow(STRIPE_SUBSCRIPTION_ID);
+      when(reader.read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID)).thenReturn(null);
+
+      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+
+      verify(session, never()).createQuery(anyString());
     }
   }
 

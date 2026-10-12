@@ -33,6 +33,31 @@ public class HttpUrlConnectionStripeApiClient implements StripeApiClient {
 
   private static final int TOO_MANY_REQUESTS = 429;
 
+  /** Explicit timeouts, or null to read the configured checkout timeouts on every call. */
+  private final Integer connectTimeoutMs;
+  private final Integer readTimeoutMs;
+
+  /** A client bounded by the configured checkout timeouts ({@link CheckoutConfiguration}). */
+  public HttpUrlConnectionStripeApiClient() {
+    this.connectTimeoutMs = null;
+    this.readTimeoutMs = null;
+  }
+
+  /**
+   * A client bounded by its own, usually shorter, timeouts.
+   *
+   * <p>ETP-5047 — for a caller that only <em>enriches</em> what it already has and must not keep
+   * anything waiting on the provider for the full checkout budget: reading the billing period of a
+   * subscription row that has just been opened.
+   *
+   * @param connectTimeoutMs how long to wait for the provider to accept a connection
+   * @param readTimeoutMs how long to wait for the provider to answer once connected
+   */
+  public HttpUrlConnectionStripeApiClient(int connectTimeoutMs, int readTimeoutMs) {
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.readTimeoutMs = readTimeoutMs;
+  }
+
   @Override
   public StripeResponse get(String path) throws StripeTransportException {
     return execute("GET", path, null);
@@ -97,8 +122,10 @@ public class HttpUrlConnectionStripeApiClient implements StripeApiClient {
       // against an unreachable provider would hang the request thread — and therefore the user's
       // browser — indefinitely, with nothing in any log. A bounded wait that fails with
       // ETGO_PlanPriceUnreachable is always better than a save that never returns.
-      connection.setConnectTimeout(CheckoutConfiguration.connectTimeoutMs());
-      connection.setReadTimeout(CheckoutConfiguration.readTimeoutMs());
+      connection.setConnectTimeout(connectTimeoutMs != null ? connectTimeoutMs
+          : CheckoutConfiguration.connectTimeoutMs());
+      connection.setReadTimeout(readTimeoutMs != null ? readTimeoutMs
+          : CheckoutConfiguration.readTimeoutMs());
       return connection;
     } catch (MalformedURLException e) {
       throw new StripeTransportException("Invalid payment provider URL: " + url, e);

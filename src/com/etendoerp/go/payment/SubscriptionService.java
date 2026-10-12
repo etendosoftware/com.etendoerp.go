@@ -100,6 +100,22 @@ public class SubscriptionService {
 
   private static final String PARAM_STRIPE_SUBSCRIPTION_ID = "stripeSubscriptionId";
 
+  private final StripeSubscriptionPeriodReader periodReader;
+
+  /** A service that reads a new row's billing period from the configured payment provider. */
+  public SubscriptionService() {
+    this(new StripeSubscriptionPeriodReader());
+  }
+
+  /**
+   * A service over an injected provider period reader, for tests.
+   *
+   * @param periodReader reads a Stripe subscription's current billing period
+   */
+  SubscriptionService(StripeSubscriptionPeriodReader periodReader) {
+    this.periodReader = periodReader;
+  }
+
   /**
    * Returns the tenant's open subscription, if it has one.
    *
@@ -323,6 +339,9 @@ public class SubscriptionService {
    * is closed. A cancellation normally closes its row already (see
    * {@link #applyLifecycleOutcome}); this covers the case where that event never arrived.
    *
+   * <p>The row opens without a billing period. The period is read from the provider afterwards, by
+   * {@link #fillPeriodFromProvider}, once the onboarding has committed (ETP-5047).
+   *
    * @param environmentClientId {@code AD_CLIENT_ID} of the tenant the subscription is for
    * @param plan the purchased plan, whose price is snapshotted onto the row
    * @param account the Etendo Go account that paid, may be null
@@ -417,6 +436,99 @@ public class SubscriptionService {
     log.info("Opened subscription for tenant {} on plan '{}'", environmentClientId,
         plan.getSearchKey());
     return subscription;
+  }
+
+  /**
+   * ETP-5047 — fills the billing period of the tenant's open row from the payment provider, when
+   * the row names a Stripe subscription and has no period yet.
+   *
+   * <p><b>Why.</b> The first {@code invoice.paid} and {@code customer.subscription.updated} of a new
+   * purchase arrive before onboarding has opened the row; they are recorded as ignored
+   * ("unresolved subscription") and Stripe never redelivers them, so without this read the row
+   * would stay periodless until its first renewal, about a month later.
+   *
+   * <p><b>Called after the onboarding commit, in its own transaction.</b> The provider call then
+   * runs while this transaction has only read, so no lock the onboarding took is held across the
+   * network; the caller commits on {@code true} and rolls back on a throw. The row is already
+   * committed either way, so nothing here can undo the subscription.
+   *
+   * <p><b>Never overwrites a period.</b> A lifecycle event that resolved once the row existed may
+   * have written one, before this call or while the provider was answering, and the event's period
+   * wins. So the row is skipped when it already has either boundary, and the write is a single
+   * conditional {@code UPDATE} guarded by both boundaries being null — atomic against a concurrent
+   * webhook, which a read-then-save would not be. Only the period and the audit columns are
+   * written: never {@code STATUS}, {@code GRACE_ANCHOR} or the {@code LAST_EVENT_AT} watermark,
+   * which belong to the lifecycle events.
+   *
+   * <p>Best-effort on the provider side: every provider failure is a WARN from
+   * {@link StripeSubscriptionPeriodReader} and answers {@code false}. Does not commit.
+   *
+   * @param environmentClientId {@code AD_CLIENT_ID} of the tenant whose row was just opened
+   * @return true when a period was written and needs committing; false when nothing was written
+   */
+  public boolean fillPeriodFromProvider(String environmentClientId) {
+    Optional<Subscription> open = findOpen(environmentClientId);
+    if (open.isEmpty()) {
+      return false;
+    }
+    Subscription subscription = open.get();
+    String stripeSubscriptionId = StringUtils.trimToNull(subscription.getStripeSubscription());
+    if (stripeSubscriptionId == null) {
+      // A payment-mode checkout, or a provider subscription id that was never recorded: there is
+      // nothing to read the period of.
+      log.info("Subscription {} of tenant {} names no Stripe subscription; no billing period to "
+          + "read", subscription.getId(), environmentClientId);
+      return false;
+    }
+    if (subscription.getCurrentPeriodStart() != null
+        || subscription.getCurrentPeriodEnd() != null) {
+      return false;
+    }
+    SubscriptionLifecycleApplier.BillingPeriod period =
+        periodReader.read(environmentClientId, stripeSubscriptionId);
+    if (period == null) {
+      return false;
+    }
+    boolean written = SystemContext.call("filling a subscription billing period",
+        () -> writePeriodIfMissing(subscription, period));
+    if (written) {
+      log.info("Subscription {} of tenant {} got its billing period from the provider",
+          subscription.getId(), environmentClientId);
+    } else {
+      log.info("Subscription {} of tenant {} got a billing period from a lifecycle event first; "
+          + "the provider's was not written", subscription.getId(), environmentClientId);
+    }
+    return written;
+  }
+
+  /**
+   * ETP-5047 — the conditional write behind {@link #fillPeriodFromProvider}: one {@code UPDATE} of
+   * that row alone, applied only while both period boundaries are still null, stamping
+   * {@code UPDATED}/{@code UPDATEDBY} as the DAL interceptor would. Like {@link #closeInDatabase},
+   * an HQL bulk update bypasses the DAL entity events, and the row is refreshed afterwards so the
+   * in-session entity reads what the database holds.
+   *
+   * @return true when the row was updated
+   */
+  private static boolean writePeriodIfMissing(Subscription subscription,
+      SubscriptionLifecycleApplier.BillingPeriod period) {
+    int updated = OBDal.getInstance().getSession()
+        .createQuery("update " + Subscription.ENTITY_NAME
+            + " set " + Subscription.PROPERTY_CURRENTPERIODSTART + " = :periodStart, "
+            + Subscription.PROPERTY_CURRENTPERIODEND + " = :periodEnd, "
+            + Subscription.PROPERTY_UPDATED + " = :updated, "
+            + Subscription.PROPERTY_UPDATEDBY + " = :updatedBy"
+            + " where " + Subscription.PROPERTY_ID + " = :id"
+            + " and " + Subscription.PROPERTY_CURRENTPERIODSTART + " is null"
+            + " and " + Subscription.PROPERTY_CURRENTPERIODEND + " is null")
+        .setParameter("periodStart", Date.from(period.start()))
+        .setParameter("periodEnd", Date.from(period.end()))
+        .setParameter("updated", new Date())
+        .setParameter("updatedBy", OBContext.getOBContext().getUser())
+        .setParameter("id", subscription.getId())
+        .executeUpdate();
+    OBDal.getInstance().getSession().refresh(subscription);
+    return updated == 1;
   }
 
   /**
