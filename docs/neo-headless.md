@@ -4982,6 +4982,50 @@ So there is no channel divergence to declare: list, count and distinct agree on 
 
 Current implementers: `ProductDefaultsHandler` (products in a system category, ETP-4967) and `ProductCategoryDefaultHandler` (the system categories themselves).
 
+#### 5.3.3 Contact summary read providers — `contacts/bp-stats` and `contacts/bp-trend` (ETP-5600)
+
+Two tab-less entities of the `contacts` spec are served whole by their pre-hook (`ContactsBpStatsHandler`, `ContactsBpTrendHandler`) and feed the contact form's summary widget and sidebar chart. Both aggregate completed/closed (`CO`/`CL`) invoices of one business partner in the current client.
+
+**Amounts are NET.** Both sum `c_invoice.totallines` (VAT excluded), the same base as the dashboard `WidgetKpisHandler` (ETP-5011), so the widget amounts, the chart and the dashboard agree. Before ETP-5600 both summed `grandtotal`.
+
+**`GET /sws/neo/contacts/bp-stats`**
+
+| Param | Required | Meaning |
+|---|---|---|
+| `businessPartnerId` | yes | `C_BPartner_ID`; blank or missing → `400` |
+| `months` | no | Period length for the summary widget. Allow-list `3` or `6`; any other value (blank, non-numeric, `12`, …) is treated as absent |
+
+Without `months` the response is the original one — two KPI entries comparing the current calendar month with the previous one:
+
+```json
+{ "response": { "count": 2, "data": [
+  { "key": "revenueThisMonth",  "label": "Revenue this month",  "value": 1200.0, "previousValue": 800.0,
+    "trend": 50.0, "format": "currency", "icon": "DollarSign" },
+  { "key": "expensesThisMonth", "label": "Expenses this month", "value": 300.0,  "previousValue": 0.0,
+    "trend": 0.0,  "format": "currency", "icon": "CreditCard" } ] } }
+```
+
+With `months=N` the two entries above are unchanged and two period KPIs are appended, plus a top-level `months`:
+
+```json
+{ "response": { "count": 4, "months": 3, "data": [
+  { "key": "revenueThisMonth", "…": "as above" },
+  { "key": "expensesThisMonth", "…": "as above" },
+  { "key": "revenue",  "label": "Revenue",  "value": 5400.0, "previousValue": 4500.0, "trend": 20.0,
+    "hasPrevious": true,  "format": "currency", "icon": "DollarSign" },
+  { "key": "expenses", "label": "Expenses", "value": 900.0,  "previousValue": 0.0,    "trend": 0.0,
+    "hasPrevious": false, "format": "currency", "icon": "CreditCard" } ] } }
+```
+
+- **Current window:** the last N calendar months including the current one, `[date_trunc('month', NOW()) - (N-1) months, NOW()]`.
+- **Comparison window:** the N calendar months immediately before it, `[start - N months, start)` — the equal-size preceding window `WidgetKpisHandler` uses (ETP-5493).
+- **`hasPrevious`** is `previousValue != 0`. When it is `false` the percentage change is undefined: `trend` is `0` and the client hides the variation chip. `trend` is otherwise `(value - previousValue) * 100 / |previousValue|`, one decimal.
+- `N` is bound as an integer query parameter; it never reaches the SQL text.
+
+**MCP.** `etendo_list(spec:"contacts", entity:"bp-stats", filters:{businessPartnerId:"…", months:3})` reaches the handler with the same params: `McpHookExecutor.buildReadProviderParams` copies every scalar `filters` entry into the provider's query params (`3` arrives as `"3"`). Omitting `months` keeps the original two-entry answer, so existing agent calls are unaffected.
+
+**`GET /sws/neo/contacts/bp-trend?businessPartnerId=…`** returns `{labels, revenue, expenses}` for the last 6 calendar months (net amounts, see above). It takes no period param.
+
 ---
 
 ## 6. Parent-Child Tab Filtering
