@@ -19,12 +19,19 @@ package com.etendoerp.go.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -45,6 +52,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * <p>The chain resolution itself ({@code forEntity} / {@code forField} / {@code forSpec}) reads
  * {@code SFEntity} and its {@code MCP_CONFIG} property, so it belongs in an integration test
  * against a real instance rather than here.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpEntityConfig
+ * @covers com.etendoerp.go.mcp.McpConfigSection
+ * @covers com.etendoerp.go.mcp.McpConfigSections
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -103,6 +114,60 @@ class McpEntityConfigTest {
       McpEntityConfig.register(sectionRejecting(null));
       assertThrows(IllegalStateException.class,
           () -> McpEntityConfig.register(sectionRejecting("other")));
+    }
+
+    /**
+     * The root cause of the post-restart {@code "MCP config section 'parent' is already
+     * registered"} 500 (ETP-5639): each {@code declaration()} built a new instance, so the
+     * idempotent-for-the-same-instance guard could not recognise a second registration of the
+     * same section and threw.
+     */
+    @Test
+    @DisplayName("each section's declaration is one instance, so re-registering it is a no-op")
+    void declarationsAreSingletons() {
+      assertSame(McpParentSection.declaration(), McpParentSection.declaration());
+      assertSame(McpFieldsSection.declaration(), McpFieldsSection.declaration());
+      assertSame(McpVerbsSection.declaration(), McpVerbsSection.declaration());
+      assertSame(McpActionsSection.declaration(), McpActionsSection.declaration());
+      McpEntityConfig.register(McpParentSection.declaration());
+      McpEntityConfig.register(McpParentSection.declaration());
+    }
+
+    /**
+     * Repro of the live failure: concurrent first callers of {@code ensureRegistered()} right
+     * after a restart. Released together by a latch, many rounds, so the window is hit reliably.
+     */
+    @Test
+    @DisplayName("concurrent first callers of ensureRegistered never fail")
+    void concurrentFirstCallersDoNotRace() throws Exception {
+      int threads = 8;
+      ExecutorService pool = Executors.newFixedThreadPool(threads);
+      Queue<Throwable> failures = new ConcurrentLinkedQueue<>();
+      try {
+        for (int round = 0; round < 200 && failures.isEmpty(); round++) {
+          McpConfigSections.resetForTests();
+          CountDownLatch start = new CountDownLatch(1);
+          CountDownLatch done = new CountDownLatch(threads);
+          for (int t = 0; t < threads; t++) {
+            pool.execute(() -> {
+              try {
+                start.await();
+                McpConfigSections.ensureRegistered();
+              } catch (Throwable e) {
+                failures.add(e);
+              } finally {
+                done.countDown();
+              }
+            });
+          }
+          start.countDown();
+          assertTrue(done.await(10, TimeUnit.SECONDS), "registration threads did not finish");
+        }
+      } finally {
+        pool.shutdownNow();
+        McpConfigSections.resetForTests();
+      }
+      assertTrue(failures.isEmpty(), "concurrent registration failed: " + failures.peek());
     }
 
     @Test

@@ -61,7 +61,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 
 /**
- * The two write gates ETP-5335 put in front of {@code neo_create} and {@code neo_update} —
+ * The two write gates ETP-5335 put in front of {@code etendo_create} and {@code etendo_update} —
  * {@link McpQuerySupport#writeGate} as consumed by
  * {@link McpWriteRequestSupport#mapFieldsToDalProperties}.
  *
@@ -74,7 +74,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
  *       caller enumerate the underlying AD table by probing keys and reading which refusal came
  *       back. That indistinguishability is a security property, so it is asserted here rather than
  *       left to the wording of a javadoc.</li>
- *   <li><b>Read-only</b> — the field IS on the surface and {@code neo_schema} already publishes it
+ *   <li><b>Read-only</b> — the field IS on the surface and {@code etendo_schema} already publishes it
  *       carrying {@code readOnly: true}, so naming the reason repeats what the caller was told
  *       before it wrote and reveals nothing.</li>
  * </ul>
@@ -87,6 +87,9 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * gate — 79 of the 128 writable entities declare a qualifier — and a live probe caught it
  * accepting {@code documentNo} on {@code sales-order/header}. Its absence is asserted, because
  * nothing about a missing exemption is visible in a signature.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpQuerySupport
+ * @covers com.etendoerp.go.mcp.McpWriteRequestSupport
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -240,7 +243,7 @@ class McpWriteGateTest {
   class ExcludedFields {
 
     @Test
-    @DisplayName("neo_create: a field the spec excludes answers 422 field_not_allowed")
+    @DisplayName("etendo_create: a field the spec excludes answers 422 field_not_allowed")
     void createRefusesAnExcludedField() throws Exception {
       declareProperty("orderReference", "POReference");
       curate("POReference", Boolean.FALSE, Boolean.FALSE, null, null);
@@ -298,6 +301,35 @@ class McpWriteGateTest {
           "the two refusals differ, which turns the response into a probe for which columns the"
               + " AD table really has — the wording must neither assert nor deny that the field"
               + " exists");
+    }
+
+    /**
+     * IMP-50: the unknown-status refusal raised on this same filter path keeps {@code available}
+     * as the bare names and adds {@code namedFilters} with what each one means.
+     */
+    @Test
+    @DisplayName("filtering: an unknown named status lists the valid names and their meanings")
+    void unknownNamedStatusCarriesDescriptions() throws Exception {
+      SFEntity sfEntity = specEntity();
+      when(sfEntity.getNamedFilters()).thenReturn(
+          "[{\"name\":\"open\",\"description\":\"Still owes a balance. Any date.\","
+              + "\"where\":\"e.open = true\"},{\"name\":\"closed\",\"where\":\"e.open = false\"}]");
+
+      McpRoutingException thrown = assertThrows(McpRoutingException.class,
+          () -> McpQuerySupport.buildWhereFromFilters(fields("status", "opne"), adTab, sfEntity,
+              null));
+      JSONObject envelope = thrown.toEnvelope();
+
+      assertEquals(422, envelope.getInt(McpConstants.KEY_STATUS));
+      assertEquals("[\"open\",\"closed\"]",
+          envelope.getJSONArray(McpConstants.KEY_AVAILABLE).toString());
+      org.codehaus.jettison.json.JSONArray described = envelope.getJSONArray("namedFilters");
+      assertEquals(2, described.length());
+      assertEquals("open", described.getJSONObject(0).getString("name"));
+      assertEquals("Still owes a balance.",
+          described.getJSONObject(0).getString("description"));
+      assertFalse(described.getJSONObject(1).has("description"));
+      assertFalse(envelope.toString().contains("e.open"), "the where fragment must not leak");
     }
 
     private String filterRefusal(String key, SFEntity sfEntity) throws Exception {
@@ -424,7 +456,7 @@ class McpWriteGateTest {
 
     /**
      * Naming the reason costs nothing here and is the whole difference from
-     * {@code field_not_allowed}: {@code neo_schema} already published this field with
+     * {@code field_not_allowed}: {@code etendo_schema} already published this field with
      * {@code readOnly: true}, so the refusal repeats what the caller was told.
      */
     @Test
@@ -440,12 +472,12 @@ class McpWriteGateTest {
       assertTrue(envelope.contains("read-only") || envelope.contains("readonly"),
           "an agent told only 'not allowed' cannot tell this apart from a field that does not"
               + " exist, and this one it CAN fix by dropping the key");
-      assertTrue(envelope.contains("neo_schema"), "the hint must name where the flag is published");
+      assertTrue(envelope.contains("etendo_schema"), "the hint must name where the flag is published");
     }
 
     /**
      * The exemption that was kept: an agent following the documented
-     * {@code neo_defaults} → {@code neo_create} sequence echoes resolved values back, and being
+     * {@code etendo_defaults} → {@code etendo_create} sequence echoes resolved values back, and being
      * refused for it would punish the recommended shape.
      */
     @Test
@@ -545,7 +577,7 @@ class McpWriteGateTest {
      * value from a client's and exempts the whole entity. Here the mapping runs on the caller's
      * own {@code fields} argument and the pre-hook fires downstream, so every key is the caller's
      * by construction. Keeping the exemption left the gate firing on under two fifths of the
-     * surface, and a live probe caught {@code neo_update} on {@code sales-order/header} —
+     * surface, and a live probe caught {@code etendo_update} on {@code sales-order/header} —
      * qualifier {@code salesOrderHeaderHandler} — accepting {@code documentNo} with a 200.
      */
     @Test
@@ -630,7 +662,7 @@ class McpWriteGateTest {
         assertTrue(body.matches("(?s).*mapFieldsToDalProperties\\s*\\([^)]*sfEntity[^)]*\\).*"),
             verb + " calls mapFieldsToDalProperties without sfEntity, which silently disables"
                 + " both write gates: an excluded or read-only field is accepted again and the"
-                + " write verbs stop agreeing with neo_schema about which fields exist.");
+                + " write verbs stop agreeing with etendo_schema about which fields exist.");
       }
     }
   }
@@ -709,7 +741,7 @@ class McpWriteGateTest {
 
       assertEquals(2, response.getJSONArray(McpFieldProjection.KEY_UNKNOWN_FIELDS).length());
       String hint = response.getString("unknownFieldsHint");
-      assertTrue(hint.contains("neo_schema"));
+      assertTrue(hint.contains("etendo_schema"));
       assertTrue(hint.contains("create"),
           "the hint must name the projection to ask for, now that view is required");
     }
@@ -745,7 +777,7 @@ class McpWriteGateTest {
   /**
    * {@code client} and {@code organization} are resolved from the session on every write.
    *
-   * <p><b>The defect.</b> A {@code neo_create} carrying another org's {@code organization}
+   * <p><b>The defect.</b> A {@code etendo_create} carrying another org's {@code organization}
    * answered {@code 200 OK} and the record was then invisible to the session that created it — a
    * {@code 404} on the id the response had just returned, because the row went into the other
    * tenant. Neither column has an {@code ETGO_SF_FIELD} row, and both gates above are built

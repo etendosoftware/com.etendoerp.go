@@ -30,6 +30,8 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link AccountReportTree} — the pure Java port of
  * {@code report-grouping.js}'s {@code buildAccountReportTree} (ETP-5483 slice 4). No DB, no
  * OBContext: plain data in, plain data out.
+ *
+ * @covers com.etendoerp.go.schemaforge.AccountReportTree
  */
 class AccountReportTreeTest {
 
@@ -338,5 +340,249 @@ class AccountReportTreeTest {
     assertEquals(0, findById(rows, "A").indent);
     assertEquals(1, findById(rows, "L1").indent);
     assertEquals(0, findById(rows, "L3").indent);
+  }
+
+  // -------------------------------------------------------------------------
+  // ShowValueCond (ETP-5662)
+  // -------------------------------------------------------------------------
+
+  /** A node carrying {@code ShowValueCond} / {@code IsSummary}; own amount is Dr-Cr. */
+  private static AccountReportTree.NodeRow svcNode(String id, String parent, String sortPath,
+      String group, String value, String level, String sign, String own, String ownRef,
+      String svc, boolean summary) {
+    return AccountReportTree.NodeRow.builder()
+        .nodeId(id).parentId(parent).sortPath(sortPath).groupName(group).value(value)
+        .name(value).elementLevel(level).accountSign(sign)
+        .ownAmt(new BigDecimal(own)).ownAmtRef(new BigDecimal(ownRef))
+        .showValueCond(svc).summary(summary).build();
+  }
+
+  /**
+   * Mini PGC balance sheet. Activo (D): A.B &gt; 551(P) &gt; 5510(P) &gt; 55100000 leaf; A.TOTAL =
+   * A.B. Pasivo (C): (551)(P) &gt; (5510)(P formula, -1 x 5510); 555 leaf. {@code dr} is the
+   * Dr-Cr posted on 55100000, {@code dr555} on 555.
+   */
+  private static List<AccountReportTree.NodeRow> mirrorTree(String dr, String dr555) {
+    return List.of(
+        svcNode("A", null, "1", "A", "A", "E", "D", "0", "0", null, true),
+        svcNode("AB", "A", "1.1", "A", "A.B", "E", "D", "0", "0", null, true),
+        svcNode("551", "AB", "1.1.1", "A", "551", "C", "D", "0", "0", "P", true),
+        svcNode("5510", "551", "1.1.1.1", "A", "5510", "D", "D", "0", "0", "P", true),
+        svcNode("55100000", "5510", "1.1.1.1.1", "A", "55100000", "S", "D", dr, "0", null,
+            false),
+        svcNode("ATOT", "A", "1.2", "A", "A.TOTAL", "E", "D", "0", "0", null, true),
+        svcNode("P", null, "2", "P", "P", "E", "C", "0", "0", null, true),
+        svcNode("M551", "P", "2.1", "P", "(551)", "C", "C", "0", "0", "P", true),
+        svcNode("M5510", "M551", "2.1.1", "P", "(5510)", "D", "C", "0", "0", "P", true),
+        svcNode("555", "P", "2.2", "P", "555", "C", "C", dr555, "0", null, false));
+  }
+
+  private static List<AccountReportTree.OperandRow> mirrorOperands() {
+    return List.of(operand("M5510", "5510", -1), operand("ATOT", "AB", 1));
+  }
+
+  private static BigDecimal amt(List<AccountReportTree.OutputRow> rows, String id) {
+    return findById(rows, id).amount;
+  }
+
+  private static boolean has(List<AccountReportTree.OutputRow> rows, String id) {
+    return rows.stream().anyMatch(r -> id.equals(r.nodeId));
+  }
+
+  @Test
+  @DisplayName("oracle case 1: credit balance on 551 hides Activo side, mirror shows it")
+  void oracleCreditBalance() {
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(mirrorTree("-1", "1"), mirrorOperands(), "S", true);
+
+    assertFalse(has(rows, "AB"));
+    assertFalse(has(rows, "551"));
+    assertFalse(has(rows, "5510"));
+    assertFalse(has(rows, "55100000"), "cascade: descendants of a reset node show 0");
+    assertFalse(has(rows, "ATOT"), "a total over a clamped subtree is 0");
+    assertEquals(0, amt(rows, "M5510").compareTo(BigDecimal.ONE));
+    assertEquals(0, amt(rows, "M551").compareTo(BigDecimal.ONE));
+    assertEquals(0, amt(rows, "555").compareTo(BigDecimal.ONE.negate()));
+    assertTrue(rows.get(0).isGroupStart,
+        "only Pasivo is visible, yet its group header must still be drawn");
+  }
+
+  @Test
+  @DisplayName("oracle case 2: debit balance on 551 shows Activo side, mirror is hidden")
+  void oracleDebitBalance() {
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(mirrorTree("5", "-5"), mirrorOperands(), "S", true);
+
+    for (String id : List.of("AB", "551", "5510", "55100000", "ATOT")) {
+      assertEquals(0, amt(rows, id).compareTo(new BigDecimal("5")), id);
+    }
+    assertFalse(has(rows, "M551"));
+    assertFalse(has(rows, "M5510"));
+  }
+
+  @Test
+  @DisplayName("N clamp keeps only negative values; non-summary and null svc pass through")
+  void negativeClampAndPassThrough() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("N1", "R", "1.1", "G", "N1", "C", "D", "5", "0", "N", true),
+        svcNode("N2", "R", "1.2", "G", "N2", "C", "D", "-5", "0", "N", true),
+        svcNode("L", "R", "1.3", "G", "L", "C", "D", "5", "0", "P", false),
+        svcNode("X", "R", "1.4", "G", "X", "C", "D", "-5", "0", null, true),
+        svcNode("A", "R", "1.5", "G", "A", "C", "D", "-5", "0", "A", true));
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", false);
+
+    assertEquals(0, amt(out, "N1").signum());
+    assertEquals(0, amt(out, "N2").compareTo(new BigDecimal("-5")));
+    assertEquals(0, amt(out, "L").compareTo(new BigDecimal("5")));
+    assertEquals(0, amt(out, "X").compareTo(new BigDecimal("-5")));
+    assertEquals(0, amt(out, "A").compareTo(new BigDecimal("-5")));
+  }
+
+  @Test
+  @DisplayName("clamped child contributes 0 to its parent roll-up")
+  void parentExcludesClampedChild() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("H", "R", "1.1", "G", "H", "E", "D", "0", "0", null, true),
+        svcNode("C1", "H", "1.1.1", "G", "C1", "C", "D", "-3", "0", "P", true),
+        svcNode("C2", "H", "1.1.2", "G", "C2", "C", "D", "4", "0", null, false));
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", true);
+
+    assertEquals(0, amt(out, "H").compareTo(new BigDecimal("4")));
+    assertFalse(has(out, "C1"));
+  }
+
+  @Test
+  @DisplayName("reference-period reset is independent of the main period")
+  void referenceResetIsIndependent() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("S", "R", "1.1", "G", "S", "C", "D", "0", "0", "P", true),
+        svcNode("K", "S", "1.1.1", "G", "K", "S", "D", "7", "-2", null, false));
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", false);
+
+    assertEquals(0, amt(out, "K").compareTo(new BigDecimal("7")));
+    assertEquals(0, findById(out, "K").amountRef.signum(), "ref period was reset");
+    assertEquals(0, findById(out, "S").amountRef.signum());
+  }
+
+  @Test
+  @DisplayName("a tree with no operand rows: mirror formula node resolves to 0 (R39 precondition)")
+  void noOperandsLeavesMirrorEmpty() {
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(mirrorTree("-1", "1"), List.of(), "S", true);
+
+    assertFalse(has(rows, "551"));
+    assertFalse(has(rows, "M551"));
+  }
+
+  /**
+   * The PGC 552 cross-wired pair, as the chart defines it: on the Activo side {@code 552A} groups
+   * {@code 5523 + 5524} and {@code 552B} holds {@code 5525}; on the Pasivo side the mirrors are
+   * wired the other way round, {@code (552A)} holds the formula {@code (5525)} and {@code (552B)}
+   * holds the formulas {@code (5523) + (5524)}. Every node is a summary with {@code P}. Posted
+   * Dr-Cr: 55230000 +4, 55240000 -2, 55250000 -3.
+   */
+  private static List<AccountReportTree.NodeRow> crossWired552Tree() {
+    return List.of(
+        svcNode("A", null, "1", "A", "A", "E", "D", "0", "0", null, true),
+        svcNode("552A", "A", "1.1", "A", "552A", "C", "D", "0", "0", "P", true),
+        svcNode("5523", "552A", "1.1.1", "A", "5523", "D", "D", "0", "0", "P", true),
+        svcNode("55230000", "5523", "1.1.1.1", "A", "55230000", "S", "D", "4", "0", "A", false),
+        svcNode("5524", "552A", "1.1.2", "A", "5524", "D", "D", "0", "0", "P", true),
+        svcNode("55240000", "5524", "1.1.2.1", "A", "55240000", "S", "D", "-2", "0", "A", false),
+        svcNode("552B", "A", "1.2", "A", "552B", "C", "D", "0", "0", "P", true),
+        svcNode("5525", "552B", "1.2.1", "A", "5525", "D", "D", "0", "0", "P", true),
+        svcNode("55250000", "5525", "1.2.1.1", "A", "55250000", "S", "D", "-3", "0", "A", false),
+        svcNode("P", null, "2", "P", "P", "E", "C", "0", "0", null, true),
+        svcNode("M552A", "P", "2.1", "P", "(552A)", "C", "C", "0", "0", "P", true),
+        svcNode("M5525", "M552A", "2.1.1", "P", "(5525)", "D", "C", "0", "0", "P", true),
+        svcNode("M552B", "P", "2.2", "P", "(552B)", "C", "C", "0", "0", "P", true),
+        svcNode("M5523", "M552B", "2.2.1", "P", "(5523)", "D", "C", "0", "0", "P", true),
+        svcNode("M5524", "M552B", "2.2.2", "P", "(5524)", "D", "C", "0", "0", "P", true));
+  }
+
+  @Test
+  @DisplayName("552 cross-wired pair: each mirror reads its own operand's raw value and clamps")
+  void crossWired552PairResolvesAndClamps() {
+    List<AccountReportTree.OperandRow> operands = List.of(
+        operand("M5523", "5523", -1), operand("M5524", "5524", -1),
+        operand("M5525", "5525", -1));
+
+    List<AccountReportTree.OutputRow> rows =
+        AccountReportTree.build(crossWired552Tree(), operands, "S", true);
+
+    // Activo: 5524 (-2) and 5525 (-3) are clamped to 0, so 552A keeps only 5523 and 552B is 0.
+    assertEquals(0, amt(rows, "552A").compareTo(new BigDecimal("4")));
+    assertEquals(0, amt(rows, "5523").compareTo(new BigDecimal("4")));
+    assertEquals(0, amt(rows, "55230000").compareTo(new BigDecimal("4")));
+    for (String id : List.of("5524", "55240000", "552B", "5525", "55250000")) {
+      assertFalse(has(rows, id), id + " must be hidden (clamped, or under a reset ancestor)");
+    }
+    // Pasivo: each mirror reads its OWN operand, not its Activo sibling's parent.
+    assertFalse(has(rows, "M5523"), "(5523) = -4 is clamped by P");
+    assertEquals(0, amt(rows, "M5524").compareTo(new BigDecimal("2")));
+    assertEquals(0, amt(rows, "M552B").compareTo(new BigDecimal("2")),
+        "(552B) = (5523) clamped 0 + (5524) 2");
+    assertEquals(0, amt(rows, "M5525").compareTo(new BigDecimal("3")));
+    assertEquals(0, amt(rows, "M552A").compareTo(new BigDecimal("3")),
+        "(552A) holds (5525), cross-wired against 552A holding 5523 + 5524");
+  }
+
+  @Test
+  @DisplayName("a zero-net parent hides while its children with value still render")
+  void zeroNetParentHidesButChildrenRender() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "C", "0", "0", null, true),
+        svcNode("H", "R", "1.1", "G", "H", "E", "C", "0", "0", null, true),
+        svcNode("C1", "H", "1.1.1", "G", "C1", "C", "C", "5", "0", null, false),
+        svcNode("C2", "H", "1.1.2", "G", "C2", "C", "C", "-5", "0", null, false));
+
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", true);
+
+    assertFalse(has(out, "H"), "the heading nets to 0 and is dropped by only-with-value");
+    assertEquals(List.of("C1", "C2"), out.stream().map(r -> r.nodeId).toList(),
+        "Classic keeps the rows without their heading; they must not be dropped with it");
+    assertEquals(0, amt(out, "C1").compareTo(new BigDecimal("-5")));
+    assertEquals(0, amt(out, "C2").compareTo(new BigDecimal("5")));
+  }
+
+  @Test
+  @DisplayName("N clamp on a formula node keeps only a strictly negative result")
+  void negativeClampOnFormulaNode() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "G", "R", "E", "D", "0", "0", null, true),
+        svcNode("POS", "R", "1.1", "G", "POS", "C", "D", "6", "0", null, false),
+        svcNode("NEG", "R", "1.2", "G", "NEG", "C", "D", "-6", "0", null, false),
+        svcNode("FP", "R", "1.3", "G", "FP", "C", "D", "0", "0", "N", true),
+        svcNode("FN", "R", "1.4", "G", "FN", "C", "D", "0", "0", "N", true),
+        svcNode("FZ", "R", "1.5", "G", "FZ", "C", "D", "0", "0", "N", true));
+    List<AccountReportTree.OperandRow> operands = List.of(
+        operand("FP", "POS", 1), operand("FN", "NEG", 1),
+        operand("FZ", "POS", 1), operand("FZ", "NEG", 1));
+
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, operands, "S", false);
+
+    assertTrue(findById(out, "FP").isFormula);
+    assertEquals(0, amt(out, "FP").signum(), "+6 is not strictly negative, so N clamps it to 0");
+    assertEquals(0, amt(out, "FN").compareTo(new BigDecimal("-6")));
+    assertEquals(0, amt(out, "FZ").signum(), "0 is not strictly negative either");
+  }
+
+  @Test
+  @DisplayName("a single-root report never forces a group header, even when its first rows hide")
+  void singleRootReportGetsNoForcedGroupHeader() {
+    List<AccountReportTree.NodeRow> rows = List.of(
+        svcNode("R", null, "1", "PyG", "R", "E", "C", "0", "0", null, true),
+        svcNode("Z", "R", "1.1", "PyG", "Z", "C", "C", "0", "0", null, false),
+        svcNode("X", "R", "1.2", "PyG", "X", "C", "C", "-10", "0", null, false),
+        svcNode("Y", "R", "1.3", "PyG", "Y", "C", "C", "4", "0", null, false));
+
+    List<AccountReportTree.OutputRow> out = AccountReportTree.build(rows, List.of(), "S", true);
+
+    assertEquals(List.of("X", "Y"), out.stream().map(r -> r.nodeId).toList());
+    assertTrue(out.stream().noneMatch(r -> r.isGroupStart),
+        "one root means one group, so no row is flagged isGroupStart");
   }
 }

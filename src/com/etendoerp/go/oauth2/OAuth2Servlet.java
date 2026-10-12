@@ -27,8 +27,6 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -167,10 +165,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final String GRANT_TYPE_CLIENT_CREDENTIALS = "client_credentials";
   private static final String GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code";
   private static final String GRANT_TYPE_REFRESH_TOKEN = "refresh_token";
-    private static final String SCOPE_NEO_READ = "neo:read";
-    private static final String SCOPE_NEO_WRITE = "neo:write";
-    private static final String SCOPE_NEO_PROCESS = "neo:process";
-    private static final String SCOPE_NEO_REPORT = "neo:report";
     private static final String FIELD_ID = "id";
     private static final String FIELD_CLIENT_ID = "clientId";
     private static final String FIELD_CLIENT_ID_REQUEST = "client_id";
@@ -195,7 +189,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String FIELD_STATE = "state";
     private static final String DB_OAUTH2_CLIENT_ID = "etgo_oauth2_client_id";
 
-  private static final String WILDCARD_SCOPE = "neo:*";
   private static final String PATH_API_KEYS = "/api-keys";
   private static final String PATH_API_KEY_ITEM = PATH_API_KEYS + "/[^/]+/?";
   private static final String MESSAGE_API_KEY_NOT_FOUND = "API key not found";
@@ -214,10 +207,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private final PublicApiKeyHandlers publicApiKeyHandlers = new PublicApiKeyHandlers();
 
-  private static final Set<String> VALID_SCOPES = Collections.unmodifiableSet(
-      new HashSet<>(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
-        SCOPE_NEO_REPORT, WILDCARD_SCOPE))
-  );
+  /** Both the current {@code etendo:} scopes and their deprecated {@code neo:} aliases. */
+  private static final Set<String> VALID_SCOPES = ApiScopes.ACCEPTED;
 
   // --- SQL constants ---
 
@@ -513,7 +504,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
     Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
     if (!requestedScopes.isEmpty()
-        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
+        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
           MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
       return;
@@ -1043,7 +1034,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String name = body.optString("name", null);
       String adUserId = body.optString(FIELD_AD_USER_ID, null);
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
-      String scopes = body.optString(FIELD_SCOPES, SCOPE_NEO_READ);
+      String scopes = body.optString(FIELD_SCOPES, ApiScopes.READ);
       boolean isActive = body.optBoolean(FIELD_IS_ACTIVE, true);
       String redirectUrisJson = body.optString(FIELD_REDIRECT_URIS_JSON, "[]");
 
@@ -1538,7 +1529,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
           principal.roleId,
           requestedScopes,
           allowedScopes,
-          WILDCARD_SCOPE,
           AUTH_CODE_EXPIRY_MS);
       AUTH_CODE_STORE.put(codeHash, codeData);
 
@@ -1829,7 +1819,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       JSONObject body = parseJsonBody(request);
       String clientName = body.optString("client_name", "MCP Client");
       String scopes = OAuth2ClientPolicy.normalizeClientScopes(
-          body.optString(FIELD_SCOPE, null), WILDCARD_SCOPE, VALID_SCOPES);
+          body.optString(FIELD_SCOPE, null), ApiScopes.ALL, VALID_SCOPES);
       String redirectUris = OAuth2ClientPolicy.normalizeRedirectUris(
           body.optJSONArray(FIELD_REDIRECT_URIS));
 
@@ -1901,9 +1891,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       metadata.put("token_endpoint", PublicUrlResolver.appendPath(authorizationServerUrl, FIELD_TOKEN));
       metadata.put("registration_endpoint",
           PublicUrlResolver.appendPath(authorizationServerUrl, "register"));
-      metadata.put("scopes_supported",
-            new JSONArray(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
-              SCOPE_NEO_REPORT, WILDCARD_SCOPE)));
+      metadata.put("scopes_supported", new JSONArray(ApiScopes.ADVERTISED));
       metadata.put("response_types_supported", new JSONArray(Arrays.asList("code")));
       metadata.put("grant_types_supported",
             new JSONArray(Arrays.asList(GRANT_TYPE_AUTHORIZATION_CODE,
@@ -2027,7 +2015,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scope, VALID_SCOPES);
     Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
     if (!requestedScopes.isEmpty()
-        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
+        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
           MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
       return false;

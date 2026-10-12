@@ -35,7 +35,7 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Plumbing shared by the dispatchers that expose a report spec's SPA routes to agents through
- * {@code neo_action} ({@link ReconciliationAgentActions} for ETP-5468,
+ * {@code etendo_action} ({@link ReconciliationAgentActions} for ETP-5468,
  * {@link BankStatementAgentActions} for ETP-5469).
  *
  * <p>Each dispatcher owns its contracts and its routing; what is identical — the role gate, the
@@ -54,7 +54,7 @@ final class AgentActionSupport {
 
   /**
    * The same role gate the SPA route passes through {@code NeoRequestRouter}: report-spec access
-   * with the HTTP method the SPA would use. {@code neo_action} is authorized as a read by the MCP
+   * with the HTTP method the SPA would use. {@code etendo_action} is authorized as a read by the MCP
    * router, so a write needs the POST check here. Fails closed when the spec cannot be resolved.
    *
    * @param context  the ACTION context (its entity names the spec)

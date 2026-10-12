@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  * <p>Both callers guard a <b>call site</b>, and a missing call site is invisible to every other
  * kind of test: the unit tests of the thing that should have been called keep passing, and no
  * signature or type changes. {@code McpWriteVerbCoercionCallSiteTest} is the precedent —
- * {@code neo_update} corrupted dates for a release because {@code handleUpdate} never invoked the
+ * {@code etendo_update} corrupted dates for a release because {@code handleUpdate} never invoked the
  * coercer that {@code handleCreate} did. The methods guarded here need an {@code OBContext}, a live
  * DAL and an {@code AD_Tab}, so the call site cannot be asserted behaviourally at all.</p>
  *

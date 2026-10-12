@@ -38,7 +38,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Architecture regression test for ETP-4793 / IMP-16 — every MCP write verb must coerce.
  *
- * <p>IMP-16 shipped a correct date coercer and {@code neo_update} kept corrupting dates anyway:
+ * <p>IMP-16 shipped a correct date coercer and {@code etendo_update} kept corrupting dates anyway:
  * {@code orderDate: "09-08-2026"} was accepted under {@code status: 0} and stored as
  * {@code 0015-02-16}, because {@code handleUpdate} never called {@code coerceFieldTypes}. The
  * coercer was reachable from {@code handleCreate} only. Nothing in a signature, a type or a unit
@@ -53,6 +53,8 @@ import org.junit.jupiter.api.Test;
  * <p>Why source-reading rather than behavioral: the write verbs are private, require an
  * {@code OBContext}, a live DAL and an {@code AD_Tab}, so the call site cannot be asserted from a
  * unit test. Reading the source is the cheap check that maps exactly onto the failure mode.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @DisplayName("ETP-4793 / IMP-16 — every MCP persist path must run coerceFieldTypes")
 class McpWriteVerbCoercionCallSiteTest {

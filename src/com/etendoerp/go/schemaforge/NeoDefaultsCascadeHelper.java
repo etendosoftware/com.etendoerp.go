@@ -124,7 +124,7 @@ public class NeoDefaultsCascadeHelper {
       // IMP-45: hand the divergences to the context so the caller can be told. The REST path
       // never reads it — there the protected value came from a form a person filled in, so there
       // is nothing to warn about. The MCP path is the one that invites an agent to re-send what
-      // neo_defaults handed it, which is how a generic default gets pinned over the one the
+      // etendo_defaults handed it, which is how a generic default gets pinned over the one the
       // business partner actually implies.
       if (ctx != null && cascadeResult != null
           && cascadeResult.getSupersededDefaults().length() > 0) {
@@ -610,7 +610,7 @@ public class NeoDefaultsCascadeHelper {
         // IMP-45: the caller's value wins, as it always has — but this is the exact point where a
         // callout that knows the record's real context (the business partner's payment terms, for
         // one) is told to stand down in favour of a value the caller may simply have echoed back
-        // from neo_defaults. Recorded so the divergence can be reported; nothing here changes what
+        // from etendo_defaults. Recorded so the divergence can be reported; nothing here changes what
         // gets persisted.
         recordSupersededDefault(result, defaults, updatedField, updateObj);
         continue;
@@ -781,6 +781,29 @@ public class NeoDefaultsCascadeHelper {
     return filtered;
   }
 
+  // injectSafeTypeDefault / hasSafeTypeDefault are the single owners of these reference
+  // constants: callers ask hasSafeTypeDefault instead of repeating the reference ids.
+  /** Amount (12), Number (22), Integer (11) and Quantity (29) references: safe default 0. */
+  private static final Set<String> NUMERIC_SAFE_TYPE_REFERENCES = Set.of("22", "29", "12", "11");
+  /** YesNo reference: safe default false. */
+  private static final String YES_NO_REFERENCE = "20";
+
+  private static String referenceId(Column col) {
+    return col.getReference() != null ? col.getReference().getId() : null;
+  }
+
+  /**
+   * True when {@link #injectSafeTypeDefault} can fill {@code col} (boolean or numeric base
+   * reference). Structural: decided by the AD reference type only.
+   */
+  static boolean hasSafeTypeDefault(Column col) {
+    String refId = referenceId(col);
+    if (refId == null) {
+      return false;
+    }
+    return YES_NO_REFERENCE.equals(refId) || NUMERIC_SAFE_TYPE_REFERENCES.contains(refId);
+  }
+
   /**
    * IMP-45: note that a protected field kept the caller's value over a callout-derived one.
    *
@@ -832,10 +855,13 @@ public class NeoDefaultsCascadeHelper {
 
   static void injectSafeTypeDefault(JSONObject body, String propName, Column col) {
     try {
-      String refId = col.getReference() != null ? col.getReference().getId() : null;
-      if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId) || "11".equals(refId)) {
+      String refId = referenceId(col);
+      if (refId == null) {
+        return;
+      }
+      if (NUMERIC_SAFE_TYPE_REFERENCES.contains(refId)) {
         body.put(propName, 0);
-      } else if ("20".equals(refId)) {
+      } else if (YES_NO_REFERENCE.equals(refId)) {
         body.put(propName, false);
       }
     } catch (Exception e) {

@@ -42,8 +42,10 @@ import org.mockito.Mockito;
  * ETP-5468 phase 1 — {@link FinancialAccountHandler} must only apply its account create / update /
  * delete rules to the entity's own CRUD. Sub-endpoints (button actions, callouts, display-logic
  * evaluation, selectors) also reach the hook with {@code httpMethod=POST}; before this change a
- * button call through {@code neo_action} was run through {@code validateAndEnrichCreate} and the
+ * button call through {@code etendo_action} was run through {@code validateAndEnrichCreate} and the
  * post-hook tried to provision a "new" account.
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  */
 @DisplayName("FinancialAccountHandler — CRUD vs sub-endpoint (ETP-5468)")
 class FinancialAccountHandlerEndpointTypeTest {

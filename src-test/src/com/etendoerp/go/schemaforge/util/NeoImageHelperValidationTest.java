@@ -41,11 +41,13 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper.ImageValidationException
  *
  * <p>The MIME guard is the security-relevant part: a declared {@code mime_type} is never trusted, so
  * a caller cannot store an HTML page or a PDF in an image column by mislabelling it.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoImageHelper
  */
 class NeoImageHelperValidationTest {
 
   private static final int CAP = 256 * 1024;
-  private static final String ADVICE = "Use neo_request_image_upload instead.";
+  private static final String ADVICE = "Use etendo_request_image_upload instead.";
 
   /** A real 2x3 PNG, produced by ImageIO so the magic bytes and the header are genuine. */
   private static byte[] realPng() throws Exception {
@@ -248,7 +250,7 @@ class NeoImageHelperValidationTest {
   void allowlistIsPngAndJpeg() {
     assertEquals(java.util.List.of("image/png", "image/jpeg"), NeoImageHelper.ALLOWED_MIME_TYPES);
     assertNotNull(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE);
-    assertTrue(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE.contains("neo_request_image_upload"),
+    assertTrue(NeoImageHelper.INVALID_UPLOAD_LINK_MESSAGE.contains("etendo_request_image_upload"),
         "the 403 must tell the caller how to get a working link");
   }
 }

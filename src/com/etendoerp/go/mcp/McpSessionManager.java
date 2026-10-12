@@ -87,16 +87,7 @@ public class McpSessionManager {
         }
       }
 
-      // Resolve client: if "0" (System), get the client from the role
-      // Tables with access level "Organization" reject clientId=0
-      String effectiveClient = clientId;
-      if ("0".equals(clientId)) {
-        String resolvedClient = resolveClientFromRole(roleId);
-        if (resolvedClient != null) {
-          effectiveClient = resolvedClient;
-          log.debug("Resolved client from role {}: {}", roleId, effectiveClient);
-        }
-      }
+      String effectiveClient = resolveEffectiveClientId(clientId, roleId);
 
       // Telemetry only (ETP-5594): the usage row must carry the tenant the call runs under, not
       // the token's "0" wildcard. Bound before createContext so a call that fails there is still
@@ -176,6 +167,30 @@ public class McpSessionManager {
   public static void runInContext(String userId, String roleId,
       String clientId, Runnable action) throws Exception {
     runInContext(userId, roleId, clientId, DEFAULT_ORG, null, action);
+  }
+
+  /**
+   * Returns the client an MCP call actually runs under. A credential carrying the System wildcard
+   * ({@code "0"}, e.g. an OAuth2 token) runs under its role's client, because tables with access
+   * level "Organization" reject client 0. Any other value is returned unchanged.
+   *
+   * <p>Shared by the context setup and by {@code McpServlet}'s commercial-access check, so the
+   * check evaluates exactly the tenant the call will touch (ETP-5642).
+   *
+   * @param clientId client carried by the credential
+   * @param roleId   role carried by the credential
+   * @return the effective client id; the given one when the role cannot resolve another
+   */
+  static String resolveEffectiveClientId(String clientId, String roleId) {
+    if (!"0".equals(clientId)) {
+      return clientId;
+    }
+    String resolvedClient = resolveClientFromRole(roleId);
+    if (resolvedClient == null) {
+      return clientId;
+    }
+    log.debug("Resolved client from role {}: {}", roleId, resolvedClient);
+    return resolvedClient;
   }
 
   /**

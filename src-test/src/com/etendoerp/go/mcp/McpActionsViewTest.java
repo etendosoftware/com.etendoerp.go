@@ -38,8 +38,10 @@ import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
  * Unit tests for {@link McpActionsView} — the pure re-shaper behind
- * {@code neo_schema({view:"actions"})} (IMP-6). No DAL/model access, so these run without a live
+ * {@code etendo_schema({view:"actions"})} (IMP-6). No DAL/model access, so these run without a live
  * instance.
+ *
+ * @covers com.etendoerp.go.mcp.McpActionsView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -56,7 +58,7 @@ class McpActionsViewTest {
 
   private static JSONObject buttonField(String name, String processName) throws JSONException {
     JSONObject field = field(name, "button");
-    field.put("invokeVia", "neo_action");
+    field.put("invokeVia", "etendo_action");
     field.put("action", name);
     field.put("processType", "OBUIAPP");
     field.put("processName", processName);
@@ -197,7 +199,7 @@ class McpActionsViewTest {
       assertTrue(actions.getJSONObject(2).has("parameters"));
       assertEquals(4, response.getInt("actionCount"));
       assertEquals(4, response.getInt(McpActionsView.KEY_INVOKABLE_COUNT));
-      assertTrue(response.getString("declaredActionsHint").contains("neo_action"));
+      assertTrue(response.getString("declaredActionsHint").contains("etendo_action"));
     }
 
     /** With nothing declared the 4-arg call is the 3-arg one: no extra entry, no hint. */

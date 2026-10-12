@@ -90,7 +90,7 @@ public class RejectQuotationHandler implements NeoHandler {
   private static final String KEY_RESPONSE = "response";
 
   /**
-   * The action as {@code neo_schema(view:"actions")} publishes it (ETP-5535), declared by
+   * The action as {@code etendo_schema(view:"actions")} publishes it (ETP-5535), declared by
    * {@link SalesQuotationHeaderHandler#actionContracts()}. Only for discovery: the body is still
    * judged by {@link #reject}, not by {@link NeoActionContract#validate}, so the React modal's
    * request is accepted exactly as before.

@@ -32,8 +32,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * {@code NeoCrudHandler#handleWindowEntityCrud} (the REST path), once dead in
  * {@code NeoServlet}, and not at all on the MCP write path — so turning a monitor/log
  * window's mutation flags off blocked the React UI with a {@code 405} while an MCP agent
- * could still write through {@code neo_create}/{@code neo_update}/{@code neo_delete}/
- * {@code neo_batch}. All four entry points now consult this class.</p>
+ * could still write through {@code etendo_create}/{@code etendo_update}/{@code etendo_delete}/
+ * {@code etendo_batch}. All four entry points now consult this class.</p>
  *
  * <p><b>Scope:</b> the gate covers entity CRUD only. Sub-endpoints
  * ({@code /action/*}, {@code /process}, {@code /callout}, {@code /selector},
@@ -104,7 +104,7 @@ public final class NeoMethodPolicy {
    *
    * <p>An entity with every flag off is NOT read-only — it is fully disabled, which is a
    * distinct (and misconfigured) state. This mirrors the pre-existing
-   * {@code neo_discover} {@code readOnly} semantics.</p>
+   * {@code etendo_discover} {@code readOnly} semantics.</p>
    *
    * @param entity the SF entity to test (may be {@code null})
    * @return {@code true} when the entity is readable and immutable
@@ -170,11 +170,11 @@ public final class NeoMethodPolicy {
         .append("' does not enable ").append(method)
         .append(". Enabled methods: ").append(enabledText).append('.');
     if (isReadOnly(entity)) {
-      message.append(" This entity is read-only by configuration — use neo_list or neo_get "
+      message.append(" This entity is read-only by configuration — use etendo_list or etendo_get "
           + "to read it. CRUD writes to it are not allowed; a separately configured "
-          + "neo_action may still be available. Do not retry this CRUD operation.");
+          + "etendo_action may still be available. Do not retry this CRUD operation.");
     } else {
-      message.append(" Pick a tool that matches an enabled method, or use neo_discover to "
+      message.append(" Pick a tool that matches an enabled method, or use etendo_discover to "
           + "inspect this spec's entities before retrying.");
     }
     return message.toString();

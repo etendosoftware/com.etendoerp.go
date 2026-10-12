@@ -32,7 +32,7 @@ import org.codehaus.jettison.json.JSONObject;
  * (ETP-5415 T12). It is not a write-path compensation and nothing in a shared service calls it.
  *
  * <p><b>The stale rule.</b> On a create the body cannot say whether an amount was sent by the caller
- * or derived by the server earlier in the pipeline ({@code neo_create} runs the defaults cascade
+ * or derived by the server earlier in the pipeline ({@code etendo_create} runs the defaults cascade
  * before the pre-hook). {@link #isStaleAmount} judges it by value: absent, zero, or already equal
  * (at 2 decimals) to what the server derives. Any other value is the caller's and is kept.
  */

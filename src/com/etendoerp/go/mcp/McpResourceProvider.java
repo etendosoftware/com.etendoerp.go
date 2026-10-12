@@ -43,11 +43,12 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
  * <p>
  * Resource URIs:
  * <ul>
- *   <li>{@code neo://specs} — List of all active specs (name, type, description)</li>
- *   <li>{@code neo://specs/{specName}} — Full spec schema (entities and their fields)</li>
- *   <li>{@code neo://specs/{specName}/{entityName}} — Single entity detail (fields, types, FK refs)</li>
- *   <li>{@code neo://processes/{specName}} — Process parameters and description</li>
+ *   <li>{@code etendo://specs} — List of all active specs (name, type, description)</li>
+ *   <li>{@code etendo://specs/{specName}} — Full spec schema (entities and their fields)</li>
+ *   <li>{@code etendo://specs/{specName}/{entityName}} — Single entity detail (fields, types, FK refs)</li>
+ *   <li>{@code etendo://processes/{specName}} — Process parameters and description</li>
  * </ul>
+ * The deprecated {@code neo://} scheme of the same URIs is still accepted on read (ETP-5602).
  */
 public class McpResourceProvider {
 
@@ -58,14 +59,17 @@ public class McpResourceProvider {
   private static final String FIELD_SPEC_NAME = "specName";
   private static final String FIELD_SPEC_TYPE = "specType";
   private static final String MIME_TYPE_JSON = "application/json";
-  private static final String URI_SPECS = "neo://specs";
+  private static final String URI_SCHEME = "etendo://";
+  /** Deprecated scheme (ETP-5602): still accepted on read, never advertised. */
+  private static final String LEGACY_URI_SCHEME = "neo://";
+  private static final String URI_SPECS = URI_SCHEME + "specs";
   private static final String URI_SPECS_PREFIX = URI_SPECS + "/";
-  private static final String URI_PROCESSES_PREFIX = "neo://processes/";
+  private static final String URI_PROCESSES_PREFIX = URI_SCHEME + "processes/";
 
   private static final String ACCESS_DENIED_TO_SPEC_PREFIX = "Access denied to spec '";
   /**
    * List all available MCP resources.
-   * Returns one static resource (neo://specs) plus one resource per active spec.
+   * Returns one static resource (etendo://specs) plus one resource per active spec.
    *
    * @return a JSONArray of resource descriptors
    * @throws Exception if schema metadata cannot be read
@@ -84,9 +88,9 @@ public class McpResourceProvider {
   private JSONObject buildSpecsListResource() throws Exception {
     JSONObject specsList = new JSONObject();
     specsList.put("uri", URI_SPECS);
-    specsList.put("name", "Available NEO Specs");
+    specsList.put("name", "Available Etendo API Specs");
     specsList.put(FIELD_DESCRIPTION,
-        "List of all NEO Headless API specs configured in this instance");
+        "List of all Etendo API specs configured in this instance");
     specsList.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
     return specsList;
   }
@@ -140,11 +144,13 @@ public class McpResourceProvider {
   /**
    * Read a specific resource by URI.
    *
-   * @param uri the MCP resource URI (e.g. "neo://specs/purchase-order")
+   * @param requestedUri the MCP resource URI (e.g. "etendo://specs/purchase-order";
+   *     the deprecated "neo://" scheme is accepted too)
    * @return the resource content as a JSONObject
    * @throws IllegalArgumentException if the URI is unknown or the resource is not found
    */
-  public JSONObject readResource(String uri) throws Exception {
+  public JSONObject readResource(String requestedUri) throws Exception {
+    String uri = canonicalUri(requestedUri);
     if (URI_SPECS.equals(uri)) {
       return readSpecsList();
     }
@@ -164,13 +170,24 @@ public class McpResourceProvider {
       return readProcess(specName);
     }
 
-    throw new IllegalArgumentException("Unknown resource URI: " + uri);
+    throw new IllegalArgumentException("Unknown resource URI: " + requestedUri);
+  }
+
+  /**
+   * Maps a URI of the deprecated {@code neo://} scheme to its {@code etendo://} equivalent, so
+   * clients that cached the old URIs keep reading them. Any other URI is returned unchanged.
+   */
+  static String canonicalUri(String uri) {
+    if (uri != null && uri.startsWith(LEGACY_URI_SCHEME)) {
+      return URI_SCHEME + uri.substring(LEGACY_URI_SCHEME.length());
+    }
+    return uri;
   }
 
   // ── Resource readers ────────────────────────────────────────────────────
 
   /**
-   * Read neo://specs — a summary of all active specs.
+   * Read etendo://specs — a summary of all active specs.
    */
   private JSONObject readSpecsList() throws Exception {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
@@ -227,7 +244,7 @@ public class McpResourceProvider {
   }
 
   /**
-   * Read neo://specs/{specName} — full spec schema with entities and their fields.
+   * Read etendo://specs/{specName} — full spec schema with entities and their fields.
    */
   private JSONObject readSpec(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
@@ -267,7 +284,7 @@ public class McpResourceProvider {
   }
 
   /**
-   * Read neo://specs/{specName}/{entityName} — detailed view of a single entity.
+   * Read etendo://specs/{specName}/{entityName} — detailed view of a single entity.
    */
   private JSONObject readEntity(String specName, String entityName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
@@ -282,7 +299,7 @@ public class McpResourceProvider {
   }
 
   /**
-   * Read neo://processes/{specName} — process parameters and metadata.
+   * Read etendo://processes/{specName} — process parameters and metadata.
    */
   private JSONObject readProcess(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
@@ -298,7 +315,7 @@ public class McpResourceProvider {
 
     // Report specs (ETP-4255) are NEO-native callable metadata only; they are not backed
     // by AD_Process/Jasper. Report callability is reported truthfully here, matching
-    // neo_discover. A callable report is described by its NEO handler, not AD_Process.
+    // etendo_discover. A callable report is described by its NEO handler, not AD_Process.
     if ("R".equals(specType)) {
       return describeReportSpec(spec, specName, specType);
     }
@@ -354,7 +371,7 @@ public class McpResourceProvider {
 
   /**
    * Describe a report spec (ETP-4255): NEO-native callable metadata only, not backed by
-   * AD_Process/Jasper. Callability is reported truthfully, matching neo_discover.
+   * AD_Process/Jasper. Callability is reported truthfully, matching etendo_discover.
    */
   private JSONObject describeReportSpec(SFSpec spec, String specName, String specType)
       throws Exception {
@@ -403,7 +420,7 @@ public class McpResourceProvider {
    * {@code ISINCLUDED}: a criteria is evaluated in the database, where the {@code MCP_CONFIG}
    * JSON is not joined, so a {@code fields.included} override cannot reach it. This method used
    * to filter in the criteria while already resolving {@code readOnly} through the view one loop
-   * below — so a field reclaimed by an override was reported by {@code neo_schema} and silently
+   * below — so a field reclaimed by an override was reported by {@code etendo_schema} and silently
    * missing here, which is the exact disagreement IMP-39 exists to end.</p>
    */
   private JSONArray buildFieldsArray(String entityId) throws Exception {
@@ -431,7 +448,7 @@ public class McpResourceProvider {
       fieldObj.put("label", column.getName());
       fieldObj.put("type", McpSchemaFieldBuilder.mapColumnType(refId));
       // Effective curation via the one resolver (ETP-5184), so this list cannot report a field as
-      // writable that neo_schema reports as read-only, or the other way round.
+      // writable that etendo_schema reports as read-only, or the other way round.
       fieldObj.put("readOnly", view.isReadOnly());
       fieldObj.put("required", column.isMandatory());
 

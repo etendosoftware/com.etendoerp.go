@@ -55,10 +55,12 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link AgentActionSupport} (ETP-5469): the plumbing shared by the
- * {@code neo_action} dispatchers of {@code bank-reconciliation} and {@code bank-statements} — the
+ * {@code etendo_action} dispatchers of {@code bank-reconciliation} and {@code bank-statements} — the
  * role gate, the SPA-shaped derived context and the flush-to-clean with its rollback (the
  * parameter copy is exercised through {@link BankStatementAgentActionsTest}'s write routing). {@link ReconciliationAgentActionsTest} keeps covering the same helpers through the
  * reconciliation dispatcher; this class pins them in isolation.
+ *
+ * @covers com.etendoerp.go.schemaforge.AgentActionSupport
  */
 @SuppressWarnings("java:S2187")
 @DisplayName("AgentActionSupport (ETP-5469)")

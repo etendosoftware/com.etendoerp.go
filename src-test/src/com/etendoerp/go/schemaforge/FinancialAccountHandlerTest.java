@@ -26,6 +26,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -102,6 +103,8 @@ import com.etendoerp.psd2.bank.integration.data.PSD2FinaccLog;
  *   <li>delete: hard delete → 204; blockers → 409; missing id → 400; unknown
  *       account → 404 (ETP-5474).</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountHandlerTest {
@@ -1813,6 +1816,10 @@ public class FinancialAccountHandlerTest {
 
   private static final String ORG_ID = "root-org";
   private static final Set<String> ORGS = new HashSet<>(Arrays.asList("0", ORG_ID));
+  private static final String USD_ID = "100";
+  /** Login-org functional currency the summary converts into (ETP-5580). */
+  private static final FinancialAccountsPageHandler.OrgCurrency ORG_EUR =
+      new FinancialAccountsPageHandler.OrgCurrency(EUR_ID, "EUR", 2);
 
   /** Builds an AccountRow fixture with the loader-set flags the list needs. */
   private static FinancialAccountsPageHandler.AccountRow accountRow(String id, String balance,
@@ -1866,6 +1873,10 @@ public class FinancialAccountHandlerTest {
     doReturn(rows).when(loaders).loadAccounts(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(loaders).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
     doReturn(deleteBlockersByAccount).when(loaders).loadDeleteBlockersByAccount(eq(CLIENT_ID), eq(ORGS));
+    // ETP-5580: the summary converts into the login org's currency. Default: EUR org currency
+    // and no rate configured for anything; tests that need a rate stub lookupRate on the spy.
+    doReturn(ORG_EUR).when(loaders).resolveOrgCurrency();
+    doReturn(null).when(loaders).lookupRate(anyString(), anyString());
     doReturn(loaders).when(handler).pageLoaders();
     return loaders;
   }
@@ -1903,6 +1914,8 @@ public class FinancialAccountHandlerTest {
     FinancialAccountsPageHandler.AccountRow loaded2 = accountRow("acc-2", "0.00", "100", "USD", false);
     loaded2.active = false;
     loaded2.maskedPan = "**** 4321";
+    loaded1.lastSyncDate = java.util.Date.from(java.time.Instant.parse("2026-10-05T10:30:00Z"));
+    // loaded2.lastSyncDate stays null — never synced, must serialise as JSON null (key kept).
     // loaded2.country stays null — a Cash/never-set-up account, exercising the "" fallback below.
 
     Map<String, Integer> pending = new LinkedHashMap<>();
@@ -1933,8 +1946,12 @@ public class FinancialAccountHandlerTest {
       assertEquals("106", first.getString("countryId"));
       assertEquals("ES", first.getString("countryIso"));
       assertEquals("Spain", first.getString("countryName"));
+      assertEquals("2026-10-05T10:30:00Z", first.getString("lastSyncDate"));
 
       JSONObject second = outArr.getJSONObject(1);
+      assertTrue("lastSyncDate key is present for a never-synced account",
+          second.has("lastSyncDate"));
+      assertTrue("never synced serialises as JSON null", second.isNull("lastSyncDate"));
       assertFalse("account without transactions leaves the Currency field editable",
           second.getBoolean("hasTransactions"));
       assertFalse("not injected for any row, pending or not", second.has("pendingCount"));
@@ -2046,7 +2063,9 @@ public class FinancialAccountHandlerTest {
    * The collection-level {@code summary} is attached as a SIBLING of {@code response.data}
    * (NEO serialises the handler body verbatim, and the frontend reads it through
    * {@code useEntity}'s {@code meta}). It aggregates only the ACTIVE rows present in this
-   * response, so archived accounts never skew the sidebar totals.
+   * response, so archived accounts never skew the sidebar totals. The total is converted into
+   * the login org's currency (ETP-5580): the USD subtotal goes through the stubbed rate, so the
+   * total is approximate, while {@code byCurrency} keeps the unconverted subtotals.
    */
   @Test
   public void testAfterHandleGetCrudAttachesSummarySiblingOverVisibleActiveRows() throws Exception {
@@ -2065,19 +2084,59 @@ public class FinancialAccountHandlerTest {
     pending.put(ACC_ID, 3);
 
     try (MockedStatic<OBContext> obContext = mockSessionContext()) {
-      stubLoaders(Arrays.asList(eur, usd, archived), pending, Collections.emptySet());
+      FinancialAccountsPageHandler loaders =
+          stubLoaders(Arrays.asList(eur, usd, archived), pending, Collections.emptySet());
+      doReturn(new BigDecimal("0.9")).when(loaders).lookupRate(USD_ID, EUR_ID);
 
       NeoResponse out = handler.afterHandle(ctx);
 
       JSONObject envelope = out.getBody().getJSONObject("response");
       JSONObject summary = envelope.optJSONObject("summary");
       assertNotNull("summary must sit next to response.data", summary);
-      // 1000 + 250; the archived 999 is excluded.
-      assertEquals(new BigDecimal("1250.00"), new BigDecimal(summary.getString("totalBalance")));
+      // 1000 EUR + 250 USD * 0.9 = 1225.00 EUR; the archived 999 is excluded. Before ETP-5580
+      // this was the raw cross-currency sum 1250.
+      assertEquals(new BigDecimal("1225.00"), new BigDecimal(summary.getString("totalBalance")));
+      assertEquals("EUR", summary.getString("totalBalanceCurrencyIso"));
+      assertTrue(summary.getBoolean("totalBalanceApproximate"));
+      assertEquals(0, summary.getJSONArray("missingRateCurrencies").length());
       assertEquals(2, summary.getJSONArray("byCurrency").length());
+      assertEquals(0, new BigDecimal("250.00").compareTo(new BigDecimal(
+          summary.getJSONArray("byCurrency").getJSONObject(1).getString("total"))));
       assertEquals(1, summary.getJSONObject("pending").getInt("accountsWithPending"));
       // The rows themselves are still there — the summary is additive.
       assertEquals(3, envelope.getJSONArray("data").length());
+    }
+  }
+
+  /**
+   * A visible account whose currency has no rate to the login org's currency is left OUT of the
+   * W-spec summary total (never summed unconverted) and named in {@code missingRateCurrencies};
+   * with nothing converted the remaining total is exact (ETP-5580).
+   */
+  @Test
+  public void testAfterHandleGetCrudSummaryExcludesCurrencyWithoutRate() throws Exception {
+    JSONArray rows = new JSONArray()
+        .put(new JSONObject().put("id", ACC_ID))
+        .put(new JSONObject().put("id", "acc-2"));
+    NeoContext ctx = getCrudContext(rows);
+
+    FinancialAccountsPageHandler.AccountRow eur = accountRow(ACC_ID, "1000.00", EUR_ID, "EUR", true);
+    FinancialAccountsPageHandler.AccountRow usd = accountRow("acc-2", "250.00", USD_ID, "USD", false);
+
+    try (MockedStatic<OBContext> obContext = mockSessionContext()) {
+      // stubLoaders' default lookupRate returns null: no USD -> EUR rate configured.
+      stubLoaders(Arrays.asList(eur, usd), Collections.emptyMap(), Collections.emptySet());
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      JSONObject summary = out.getBody().getJSONObject("response").getJSONObject("summary");
+      assertEquals(new BigDecimal("1000.00"), new BigDecimal(summary.getString("totalBalance")));
+      assertEquals("EUR", summary.getString("totalBalanceCurrencyIso"));
+      assertFalse(summary.getBoolean("totalBalanceApproximate"));
+      JSONArray missing = summary.getJSONArray("missingRateCurrencies");
+      assertEquals(1, missing.length());
+      assertEquals("USD", missing.getString(0));
+      assertEquals(2, summary.getJSONArray("byCurrency").length());
     }
   }
 

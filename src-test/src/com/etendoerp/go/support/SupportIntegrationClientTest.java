@@ -42,6 +42,8 @@ import org.openbravo.model.ad.access.User;
 
 /**
  * Tests for {@link SupportIntegrationClient}.
+ *
+ * @covers com.etendoerp.go.support.SupportIntegrationClient
  */
 class SupportIntegrationClientTest {
 
@@ -366,6 +368,47 @@ class SupportIntegrationClientTest {
       StringBuilder sb = new StringBuilder();
       SupportIntegrationClient.appendEventText(sb, event);
       assertEquals("real", sb.toString());
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // rewriteStaleDocsLinks
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("rewriteStaleDocsLinks")
+  class RewriteStaleDocsLinks {
+
+    @Test
+    @DisplayName("Null text passes through unchanged")
+    void nullTextPassesThrough() {
+      assertNull(SupportIntegrationClient.rewriteStaleDocsLinks(null));
+    }
+
+    @Test
+    @DisplayName("Text without the stale base URL is returned unchanged")
+    void noStaleUrlUnchanged() {
+      String text = "Accedé a Ventas > Pedido y abrí el pedido correspondiente.";
+      assertEquals(text, SupportIntegrationClient.rewriteStaleDocsLinks(text));
+    }
+
+    @Test
+    @DisplayName("Stale docs base URL is rewritten to the current one, path preserved")
+    void rewritesStaleBaseUrl() {
+      String text = "Fuente: https://etendosoftware.github.io/etendo-go-docs/comercial/ventas/"
+          + "crear-y-gestionar-pedidos/crear-y-gestionar-pedidos/";
+      String expected = "Fuente: https://help.etendo.ai/comercial/ventas/"
+          + "crear-y-gestionar-pedidos/crear-y-gestionar-pedidos/";
+      assertEquals(expected, SupportIntegrationClient.rewriteStaleDocsLinks(text));
+    }
+
+    @Test
+    @DisplayName("Multiple occurrences in the same text are all rewritten")
+    void rewritesMultipleOccurrences() {
+      String text = "Ver https://etendosoftware.github.io/etendo-go-docs/a/ y tambien "
+          + "https://etendosoftware.github.io/etendo-go-docs/b/";
+      String result = SupportIntegrationClient.rewriteStaleDocsLinks(text);
+      assertEquals("Ver https://help.etendo.ai/a/ y tambien https://help.etendo.ai/b/", result);
     }
   }
 

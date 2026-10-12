@@ -40,19 +40,19 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 
 /**
- * Resolves FK-by-name values in a {@code neo_create}/{@code neo_update} body (IMP-4).
+ * Resolves FK-by-name values in a {@code etendo_create}/{@code etendo_update} body (IMP-4).
  * <p>
  * Historically every foreign-key field required the exact 32-char record id, forcing an agent to
- * call {@code neo_selectors} first even for an obvious single-match lookup (e.g.
+ * call {@code etendo_selectors} first even for an obvious single-match lookup (e.g.
  * {@code businessPartner: "Acme Corp"}). This resolves such human search strings server-side via
- * the same {@link NeoSelectorService#querySelectorByColumn} path {@code neo_selectors} uses,
+ * the same {@link NeoSelectorService#querySelectorByColumn} path {@code etendo_selectors} uses,
  * leaving an already-valid id untouched.
  * <p>
  * <b>Id-first (ETP-4793 / IMP-15).</b> "Already-valid id" cannot be decided by shape alone: every
  * Etendo {@code _ID} column is a {@code VARCHAR}, and legacy master data (currency, UOM, document
  * type, tax rate) still carries short numeric ids such as {@code "102"} for EUR. Matching only the
  * 32-char hex form sent those values down the name path, where no record is literally *named*
- * {@code "102"}, so the very id {@code neo_defaults} had just returned came back as a 422. Each
+ * {@code "102"}, so the very id {@code etendo_defaults} had just returned came back as a 422. Each
  * candidate value is therefore probed as a record id of the target entity first, and only falls
  * through to the selector lookup when no record carries it. The residual ambiguity — a display name
  * that happens to equal some record's id — resolves to that record, which is what the caller meant.
@@ -61,8 +61,8 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * relative to a sibling field: {@code partnerAddress} lists the locations <i>of a given</i>
  * {@code businessPartner}, a tax rate depends on {@code orderDate} and {@code priceList}. This class
  * used to run with context built from {@code adTab} alone, so those selectors saw the unfiltered set
- * or none at all — {@code neo_create} rejected the byte-identical {@code $_identifier} that
- * {@code neo_selectors} with a {@code recordContext} had just returned. The body's own sibling fields
+ * or none at all — {@code etendo_create} rejected the byte-identical {@code $_identifier} that
+ * {@code etendo_selectors} with a {@code recordContext} had just returned. The body's own sibling fields
  * are now fed in as that context via {@code McpSelectorContextHelper#withBodyContext}.
  * <p>
  * That requires <b>dependency order</b>, which was the reason the earlier note gave for not doing it:
@@ -88,6 +88,9 @@ final class McpFkResolver {
   private static final String KEY_CANDIDATES = "candidates";
   private static final String KEY_FIELD = "field";
   private static final int SELECTOR_LIMIT = 10;
+  private static final String LABEL_SEPARATOR = " - ";
+  /** Caps how many label separators are probed, so one failed resolution stays cheap. */
+  private static final int MAX_LABEL_SEPARATOR_PROBES = 3;
 
   /** @return {@code true} when {@code value} already looks like a 32-char hex Etendo id. */
   static boolean looksLikeId(String value) {
@@ -130,7 +133,7 @@ final class McpFkResolver {
    * Same as {@link #resolveFkNames(JSONObject, Entity, Tab, Map, Logger)}, but skips values the
    * caller knows are not resolvable yet.
    * <p>
-   * Added for {@code neo_batch} (IMP-15): a batch body may carry {@code "$ref:<opId>"} placeholders
+   * Added for {@code etendo_batch} (IMP-15): a batch body may carry {@code "$ref:<opId>"} placeholders
    * that {@code BatchService} substitutes with a real recordId only once the referenced op has run.
    * Sending those to the selector would report a spurious {@code not_found} for a value that is
    * about to become a valid id.
@@ -166,7 +169,7 @@ final class McpFkResolver {
    * <p>
    * A key lands in neither set when its value is already a usable record id — that is the case the
    * IMP-22 context synthesis depends on, and it is the common one: an agent that resolved
-   * {@code businessPartner} via {@code neo_selectors} sends the id, and {@code partnerAddress} in the
+   * {@code businessPartner} via {@code etendo_selectors} sends the id, and {@code partnerAddress} in the
    * same body then resolves against it on the very first pass.
    */
   private static void classify(JSONObject body, Entity dalEntity, Logger log, String key,
@@ -263,6 +266,11 @@ final class McpFkResolver {
     int matchCount = items == null ? 0 : items.length();
     switch (decideOutcome(matchCount)) {
       case NOT_FOUND:
+        String labelMatchId = resolveByExactLabel(column, key, search, contextParams);
+        if (labelMatchId != null) {
+          body.put(key, labelMatchId);
+          return null;
+        }
         return buildNotFoundError(key, search);
       case AMBIGUOUS:
         return buildAmbiguousError(key, search, items);
@@ -271,6 +279,67 @@ final class McpFkResolver {
         body.put(key, items.getJSONObject(0).optString(KEY_ID));
         return null;
     }
+  }
+
+  /**
+   * Resolves a value that is exactly the label of one selector candidate (ETP-5535 / CP-13).
+   * <p>
+   * An {@code ambiguous_fk} error offers each candidate by its selector label (for example
+   * {@code "<name> - <category>"}), but the selector search matches the <i>name</i> only, so
+   * resending that label verbatim found nothing and answered {@code not_found}. Only reached after
+   * the plain search matched zero records, so unique matches, real ambiguity and not-found values
+   * without a label separator behave exactly as before. The label is split at each {@code " - "}
+   * separator, the leading part is searched, and the candidate whose string value equals the whole
+   * value is taken, provided exactly one does.
+   * <p>
+   * At most {@link #MAX_LABEL_SEPARATOR_PROBES} separators are probed, so a caller-supplied value
+   * carrying many separators cannot turn one failed resolution into an unbounded number of selector
+   * queries. A real label is split by its leading parts, well within that budget.
+   *
+   * @return the matched record id, or {@code null} when no single candidate carries that label
+   */
+  private static String resolveByExactLabel(Column column, String key, String search,
+      Map<String, String> contextParams) {
+    int sep = search.indexOf(LABEL_SEPARATOR);
+    for (int probes = 0; sep > 0 && probes < MAX_LABEL_SEPARATOR_PROBES; probes++) {
+      NeoResponse response = NeoSelectorService.querySelectorByColumn(column, key,
+          search.substring(0, sep), SELECTOR_LIMIT, 0, contextParams);
+      JSONArray items = response.getHttpStatus() >= 400 || response.getBody() == null ? null
+          : response.getBody().optJSONArray(KEY_ITEMS);
+      String id = uniqueLabelMatch(items, search);
+      if (id != null) {
+        return id;
+      }
+      sep = search.indexOf(LABEL_SEPARATOR, sep + 1);
+    }
+    return null;
+  }
+
+  /** @return the id of the only item having a string property equal to {@code label}, else null. */
+  static String uniqueLabelMatch(JSONArray items, String label) {
+    String found = null;
+    for (int i = 0; items != null && i < items.length(); i++) {
+      JSONObject item = items.optJSONObject(i);
+      if (item == null || !hasStringValue(item, label)) {
+        continue;
+      }
+      if (found != null) {
+        return null;
+      }
+      found = item.optString(KEY_ID, null);
+    }
+    return found;
+  }
+
+  private static boolean hasStringValue(JSONObject item, String expected) {
+    Iterator<?> names = item.keys();
+    while (names.hasNext()) {
+      String name = (String) names.next();
+      if (!KEY_ID.equals(name) && expected.equals(item.opt(name))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -303,7 +372,7 @@ final class McpFkResolver {
     // nothing, so that advice was emitted to agents that had passed a real (legacy numeric) id.
     error.put(McpConstants.KEY_DETAIL,
         "No match for '" + field + "'='" + search + "': it is neither the id of an existing record "
-            + "nor a value any selector matched. Use neo_selectors to find a valid one.");
+            + "nor a value any selector matched. Use etendo_selectors to find a valid one.");
     error.put(KEY_FIELD, field);
     return error;
   }
@@ -315,7 +384,7 @@ final class McpFkResolver {
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_AMBIGUOUS_FK);
     error.put(McpConstants.KEY_DETAIL,
         "'" + field + "'='" + search + "' matched " + items.length() + " records. Pick one of "
-            + "the candidates' ids, or narrow the search text.");
+            + "the candidates and resend it by its id or its exact label, or narrow the search text.");
     error.put(KEY_FIELD, field);
     error.put(KEY_CANDIDATES, items);
     return error;

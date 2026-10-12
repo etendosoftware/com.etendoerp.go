@@ -59,6 +59,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * {@code parent.field} names a real DAL property, because that needs a running model; that half is
  * {@code McpParentScope}'s job at resolve time, and it is why an unresolvable field withholds the
  * entity instead of being ignored.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpActionsSection
+ * @covers com.etendoerp.go.mcp.McpVerbsSection
+ * @covers com.etendoerp.go.mcp.McpParentSection
  */
 @DisplayName("MCP_CONFIG sourcedata")
 class McpConfigSourcedataTest {
@@ -74,7 +78,7 @@ class McpConfigSourcedataTest {
    * same from the Etendo root, from the module, and from an IDE with either as its working
    * directory. Mirrors the lookup in {@code McpWriteVerbCoercionCallSiteTest}.
    */
-  private static Path sourcedataDir() {
+  static Path sourcedataDir() {
     Path fromRoot = Paths.get(SOURCEDATA);
     if (Files.isDirectory(fromRoot)) {
       return fromRoot;
@@ -302,7 +306,7 @@ class McpConfigSourcedataTest {
       assertEveryWriteHidden(payload.getJSONObject(McpVerbsSection.NAME), id);
       String reason = actions.getString(McpActionsSection.KEY_REASON);
       String invoiceSpec = id.equals(PAYMENT_HEADERS.get(0)) ? "sales-invoice" : "purchase-invoice";
-      assertTrue(reason.contains("neo_action(spec:'" + invoiceSpec + "'")
+      assertTrue(reason.contains("etendo_action(spec:'" + invoiceSpec + "'")
           && reason.contains("action:'registerPayment'"), id + ": how one is created: " + reason);
       assertTrue(reason.contains("RPVOID") && reason.contains("pisLocked"),
           id + ": when Eliminar is refused: " + reason);
@@ -335,7 +339,7 @@ class McpConfigSourcedataTest {
     // ETP-5558: the 405 used to name the financial-account-transactions spec, which the MCP refuses
     // (422, report spec) — a dead end. It now names the account's declared movement actions.
     String instead = verbs.getString(McpVerbsSection.KEY_INSTEAD);
-    assertTrue(instead.contains("neo_action(spec:'financial-account', entity:'account'"), instead);
+    assertTrue(instead.contains("etendo_action(spec:'financial-account', entity:'account'"), instead);
     for (String action : List.of("createMovement", "updateMovement", "processMovement",
         "reactivateMovement", "deleteMovement", "transferFunds")) {
       assertTrue(instead.contains("'" + action + "'"), action + " in " + instead);
@@ -358,7 +362,7 @@ class McpConfigSourcedataTest {
     JSONObject verbs = payloadOf(FA_RECONCILIATIONS).getJSONObject(McpVerbsSection.NAME);
     assertEveryWriteHidden(verbs, FA_RECONCILIATIONS);
     assertTrue(verbs.getString(McpVerbsSection.KEY_INSTEAD).contains(
-        "neo_action(spec:'bank-reconciliation'"), verbs.getString(McpVerbsSection.KEY_INSTEAD));
+        "etendo_action(spec:'bank-reconciliation'"), verbs.getString(McpVerbsSection.KEY_INSTEAD));
     assertResolvesCleanly(FA_RECONCILIATIONS);
   }
 

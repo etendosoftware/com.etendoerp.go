@@ -183,12 +183,26 @@ public class NeoTelemetryService {
    * @param properties event properties
    */
   public void emit(String eventName, Map<String, ?> properties) {
+    emit(eventName, properties, null);
+  }
+
+  /**
+   * Emits a sanitized backend event that also names its tenant for the server log.
+   *
+   * <p>The tenant id is not a property: it bypasses the allowlist on purpose and is printed by the
+   * log sink only, never handed to Mixpanel (see {@link NeoTelemetryEvent#getClientId()}).</p>
+   *
+   * @param eventName backend event name
+   * @param properties event properties
+   * @param clientId the {@code AD_Client_ID} the event happened under, or {@code null}
+   */
+  public void emit(String eventName, Map<String, ?> properties, String clientId) {
     if (!isBackendEvent(eventName)) {
       return;
     }
     try {
       sink.emit(new NeoTelemetryEvent(eventName, sanitizeProperties(properties),
-          Instant.now(clock)));
+          Instant.now(clock), StringUtils.trimToNull(clientId)));
     } catch (Exception e) {
       log.warn("Backend telemetry sink failed for event {}: {} {}", eventName,
           e.getClass().getSimpleName(), e.getMessage());

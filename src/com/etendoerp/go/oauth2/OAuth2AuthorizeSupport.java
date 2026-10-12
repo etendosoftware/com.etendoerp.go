@@ -132,7 +132,7 @@ final class OAuth2AuthorizeSupport {
   }
   static OAuth2Servlet.AuthCodeData buildAuthCodeData(AuthorizeRequestData authorizeRequest,
       String userId, String roleId, Set<String> requestedScopes,
-      Set<String> allowedScopes, String wildcardScope, long authCodeExpiryMs) {
+      Set<String> allowedScopes, long authCodeExpiryMs) {
     if (authorizeRequest == null || requestedScopes == null || allowedScopes == null) {
       throw new IllegalArgumentException("Authorize data and scopes cannot be null");
     }
@@ -142,12 +142,15 @@ final class OAuth2AuthorizeSupport {
     codeData.roleId = roleId;
     codeData.redirectUri = authorizeRequest.redirectUri;
     codeData.codeChallenge = authorizeRequest.codeChallenge;
+    // Requested scopes the client may hold are granted under the name the client asked for, so a
+    // client that requests a deprecated neo: scope gets back exactly what it requested.
     Set<String> grantedScopes = new LinkedHashSet<>(allowedScopes);
     if (!requestedScopes.isEmpty()) {
-      if (allowedScopes.contains(wildcardScope)) {
-        grantedScopes = new LinkedHashSet<>(requestedScopes);
-      } else {
-        grantedScopes.retainAll(requestedScopes);
+      grantedScopes = new LinkedHashSet<>();
+      for (String scope : requestedScopes) {
+        if (ApiScopes.grants(allowedScopes, scope)) {
+          grantedScopes.add(scope);
+        }
       }
     }
     codeData.scopes = String.join(" ", grantedScopes);

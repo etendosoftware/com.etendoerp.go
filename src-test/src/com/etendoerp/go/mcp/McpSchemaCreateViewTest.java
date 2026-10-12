@@ -33,8 +33,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link McpSchemaCreateView} — the pure re-shaper behind
- * {@code neo_schema({view:"create"})} and {@code neo_schema({fields:[…]})} (IMP-12). No DAL/model
+ * {@code etendo_schema({view:"create"})} and {@code etendo_schema({fields:[…]})} (IMP-12). No DAL/model
  * access, so these run without a live instance.
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaCreateView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
@@ -146,7 +148,7 @@ class McpSchemaCreateViewTest {
     // Every emitted field is editable, writable, and in the group its userRequired flag names, so
     // repeating those keys 24 times is the verbosity IMP-12 exists to remove. defaultExpression goes
     // too: two AEAT columns on sales-invoice/header carry 1,410 chars of raw @SQL= that no agent can
-    // evaluate — neo_defaults resolves it server-side.
+    // evaluate — etendo_defaults resolves it server-side.
     @Test
     @DisplayName("drops the keys the grouping already encodes, plus the AD default expression")
     void dropsRedundantKeys() throws JSONException {
@@ -193,7 +195,7 @@ class McpSchemaCreateViewTest {
     }
 
     // IMP-12 §11.2: 4 of the 6 fields the static rule called required were already resolved by
-    // neo_defaults, so `required` was telling the agent to interrogate the user for values Etendo
+    // etendo_defaults, so `required` was telling the agent to interrogate the user for values Etendo
     // already had.
     @Test
     @DisplayName("a userRequired field the server resolves is demoted to optional, flagged")
@@ -243,8 +245,8 @@ class McpSchemaCreateViewTest {
       assertEquals(McpSchemaCreateView.CREATE_HINT, response.getString("hint"));
     }
 
-    // ETP-4918: a cold agent hit neo_create's 422 on a child entity's parent FK because
-    // neo_defaults without parentId silently omits parent-dependent fields (a storage bin scoped
+    // ETP-4918: a cold agent hit etendo_create's 422 on a child entity's parent FK because
+    // etendo_defaults without parentId silently omits parent-dependent fields (a storage bin scoped
     // to the parent's warehouse) rather than erroring — the hint must say so up front.
     @Test
     @DisplayName("a child entity gets the parentId clause appended to the hint")
@@ -315,7 +317,7 @@ class McpSchemaCreateViewTest {
       assertEquals(0, McpSchemaCreateView.resolvedDefaultNames(body).size());
     }
 
-    // neo_defaults ships its own envelope plus a display name per FK; neither is a field the agent
+    // etendo_defaults ships its own envelope plus a display name per FK; neither is a field the agent
     // could send, so neither may demote anything.
     @Test
     @DisplayName("skips the metadata envelope and the $_identifier display names")
@@ -379,7 +381,7 @@ class McpSchemaCreateViewTest {
   @DisplayName("unknownFields")
   class UnknownFields {
 
-    // IMP-18 tracks exactly this defect on neo_list's projection: a typo makes the field vanish in
+    // IMP-18 tracks exactly this defect on etendo_list's projection: a typo makes the field vanish in
     // silence and the agent concludes the field does not exist. Echoed back here at birth.
     @Test
     @DisplayName("echoes back names that matched no descriptor")

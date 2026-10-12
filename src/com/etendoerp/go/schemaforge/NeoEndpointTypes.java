@@ -35,7 +35,7 @@ final class NeoEndpointTypes {
    * of its sub-endpoints (a button action, a callout, a display-logic evaluation, a selector).
    *
    * <p>ETP-5468: the sub-endpoints also reach this hook with {@code httpMethod=POST} — a REST
-   * {@code POST /account/{id}/action/<button>} and an MCP {@code neo_action} both do — so keying
+   * {@code POST /account/{id}/action/<button>} and an MCP {@code etendo_action} both do — so keying
    * the create validation on the HTTP method alone ran every button call through
    * {@link FinancialAccountHandler#validateAndEnrichCreate}: an agent had to invent a unique
    * {@code name} and a {@code currency} before its button even reached the process. A {@code null}

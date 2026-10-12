@@ -300,8 +300,8 @@ public class AmortizationHeaderHandler implements NeoHandler {
    * Resolves {@code assetId} using a two-step lookup:
    * <ol>
    *   <li>{@link NeoContext#getQueryParams()} — populated on the REST path
-   *       ({@code NeoDefaultsEndpoint}) and on the MCP {@code neo_defaults} /
-   *       {@code neo_action} paths ({@code McpToolRouter.handleDefaults}), but <b>not</b> on
+   *       ({@code NeoDefaultsEndpoint}) and on the MCP {@code etendo_defaults} /
+   *       {@code etendo_action} paths ({@code McpToolRouter.handleDefaults}), but <b>not</b> on
    *       the MCP CRUD hook path: {@code McpHookExecutor.buildHookContext} leaves it
    *       {@code null}, so it must always be null-guarded.</li>
    *   <li>{@link RequestContext} HTTP parameter — kept as a fallback for any direct

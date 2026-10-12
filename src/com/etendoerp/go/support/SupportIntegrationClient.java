@@ -87,6 +87,14 @@ final class SupportIntegrationClient {
    * shows a one-click "talk to a human" button on that message instead. */
   static final String SUGGESTS_ESCALATION_MARKER = "\u200B##SUGGESTS_ESCALATION##";
 
+  // ETP-5570: the ADK (ValerIA) still cites the pre-rename GitHub Pages base for the
+  // functional docs site \u2014 its own prompt/corpus lives outside this repo, so this is a
+  // boundary-level safety net rather than a fix at the source. etendosoftware.github.io/
+  // etendo-go-docs 404s outright (no redirect) since the docs repo was renamed and the site
+  // republished at help.etendo.ai with the same page slugs \u2014 only the base changed.
+  static final String STALE_DOCS_BASE_URL = "https://etendosoftware.github.io/etendo-go-docs";
+  static final String CURRENT_DOCS_BASE_URL = "https://help.etendo.ai";
+
   private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(10))
       .build();
@@ -184,7 +192,7 @@ final class SupportIntegrationClient {
         log.warn("ADK /run returned {}: {}", resp.statusCode(), resp.body());
         return null;
       }
-      String replyText = parseAdkResponse(resp.body());
+      String replyText = rewriteStaleDocsLinks(parseAdkResponse(resp.body()));
       if (replyText != null && responseSuggestsEscalation(resp.body())) {
         replyText += SUGGESTS_ESCALATION_MARKER;
       }
@@ -265,6 +273,16 @@ final class SupportIntegrationClient {
       log.warn("Failed to parse ADK response: {}", e.getMessage());
       return null;
     }
+  }
+
+  /** Rewrites any occurrence of the dead pre-rename docs GitHub Pages base URL to the live
+   * one, preserving the page path — see {@link #STALE_DOCS_BASE_URL}'s javadoc for why this
+   * exists. {@code null} passes through unchanged. */
+  static String rewriteStaleDocsLinks(String text) {
+    if (text == null || !text.contains(STALE_DOCS_BASE_URL)) {
+      return text;
+    }
+    return text.replace(STALE_DOCS_BASE_URL, CURRENT_DOCS_BASE_URL);
   }
 
   /** True if any event in the turn's raw ADK response set {@code pending_escalation=confirm}

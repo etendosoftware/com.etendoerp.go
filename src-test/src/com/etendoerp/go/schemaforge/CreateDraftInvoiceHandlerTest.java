@@ -108,6 +108,9 @@ import org.openbravo.model.pricing.pricelist.PriceList;
  *       costly static chains ({@code generateInvoiceDocumentNo}, {@code findARInvoiceDocType})
  *       so each test exercises only the method under test.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.CreateDraftInvoiceHandler
+ * @covers com.etendoerp.go.schemaforge.OrderInvoiceListSupport
  */
 public class CreateDraftInvoiceHandlerTest {
 
@@ -1740,6 +1743,11 @@ public class CreateDraftInvoiceHandlerTest {
 
       assertNotNull(response);
       assertEquals(200, response.getHttpStatus());
+      // The sales handler delegates with the sales flag: both queries bind salesTrx=true.
+      verify(lineQuery).setParameter("salesTrx", true);
+      verify(directQuery).setParameter("salesTrx", true);
+      verify(lineQuery, never()).setParameter("salesTrx", false);
+      verify(directQuery, never()).setParameter("salesTrx", false);
       JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
       assertEquals(2, data.length());
       assertEquals("inv-1", data.getJSONObject(0).getString("id"));

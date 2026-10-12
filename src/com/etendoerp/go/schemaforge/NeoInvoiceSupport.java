@@ -36,13 +36,24 @@ final class NeoInvoiceSupport {
 
   private static final Logger log = LogManager.getLogger(NeoInvoiceSupport.class);
 
+  /**
+   * Quantity of the movement line {@code sil} matched to counted invoices in the match table of
+   * the movement's own direction ({@code sio.issotrx}: {@code M_MatchSI} for a shipment,
+   * {@code M_MatchInv} for a receipt). These readers serve both directions, so the direction comes
+   * from the movement row itself. Before ETP-5576 they read {@code M_MatchSI} only, and a second
+   * partial receipt of an invoice line (linked only through {@code M_MatchInv}) read as uninvoiced.
+   */
+  private static final String MATCHED_QTY_EXPR =
+      InOutInvoiceLinks.matchedQtyByMovementDirectionExpr("sil.m_inoutline_id", "sio.issotrx");
+
   private NeoInvoiceSupport() {
   }
 
   /**
    * Returns the pending (not yet invoiced) quantity for every active line of the
-   * given shipment or goods receipt. Uses GREATEST(M_MatchSI, direct C_InvoiceLine)
-   * to avoid double-counting, and excludes voided and closed invoices.
+   * given shipment or goods receipt. Uses GREATEST(match table, direct C_InvoiceLine)
+   * to avoid double-counting — the match table being M_MatchSI or M_MatchInv by the
+   * movement's IsSOTrx — and excludes voided and closed invoices.
    * Draft invoices are excluded by default (pass {@code true} to include them).
    *
    * @param inOutId        the M_InOut_ID of the shipment or receipt
@@ -86,11 +97,12 @@ final class NeoInvoiceSupport {
     }
   }
 
-  // SQL literals derived from trusted booleans — no injection risk.
+  // SQL literals derived from trusted booleans and fixed enum table names — no injection risk.
   @SuppressWarnings("java:S2077")
   private static Map<String, BigDecimal> queryPendingQtyPerLine(String inOutId, boolean includeDrafts)
       throws SQLException {
-    // includeDrafts=false: three paths — m_matchsi, direct m_inoutline_id, and ol_qty (invoice
+    // includeDrafts=false: three paths — the match table of the movement's direction
+    // (MATCHED_QTY_EXPR), direct m_inoutline_id, and ol_qty (invoice
     // created from the ORDER: m_inoutline_id IS NULL, joined via c_orderline_id scoped to this
     // shipment). Used for the billing-status badge and for blocking duplicate invoice creation.
     //
@@ -104,19 +116,12 @@ final class NeoInvoiceSupport {
           "SELECT sil.m_inoutline_id, "
           + "  ABS(sil.movementqty) AS movement_qty, "
           + "  COALESCE(GREATEST("
-          + "    COALESCE(msi_qty.qtymatched, 0), "
+          + "    COALESCE(" + MATCHED_QTY_EXPR + ", 0), "
           + "    COALESCE(direct_qty.qtyinvoiced, 0), "
           + "    COALESCE(ol_qty.qtyinvoiced, 0) "
           + "  ), 0) AS invoiced_qty "
           + "FROM m_inoutline sil "
-          + "LEFT JOIN ("
-          + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
-          + "  FROM m_matchsi msi "
-          + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
-          + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-          + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
-          + "  GROUP BY msi.m_inoutline_id "
-          + ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id "
+          + "JOIN m_inout sio ON sio.m_inout_id = sil.m_inout_id "
           + "LEFT JOIN ("
           + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
           + "  FROM c_invoiceline il2 "
@@ -149,19 +154,12 @@ final class NeoInvoiceSupport {
           "SELECT sil.m_inoutline_id, "
           + "  ABS(sil.movementqty) AS movement_qty, "
           + "  COALESCE(GREATEST("
-          + "    COALESCE(msi_qty.qtymatched, 0), "
+          + "    COALESCE(" + MATCHED_QTY_EXPR + ", 0), "
           + "    COALESCE(direct_qty.qtyinvoiced, 0), "
           + "    COALESCE(draft_all.qtydraft, 0) "
           + "  ), 0) AS invoiced_qty "
           + "FROM m_inoutline sil "
-          + "LEFT JOIN ("
-          + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
-          + "  FROM m_matchsi msi "
-          + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
-          + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-          + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
-          + "  GROUP BY msi.m_inoutline_id "
-          + ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id "
+          + "JOIN m_inout sio ON sio.m_inout_id = sil.m_inout_id "
           + "LEFT JOIN ("
           + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
           + "  FROM c_invoiceline il2 "

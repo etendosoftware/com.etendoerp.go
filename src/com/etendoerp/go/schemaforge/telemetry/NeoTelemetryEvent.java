@@ -30,11 +30,18 @@ public final class NeoTelemetryEvent {
   private final String name;
   private final Map<String, Object> properties;
   private final Instant timestamp;
+  private final String clientId;
 
   NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp) {
+    this(name, properties, timestamp, null);
+  }
+
+  NeoTelemetryEvent(String name, Map<String, Object> properties, Instant timestamp,
+      String clientId) {
     this.name = name;
     this.properties = Collections.unmodifiableMap(new LinkedHashMap<>(properties));
     this.timestamp = timestamp;
+    this.clientId = clientId;
   }
 
   /**
@@ -62,5 +69,18 @@ public final class NeoTelemetryEvent {
    */
   public Instant getTimestamp() {
     return timestamp;
+  }
+
+  /**
+   * The tenant ({@code AD_Client_ID}) the event happened under, for the server log only.
+   *
+   * <p>Deliberately not one of {@link #getProperties()}: properties are what every sink receives,
+   * Mixpanel included, and the tenant id stays on our side. Only {@code LogNeoTelemetrySink} prints
+   * it, so a failure seen in Datadog can be traced to its tenant (ETP-5639).</p>
+   *
+   * @return the AD client id, or {@code null} when the event carries none
+   */
+  public String getClientId() {
+    return clientId;
   }
 }

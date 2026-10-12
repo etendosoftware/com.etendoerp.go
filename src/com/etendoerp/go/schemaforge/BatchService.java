@@ -53,7 +53,7 @@ import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
  * <p>Accepts an ordered list of CRUD operations, runs them in order, and supports
  * back-references between operations. Used by the React UI to ingest a multi-record
  * document and exposed as a generic primitive that an MCP agent can compose alongside
- * {@code neo_selectors} / {@code neo_create}.</p>
+ * {@code etendo_selectors} / {@code etendo_create}.</p>
  *
  * <p><b>Atomic, as of IMP-23 option B — and it was not before.</b> This class always owned a
  * single transaction (one {@code commitAndClose()} after the loop, {@code rollbackAndClose()} on
@@ -308,10 +308,10 @@ public class BatchService {
    * abstained, silently: a batched order line was persisted at price 0 while the very same line
    * created with a literal parent id got its price. That is the divergence class this ticket
    * exists to remove — correct on one path, quietly wrong on the other — and it was already the
-   * reason {@code neo_batch} had been switched off (ETP-5335).
+   * reason {@code etendo_batch} had been switched off (ETP-5335).
    *
    * <p>Running the transforms here instead gives them the same starting state
-   * {@code neo_create} has: every reference resolved, the parent persisted and addressable. The
+   * {@code etendo_create} has: every reference resolved, the parent persisted and addressable. The
    * shared code holds no knowledge of what the preprocessor does or who supplies it — REST's
    * {@code /sws/neo/batch} passes none and is unchanged.
    *
@@ -725,7 +725,7 @@ public class BatchService {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Entity not found in spec '" + spec.getId() + "': " + entityName);
     }
-    // ETP-4254: /batch (and MCP neo_batch, which shares this method) enters the CRUD
+    // ETP-4254: /batch (and MCP etendo_batch, which shares this method) enters the CRUD
     // pipeline at NeoCrudHandler#handleDefault — i.e. AFTER the method-flag gate in
     // handleWindowEntityCrud. Without this check a read-only entity (all mutation flags
     // 'N', e.g. the SII/VeriFactu monitor logs) rejected a direct POST with 405 while

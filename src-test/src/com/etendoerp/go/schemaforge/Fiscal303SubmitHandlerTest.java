@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -51,6 +52,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.Query;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -77,6 +79,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for the AEAT 303 telematic submission entity added to {@link Fiscal303BoxesHandler}
@@ -120,9 +123,25 @@ public class Fiscal303SubmitHandlerTest {
 
   private Fiscal303BoxesHandler handler;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal303 sub-route
+   * (including "submit") on the Tax Report window grant before any routing runs. Default every
+   * test to "granted" so this file's submit-flow tests keep exercising what they were written
+   * for; the denial itself is covered in {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @Before
   public void setUp() {
     handler = snapshotStubbed(mock(NeoServlet.class));
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── resolveNrcForSubmission ─────────────────────────────────────────────────
@@ -1121,6 +1140,41 @@ public class Fiscal303SubmitHandlerTest {
       assertEquals("ALREADY_SUBMITTED", body.getString("errorCode"));
       verify(decl, never()).setDeclarationStatus(anyString());
     }
+  }
+
+  /**
+   * ETP-5546 — a role whose Tax Report window grant is read-only (or absent) gets 403 for
+   * {@code POST /fiscal303/submit}, the single most sensitive write in this handler's scope: it
+   * files the declaration with the AEAT. The gate in {@link AbstractFiscalHandler#handle} runs
+   * before any of {@code handleSubmit}'s own logic, so denial must short-circuit before the
+   * declaration is even looked up — proven the same way
+   * {@link #testHandleSubmit_alreadySubmittedDeclaration_blocksResubmission} already proves its
+   * own trigger: {@link AEAT303SubmissionService} is never constructed.
+   *
+   * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
+   * @covers com.etendoerp.go.schemaforge.Fiscal303BoxesHandler
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_deniedAccess_returnsForbiddenWithoutSubmitting() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+
+    try (MockedConstruction<AEAT303SubmissionService> serviceMock =
+        mockConstruction(AEAT303SubmissionService.class)) {
+      h.handle("submit", "POST", req, res);
+
+      assertTrue("AEAT303SubmissionService must not be constructed when access is denied",
+          serviceMock.constructed().isEmpty());
+    }
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+    verify(res, never()).setStatus(anyInt());
   }
 
   /**

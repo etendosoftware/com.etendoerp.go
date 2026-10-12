@@ -41,6 +41,9 @@ import org.openbravo.dal.service.OBDal;
  *
  * <p>Mocks OBDal, Connection, PreparedStatement, and ResultSet to exercise all
  * branching logic without requiring a live database.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoInvoiceSupport
+ * @covers com.etendoerp.go.schemaforge.InOutInvoiceLinks
  */
 public class NeoInvoiceSupportTest {
 
@@ -457,6 +460,40 @@ public class NeoInvoiceSupportTest {
         fail("The guard path must not degrade silently");
       } catch (OBException expected) {
         // Expected: an infrastructure failure must stay distinguishable from "nothing pending".
+      }
+    }
+  }
+
+  // ─── ETP-5576: the match arm follows the movement's direction ─────────────
+
+  /**
+   * The pending-quantity query serves shipments AND receipts, so its match arm must read the match
+   * table of the movement's own IsSOTrx: M_MatchSI for a shipment, M_MatchInv for a receipt. A
+   * second partial receipt of an invoice line is linked ONLY through M_MatchInv; reading M_MatchSI
+   * alone made it look uninvoiced and re-offered "Crear Factura" (duplicate-invoice risk). Both
+   * variants ({@code includeDrafts} false/true) build their own SQL, so both are checked.
+   */
+  @Test
+  public void computePendingQtyPerLine_matchArmFollowsMovementDirection() throws Exception {
+    for (boolean includeDrafts : new boolean[] { false, true }) {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        Connection conn = stubDalConnection(obDalMock, dal);
+        PreparedStatement ps = mock(PreparedStatement.class);
+        ResultSet rs = mock(ResultSet.class);
+        when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+
+        NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-dir", includeDrafts);
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        Mockito.verify(conn).prepareStatement(sqlCaptor.capture());
+        String sql = sqlCaptor.getValue();
+        assertTrue("includeDrafts=" + includeDrafts + ": a shipment (issotrx Y) must read M_MatchSI",
+            sql.contains("WHEN sio.issotrx = 'Y' THEN (SELECT SUM(ABS(mt.qty)) FROM m_matchsi mt"));
+        assertTrue("includeDrafts=" + includeDrafts + ": a receipt (issotrx N) must read M_MatchInv",
+            sql.contains("ELSE (SELECT SUM(ABS(mt.qty)) FROM m_matchinv mt"));
       }
     }
   }

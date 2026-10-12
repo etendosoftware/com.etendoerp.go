@@ -36,8 +36,8 @@ import org.openbravo.dal.core.OBContext;
  * separately on each side is how the same defect survived in two files after being closed
  * (IMP-39).</p>
  *
- * <p>Read access is unchanged. Both fields stay in {@code neo_get}, {@code neo_list} and
- * {@code neo_schema} responses: they are information the caller legitimately needs.</p>
+ * <p>Read access is unchanged. Both fields stay in {@code etendo_get}, {@code etendo_list} and
+ * {@code etendo_schema} responses: they are information the caller legitimately needs.</p>
  */
 public final class NeoServerOwnedFields {
 

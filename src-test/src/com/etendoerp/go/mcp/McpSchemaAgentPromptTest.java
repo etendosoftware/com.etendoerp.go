@@ -35,7 +35,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Covers the entity-level {@code agentPrompt} ({@code ETGO_SF_ENTITY.AGENT_PROMPT}) that ETP-5184
- * added to {@code neo_schema}, in both shapes it is emitted in: the full dump and
+ * added to {@code etendo_schema}, in both shapes it is emitted in: the full dump and
  * {@code view:"create"}.
  *
  * <p>This is the half of the change with no live evidence behind it. The field-level prompt was
@@ -50,11 +50,14 @@ import org.junit.jupiter.api.Test;
  * prompt sits alongside {@code spec}/{@code entity}/{@code table} so an agent reads it before the
  * field list, but Jettison's {@code JSONObject} is backed by a hash map, so emission order is not a
  * property this class can pin.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaCreateView
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects
 // the outer class for @Test methods, hence the suppression.
 @SuppressWarnings("java:S2187")
-@DisplayName("neo_schema entity-level agentPrompt (ETP-5184)")
+@DisplayName("etendo_schema entity-level agentPrompt (ETP-5184)")
 class McpSchemaAgentPromptTest {
 
   private static final String KEY = "agentPrompt";
@@ -248,7 +251,7 @@ class McpSchemaAgentPromptTest {
         missing.add("the entity prompt passed to McpSchemaCreateView.buildResponse");
       }
       if (!missing.isEmpty()) {
-        fail("neo_schema no longer emits the entity-level agentPrompt: " + missing
+        fail("etendo_schema no longer emits the entity-level agentPrompt: " + missing
             + ". Both shapes must carry it — view:\"create\" is what an agent reads immediately"
             + " before writing, and for a handler-backed entity the prompt is the only place the"
             + " advertised contract can be contradicted (ETP-5184).");

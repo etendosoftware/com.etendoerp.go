@@ -62,7 +62,7 @@ final class McpHookExecutor {
    * What a READ-surface dispatch leaves the MCP read pipeline to do next (ETP-5415, T3).
    *
    * <p>A read cannot borrow the write sites' "a non-null hook response is the answer, return it"
-   * contract: an MCP read still has to project, flatten and (for {@code neo_get}) attach the record
+   * contract: an MCP read still has to project, flatten and (for {@code etendo_get}) attach the record
    * URL, and returning a handler's {@link NeoResponse} body verbatim would hand the agent core's
    * wrapped envelope instead of the flat shape every other read produces. So a successful hook
    * response <b>replaces the body the pipeline carries on with</b>, and only a {@code >= 400} one
@@ -88,7 +88,7 @@ final class McpHookExecutor {
    * answer over REST and returned HTTP 500 over MCP — {@code getAdTabOrThrow} fired before any
    * hook could decline the generic path. The dashboard widgets, {@code contacts/bp-stats}, the
    * three reports and {@code not-posted-documents} all render in the SPA and were unreachable to
-   * an agent, while {@code neo_discover} advertised them and the {@code not_found} hint steered
+   * an agent, while {@code etendo_discover} advertised them and the {@code not_found} hint steered
    * callers straight into them.</p>
    *
    * <p><b>The quiet one, which is the reason this is not just a bug fix:</b> the asymmetry applied
@@ -108,7 +108,7 @@ final class McpHookExecutor {
    * arguments. The {@code filters} pass-through is what gives the agent a way to supply a named
    * input at all: {@code bp-stats} needs a {@code businessPartnerId} that no MCP argument
    * otherwise carries, so
-   * {@code neo_list(contacts, bp-stats, filters:{businessPartnerId:"…"})} is its call shape.</p>
+   * {@code etendo_list(contacts, bp-stats, filters:{businessPartnerId:"…"})} is its call shape.</p>
    *
    * <p><b>Relation to ETP-5405.</b> That ticket fixed the same 500 with
    * {@code McpTablessReadDispatcher}, which ran this phase only when {@code getADTab() == null}.
@@ -120,7 +120,7 @@ final class McpHookExecutor {
    *
    * @param specName   the spec being read
    * @param entityName the entity being read
-   * @param recordId   the record for {@code neo_get}, {@code null} for {@code neo_list} — the
+   * @param recordId   the record for {@code etendo_get}, {@code null} for {@code etendo_list} — the
    *                   value customizations branch on to tell a single-record read from a list
    * @param sfEntity   the entity configuration, whose {@code Java_Qualifier} is resolved
    * @param queryParams the provider's inputs, built by {@link #buildReadProviderParams}; never
@@ -204,7 +204,7 @@ final class McpHookExecutor {
   /**
    * Run the entity customization's READ post-phase over an MCP read result (ETP-5415, T3).
    *
-   * <p>Until this existed, {@code neo_list} and {@code neo_get} were the only NEO surfaces that
+   * <p>Until this existed, {@code etendo_list} and {@code etendo_get} were the only NEO surfaces that
    * reached no customization at all: {@code OrderLineHandler.afterHandle} injects {@code
    * productCode} into every sales-order line a REST read returns, and an MCP read of the same rows
    * simply did not have it — with nothing in the response, and no line in the log, to say a hook
@@ -227,7 +227,7 @@ final class McpHookExecutor {
    *
    * @param specName     the spec being read
    * @param entityName   the entity being read
-   * @param recordId     the record for {@code neo_get}, {@code null} for {@code neo_list} — the
+   * @param recordId     the record for {@code etendo_get}, {@code null} for {@code etendo_list} — the
    *                     value customizations branch on to tell a single-record read from a list
    * @param adTab        the entity's AD tab
    * @param sfEntity     the entity configuration, whose {@code Java_Qualifier} is resolved
@@ -372,7 +372,7 @@ final class McpHookExecutor {
    *
    * @param specName      the spec that owns the entity
    * @param entityName    the entity that owns the FK field
-   * @param fieldName     the selector field as passed to {@code neo_selectors}, e.g.
+   * @param fieldName     the selector field as passed to {@code etendo_selectors}, e.g.
    *                      {@code paymentMethod}
    * @param contextParams the validated selector context params, exposed as query params so a
    *                      customization reads them the way the REST path lets it
@@ -410,7 +410,7 @@ final class McpHookExecutor {
    * @param specName   the spec that owns the entity
    * @param entityName the entity that owns the button field
    * @param recordId   the record the action targets
-   * @param actionName the button field name as passed to {@code neo_action}, e.g.
+   * @param actionName the button field name as passed to {@code etendo_action}, e.g.
    *                   {@code documentAction}
    * @param params     the MCP {@code parameters} object, used as the request body; must not be
    *                   {@code null} so a handler can read and mutate it
@@ -470,7 +470,7 @@ final class McpHookExecutor {
    * {@code 202 Accepted}, which means the delete was queued and has not happened yet, so it is not
    * a confirmation.
    *
-   * <p>ETP-5474: the 204 used to be rendered as {@code {}}, so {@code neo_delete} on a financial
+   * <p>ETP-5474: the 204 used to be rendered as {@code {}}, so {@code etendo_delete} on a financial
    * account that had just been removed read to the agent as a failed delete. Handled here rather
    * than per handler so any future handler resolving DELETE with 204 is covered. Not folded into
    * {@link #runPreHook}: on the process/report/widget paths a 204 does not mean "deleted".</p>
@@ -490,7 +490,7 @@ final class McpHookExecutor {
 
   /**
    * Maps a DELETE pre-hook response to an MCP result with the {@link #runDeletePreHook} rules, for
-   * callers that obtained the response elsewhere (ETP-5415: {@code neo_delete} runs its pre-hook
+   * callers that obtained the response elsewhere (ETP-5415: {@code etendo_delete} runs its pre-hook
    * through {@code NeoExtensionDispatcher}).
    *
    * @param pre      the pre-hook response, may be {@code null}
@@ -582,7 +582,7 @@ final class McpHookExecutor {
    * pre-IMP-5 {@code {"error":{"message":…,"status":422}}} with nothing an agent could branch on —
    * found while verifying IMP-19, after IMP-17 had closed the three funnels it enumerated and this
    * was in none of them. Every MCP path that returns a handler's or a process's {@code NeoResponse}
-   * comes through here — report generation, {@code neo_process}, the widget/amortization paths and
+   * comes through here — report generation, {@code etendo_process}, the widget/amortization paths and
    * all four entity pre/post hooks — so normalizing once covers all of them. The normalization is
    * additive and idempotent; see {@link McpToolRouterSupport#toMcpHandlerError} for why it does not
    * live in {@code NeoResponse.error} itself.</p>

@@ -59,16 +59,16 @@ public class BankStatementEntityHandler implements NeoHandler {
       METHOD_DELETE);
 
   /**
-   * How a caller reaches the supported write: {@code neo_action} on the {@code bank-statements}
+   * How a caller reaches the supported write: {@code etendo_action} on the {@code bank-statements}
    * report spec, whose one entity is also named {@code bank-statements}
    * ({@link BankStatementAgentActions}). Each message below names the concrete action.
    */
   private static final String VIA_NEO_ACTION =
-      " via neo_action {spec:\"bank-statements\", entity:\"bank-statements\"";
+      " via etendo_action {spec:\"bank-statements\", entity:\"bank-statements\"";
   private static final String ID_ACCOUNT = ", id: <financial account id>}";
   private static final String ID_STATEMENT = ", id: <bank statement id>}";
   private static final String PARAMETERS_HINT =
-      " (neo_schema({spec:\"bank-statements\", view:\"actions\"}) lists its parameters).";
+      " (etendo_schema({spec:\"bank-statements\", view:\"actions\"}) lists its parameters).";
 
   static final String MSG_STATEMENT_CREATE_DISABLED =
       "Bank statements are created with action createStatement (or importStatement from a file)"

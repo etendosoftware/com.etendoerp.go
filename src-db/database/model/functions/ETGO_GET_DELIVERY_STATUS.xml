@@ -13,15 +13,38 @@ BEGIN
   -- the source of truth. Etendo populates these tables when the related
   -- shipment/receipt is completed for an invoice that already exists and
   -- is linked to the same purchase/sales order.
+  -- ETP-5576: only match rows whose shipment/receipt is completed ('CO') or
+  -- closed ('CL') count as delivered. A second or later partial movement
+  -- created from an invoice gets its match row while still in draft (Classic
+  -- "create lines from invoice" behaviour), and a draft has delivered nothing.
+  -- Voided ('VO') movements are excluded too: their original and reversal
+  -- match rows used to be summed through ABS(qty), overstating delivery.
+  -- A match row is not trusted beyond what its movement line moved either.
+  -- Core can insert a match whose qty exceeds the shipment/receipt line
+  -- (an invoice created with "add from order" for 10 units matched against a
+  -- completed shipment line that moved 4 gets m_matchsi.qty = 10). Match rows
+  -- of both tables are therefore aggregated per movement line first and each
+  -- aggregate is capped at ABS(m_inoutline.movementqty), so several match
+  -- rows of the same invoice line on the same movement line can never add up
+  -- to more than that line moved. The per-invoice-line cap by ABS(qtyinvoiced) still applies on top.
   SELECT
     COALESCE(SUM(ABS(il.qtyinvoiced)), 0),
     COALESCE(SUM(
       LEAST(
         ABS(il.qtyinvoiced),
-        COALESCE((SELECT SUM(ABS(qty)) FROM m_matchinv
-                   WHERE c_invoiceline_id = il.c_invoiceline_id), 0)
-      + COALESCE((SELECT SUM(ABS(qty)) FROM m_matchsi
-                   WHERE c_invoiceline_id = il.c_invoiceline_id), 0)
+        COALESCE((SELECT SUM(LEAST(m.qty, ABS(iol.movementqty)))
+                   FROM (SELECT u.m_inoutline_id, SUM(u.qty) AS qty
+                           FROM (SELECT mi.m_inoutline_id, ABS(mi.qty) AS qty
+                                   FROM m_matchinv mi
+                                  WHERE mi.c_invoiceline_id = il.c_invoiceline_id
+                                 UNION ALL
+                                 SELECT msi.m_inoutline_id, ABS(msi.qty) AS qty
+                                   FROM m_matchsi msi
+                                  WHERE msi.c_invoiceline_id = il.c_invoiceline_id) u
+                          GROUP BY u.m_inoutline_id) m
+                   JOIN m_inoutline iol ON iol.m_inoutline_id = m.m_inoutline_id
+                   JOIN m_inout io ON io.m_inout_id = iol.m_inout_id
+                  WHERE io.docstatus IN ('CO', 'CL')), 0)
       )
     ), 0)
   INTO v_total, v_delivered

@@ -26,7 +26,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Architecture regression test for ETP-5009 — {@code neo_list} must AND the entity
+ * Architecture regression test for ETP-5009 — {@code etendo_list} must AND the entity
  * customization's {@code NeoHandler#readPredicates} into its query, the way the REST list GET and
  * its {@code ?_distinct=} fetch do.
  *
@@ -35,6 +35,8 @@ import org.junit.jupiter.api.Test;
  * error and no log line. {@code handleList} needs an {@code OBContext}, a live DAL and
  * {@code DefaultJsonDataService}, so — like {@code McpListTabWhereCallSiteTest} — the guard is on
  * the call site; the resolution rule itself is covered by {@code NeoReadPredicatesTest}.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
  */
 @DisplayName("ETP-5009 — the MCP list applies the customization's read predicates")
 class McpListReadPredicatesCallSiteTest {
@@ -58,7 +60,7 @@ class McpListReadPredicatesCallSiteTest {
   void listResolvesReadPredicatesOnMcp() {
     assertTrue(RESOLVE_ON_MCP.matcher(listBody()).find(),
         "handleList no longer calls NeoReadPredicates.resolve(..., NeoExtensionChannel.MCP)."
-            + " Without it neo_list returns rows the REST list excludes in the query (ETP-5009).");
+            + " Without it etendo_list returns rows the REST list excludes in the query (ETP-5009).");
   }
 
   @Test

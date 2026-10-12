@@ -195,25 +195,22 @@ final class CandidatesSupport {
    */
   static void appendForeignOriginal(JSONObject row, ResultSet rs, BigDecimal signedBase)
       throws Exception {
-    String foreignIso = StringUtils.trimToEmpty(rs.getString("foreign_currency_iso"));
     String accountIso = StringUtils.trimToEmpty(rs.getString("account_currency_iso"));
-    BigDecimal foreignAmount = rs.getBigDecimal("foreign_amount");
+    ForeignOriginal foreign = ForeignOriginal.of(rs.getString("foreign_currency_iso"), accountIso,
+        rs.getBigDecimal("foreign_amount"), rs.getBigDecimal("foreign_convert_rate"));
     // Not a foreign pair (or no stored original amount): keep the row as is.
-    if (foreignIso.isEmpty() || accountIso.isEmpty() || foreignIso.equals(accountIso)
-        || foreignAmount == null) {
+    if (foreign == null) {
       return;
     }
-    BigDecimal signedForeign = signedBase.signum() < 0 ? foreignAmount.abs().negate()
-        : foreignAmount.abs();
+    BigDecimal signedForeign = foreign.signedLike(signedBase);
     row.put(KEY_AMOUNT, signedForeign);
     row.put(KEY_PENDING_BALANCE, signedForeign);
     row.put("amountBase", signedBase);
-    row.put("currency", foreignIso);
+    row.put("currency", foreign.currencyIso());
     row.put("currencyId", rs.getString("foreign_currency_id"));
     row.put("baseCurrency", accountIso);
-    BigDecimal rate = rs.getBigDecimal("foreign_convert_rate");
-    if (rate != null) {
-      row.put("rate", rate);
+    if (foreign.rate() != null) {
+      row.put("rate", foreign.rate());
     }
   }
 

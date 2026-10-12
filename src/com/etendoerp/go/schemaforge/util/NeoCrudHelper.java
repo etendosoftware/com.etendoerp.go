@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge.util;
 
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
@@ -30,7 +29,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.jspecify.annotations.Nullable;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -57,95 +55,8 @@ public class NeoCrudHelper {
   private static final Logger log = LogManager.getLogger(NeoCrudHelper.class);
   private static final String PARENT_ID_KEY = "parentId";
   private static final String NEO_ERROR_PREFIX = "__NEO_ERROR__:";
-  /**
-   * Internal-only HQL predicate — stripped from HTTP request params in {@link #buildBaseParams}
-   * to prevent HQL injection. Trusted internal code (e.g. hooks) may still inject it into the
-   * params map after {@code buildBaseParams} returns, and the where-clause builder will consume it.
-   */
-  public static final String NEO_WHERE_PARAM = "_neoWhere";
 
   private NeoCrudHelper() {
-  }
-
-  /**
-   * Builds the base parameter map required by {@code DefaultJsonDataService} operations.
-   * Includes entity name, tab ID, window ID, and active-record filter; also copies any
-   * additional query parameters (filters, pagination, sorting) from the request context.
-   *
-   * @param context        the current NEO request context, used to read the record ID and query params
-   * @param adTab          the AD_Tab linked to the entity, used to resolve tab and window IDs
-   * @param dalEntityName  the DAL entity name (e.g. {@code "Order"}) required by DefaultJsonDataService
-   * @return a mutable parameter map ready to be passed to {@code DefaultJsonDataService} fetch/add/update/remove
-   */
-  public static Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
-    Map<String, String> params = new HashMap<>();
-    params.put(JsonConstants.ENTITYNAME, dalEntityName);
-    params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
-    params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
-    params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
-
-    if (context.getRecordId() != null) {
-      params.put(JsonConstants.ID, context.getRecordId());
-    }
-
-    if (context.getQueryParams() != null) {
-      for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
-        // _neoWhere is an internal-only predicate injected by hooks/handlers after params are built.
-        // Stripping it here prevents HQL injection via HTTP request parameters.
-        if (!NEO_WHERE_PARAM.equals(entry.getKey())) {
-          params.put(entry.getKey(), entry.getValue());
-        }
-      }
-    }
-    return params;
-  }
-
-  /**
-   * Build and apply the where clause (tab HQL + parent filter + client base filter) to the params map.
-   * Supports a special {@code _neoWhere} query parameter that injects an additional HQL predicate,
-   * merged with the tab's own HQL filter clause and any parent filter.
-   */
-  static void buildWhereClause(Map<String, String> params, Tab adTab, NeoContext context) {
-    StringBuilder whereClause = new StringBuilder();
-
-    String parentId = getParentId(context);
-
-    String tabWhere = adTab.getHqlwhereclause();
-    if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
-      }
-      whereClause.append("(").append(tabWhere).append(")");
-    }
-    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      NeoTypeCoercionHelper.ParentFilter parentFilter =
-          NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
-      if (parentFilter != null) {
-        if (whereClause.length() > 0) {
-          whereClause.append(" and ");
-        }
-        whereClause.append("(").append(parentFilter.resolveForStringApi()).append(")");
-      }
-    }
-
-    String neoWhere = params.remove(NEO_WHERE_PARAM);
-    if (StringUtils.isNotBlank(neoWhere)) {
-      if (whereClause.length() > 0) {
-        whereClause.append(" and ");
-      }
-      whereClause.append("(").append(neoWhere).append(")");
-    }
-
-    if (whereClause.length() > 0) {
-      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
-      params.put(JsonConstants.USE_ALIAS, "true");
-    }
-  }
-
-  private static @Nullable String getParentId(NeoContext context) {
-    return context.getQueryParams() != null
-        ? context.getQueryParams().get(PARENT_ID_KEY)
-        : null;
   }
 
   /**

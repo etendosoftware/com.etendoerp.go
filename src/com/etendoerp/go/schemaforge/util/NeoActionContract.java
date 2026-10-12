@@ -43,7 +43,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * One named action a {@link NeoHandler} serves through {@code neo_action} / the ACTION
+ * One named action a {@link NeoHandler} serves through {@code etendo_action} / the ACTION
  * sub-endpoint, with the parameters it accepts (ETP-5468).
  *
  * <p><b>Why the handler declares it.</b> Same argument as {@link NeoReportParam} (IMP-19) and
@@ -53,8 +53,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * refusals one at a time — which is exactly how agents ended up pressing Core's hidden APRM buttons
  * on {@code financial-account/account} instead of the real reconciliation routes.</p>
  *
- * <p><b>One declaration, three readers.</b> {@code neo_schema} renders it ({@link #toJson()}),
- * {@code neo_discover} lists its names, and {@link #validate} judges the call against it before the
+ * <p><b>One declaration, three readers.</b> {@code etendo_schema} renders it ({@link #toJson()}),
+ * {@code etendo_discover} lists its names, and {@link #validate} judges the call against it before the
  * handler runs — so what an agent is shown and what it is judged against cannot drift.</p>
  */
 public final class NeoActionContract {
@@ -138,7 +138,7 @@ public final class NeoActionContract {
   }
 
   /**
-   * The same contract, stating what the {@code neo_action} {@code id} argument must be for it (for
+   * The same contract, stating what the {@code etendo_action} {@code id} argument must be for it (for
    * example "the financial account id"). Keeps window-specific wording out of the generic MCP
    * classes, which render it verbatim.
    *
@@ -162,7 +162,7 @@ public final class NeoActionContract {
    * <p>For an action behind an AD button whose parameters the SPA collects in its process dialog:
    * the SPA posts them as {@code {"fieldValues": {...}}}, and the customization reads them there
    * ({@code PeriodOpenCloseHandler} reads {@code fieldValues.openClose}). The agent still passes
-   * the declared parameters flat; {@code neo_action} wraps them, so the customization receives the
+   * the declared parameters flat; {@code etendo_action} wraps them, so the customization receives the
    * body the SPA sends instead of answering "Missing required parameter".</p>
    *
    * @return a copy whose parameters travel under {@code fieldValues}
@@ -222,7 +222,7 @@ public final class NeoActionContract {
   }
 
   /**
-   * Renders the contract for {@code neo_schema(view:"actions")}: the action plus a JSON Schema of
+   * Renders the contract for {@code etendo_schema(view:"actions")}: the action plus a JSON Schema of
    * its {@code parameters} object.
    *
    * @return {@code {action, description, mutating, invokeVia, parameters:{type, properties,
@@ -248,7 +248,7 @@ public final class NeoActionContract {
     out.put("action", name);
     out.put(KEY_DESCRIPTION, description);
     out.put("mutating", mutating);
-    out.put("invokeVia", "neo_action");
+    out.put("invokeVia", "etendo_action");
     if (idDescription != null) {
       out.put("idDescription", idDescription);
     }
@@ -403,7 +403,7 @@ public final class NeoActionContract {
       this.contracts = contracts;
     }
 
-    /** @return the entity to pass as {@code entity} to {@code neo_action} / {@code neo_schema} */
+    /** @return the entity to pass as {@code entity} to {@code etendo_action} / {@code etendo_schema} */
     public String getEntityName() {
       return entityName;
     }

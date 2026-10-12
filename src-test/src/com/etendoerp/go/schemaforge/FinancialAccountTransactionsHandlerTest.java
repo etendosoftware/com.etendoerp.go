@@ -89,7 +89,12 @@ import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
  *       and empty result-set fallback.</li>
  *   <li>Helper methods {@code formatDate} (via reflection-free row mapping)
  *       and the static {@code nullSafeBigDecimal} contract.</li>
+ *   <li>ETP-5657: a cross-currency movement carries its foreign-currency original
+ *       ({@code foreignAmount}/{@code foreignCurrency}/{@code foreignConversionRate}); a
+ *       same-currency movement does not.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountTransactionsHandler
  */
 // Silent runner: clearMocks() (below) wipes the inline mock maker registry after
 // each test to keep the shared test-worker heap flat; the strict runner would
@@ -464,6 +469,72 @@ public class FinancialAccountTransactionsHandlerTest {
       assertEquals("PAY-099", row.getString("documentNo"));
       assertEquals("ACME SL", row.getString("contact"));
       assertEquals("EUR", row.getString("currencyIso"));
+    }
+  }
+
+  /**
+   * ETP-5657: the Movements list re-exposes the original currency Core stored on a cross-currency
+   * movement (27.80 EUR booked for 40.91 USD at 0.67954), and only there — a same-currency
+   * movement keeps its old shape. The query selects the foreign columns and joins both
+   * currencies.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain or JSON traversal fails
+   */
+  @Test
+  public void testLoadTransactionsAddsForeignOriginalOnlyToForeignRows() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    stubTransactionRow(rs, "TRX-FX", Timestamp.valueOf("2026-10-06 10:00:00"), "RPPC", "BPD",
+        new BigDecimal("27.80"), new BigDecimal("500.00"), "FX receipt", "Y", "PAY-FX",
+        "ACME Inc", "EUR");
+    when(rs.getString("fin_finacc_transaction_id")).thenReturn("TRX-FX", "TRX-EUR");
+    when(rs.getString("foreign_currency_iso")).thenReturn("USD", "EUR");
+    when(rs.getString("account_currency_iso")).thenReturn("EUR", "EUR");
+    when(rs.getBigDecimal("foreign_amount"))
+        .thenReturn(new BigDecimal("40.91"), new BigDecimal("12.00"));
+    when(rs.getBigDecimal("foreign_convert_rate"))
+        .thenReturn(new BigDecimal("0.67954"), BigDecimal.ONE);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      JSONArray arr = handler.loadTransactions(ACCOUNT_ID);
+
+      assertEquals(2, arr.length());
+      JSONObject foreign = arr.getJSONObject(0);
+      assertEquals("TRX-FX", foreign.getString("id"));
+      assertEquals(0,
+          new BigDecimal("27.80").compareTo(new BigDecimal(foreign.getString("amount"))));
+      assertEquals(0,
+          new BigDecimal("40.91").compareTo(new BigDecimal(foreign.getString("foreignAmount"))));
+      assertEquals("USD", foreign.getString("foreignCurrency"));
+      assertEquals(0, new BigDecimal("0.67954")
+          .compareTo(new BigDecimal(foreign.getString("foreignConversionRate"))));
+
+      JSONObject sameCurrency = arr.getJSONObject(1);
+      assertEquals("TRX-EUR", sameCurrency.getString("id"));
+      assertFalse(sameCurrency.has("foreignAmount"));
+      assertFalse(sameCurrency.has("foreignCurrency"));
+      assertFalse(sameCurrency.has("foreignConversionRate"));
+
+      ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sql.capture());
+      String query = sql.getValue();
+      assertTrue(query, query.contains("ft.foreign_amount"));
+      assertTrue(query, query.contains("ft.foreign_convert_rate"));
+      assertTrue(query, query.contains("fcur.iso_code AS foreign_currency_iso"));
+      assertTrue(query, query.contains("facur.iso_code AS account_currency_iso"));
+      assertTrue(query, query.contains(
+          "LEFT JOIN c_currency facur ON facur.c_currency_id = fa.c_currency_id"));
+      assertTrue(query, query.contains(
+          "LEFT JOIN c_currency fcur ON fcur.c_currency_id = ft.foreign_currency_id"));
     }
   }
 

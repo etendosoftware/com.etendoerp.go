@@ -30,8 +30,10 @@ import org.openbravo.dal.service.OBDal;
 
 /**
  * {@link InvoiceLineAmountSupport#deriveAmountsOnCreate} (ETP-5528): a sales invoice line created
- * through {@code neo_create} persisted {@code LineNetAmt 0 / Line_Gross_Amount 0}; live after the
- * fix, Fernet at 18, qty 10, 21 % → net 180 / gross 217.80, the same as {@code neo_batch}.
+ * through {@code etendo_create} persisted {@code LineNetAmt 0 / Line_Gross_Amount 0}; live after the
+ * fix, Fernet at 18, qty 10, 21 % → net 180 / gross 217.80, the same as {@code etendo_batch}.
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceLineAmountSupport
  */
 class InvoiceLineAmountSupportTest {
 

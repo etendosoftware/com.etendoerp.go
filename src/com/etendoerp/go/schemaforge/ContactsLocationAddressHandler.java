@@ -135,7 +135,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * caller, and {@link NeoContext#getQueryParams()} is {@code null} on the MCP CRUD hook path
    * ({@code McpHookExecutor.buildHookContext} does not populate it), so it must be guarded:
    * <ol>
-   *   <li><b>MCP</b> ({@code neo_create}) — {@code McpToolRouter} removes {@code parentId} from
+   *   <li><b>MCP</b> ({@code etendo_create}) — {@code McpToolRouter} removes {@code parentId} from
    *       the body and writes the resolved FK back as the {@code businessPartner} property;
    *       {@code queryParams} is {@code null}, so the body branch wins.</li>
    *   <li><b>REST from the UI</b> ({@code POST /locationAddress?parentId=<bpId>}) — the body
@@ -220,7 +220,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS, true));
       bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS, true));
       // C_BPartner_Location.IsTaxLocation's own AD default is an unquoted 'N', so a create that
-      // never mentions it should stay false — `neo_schema` advertises it as an accepted,
+      // never mentions it should stay false — `etendo_schema` advertises it as an accepted,
       // server-defaulted field, and a caller that explicitly sends `taxLocation: true` has every
       // reason to expect it stored, not silently dropped because nothing here ever read it.
       bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION, false));
@@ -242,7 +242,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   /**
    * The 400 for a create body that cannot be served, or {@code null} when it can.
    *
-   * <p>{@code neo_schema} advertises {@code locationAddress} (an FK to an existing C_Location) as
+   * <p>{@code etendo_schema} advertises {@code locationAddress} (an FK to an existing C_Location) as
    * this entity's own field, mirroring how {@code bp-location/bpLocation} already exposes
    * C_Location as a writable entity in its own right (country required there). A caller may
    * therefore either

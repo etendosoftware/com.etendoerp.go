@@ -273,7 +273,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
 
   /**
    * The action's DAL property name, whichever spelling the caller used (ETP-5558). The button
-   * lookup accepts the DB column name as well as the field name — {@code neo_schema} publishes both,
+   * lookup accepts the DB column name as well as the field name — {@code etendo_schema} publishes both,
    * as {@code action} and {@code name} — so matching on the property name alone let the column
    * spelling skip this handler: Reactivate ran without {@code action = "RE"} and Eliminar without
    * the agent's gate. A name that resolves to no button is returned as it came.

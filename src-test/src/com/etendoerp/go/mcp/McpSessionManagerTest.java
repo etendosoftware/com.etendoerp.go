@@ -446,4 +446,32 @@ class McpSessionManagerTest {
       assertNull(result);
     }
   }
+
+  @Nested
+  @DisplayName("resolveEffectiveClientId (ETP-5642)")
+  class ResolveEffectiveClientId {
+
+    @Test
+    @DisplayName("a concrete client is returned unchanged without querying the role")
+    void concreteClientPassesThrough() {
+      assertEquals("myClient", McpSessionManager.resolveEffectiveClientId("myClient", ROLE_ID));
+      verify(hibernateSession, never()).doReturningWork(any());
+    }
+
+    @Test
+    @DisplayName("the System wildcard resolves to the role's client")
+    void wildcardResolvesRoleClient() {
+      when(hibernateSession.doReturningWork(any())).thenReturn("roleClient");
+
+      assertEquals("roleClient", McpSessionManager.resolveEffectiveClientId("0", ROLE_ID));
+    }
+
+    @Test
+    @DisplayName("the System wildcard is kept when the role resolves no client")
+    void wildcardWithoutRoleClientKeepsZero() {
+      when(hibernateSession.doReturningWork(any())).thenReturn(null);
+
+      assertEquals("0", McpSessionManager.resolveEffectiveClientId("0", ROLE_ID));
+    }
+  }
 }

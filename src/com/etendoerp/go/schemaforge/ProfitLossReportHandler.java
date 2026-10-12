@@ -238,7 +238,8 @@ public class ProfitLossReportHandler extends AbstractAccountTreeReportHandler {
   @Override
   String ownAmountColumns() {
     return "COALESCE(f.own_amt, 0) AS own_amt, "
-        + "  COALESCE(f.own_amt_ref, 0) AS own_amt_ref ";
+        + "  COALESCE(f.own_amt_ref, 0) AS own_amt_ref, "
+        + "  ev.showvaluecond, ev.issummary ";
   }
 
   @Override

@@ -33,7 +33,13 @@ final class LogNeoTelemetrySink implements NeoTelemetrySink {
     if (event == null) {
       return;
     }
-    log.log(level(event), "event={} properties={}", event.getName(), event.getProperties());
+    if (event.getClientId() == null) {
+      log.log(level(event), "event={} properties={}", event.getName(), event.getProperties());
+      return;
+    }
+    // ETP-5639: the tenant, so a failed MCP call seen in Datadog names the client it ran under.
+    log.log(level(event), "event={} clientId={} properties={}", event.getName(),
+        event.getClientId(), event.getProperties());
   }
 
   private static Level level(NeoTelemetryEvent event) {

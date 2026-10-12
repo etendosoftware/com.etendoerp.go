@@ -67,6 +67,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * "denied"/"parameter validation" test group — every test instead pins down the identity
  * resolution path (context -&gt; DB user -&gt; role -&gt; token), which is the actual
  * security-critical surface of this class.
+ *
+ * @covers com.etendoerp.go.schemaforge.webhooks.SFRefreshToken
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFRefreshTokenTest {
@@ -650,6 +652,71 @@ class SFRefreshTokenTest {
     // been rebound server-side, and the client has no token to read them from.
     assertEquals("role-1", result.getString("selectedRoleId"));
     assertEquals("org-1", result.getString("selectedOrgId"));
+  }
+
+  /**
+   * The {@code unchanged:true} response passes each {@code roleList} entry through exactly as
+   * {@link EtendoGoJwtSupport#loadRoleListData(String)} built it -- the {@code isClientAdmin} flag
+   * included, {@code true} and {@code false} alike. The SPA reads it to show the localized
+   * administrator label instead of the tenant-specific client-admin role name, so stripping or
+   * rebuilding the entries here would silently fall back to the raw name.
+   */
+  @Test
+  void unchangedResponseKeepsIsClientAdminFlagOnEveryRoleListEntry() throws JSONException {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.getId()).thenReturn("admin-role");
+    when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+    when(mockContext.getRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    JSONArray roleArray = new JSONArray();
+    JSONObject adminEntry = new JSONObject();
+    adminEntry.put("id", "admin-role");
+    adminEntry.put("name", "Acme SL Admin");
+    adminEntry.put("isClientAdmin", true);
+    adminEntry.put("orgList", new JSONArray());
+    roleArray.put(adminEntry);
+    JSONObject otherEntry = new JSONObject();
+    otherEntry.put("id", "role-2");
+    otherEntry.put("name", "Other Role");
+    otherEntry.put("isClientAdmin", false);
+    otherEntry.put("orgList", new JSONArray());
+    roleArray.put(otherEntry);
+    RoleListData roleListData = new RoleListData("admin-role", roleArray);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verifyNoInteractions();
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertTrue(result.optBoolean("unchanged", false));
+    JSONArray returnedRoleList = result.getJSONArray("roleList");
+    assertEquals(2, returnedRoleList.length());
+    JSONObject returnedAdmin = returnedRoleList.getJSONObject(0);
+    assertEquals("admin-role", returnedAdmin.getString("id"));
+    assertEquals("Acme SL Admin", returnedAdmin.getString("name"));
+    assertTrue(returnedAdmin.has("isClientAdmin"));
+    assertTrue(returnedAdmin.getBoolean("isClientAdmin"));
+    JSONObject returnedOther = returnedRoleList.getJSONObject(1);
+    assertEquals("role-2", returnedOther.getString("id"));
+    assertTrue(returnedOther.has("isClientAdmin"));
+    assertFalse(returnedOther.getBoolean("isClientAdmin"));
   }
 
   /**

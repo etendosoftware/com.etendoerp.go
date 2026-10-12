@@ -41,6 +41,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *
  * <p>These tests call package-private helpers and mock the AD_Tab/AD_Window
  * dependencies. They do not require a database connection.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSelectorContextHelper
  */
 public class SelectorContextParamsTest {
 
@@ -531,7 +533,7 @@ public class SelectorContextParamsTest {
     body.put("totalCount", 0);
     NeoResponse response = NeoResponse.ok(body);
 
-    // The MCP caller names the field, not the column — "region" is what neo_selectors is asked for.
+    // The MCP caller names the field, not the column — "region" is what etendo_selectors is asked for.
     NeoResponse result = McpSelectorContextHelper.withDiagnostics(response, "region",
         new HashMap<>());
 
