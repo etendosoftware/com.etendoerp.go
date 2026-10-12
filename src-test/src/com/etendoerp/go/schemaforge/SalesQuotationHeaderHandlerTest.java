@@ -74,6 +74,12 @@ import org.openbravo.model.common.order.Order;
  * <p>ETP-4027: the {@code Convertquotation} action is intercepted in {@code handle()} and
  * delegates to {@link ConvertQuotationIntoOrder#convertQuotationIntoSalesOrder} with
  * {@code recalculatePrices=false} so that quotation prices are preserved in the new order.
+ *
+ * <p>{@code testIsRejectDocAction_table} also guards {@link DocActionRequestSupport}, the
+ * DocAction value parsing {@code isRejectDocAction} delegates to.
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesQuotationHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
  */
 public class SalesQuotationHeaderHandlerTest {
 

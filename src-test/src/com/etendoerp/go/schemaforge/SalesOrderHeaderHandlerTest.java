@@ -28,6 +28,8 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -54,6 +56,7 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
@@ -67,6 +70,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  *   <li><strong>DB-mocked</strong> – mocks OBDal/Connection/PreparedStatement/ResultSet to test
  *       the hasLinkedDocuments annotation logic for both single-record and list responses</li>
  * </ul>
+ *
+ * <p>{@code handle()} is also covered, including the Reactivate refusal on orders with linked
+ * documents.
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
+ * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -603,6 +613,76 @@ public class SalesOrderHeaderHandlerTest {
     when(mockClone.handle(ctx)).thenReturn(null);
 
     assertNull(handler.handle(ctx));
+  }
+
+  // ── Reactivate (DocAction RE) refused on orders with linked documents ──────
+
+  /**
+   * Reactivate ({@code DocAction} = {@code RE}) through {@code handle()}, one row per outcome of
+   * the linked-documents lookup: a linked shipment/invoice is refused with 400, no linked
+   * document lets the request fall through to the action router, and a lookup that cannot run
+   * is refused with 500 (fail closed). Every row also proves the lookup ran for this order.
+   * The button/body shapes (column vs field, root vs {@code fieldValues}) are guarded by
+   * {@code SalesQuotationHeaderHandlerTest#testIsRejectDocAction_table}; here they only vary to
+   * mirror the REST and MCP requests.
+   */
+  @Test
+  public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
+    final String orderId = "order-re-1";
+    // { label, button, body, linked docs (null = the query throws), expected status (null = falls through) }
+    Object[][] cases = {
+        { "linked shipment/invoice is refused", "DocAction",
+            "{\"docAction\":\"RE\"}", Boolean.TRUE, 400 },
+        { "no linked documents falls through", "documentAction",
+            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", Boolean.FALSE, null },
+        { "failed lookup fails closed", "DocAction",
+            "{\"docAction\":\"RE\"}", null, 500 },
+    };
+    for (Object[] c : cases) {
+      String label = (String) c[0];
+      Boolean linked = (Boolean) c[3];
+      Integer expectedStatus = (Integer) c[4];
+
+      NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
+      SalesOrderHeaderHandler handler = handlerWithMockClone(router);
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("header")
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName((String) c[1]).recordId(orderId)
+          .requestBody(new JSONObject((String) c[2]))
+          .build();
+
+      OBDal dal = mock(OBDal.class);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      if (linked == null) {
+        when(ps.executeQuery()).thenThrow(new SQLException("DB down"));
+      } else {
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(linked);
+      }
+
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        msgMock.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("refused");
+
+        NeoResponse result = handler.handle(ctx);
+
+        verify(ps).setString(1, orderId);
+        if (expectedStatus == null) {
+          assertNull(label, result);
+          verify(router).handle(ctx);
+        } else {
+          assertNotNull(label, result);
+          assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+          verify(router, never()).handle(any());
+        }
+      }
+    }
   }
 
   // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────
