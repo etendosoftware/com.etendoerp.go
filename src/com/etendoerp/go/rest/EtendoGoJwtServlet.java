@@ -4266,10 +4266,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * one for the same payment. The provider call takes seconds at worst, so it must not widen that
    * window. Nothing here needs the checkout open: the fill reads only the subscription row.
    *
-   * <p>Every step of {@code completeCommittedOnboarding} commits or rolls back its own work, so the
-   * DAL session is empty here — which the service requires: it closes the session before the
-   * provider call, so neither a lock nor a pooled connection is held while Stripe answers, and
-   * writes the period in a fresh transaction that is committed here. It never fails the
+   * <p>The service requires an empty DAL session: it closes the session before the provider call,
+   * so neither a lock nor a pooled connection is held while Stripe answers, and writes the period
+   * in a fresh transaction that is committed here. Each step of
+   * {@code completeCommittedOnboarding} commits its own work when it succeeds; a failed demo data
+   * transfer start and a failed ready email roll theirs back. A failed checkout close or draft
+   * clear only logs, so whatever such a failure left unflushed is still pending here; the
+   * service's session close before the provider call commits it, as the sample data and costing
+   * steps after this one would otherwise. It never fails the
    * onboarding: the row is already committed, and on any failure (the commit included, which is
    * why it sits inside the try) only this step rolls back. Provider failures are WARNs from the
    * reader; see {@link SubscriptionService#fillPeriodFromProviderAfterCommit}.
@@ -4650,6 +4654,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * when the purchase has no demo source. Best-effort in its own right: a failure here is logged
    * as a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
+   * <p>A failure is also rolled back (ETP-5047). The service commits each of its writes, but one
+   * that fails between writing a preference and its own commit leaves that preference pending, and
+   * the next commit on this thread — the draft clear, the billing period fill — would persist a
+   * half-written transfer. Nothing earlier on the thread is lost: the tenant and the checkout close
+   * have committed by then, and so has a selection this call recorded before the start failed.
+   *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
    * @param clientId {@code AD_CLIENT_ID} of the productive environment just provisioned
@@ -4668,6 +4678,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (RuntimeException e) {
       log.error("Environment (client {}) was provisioned but its demo data transfer could not be "
           + "started", clientId, e);
+      EtendoGoDalHelper.rollbackDalChanges("demo data transfer start", e, log);
     }
   }
 
