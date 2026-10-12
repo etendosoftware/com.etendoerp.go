@@ -35,7 +35,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  *
  * <p>Until ETP-5558 the {@code FIN_Financial_Account.Writeofflimit} was enforced only by the SPA
  * ({@code writeoffMath.js → writeoffState}), which disables the toggle over the limit. Every other
- * caller — the MCP {@code neo_action registerPayment}, a direct REST call — could write off any
+ * caller — the MCP {@code etendo_action registerPayment}, a direct REST call — could write off any
  * amount: {@code writeoffDifference:true} went straight to Core. The toggle is a convenience, the
  * boundary is here.
  *

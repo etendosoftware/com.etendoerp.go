@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
@@ -44,12 +45,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -93,6 +96,8 @@ import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.ConversionRateDoc;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
@@ -129,7 +134,12 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *       rejection; error rollback.</li>
  *   <li>reactivate: happy path; not-reconciled / closed-period / missing-body
  *       400; already-reconciled 409.</li>
+ *   <li>reconcileGroup with explicit conversion (ETP-5657): end to end through the handler — the
+ *       payment carries the stated transaction amount and its reproducing rate, and the usual tail
+ *       closes the line, leaves a pending remainder, or posts a within-tolerance difference.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.ReconciliationHandler
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerTest {
@@ -2556,6 +2566,339 @@ public class ReconciliationHandlerTest {
       // The 40.00 auto-created transaction is reconciled against the line (remainder stays pending).
       verify(handler).matchBankStatementLine(eq(line),
           argThat(ops -> ops.contains("T-INV")), eq(rec));
+    }
+  }
+
+  // ── reconcileGroup with explicit conversion (ETP-5657) ───────────────────────
+
+  private static final Date CONVERSION_DATE = new Date(1_760_000_000_000L);
+  private static final String CONVERSION_REMAINDER_ID = "line-rem";
+
+  private static Currency currencyOfPrecisionTwo(String id) {
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn(id);
+    when(currency.getStandardPrecision()).thenReturn(2L);
+    return currency;
+  }
+
+  /** A EUR account with a difference concept, at 5% tolerance (the inline posting enabled). */
+  private FIN_FinancialAccount eurAccountWithDifferenceGlItem() {
+    withFivePercentTolerance();
+    FIN_FinancialAccount account = accountWithDifferenceGlItem();
+    Currency eur = currencyOfPrecisionTwo("EUR");
+    when(account.getCurrency()).thenReturn(eur);
+    return account;
+  }
+
+  /**
+   * One USD invoice INV-1 / PS-1 with 40.91 outstanding, resolvable on {@code dal}, and a payment
+   * seam that records each request and auto-creates deposit transaction T-INV for
+   * {@code txnAmount}.
+   */
+  private FIN_FinaccTransaction stubUsdInvoicePayment(OBDal dal,
+      MockedStatic<ReconciliationPaymentService> rps, String txnAmount,
+      List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests) {
+    return stubUsdInvoicePayment(dal, rps, "40.91", new BigDecimal(txnAmount), BigDecimal.ZERO,
+        requests);
+  }
+
+  /**
+   * One USD invoice INV-1 / PS-1 with {@code outstanding}, resolvable on {@code dal}, and a payment
+   * seam that records each request and auto-creates transaction T-INV with the given deposit and
+   * payment amounts (a receipt deposits, a payment-out pays).
+   */
+  private FIN_FinaccTransaction stubUsdInvoicePayment(OBDal dal,
+      MockedStatic<ReconciliationPaymentService> rps, String outstanding, BigDecimal txnDeposit,
+      BigDecimal txnPayment,
+      List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests) {
+    Currency usd = currencyOfPrecisionTwo("USD");
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getId()).thenReturn("INV-1");
+    when(invoice.getCurrency()).thenReturn(usd);
+    FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
+    when(schedule.getOutstandingAmount()).thenReturn(new BigDecimal(outstanding));
+    when(schedule.getInvoice()).thenReturn(invoice);
+    when(dal.get(Invoice.class, "INV-1")).thenReturn(invoice);
+    when(dal.get(FIN_PaymentSchedule.class, "PS-1")).thenReturn(schedule);
+
+    FIN_FinaccTransaction createdTxn = trxFor(ACC_ID, txnDeposit, txnPayment, null);
+    when(createdTxn.getId()).thenReturn("T-INV");
+    doReturn(createdTxn).when(handler).loadTransaction("T-INV");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(createdTxn));
+    rps.when(() -> ReconciliationPaymentService.registerReconciliationPayment(any()))
+        .thenAnswer(inv -> {
+          requests.add(inv.getArgument(0));
+          return payment;
+        });
+    return createdTxn;
+  }
+
+  /** {@code reconcileGroup} body paying INV-1 with 40.91 USD that the bank converted to 27.87. */
+  private JSONObject explicitConversionBody() throws Exception {
+    return invoiceReconcileBody(ACC_ID, LINE_ID, "INV-1", "PS-1")
+        .put("actualPayment", 40.91)
+        .put("convertedAmount", "27.87");
+  }
+
+  /** The one payment registered pays 40.91 USD for exactly 27.87 EUR, at a reproducing rate. */
+  private static void assertExplicitPayment(
+      List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests) {
+    assertEquals(1, requests.size());
+    ReconciliationPaymentService.ReconciliationPaymentRequest request = requests.get(0);
+    assertEquals(0, new BigDecimal("40.91").compareTo(request.paymentAmount()));
+    assertEquals("27.87", request.accountAmount().toPlainString());
+    assertEquals("0.681252", request.rate().toPlainString());
+    assertTrue(request.isReceipt());
+    assertEquals(CONVERSION_DATE, request.paymentDate());
+    assertFalse("explicit conversion never writes off", request.writeoffDifference());
+  }
+
+  private static JSONObject createdData(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /**
+   * Explicit conversion whose converted amount equals the line: the payment books exactly 27.87,
+   * that one transaction is matched, no difference movement is posted (even with a tolerance and a
+   * concept configured) and the line is reported complete. The invoice's own rate is never read.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupExplicitConversionEqualToTheLineClosesIt() throws Exception {
+    FIN_FinancialAccount account = eurAccountWithDifferenceGlItem();
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("27.87"), BigDecimal.ZERO, null);
+    when(line.getId()).thenReturn(LINE_ID);
+    when(line.getTransactionDate()).thenReturn(CONVERSION_DATE);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-fx");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    stubReconciliationCompose(rec, "Success");
+    List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests = new ArrayList<>();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubUsdInvoicePayment(dal, rps, "27.87", requests);
+
+      NeoResponse response = handler.reconcileGroup(explicitConversionBody());
+
+      assertEquals(201, response.getHttpStatus());
+      assertExplicitPayment(requests);
+      verify(handler).matchBankStatementLine(eq(line),
+          argThat(ops -> ops.size() == 1 && ops.contains("T-INV")), eq(rec));
+      verify(handler, never()).createTransactionForRule(any(), any(), any());
+      verify(dal, never()).createCriteria(ConversionRateDoc.class);
+      JSONObject data = createdData(response);
+      assertFalse(data.getBoolean(ReconciliationLineTargetSupport.KEY_PARTIAL));
+      assertEquals(0, BigDecimal.ZERO.compareTo(
+          new BigDecimal(data.getString(ReconciliationLineTargetSupport.KEY_PENDING_AMOUNT))));
+    }
+  }
+
+  /**
+   * Explicit conversion below the line by more than the tolerance (27.87 of 30.00: 2.13 > 5% =
+   * 1.50): no difference is posted, the 27.87 transaction is matched, and the 201 reports the
+   * pending remainder Core's split leaves (simulated here: the match stub produces the group).
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupExplicitConversionBelowTheLineLeavesARemainder() throws Exception {
+    FIN_FinancialAccount account = eurAccountWithDifferenceGlItem();
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("30.00"), BigDecimal.ZERO, null);
+    when(line.getId()).thenReturn(LINE_ID);
+    when(line.getTransactionDate()).thenReturn(CONVERSION_DATE);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-fx-partial");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    stubReconciliationCompose(rec, "Success");
+    doNothing().when(handler).tagMatchGroup(any());
+    AtomicBoolean split = new AtomicBoolean(false);
+    doAnswer(inv -> {
+      split.set(true);
+      return null;
+    }).when(handler).matchBankStatementLine(any(), any(), any());
+    List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests = new ArrayList<>();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class);
+        MockedStatic<ReactivationSupport> reactivation =
+            mockStatic(ReactivationSupport.class, CALLS_REAL_METHODS)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      FIN_FinaccTransaction createdTxn = stubUsdInvoicePayment(dal, rps, "27.87", requests);
+      // After the match, the line belongs to a group: the matched 27.87 head and a 2.13 remainder.
+      FIN_BankStatementLine head = mock(FIN_BankStatementLine.class);
+      when(head.isActive()).thenReturn(Boolean.TRUE);
+      when(head.getId()).thenReturn(LINE_ID);
+      when(head.getCramount()).thenReturn(new BigDecimal("27.87"));
+      when(head.getDramount()).thenReturn(BigDecimal.ZERO);
+      when(head.getFinancialAccountTransaction()).thenReturn(createdTxn);
+      FIN_BankStatementLine remainder = mock(FIN_BankStatementLine.class);
+      when(remainder.isActive()).thenReturn(Boolean.TRUE);
+      when(remainder.getId()).thenReturn(CONVERSION_REMAINDER_ID);
+      when(remainder.getCramount()).thenReturn(new BigDecimal("2.13"));
+      when(remainder.getDramount()).thenReturn(BigDecimal.ZERO);
+      FIN_BankStatement statement = line.getBankStatement();
+      doReturn(Arrays.asList(head, remainder)).when(handler)
+          .loadMatchGroupLines(statement, "GRP-FX");
+      reactivation.when(() -> ReactivationSupport.readMatchGroupId(line))
+          .thenAnswer(inv -> split.get() ? "GRP-FX" : null);
+
+      NeoResponse response = handler.reconcileGroup(explicitConversionBody());
+
+      assertEquals(201, response.getHttpStatus());
+      assertExplicitPayment(requests);
+      verify(handler).matchBankStatementLine(eq(line),
+          argThat(ops -> ops.size() == 1 && ops.contains("T-INV")), eq(rec));
+      verify(handler, never()).createTransactionForRule(any(), any(), any());
+      JSONObject data = createdData(response);
+      assertTrue(data.getBoolean(ReconciliationLineTargetSupport.KEY_PARTIAL));
+      assertEquals(0, new BigDecimal("2.13").compareTo(
+          new BigDecimal(data.getString(ReconciliationLineTargetSupport.KEY_PENDING_AMOUNT))));
+      assertEquals(CONVERSION_REMAINDER_ID,
+          data.getString(ReconciliationDifferenceSupport.KEY_REMAINDER_LINE_ID));
+    }
+  }
+
+  /**
+   * Payment-out, as seen in live QA: a -40.00 EUR line (a bank debit) paying a 58.70 USD purchase
+   * invoice with {@code actualPayment} 58.70 and {@code convertedAmount} 40.00. Exactly one payment
+   * is registered as a payment (not a receipt) for 58.70 USD and 40.00 EUR at 0.681431, which
+   * round-trips to 40.00, with no write-off; the line closes with no difference movement.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupExplicitConversionPaymentOutClosesTheDebitLine()
+      throws Exception {
+    FIN_FinancialAccount account = eurAccountWithDifferenceGlItem();
+    FIN_BankStatementLine line = lineFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("40.00"), null);
+    when(line.getId()).thenReturn(LINE_ID);
+    when(line.getTransactionDate()).thenReturn(CONVERSION_DATE);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-fx-out");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    stubReconciliationCompose(rec, "Success");
+    List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests = new ArrayList<>();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubUsdInvoicePayment(dal, rps, "58.70", BigDecimal.ZERO, new BigDecimal("40.00"),
+          requests);
+
+      NeoResponse response = handler.reconcileGroup(
+          invoiceReconcileBody(ACC_ID, LINE_ID, "INV-1", "PS-1")
+              .put("actualPayment", "58.70")
+              .put("convertedAmount", "40.00"));
+
+      assertEquals(201, response.getHttpStatus());
+      assertEquals(1, requests.size());
+      ReconciliationPaymentService.ReconciliationPaymentRequest request = requests.get(0);
+      assertEquals(0, new BigDecimal("58.70").compareTo(request.paymentAmount()));
+      assertEquals("40.00", request.accountAmount().toPlainString());
+      assertEquals("0.681431", request.rate().toPlainString());
+      assertEquals("40.00", new BigDecimal("58.70").multiply(request.rate())
+          .setScale(2, RoundingMode.HALF_UP).toPlainString());
+      assertFalse("a debit line is a payment, not a receipt", request.isReceipt());
+      assertFalse("explicit conversion never writes off", request.writeoffDifference());
+      verify(handler).matchBankStatementLine(eq(line),
+          argThat(ops -> ops.size() == 1 && ops.contains("T-INV")), eq(rec));
+      verify(handler, never()).createTransactionForRule(any(), any(), any());
+      JSONObject data = createdData(response);
+      assertFalse(data.getBoolean(ReconciliationLineTargetSupport.KEY_PARTIAL));
+      assertEquals(0, BigDecimal.ZERO.compareTo(
+          new BigDecimal(data.getString(ReconciliationLineTargetSupport.KEY_PENDING_AMOUNT))));
+    }
+  }
+
+  /**
+   * An agent sending {@code operationIds + convertedAmount} with no invoice: the conversion fields
+   * only describe the invoice leg, so the request is refused (400 not combinable) instead of
+   * answering 201 after a plain 1:1 match that ignored what was asked. Nothing is matched.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupConversionFieldsWithoutInvoicesAreRefused() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(trx).when(handler).loadTransaction("t1");
+    stubReconciliationCompose(rec, "Success");
+
+    NeoResponse response;
+    try (MockedStatic<ReconciliationPaymentService> rps =
+        mockStatic(ReconciliationPaymentService.class)) {
+      response = handler.reconcileGroup(
+          reconcileBody(ACC_ID, LINE_ID, "t1").put("convertedAmount", "100.00"));
+      rps.verifyNoInteractions();
+    }
+
+    assertEquals(400, response.getHttpStatus());
+    assertEquals("Conversion fields cannot be combined with existing transactions or a "
+        + "write-off", response.getBody().getJSONObject("error").getString("message"));
+    verify(handler, never()).addNewDraftReconciliation(any());
+    verify(handler, never()).matchBankStatementLine(any(), any(), any());
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+  }
+
+  /**
+   * Explicit conversion below the line within the tolerance (27.87 of 28.00: 0.13 &lt;= 5%): the
+   * usual tail posts the 0.13 difference to the account's concept and matches it together with the
+   * payment's transaction, so the line closes.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupExplicitConversionWithinTolerancePostsTheDifference()
+      throws Exception {
+    FIN_FinancialAccount account = eurAccountWithDifferenceGlItem();
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("28.00"), BigDecimal.ZERO, null);
+    when(line.getTransactionDate()).thenReturn(CONVERSION_DATE);
+    FIN_FinaccTransaction diffTrx = trxFor(ACC_ID, new BigDecimal("0.13"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-fx-diff");
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(diffTrx).when(handler).loadTransaction(TRX_DIFF_ID);
+    doReturn(TRX_DIFF_ID).when(handler).createTransactionForRule(any(), any(), any());
+    doNothing().when(handler).tagMatchGroup(any());
+    stubReconciliationCompose(rec, "Success");
+    List<ReconciliationPaymentService.ReconciliationPaymentRequest> requests = new ArrayList<>();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationPaymentService> rps =
+            mockStatic(ReconciliationPaymentService.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubMessageBd(msgMock, DIFFERENCE_MESSAGE_KEY, DIFFERENCE_DESCRIPTION);
+      stubUsdInvoicePayment(dal, rps, "27.87", requests);
+
+      NeoResponse response = handler.reconcileGroup(explicitConversionBody());
+
+      assertEquals(201, response.getHttpStatus());
+      assertExplicitPayment(requests);
+      verify(handler, times(1)).createTransactionForRule(eq(account), eq(line), argThat(spec ->
+          GL_DIFF_ID.equals(spec.optString("glItemId")) && specAmountIs(spec, "0.13")));
+      verify(handler).matchBankStatementLine(eq(line),
+          argThat(ops -> ops.contains("T-INV") && ops.contains(TRX_DIFF_ID)), eq(rec));
     }
   }
 

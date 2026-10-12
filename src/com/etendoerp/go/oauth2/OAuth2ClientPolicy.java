@@ -55,11 +55,20 @@ final class OAuth2ClientPolicy {
     return !validScopes.containsAll(requestedScopes);
   }
 
-  static boolean isScopeAllowed(Set<String> requested, Set<String> allowed, String wildcardScope) {
+  /**
+   * Whether every requested scope is granted by the client's allowed scopes, with the
+   * {@code neo:}/{@code etendo:} equivalence of {@link ApiScopes#grants}.
+   */
+  static boolean isScopeAllowed(Set<String> requested, Set<String> allowed) {
     if (requested == null || allowed == null) {
       return false;
     }
-    return allowed.contains(wildcardScope) || allowed.containsAll(requested);
+    for (String scope : requested) {
+      if (!ApiScopes.grants(allowed, scope)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   static String normalizeClientScopes(String scopeStr, String defaultScopes, Set<String> validScopes) {

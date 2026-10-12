@@ -70,7 +70,7 @@ public class SalesQuotationLineHandler extends OrderLineHandler {
    * create callout cascade fires for the product, sets it from the product's tax category, the
    * header's order date and the organization — exactly what the UI does when a product is picked.
    * {@code product} is itself required, so the source is always there. Declared here so
-   * {@code neo_schema(view:"create")} stops listing {@code tax} as required: an agent sent looking
+   * {@code etendo_schema(view:"create")} stops listing {@code tax} as required: an agent sent looking
    * for a tax by name finds one the server would not have picked, or none at all.
    *
    * <p>A caller may still send a tax; the cascade keeps a value the caller provided.

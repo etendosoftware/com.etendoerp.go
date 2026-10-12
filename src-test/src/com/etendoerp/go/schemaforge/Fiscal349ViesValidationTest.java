@@ -65,6 +65,8 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.module.bptaxidkey.ViesService;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Unit tests for the {@code POST /neo/fiscal349/validate-vies} verb of
  * {@link Fiscal349BoxesHandler}.
@@ -92,6 +94,16 @@ class Fiscal349ViesValidationTest {
   private PreparedStatement updatePs;
   private ResultSet selectRs;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal349 sub-route
+   * (including "validate-vies") on the Tax Report window grant before any routing runs. Opened
+   * and closed synchronously around the single {@code handle()} call on the main test thread —
+   * unlike {@link ViesService}, nothing here runs on the worker pool, so a static mock is safe.
+   * Default every test to "granted"; the denial itself is covered in
+   * {@link AbstractFiscalHandlerTest}, which owns the gate.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @BeforeEach
   void setUp() throws Exception {
     servlet = mock(NeoServlet.class);
@@ -103,6 +115,10 @@ class Fiscal349ViesValidationTest {
 
     obDalMock = mockStatic(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
 
     connMock = mock(Connection.class);
     selectPs = mock(PreparedStatement.class);
@@ -121,6 +137,7 @@ class Fiscal349ViesValidationTest {
   @AfterEach
   void tearDown() {
     obDalMock.close();
+    accessMock.close();
   }
 
   // ── helpers ───────────────────────────────────────────────────────
@@ -174,6 +191,32 @@ class Fiscal349ViesValidationTest {
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
     verify(servlet, never()).sendError(eq(resp), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
+  }
+
+  /**
+   * ETP-5546 — a role whose Tax Report window grant is read-only (or absent) gets 403 for
+   * {@code POST /fiscal349/validate-vies}, a write (it mutates {@code C_BPartner}'s VIES status).
+   * The gate in {@link AbstractFiscalHandler#handle} runs before any of {@code
+   * handleValidateVies}'s own logic (year/period check, candidate load, VIES network calls), so
+   * denial must short-circuit before any of them run — proven here the same way the file's own
+   * {@code testGatedOutPartnerIsStillPendingAndNeverSentToVies} proves its own trigger: {@link
+   * ViesService#checkVat} (via the handler's {@code checkVat} seam) is never called.
+   *
+   * @covers com.etendoerp.go.schemaforge.AbstractFiscalHandler
+   */
+  @Test
+  void testPostValidateViesDeniedAccessReturnsForbiddenWithoutValidating() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+
+    handler.handle("validate-vies", "POST", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+    verify(handler, never()).checkVat(anyString());
+    verify(resp, never()).getWriter();
   }
 
   // ── pendingBpIds ──────────────────────────────────────────────────

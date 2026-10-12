@@ -54,7 +54,7 @@ final class McpRouterErrorBodies {
       body.put(McpConstants.KEY_DETAIL, detail);
       body.put("tool", toolName);
       body.put(McpConstants.KEY_HINT, "Your role does not have access to this. The answer is the "
-          + "same every time, so do not retry: ask for the grant, or use neo_discover to see what "
+          + "same every time, so do not retry: ask for the grant, or use etendo_discover to see what "
           + "this role may reach.");
     } catch (JSONException ignored) {
       // An envelope that cannot be built must not replace the refusal with a server error.
@@ -63,7 +63,7 @@ final class McpRouterErrorBodies {
   }
 
   /**
-   * The envelope for {@code neo_batch}, which this server does not serve.
+   * The envelope for {@code etendo_batch}, which this server does not serve.
    *
    * <p>Names the replacement and, more importantly, the one way the replacement is NOT
    * equivalent: a batch was undone as a unit and separate creates are not, so a caller that
@@ -77,7 +77,7 @@ final class McpRouterErrorBodies {
     error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_METHOD_NOT_ALLOWED);
     error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_TOOL_DISABLED);
     error.put(McpConstants.KEY_DETAIL,
-        "neo_batch is disabled on this server. Create the records one at a time with neo_create "
+        "etendo_batch is disabled on this server. Create the records one at a time with etendo_create "
             + "instead: create the parent first, then pass its returned id as parentId on each "
             + "child create.");
     error.put("hint",

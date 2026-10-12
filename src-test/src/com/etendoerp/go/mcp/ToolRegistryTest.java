@@ -32,6 +32,8 @@ import org.junit.Test;
  * <p>
  * Full integration tests (RBAC filtering, DAL queries) require OBBaseTest and run
  * against a live Etendo instance. These unit tests cover the pure-logic parts.
+ *
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 public class ToolRegistryTest {
 
@@ -61,13 +63,26 @@ public class ToolRegistryTest {
     assertEquals("a_b", ToolRegistry.kebabToSnake("a-b"));
   }
 
+  /**
+   * IMP-53: etendo_discover declares an optional {@code spec} argument, and only that one — the
+   * unknown-argument guard reads this set, so a mistyped name is refused instead of ignored.
+   */
+  @Test
+  public void testDiscoverDeclaresOnlyOptionalSpecArgument() {
+    java.util.Optional<java.util.Set<String>> declared =
+        ToolRegistry.declaredArgumentNames("etendo_discover");
+
+    assertTrue(declared.isPresent());
+    assertEquals(java.util.Set.of("spec"), declared.get());
+  }
+
   /** Tests that McpToolDefinition getters return the values provided at construction. */
   @Test
   public void testMcpToolDefinitionGetters() {
     Map<String, Object> schema = Map.of("type", "object");
-    McpToolDefinition tool = new McpToolDefinition("neo_list", "List records", schema);
+    McpToolDefinition tool = new McpToolDefinition("etendo_list", "List records", schema);
 
-    assertEquals("neo_list", tool.getName());
+    assertEquals("etendo_list", tool.getName());
     assertEquals("List records", tool.getDescription());
     assertEquals(schema, tool.getInputSchema());
   }
@@ -75,7 +90,7 @@ public class ToolRegistryTest {
   /** Tests that a null input schema is normalized to an empty map by McpToolDefinition. */
   @Test
   public void testMcpToolDefinitionNullSchema() {
-    McpToolDefinition tool = new McpToolDefinition("neo_discover", "Discover specs", null);
+    McpToolDefinition tool = new McpToolDefinition("etendo_discover", "Discover specs", null);
 
     assertNotNull(tool.getInputSchema());
     assertTrue(tool.getInputSchema().isEmpty());
@@ -102,16 +117,16 @@ public class ToolRegistryTest {
   /** Tests that McpToolDefinition.toString() includes the tool name and description. */
   @Test
   public void testMcpToolDefinitionToString() {
-    McpToolDefinition tool = new McpToolDefinition("neo_get", "Get record", Collections.emptyMap());
+    McpToolDefinition tool = new McpToolDefinition("etendo_get", "Get record", Collections.emptyMap());
     String str = tool.toString();
-    assertTrue(str.contains("neo_get"));
+    assertTrue(str.contains("etendo_get"));
     assertTrue(str.contains("Get record"));
   }
 
-  /** Tests that neo_batch is recognised as a CRUD tool (so spec resolution is skipped). */
+  /** Tests that etendo_batch is recognised as a CRUD tool (so spec resolution is skipped). */
   @Test
   public void testNeoBatchIsCrudTool() {
-    assertTrue(ToolRegistry.isCrudTool("neo_batch"));
+    assertTrue(ToolRegistry.isCrudTool("etendo_batch"));
   }
 
   /**
@@ -128,7 +143,7 @@ public class ToolRegistryTest {
   @SuppressWarnings("unchecked")
   public void testVectorSearchToolSchema() {
     McpToolDefinition tool = new ToolRegistry().buildVectorSearchTool(List.of("product"));
-    assertEquals("neo_vector_search", tool.getName());
+    assertEquals("etendo_vector_search", tool.getName());
     Map<String, Object> schema = tool.getInputSchema();
     assertEquals(List.of("query"), schema.get("required"));
     Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
@@ -146,7 +161,7 @@ public class ToolRegistryTest {
   public void testBuildBatchToolSchema() {
     McpToolDefinition tool = new ToolRegistry().buildBatchTool();
 
-    assertEquals("neo_batch", tool.getName());
+    assertEquals("etendo_batch", tool.getName());
     assertNotNull(tool.getDescription());
     // This assertion has now been wrong twice, in opposite directions, which is why it checks the
     // caller-visible consequence rather than a keyword. It first required the description to

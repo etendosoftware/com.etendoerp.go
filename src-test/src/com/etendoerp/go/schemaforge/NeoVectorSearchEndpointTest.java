@@ -351,7 +351,7 @@ public class NeoVectorSearchEndpointTest {
   /**
    * {@code authorizedTargetKeys()} must propagate an unreadable catalogue as {@code
    * Optional.empty()}, not collapse it into a present-but-empty (all-denied) list — the two drive
-   * different branches in {@code McpToolRouter.handleVectorSearch}. Same no-mocking rationale as
+   * different branches in {@code McpVectorSearchTool.handle}. Same no-mocking rationale as
    * the test above. The distinction used to be null-vs-empty and is now absent-vs-empty; what must
    * not change is that there are still two answers.
    */

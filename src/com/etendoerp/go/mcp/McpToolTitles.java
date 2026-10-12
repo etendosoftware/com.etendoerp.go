@@ -37,11 +37,11 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * in the language of the user the MCP token belongs to.
  * <p>
  * Clients that support the field show it instead of the programmatic {@code name}, so a title
- * never exposes the internal {@code neo_} prefix. Clients that predate the field ignore it and keep
+ * never exposes the internal {@code etendo_} prefix. Clients that predate the field ignore it and keep
  * showing the name. Only the title is localized: the {@code description} is read by the model and
  * stays in English.
  * <ul>
- *   <li><b>Fixed tools</b> ({@code neo_list}, {@code docs}...): the
+ *   <li><b>Fixed tools</b> ({@code etendo_list}, {@code docs}...): the
  *       {@code messages/mcp_titles_<language>.properties} catalog, English as fallback.</li>
  *   <li><b>Per-spec process and report tools</b>: the translated name of the spec's AD_Process,
  *       else of its AD_Window ({@link #fromSpec}), so no catalog entry is needed per spec.</li>
@@ -63,7 +63,7 @@ final class McpToolTitles {
    */
   private static final ResourceBundle.Control NO_HOST_FALLBACK =
       ResourceBundle.Control.getNoFallbackControl(ResourceBundle.Control.FORMAT_PROPERTIES);
-  private static final String INTERNAL_PREFIX = "neo_";
+  private static final String INTERNAL_PREFIX = "etendo_";
 
   private McpToolTitles() {
   }
@@ -88,7 +88,7 @@ final class McpToolTitles {
    * @param toolName the programmatic MCP tool name
    * @param language the user's Etendo language code; blank means English
    * @return the catalog title for the language (English fallback), or the name humanized with any
-   *     internal {@code neo_} prefix dropped; an empty string for a null or blank name
+   *     internal {@code etendo_} prefix dropped; an empty string for a null or blank name
    */
   static String of(String toolName, String language) {
     if (StringUtils.isBlank(toolName)) {

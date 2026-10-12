@@ -59,6 +59,8 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link WidgetRevenueTrendHandler} (ETP-5493: period-aware buckets).
+ *
+ * @covers com.etendoerp.go.schemaforge.WidgetRevenueTrendHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -277,16 +279,22 @@ class WidgetRevenueTrendHandlerTest {
       }
     }
 
+    /**
+     * ETP-5493: the day-alignment (first midnight on or after "from") is owned by
+     * {@link WidgetQueryHelper}; the series starts straight at {@code date_trunc(unit, from)}
+     * with no CASE of its own.
+     */
     @Test
-    void seriesStartsAtFirstMidnightOnOrAfterFrom() {
+    void seriesStartsAtTheDayAlignedFromWithoutItsOwnCase() {
       when(nativeQuery.list()).thenReturn(Collections.emptyList());
       handler.handle(buildContext("GET", "last30d"));
 
       String from = WidgetQueryHelper.rangeToSqlDateFrom("last30d");
-      String expected = "CASE WHEN date_trunc('day', " + from + ") < " + from
-          + " THEN date_trunc('day', " + from + ") + INTERVAL '1 day' ELSE date_trunc('day', " + from
-          + ") END";
-      assertTrue(captureTrendSql().contains(expected));
+      String sql = captureTrendSql();
+      assertTrue(sql.contains("CAST(date_trunc('day', " + from + ") AS timestamp)"));
+      assertTrue(from.contains("CASE WHEN date_trunc('day',"), "from must be day-aligned: " + from);
+      assertFalse(sql.replace(from, "").contains("CASE WHEN date_trunc('day'"),
+          "the trend must not align the start by itself");
     }
 
     @Test
@@ -371,6 +379,29 @@ class WidgetRevenueTrendHandlerTest {
             + " AND i.dateinvoiced <= NOW()";
         assertTrue(kpisRevenueSql(range).contains(window), "kpis current window for " + range);
         assertTrue(captureTrendSql().contains(window), "trend current window for " + range);
+      }
+    }
+
+    /**
+     * ETP-5493 repro: an invoice on the boundary day dated later than "from"'s time of day was
+     * counted by the kpis but dropped by the trend. Both must start from the SAME day-aligned
+     * expression, so the first series bucket and the kpis lower bound are one and the same.
+     */
+    @Test
+    void rollingRangesStartFromTheSameDayAlignedExpressionInBothQueries() throws Exception {
+      when(nativeQuery.list()).thenReturn(Collections.emptyList());
+      for (String range : new String[] { "last30d", "last90d", "lastYear" }) {
+        org.mockito.Mockito.clearInvocations(session);
+        handler.handle(buildContext("GET", range));
+
+        String from = WidgetQueryHelper.rangeToSqlDateFrom(range);
+        String aligned = "CASE WHEN date_trunc('day', NOW()";
+        assertTrue(from.startsWith(aligned), range + " from must be day-aligned: " + from);
+        assertTrue(kpisRevenueSql(range).contains("i.dateinvoiced >= " + from), "kpis " + range);
+        assertTrue(captureTrendSql().contains("date_trunc('" + WidgetRevenueTrendHandler.granularityFor(range)
+            + "', " + from + ")"), "trend series start " + range);
+        assertTrue(captureTrendSql().contains("i.dateinvoiced >= " + from), "trend filter " + range);
+        assertEquals(from, WidgetQueryHelper.rangeToSqlPrevTo(range), "prevTo adjacent " + range);
       }
     }
 

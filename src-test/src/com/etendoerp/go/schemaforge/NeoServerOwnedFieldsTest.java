@@ -50,7 +50,7 @@ import org.openbravo.model.common.enterprise.Organization;
  * that call it.
  *
  * <h2>The defect this closes</h2>
- * <p>{@code neo_create} carrying an {@code organization} belonging to another org answered
+ * <p>{@code etendo_create} carrying an {@code organization} belonging to another org answered
  * {@code 200 OK}, and the record was then invisible to the session that created it — a
  * {@code 404} on the very id the response had just handed back, because the row had been written
  * into the other tenant. Neither {@code AD_Client_ID} nor {@code AD_Org_ID} has an
@@ -65,6 +65,8 @@ import org.openbravo.model.common.enterprise.Organization;
  * {@code stripServerOwnedFields} sits <b>outside</b> the {@code active} guard, and it is the
  * reason the inactive-filter cases below are the important ones rather than a completeness
  * exercise.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoServerOwnedFields
  */
 @DisplayName("Tenant ownership on write — client/organization come from the session")
 class NeoServerOwnedFieldsTest {

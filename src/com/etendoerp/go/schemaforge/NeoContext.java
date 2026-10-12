@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -59,6 +60,14 @@ public class NeoContext {
    * capability one.
    */
   private final boolean mcpOrigin;
+  /**
+   * ETP-5194 — per-request state a customization hands from its {@code handle()} pre-hook to its
+   * own {@code afterHandle()} post-hook. Every channel (REST single, REST batch, MCP) passes the
+   * same {@code NeoContext} instance to both phases, while a handler instance may be shared
+   * across requests, so this is the only safe place for that state. Keys should be namespaced by
+   * the owning class to avoid collisions.
+   */
+  private final Map<String, Object> attributes = new HashMap<>();
 
   private NeoContext(Builder builder) {
     this.specName = builder.specName;
@@ -172,6 +181,32 @@ public class NeoContext {
    */
   public void setSupersededDefaults(JSONObject supersededDefaults) {
     this.supersededDefaults = supersededDefaults;
+  }
+
+  /**
+   * Returns per-request state an earlier phase of this same request stored with {@link
+   * #setAttribute}, typically a customization's {@code handle()} pre-hook handing a marker to its
+   * own {@code afterHandle()}. See {@link #attributes}.
+   *
+   * @param key the attribute key, namespaced by the owning class
+   * @return the value stored by an earlier phase of this same request, or {@code null}
+   */
+  public Object getAttribute(String key) {
+    return attributes.get(key);
+  }
+
+  /**
+   * Stores per-request state for a later phase of this same request. See {@link #attributes}.
+   *
+   * @param key the attribute key, namespaced by the owning class
+   * @param value the value; {@code null} removes the key
+   */
+  public void setAttribute(String key, Object value) {
+    if (value == null) {
+      attributes.remove(key);
+    } else {
+      attributes.put(key, value);
+    }
   }
 
   public NeoEndpointType getEndpointType() {

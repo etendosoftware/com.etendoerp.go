@@ -47,7 +47,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoBooleanFormat;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
-import com.etendoerp.sequences.SequenceUtils;
 
 /**
  * Service for resolving default values when creating a new record via NEO Headless.
@@ -378,7 +377,7 @@ public class NeoDefaultsService {
     }
     if (sqlOutcome.getMissingParentToken() != null) {
       notes.put(propertyName + ": its default needs @" + sqlOutcome.getMissingParentToken()
-          + "@ from the parent record, but no parentId was given. Call neo_defaults again "
+          + "@ from the parent record, but no parentId was given. Call etendo_defaults again "
           + "with parentId to resolve it.");
     } else if (sqlOutcome.isZeroRows()) {
       notes.put(propertyName + ": its @SQL= default query matched zero rows for the current "
@@ -922,7 +921,7 @@ public class NeoDefaultsService {
    * short-circuit above or to {@link Utility#getDefault}, neither of which unquotes anything —
    * so the quoted literal reached property validation completely untouched. Reproduced for real:
    * {@code C_BPartner.EM_OBTIK_Tax_ID_Key} stores {@code '1'}, and a business partner created via
-   * {@code neo_create} with no explicit value for that field failed a 422 on the very default
+   * {@code etendo_create} with no explicit value for that field failed a 422 on the very default
    * NEO had just injected. The same quoting was found on 9 other columns across as many tables
    * (list references, {@code TableDir} FKs, a {@code YesNo}, and a {@code Table} FK) — all
    * fixed by this one shared choke point rather than a field-by-field patch.
@@ -1137,7 +1136,15 @@ public class NeoDefaultsService {
     if (docTypeId != null) {
       return docTypeId;
     }
-    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null) {
+    // Last resort, for a NOT NULL column the safe-type fallback cannot fill (ETP-3660). Never
+    // for an optional column: NEO does not pre-fill it, and the DB DEFAULT still applies at
+    // INSERT (entities are mapped dynamic-insert, so a null property is left out of the
+    // statement). Nor for a boolean/numeric one: those end up false/0 via injectSafeTypeDefault,
+    // matching the generated entity's setDefaultValue — not the DB DEFAULT (e.g.
+    // C_BPartner.IsProspect 'Y' is created N, as in classic).
+    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null
+        && Boolean.TRUE.equals(adColumn.isMandatory())
+        && !NeoDefaultsCascadeHelper.hasSafeTypeDefault(adColumn)) {
       String dbDefault = NeoDefaultsSqlHelper.resolveDbColumnDefault(
           adColumn.getTable().getDBTableName(), dbColumnName);
       if (dbDefault != null) {
@@ -1149,12 +1156,16 @@ public class NeoDefaultsService {
 
   /**
    * Check if a column is a sequence/DocumentNo field.
-   * Uses SequenceUtils.isSequence() from Etendo core for the reference-based check,
-   * plus the classic DocumentNo/Value detection.
+   *
+   * <p>The reference-based check reads the runtime DAL model ({@link Property#isSequence()},
+   * computed once at model load from the column's reference and reference value), the same flag
+   * the save path uses to fire the sequence generator. It replaces
+   * {@code SequenceUtils.isSequence(Column)}, which ran one {@code SequenceConfig} query per
+   * column on every create (~105 per M_Product row). Plus the classic DocumentNo/Value
+   * detection, unchanged.</p>
    */
-  private static boolean isSequenceField(Column adColumn) {
-    // Check via Etendo's SequenceUtils (reference-based sequence configuration)
-    if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
+  static boolean isSequenceField(Column adColumn) {
+    if (NeoSequencePreviewHelper.isModelSequenceColumn(adColumn)) {
       return true;
     }
     // Classic fallback: DocumentNo or Value with automatic sequence
@@ -1164,10 +1175,11 @@ public class NeoDefaultsService {
             && Boolean.TRUE.equals(adColumn.isUseAutomaticSequence()));
   }
 
+
   /**
    * Preview for transactional sequences (new AD_Sequence mechanism, detected via
-   * SequenceUtils.isSequence). Looks up the sequence by column + current organization and
-   * returns the current nextAssignedNumber without consuming it.
+   * NeoSequencePreviewHelper#isModelSequenceColumn). Looks up the sequence by column + current
+   * organization and returns the current nextAssignedNumber without consuming it.
    */
   static String resolveTransactionalSequencePreview(Column adColumn) {
     try {

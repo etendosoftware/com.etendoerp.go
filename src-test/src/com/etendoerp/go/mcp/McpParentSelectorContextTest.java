@@ -60,12 +60,14 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 /**
  * ETP-5535 — {@link McpParentSelectorContext#selectorArgs}: the parent record of a child create,
  * handed to FK-by-name resolution as the {@code parentContext} an agent would pass to
- * {@code neo_selectors}. Measured gap: a quotation line's tax rule reads the header's order date,
+ * {@code etendo_selectors}. Measured gap: a quotation line's tax rule reads the header's order date,
  * which the line body does not carry, so {@code tax: "Entregas IVA 21%"} resolved to nothing.
  *
  * <p>Every guard must answer {@code null} — the pre-ETP-5535 context — and the abstain cases
  * also assert the parent was never looked up, because the whole body sits inside a
  * {@code catch (Exception)} that would answer {@code null} too.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpParentSelectorContext
  */
 @DisplayName("McpParentSelectorContext (ETP-5535)")
 class McpParentSelectorContextTest {

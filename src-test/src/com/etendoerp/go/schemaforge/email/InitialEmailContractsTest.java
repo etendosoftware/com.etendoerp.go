@@ -58,6 +58,10 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Tests the built-in transactional email contracts.
+ *
+ * @covers com.etendoerp.go.schemaforge.email.TransactionalEmailService
+ * @covers com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract
+ * @covers com.etendoerp.go.schemaforge.email.contracts.CompanyInvitationEmailContract
  */
 public class InitialEmailContractsTest {
 
@@ -225,7 +229,7 @@ public class InitialEmailContractsTest {
     assertEquals("Bienvenido a Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
-        .contains("Tu cuenta de Etendo Go fue creada correctamente"));
+        .contains("Tu cuenta de Etendo fue creada correctamente"));
   }
 
   @Test

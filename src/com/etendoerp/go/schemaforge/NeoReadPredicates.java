@@ -27,7 +27,7 @@ import org.apache.commons.lang3.StringUtils;
  * expression ready to be ANDed into a list read (ETP-5009).
  *
  * <p>The single place every generic list read asks for them — the REST list {@code GET}, the REST
- * {@code ?_distinct=} value fetch and MCP {@code neo_list} — so the three cannot disagree about
+ * {@code ?_distinct=} value fetch and MCP {@code etendo_list} — so the three cannot disagree about
  * which rows exist. Resolution goes through {@link NeoExtensionDispatcher#resolveOnly}, i.e. the
  * same order every other surface uses: the {@link NeoExtension} annotation first, the entity's
  * {@code Java_Qualifier} second, with the resolver the channel's callers already use.</p>

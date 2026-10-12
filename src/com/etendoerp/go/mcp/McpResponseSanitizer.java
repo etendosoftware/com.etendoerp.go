@@ -32,7 +32,7 @@ import org.codehaus.jettison.json.JSONObject;
  * {@code function_response.response}: it means "a pointer to an attached part, resolvable by
  * {@code display_name}". Openbravo's {@code DataToJsonConverter#toJsonObject} puts it on
  * <em>every</em> serialised record ({@code JsonConstants.REF}, line 169 of that class), so every
- * row of a {@code neo_list} / {@code neo_get} carried one. Gemini tried to resolve the pointer,
+ * row of a {@code etendo_list} / {@code etendo_get} carried one. Gemini tried to resolve the pointer,
  * found no such part, and rejected the <em>whole</em> request with HTTP 400 {@code INVALID_ARGUMENT}
  * — "The referenced name {@code BusinessPartner/BC8D…} in function_response.response does not match
  * to a display_name in the function_response.parts". The failure is on the tool <em>result</em>, so
@@ -42,14 +42,14 @@ import org.codehaus.jettison.json.JSONObject;
  * <p><b>What is and is not stripped.</b> Only the key spelled exactly {@code $ref} is removed.
  * A key that merely <em>contains</em> a {@code $} is harmless and must be kept — the FK identifier
  * columns are all spelled {@code xxx$_identifier}, and they were verified to pass. Likewise a
- * <em>value</em> of the form {@code "$ref:<opId>"} (the {@code neo_batch} placeholder,
+ * <em>value</em> of the form {@code "$ref:<opId>"} (the {@code etendo_batch} placeholder,
  * {@link com.etendoerp.go.schemaforge.BatchService#REF_PREFIX}) is untouched: this class only ever
  * looks at key names.
  *
  * <p><b>Why removing it is lossless.</b> {@code encodeReference} builds the value as
  * {@code entityName + "/" + id}, and both halves are already present on the same row as
  * {@code _entityName} and {@code id}. The construction rule is now declared once — in
- * {@code neo_schema}'s hint and in the {@code docs} preamble — instead of being paid for on every
+ * {@code etendo_schema}'s hint and in the {@code docs} preamble — instead of being paid for on every
  * row of every response, which is also why this is an Agent Context Economy win, not just a fix.
  *
  * <p><b>MCP surface only.</b> The stripping happens in the MCP content wrappers
@@ -74,12 +74,63 @@ final class McpResponseSanitizer {
    */
   static final String RESERVED_REF_KEY = "$ref";
 
+  /** Indent factor of a result rendered for a human, the pre-IMP-53 format. */
+  private static final int HUMAN_INDENT = 2;
+
+  /**
+   * Whether the tool call running on this thread asked for {@code _indentResponse:true} (IMP-53).
+   * Set and restored by {@code McpToolRouter.route} around the whole call, so every JSON body that
+   * call renders — result or error — follows it without each handler passing a flag along.
+   */
+  private static final ThreadLocal<Boolean> INDENTED = ThreadLocal.withInitial(() -> false);
+
   private McpResponseSanitizer() {
   }
 
   /**
-   * Strip the reserved keys from {@code body} in place and render it with the indentation the MCP
-   * tool results use.
+   * Set the rendering mode for the tool call on this thread.
+   *
+   * @param indented {@code true} to indent JSON results for human reading
+   * @return the previous mode, to hand back to {@link #restoreIndented(boolean)}
+   */
+  static boolean setIndented(boolean indented) {
+    boolean previous = INDENTED.get();
+    INDENTED.set(indented);
+    return previous;
+  }
+
+  /**
+   * Restore the mode {@link #setIndented(boolean)} returned; the default mode removes the value.
+   *
+   * @param previous the mode to restore
+   */
+  static void restoreIndented(boolean previous) {
+    if (previous) {
+      INDENTED.set(true);
+    } else {
+      INDENTED.remove();
+    }
+  }
+
+  /**
+   * Serialise a JSON body in the mode of the current tool call: compact unless the call asked for
+   * {@code _indentResponse:true}. The one place an MCP JSON result becomes text.
+   *
+   * @param body the body to serialise, not {@code null}
+   * @return the serialised body
+   * @throws JSONException if the body cannot be rendered
+   */
+  static String serialize(JSONObject body) throws JSONException {
+    return Boolean.TRUE.equals(INDENTED.get()) ? body.toString(HUMAN_INDENT) : body.toString();
+  }
+
+  /**
+   * Strip the reserved keys from {@code body} in place and render it.
+   *
+   * <p>No indentation by default (IMP-53): pretty-printing was 41 % of {@code etendo_discover}'s
+   * bytes — 76 541 against 45 051 compact — and the usual reader is an agent that pays for every
+   * byte in context. A call with {@code _indentResponse:true} gets the indented form
+   * ({@link #serialize}). Whitespace only: the data is unchanged either way.</p>
    *
    * @param body the tool-result body (may be {@code null})
    * @return the rendered body, or {@code "{}"} when {@code body} is {@code null}
@@ -90,7 +141,7 @@ final class McpResponseSanitizer {
       return "{}";
     }
     strip(body);
-    return body.toString(2);
+    return serialize(body);
   }
 
   /**

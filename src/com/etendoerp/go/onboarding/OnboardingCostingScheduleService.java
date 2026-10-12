@@ -141,7 +141,7 @@ public class OnboardingCostingScheduleService {
   private static final String CHANNEL_SCHEDULER = "Process Scheduler";
   private static final String DEFAULT_LANGUAGE = "en_US";
   private static final String DESCRIPTION =
-      "Automatic cost calculation (Etendo GO onboarding)";
+      "Automatic cost calculation (Etendo onboarding)";
 
   /** Seconds in the cadence, i.e. the width of the window the start instant is spread over. */
   private static final int CADENCE_SECONDS = INTERVAL_SECONDS.intValue();

@@ -24,6 +24,7 @@ import java.sql.ResultSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -59,6 +60,12 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
   private static final String FIELD_ORDER_QUANTITY    = "orderQuantity";
   private static final String FIELD_PRODUCT_CODE      = "productCode";
   private static final String FIELD_INVOICED_QUANTITY = "invoicedQuantity";
+  private static final Set<String> RESPONSE_ENRICHED_FIELDS =
+      Set.of(FIELD_INVOICED_QUANTITY, FIELD_PRODUCT_CODE);
+
+  /** SQL references of {@link #fetchLineData}: the movement line and its movement's IsSOTrx. */
+  private static final String IOL_LINE_REF      = "il.m_inoutline_id";
+  private static final String IOL_IS_SO_TRX_REF = "io.issotrx";
 
   // Captures invoiceLineId before NeoFieldFilter strips it. Cleared in afterHandle.
   private static final ThreadLocal<String> PENDING_INVOICE_LINE_ID = new ThreadLocal<>();
@@ -91,6 +98,18 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
     // see NeoHandlerUtils#injectDefaultLocatorOnPost's Javadoc for the full rationale.
     NeoHandlerUtils.injectDefaultLocatorOnPost(context, log);
     return null;
+  }
+
+  /**
+   * The keys {@link #afterHandle} adds to every GET line without a spec field behind them:
+   * {@code invoicedQuantity} and {@code productCode}. {@code orderQuantity} is not listed — it is
+   * a spec field ({@code QuantityOrder}) whose value is overwritten, so it is already emittable.
+   * Declared so an MCP {@code fields:[…]} projection does not report them in
+   * {@code unknownFields} while the same response carries them (ETP-5576).
+   */
+  @Override
+  public Set<String> responseEnrichedFields() {
+    return RESPONSE_ENRICHED_FIELDS;
   }
 
   /**
@@ -176,7 +195,8 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
     }
   }
 
-  // placeholders contains only "?" literals — no injection risk.
+  // placeholders contains only "?" literals and the match tables are fixed enum literals — no
+  // injection risk.
   @SuppressWarnings("java:S2077")
   private Map<String, LineData> fetchLineData(List<String> lineIds) {
     Map<String, LineData> result = new HashMap<>();
@@ -186,17 +206,30 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
     String placeholders = lineIds.stream().map(id -> "?").collect(Collectors.joining(","));
     // COALESCE(order line qty, invoice line qty) so receipt lines created from
     // an invoice (no c_orderline_id) still show the invoiced qty as "ordered qty".
+    //
+    // An invoice line reaches a movement line through C_InvoiceLine.M_InOutLine_ID (the first
+    // movement only) or through the match table of the movement's direction (every further
+    // partial movement — ETP-5576). The match arms are scalar subqueries, so they never multiply
+    // rows; the invoiced quantity takes GREATEST of the two arms, never their sum, because the
+    // first movement is linked by both once completed. It is capped at ABS(movementqty), like the
+    // goods receipt header: core can write a match row (or the column arm can carry a whole
+    // invoice line) whose qty exceeds what this movement line actually moved.
     String sql =
         "SELECT il.m_inoutline_id,"
-        + "  COALESCE(ol.qtyordered, src_il.qtyinvoiced) AS ordered_qty,"
+        + "  COALESCE(ol.qtyordered, src_il.qtyinvoiced, "
+        + InOutInvoiceLinks.matchedSourceInvoiceQtyByMovementDirectionExpr(
+            IOL_LINE_REF, IOL_IS_SO_TRX_REF) + ") AS ordered_qty,"
         + "  p.value, "
-        + "  COALESCE(("
+        + "  LEAST(GREATEST(COALESCE(("
         + "    SELECT SUM(ABS(cil.qtyinvoiced)) FROM c_invoiceline cil"
         + "    JOIN c_invoice ci ON ci.c_invoice_id = cil.c_invoice_id"
         + "    WHERE cil.m_inoutline_id = il.m_inoutline_id"
         + "      AND ci.docstatus NOT IN ('VO','CL','DR') AND ci.isactive = 'Y'"
-        + "  ), 0) "
+        + "  ), 0), COALESCE("
+        + InOutInvoiceLinks.matchedQtyByMovementDirectionExpr(IOL_LINE_REF, IOL_IS_SO_TRX_REF)
+        + ", 0)), ABS(il.movementqty)) "
         + "FROM m_inoutline il "
+        + "JOIN m_inout io ON io.m_inout_id = il.m_inout_id "
         + "LEFT JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id "
         + "LEFT JOIN c_invoiceline src_il ON src_il.m_inoutline_id = il.m_inoutline_id "
         + "LEFT JOIN m_product p ON p.m_product_id = il.m_product_id "

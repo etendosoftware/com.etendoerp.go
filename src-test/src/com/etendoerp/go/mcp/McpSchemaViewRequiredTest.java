@@ -34,7 +34,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
- * IMP-44 — {@code neo_schema}'s {@code view} is a decision the caller states, not one it inherits.
+ * IMP-44 — {@code etendo_schema}'s {@code view} is a decision the caller states, not one it inherits.
  *
  * <p>Omitting it used to land on the full field dump: 39.5 kB on {@code sales-order/header}
  * against 5.4 kB for {@code view:"create"}, with the advice to use the cheaper projection
@@ -44,12 +44,15 @@ import org.junit.jupiter.api.Test;
  * prose.</p>
  *
  * <p>The same refusal covers an unrecognised value, and that half is the sharper one:
- * {@code view:"summary"} is a real view on {@code neo_list}/{@code neo_get}, so an agent
+ * {@code view:"summary"} is a real view on {@code etendo_list}/{@code etendo_get}, so an agent
  * generalising across the tools would ask for the smallest projection and silently be handed the
  * largest response in the surface — no error, no warning, and a plausible-looking answer.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaCreateView
+ * @covers com.etendoerp.go.mcp.ToolRegistry
  */
 @SuppressWarnings("java:S2187") // test methods live in the @Nested classes below
-@DisplayName("IMP-44 — neo_schema requires an explicit view")
+@DisplayName("IMP-44 — etendo_schema requires an explicit view")
 class McpSchemaViewRequiredTest {
 
   /** The three projections, and the only three. */
@@ -80,7 +83,7 @@ class McpSchemaViewRequiredTest {
      * full dump answered a request for less with the biggest response in the tool.
      */
     @Test
-    @DisplayName("an unrecognised view — summary, the real one from neo_list — is refused, not "
+    @DisplayName("an unrecognised view — summary, the real one from etendo_list — is refused, not "
         + "ignored")
     void unknownViewIsRefused() throws Exception {
       JSONObject envelope = McpRoutingException.schemaViewRequired("summary").toEnvelope();
@@ -152,7 +155,7 @@ class McpSchemaViewRequiredTest {
       assertFalse(McpSchemaCreateView.isFullView(null),
           "a null view is the omission IMP-44 exists to refuse; it must not reach the dump");
       assertTrue(McpFieldProjection.isSummaryView("summary"),
-          "summary is a real view on neo_list/neo_get — that is precisely why an agent sends it"
+          "summary is a real view on etendo_list/etendo_get — that is precisely why an agent sends it"
               + " here, and why falling through to the full dump was the worst possible answer");
     }
 
@@ -215,7 +218,7 @@ class McpSchemaViewRequiredTest {
       Object props = schemaToolInputSchema().get(McpConstants.KEY_PROPERTIES);
       assertTrue(props instanceof Map);
       Object viewProp = ((Map<?, ?>) props).get(McpActionsView.PARAM_VIEW);
-      assertTrue(viewProp instanceof Map, "neo_schema declares no view property");
+      assertTrue(viewProp instanceof Map, "etendo_schema declares no view property");
       Object values = ((Map<?, ?>) viewProp).get("enum");
       assertTrue(values instanceof List, "view was declared without an enum: " + values);
       List<?> enumValues = (List<?>) values;
@@ -230,8 +233,8 @@ class McpSchemaViewRequiredTest {
     @Test
     @DisplayName("the unknown-argument guard knows about view")
     void theArgumentGuardKnowsView() {
-      assertTrue(ToolRegistry.declaredArgumentNames("neo_schema")
-          .orElseThrow(() -> new AssertionError("neo_schema is not guarded at all"))
+      assertTrue(ToolRegistry.declaredArgumentNames("etendo_schema")
+          .orElseThrow(() -> new AssertionError("etendo_schema is not guarded at all"))
           .contains(McpActionsView.PARAM_VIEW));
     }
 

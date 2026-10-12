@@ -48,7 +48,10 @@ import org.openbravo.model.common.invoice.Invoice;
  *
  * <p>Covers the POST {@code handle()} derivation logic (currency / toCurrency defaulting and the
  * rate ↔ foreignAmount callout) and the {@code afterHandle()} DEFAULTS injection, plus every
- * early-exit guard.
+ * early-exit guard. POST and PATCH both mirror the final rate onto the header's
+ * {@code eTGOCurrencyRate} (POST since ETP-5657).
+ *
+ * @covers com.etendoerp.go.schemaforge.InvoiceExchangeRateHandler
  */
 public class InvoiceExchangeRateHandlerTest {
 
@@ -360,6 +363,95 @@ public class InvoiceExchangeRateHandlerTest {
       assertEquals(0, new BigDecimal(body.optString("rate")).compareTo(new BigDecimal("5")));
       assertEquals(0, new BigDecimal(body.optString("foreignAmount")).compareTo(new BigDecimal("500")));
     }
+  }
+
+  // ----- handle() create: sync to invoice.eTGOCurrencyRate (ETP-5657) -----
+
+  /** The header rate the handler must write for a doc→org {@code docRate}: 1 / docRate. */
+  private static BigDecimal headerRateFor(String docRate) {
+    return BigDecimal.ONE.divide(new BigDecimal(docRate), 12, java.math.RoundingMode.HALF_UP);
+  }
+
+  /**
+   * Runs a POST for {@code body} against an invoice of {@code grandTotal}, then hands the invoice
+   * and the DAL to {@code verification} while the static mocks are still open.
+   */
+  private void runCreate(JSONObject body, BigDecimal grandTotal,
+      java.util.function.BiConsumer<Invoice, OBDal> verification) {
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = invoiceWith(grandTotal);
+      when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
+      currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency(ORG_ID)).thenReturn(ORG_CURRENCY_ID);
+
+      assertNull(handler.handle(crudPost(body)));
+
+      verification.accept(invoice, dal);
+    }
+  }
+
+  @Test
+  public void testHandleCreateSyncsHeaderRateFromTheTypedRate() throws Exception {
+    JSONObject body = new JSONObject().put("invoice", INVOICE_ID).put("rate", "0.67954");
+
+    runCreate(body, new BigDecimal("40.91"), (invoice, dal) -> {
+      org.mockito.ArgumentCaptor<BigDecimal> captor =
+          org.mockito.ArgumentCaptor.forClass(BigDecimal.class);
+      Mockito.verify(invoice).setETGOCurrencyRate(captor.capture());
+      assertEquals(0, captor.getValue().compareTo(headerRateFor("0.67954")));
+      Mockito.verify(dal).save(invoice);
+    });
+  }
+
+  @Test
+  public void testHandleCreateSyncsHeaderRateDerivedFromForeignAmount() throws Exception {
+    // Only foreignAmount: rate = 220 / 100 = 2.2 is derived first, and THAT rate is synced.
+    JSONObject body = new JSONObject().put("invoice", INVOICE_ID).put("foreignAmount", "220");
+
+    runCreate(body, new BigDecimal("100"), (invoice, dal) -> {
+      org.mockito.ArgumentCaptor<BigDecimal> captor =
+          org.mockito.ArgumentCaptor.forClass(BigDecimal.class);
+      Mockito.verify(invoice).setETGOCurrencyRate(captor.capture());
+      assertEquals(0, captor.getValue().compareTo(headerRateFor("2.2")));
+      Mockito.verify(dal).save(invoice);
+    });
+  }
+
+  @Test
+  public void testHandleCreateWithoutRateDoesNotTouchTheHeader() throws Exception {
+    JSONObject body = new JSONObject().put("invoice", INVOICE_ID);
+
+    runCreate(body, new BigDecimal("100"), (invoice, dal) -> {
+      Mockito.verify(invoice, Mockito.never()).setETGOCurrencyRate(Mockito.any());
+      Mockito.verify(dal, Mockito.never()).save(invoice);
+    });
+  }
+
+  @Test
+  public void testHandleCreateWithZeroRateDoesNotTouchTheHeader() throws Exception {
+    JSONObject body = new JSONObject().put("invoice", INVOICE_ID).put("rate", "0");
+
+    runCreate(body, new BigDecimal("100"), (invoice, dal) -> {
+      Mockito.verify(invoice, Mockito.never()).setETGOCurrencyRate(Mockito.any());
+      Mockito.verify(dal, Mockito.never()).save(invoice);
+    });
+  }
+
+  @Test
+  public void testHandleCreateSyncsHeaderRateEvenWithZeroGrandTotal() throws Exception {
+    // A lineless draft: nothing to derive, but the typed rate still reaches the header.
+    JSONObject body = new JSONObject().put("invoice", INVOICE_ID).put("rate", "1.10");
+
+    runCreate(body, BigDecimal.ZERO, (invoice, dal) -> {
+      org.mockito.ArgumentCaptor<BigDecimal> captor =
+          org.mockito.ArgumentCaptor.forClass(BigDecimal.class);
+      Mockito.verify(invoice).setETGOCurrencyRate(captor.capture());
+      assertEquals(0, captor.getValue().compareTo(headerRateFor("1.10")));
+      Mockito.verify(dal).save(invoice);
+    });
   }
 
   // ----- handle() update: reverse sync to invoice.eTGOCurrencyRate -----

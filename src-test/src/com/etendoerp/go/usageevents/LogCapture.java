@@ -31,9 +31,10 @@ import org.apache.logging.log4j.core.config.Property;
 /**
  * Captures the formatted lines one class logs at a given level, for the duration of a
  * try-with-resources block. The "loss is reported, throttled" guarantee is only observable in the
- * log, so the tests assert on the lines themselves rather than on a mocked logger.
+ * log, so the tests assert on the lines themselves rather than on a mocked logger. Public so the
+ * MCP tests can assert log levels and wording the same way.
  */
-final class LogCapture extends AbstractAppender implements AutoCloseable {
+public final class LogCapture extends AbstractAppender implements AutoCloseable {
 
   private final Logger logger;
   private final List<LogEvent> events = new CopyOnWriteArrayList<>();
@@ -45,7 +46,7 @@ final class LogCapture extends AbstractAppender implements AutoCloseable {
   }
 
   /** Start capturing everything {@code source} logs. */
-  static LogCapture of(Class<?> source) {
+  public static LogCapture of(Class<?> source) {
     LogCapture capture = new LogCapture(source);
     capture.start();
     capture.logger.addAppender(capture);
@@ -58,11 +59,16 @@ final class LogCapture extends AbstractAppender implements AutoCloseable {
   }
 
   /** @return the formatted messages logged at exactly {@code level}, in order */
-  List<String> messages(Level level) {
+  public List<String> messages(Level level) {
     return events.stream()
         .filter(e -> e.getLevel() == level)
         .map(e -> e.getMessage().getFormattedMessage())
         .collect(Collectors.toList());
+  }
+
+  /** @return the events logged at exactly {@code level}, in order — to inspect the throwable */
+  public List<LogEvent> events(Level level) {
+    return events.stream().filter(e -> e.getLevel() == level).collect(Collectors.toList());
   }
 
   @Override

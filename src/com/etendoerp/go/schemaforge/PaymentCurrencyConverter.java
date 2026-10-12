@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.math.RoundingMode;
 
 import javax.servlet.http.HttpServletResponse;
@@ -46,8 +47,28 @@ import org.openbravo.model.financialmgmt.payment.FIN_Payment;
  */
 final class PaymentCurrencyConverter {
 
-  /** Request field carrying the user-supplied (or seeded) invoice→account conversion rate. */
-  private static final String KEY_CONVERSION_RATE = "conversionRate";
+  /**
+   * Request field carrying the user-supplied (or seeded) invoice→account conversion rate. Shared
+   * with the reconciliation explicit-conversion path ({@link ReconciliationConversionSupport}).
+   */
+  static final String KEY_CONVERSION_RATE = "conversionRate";
+
+  static final String MSG_RATE_REQUIRED =
+      "A conversion rate is required when the invoice and account currencies differ";
+  static final String MSG_INVALID_RATE_FORMAT = "Invalid conversion rate format";
+  static final String MSG_RATE_NOT_POSITIVE = "Conversion rate must be greater than zero";
+  static final String MSG_RATE_ONE_CROSS_CURRENCY =
+      "A conversion rate other than 1 is required when the invoice and account currencies differ";
+
+  /**
+   * Decimal places tried, in order, when deriving a rate from {@code txnAmount / paymentAmount}
+   * (see {@link #consistentRate}). Six first because that is what Classic's Add Payment stores
+   * ({@code FIN_AddPayment.setFinancialTransactionAmountAndRate}).
+   */
+  private static final int[] DERIVED_RATE_SCALES = { 6, 8, 10, 12 };
+
+  /** Fallback precision (decimal places) for a currency that declares none. */
+  private static final int DEFAULT_CURRENCY_SCALE = 2;
 
   private PaymentCurrencyConverter() {
   }
@@ -102,34 +123,51 @@ final class PaymentCurrencyConverter {
       FIN_FinancialAccount account) {
     boolean foreignCurrency = isCrossCurrency(invoice, account);
     String rawRate = body.optString(KEY_CONVERSION_RATE, "").trim();
-    BigDecimal conversionRate;
     if (StringUtils.isBlank(rawRate)) {
       // Defense-in-depth (B1): a genuinely foreign payment arriving with no rate would otherwise
       // silently book amount x 1 in the account currency (e.g. 100 USD posted as 100 EUR).
       if (foreignCurrency) {
         return new RateResolution(null, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "A conversion rate is required when the invoice and account currencies differ"));
+            MSG_RATE_REQUIRED));
       }
-      conversionRate = BigDecimal.ONE;
-    } else {
-      try {
-        conversionRate = new BigDecimal(rawRate);
-      } catch (NumberFormatException e) {
-        return new RateResolution(null, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Invalid conversion rate format"));
-      }
+      return new RateResolution(BigDecimal.ONE, null);
     }
-    if (conversionRate.signum() <= 0) {
+    return parseRate(rawRate, foreignCurrency);
+  }
+
+  /**
+   * Parses a conversion rate the user TYPED and checks it with {@link #rateError}. Returns the same
+   * {@link RateResolution} shape as {@link #resolveConversionRate}: the rate, or the 400 to return
+   * verbatim ({@value #MSG_INVALID_RATE_FORMAT} when {@code rawRate} is not a number). Shared by the
+   * two-step payment modal and the reconciliation explicit-conversion path
+   * ({@link ReconciliationConversionSupport}), so both answer with the same messages.
+   */
+  static RateResolution parseRate(String rawRate, boolean crossCurrency) {
+    BigDecimal rate;
+    try {
+      rate = new BigDecimal(rawRate.trim());
+    } catch (NumberFormatException e) {
       return new RateResolution(null, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Conversion rate must be greater than zero"));
+          MSG_INVALID_RATE_FORMAT));
     }
-    // A cross-currency rate of exactly ONE is almost certainly a missing / placeholder value —
-    // reject it too rather than book amount x 1 across two different currencies.
-    if (foreignCurrency && conversionRate.compareTo(BigDecimal.ONE) == 0) {
-      return new RateResolution(null, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "A conversion rate other than 1 is required when the invoice and account currencies differ"));
+    NeoResponse invalid = rateError(rate, crossCurrency);
+    return invalid != null ? new RateResolution(null, invalid) : new RateResolution(rate, null);
+  }
+
+  /**
+   * The 400 a conversion rate earns, or {@code null} when it is acceptable: it must be greater than
+   * zero and, across two different currencies, other than exactly ONE — a cross-currency rate of 1
+   * is almost certainly a missing / placeholder value, and booking amount x 1 across two currencies
+   * is wrong. Applies to a rate the user supplied; a rate the server derives is never checked here.
+   */
+  static NeoResponse rateError(BigDecimal rate, boolean crossCurrency) {
+    if (rate.signum() <= 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_RATE_NOT_POSITIVE);
     }
-    return new RateResolution(conversionRate, null);
+    if (crossCurrency && rate.compareTo(BigDecimal.ONE) == 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_RATE_ONE_CROSS_CURRENCY);
+    }
+    return null;
   }
 
   /**
@@ -261,9 +299,52 @@ final class PaymentCurrencyConverter {
    * of the line consumed, rounded to the invoice currency's own precision.
    */
   static BigDecimal invoiceAmountFor(BigDecimal baseAmount, BigDecimal rate, Currency invoiceCurrency) {
-    int scale = invoiceCurrency != null && invoiceCurrency.getStandardPrecision() != null
-        ? invoiceCurrency.getStandardPrecision().intValue()
-        : 2;
-    return baseAmount.divide(rate, scale, RoundingMode.HALF_UP);
+    return baseAmount.divide(rate, standardScale(invoiceCurrency), RoundingMode.HALF_UP);
+  }
+
+  /**
+   * The currency's standard precision (decimal places), or 2 when the currency is unknown or
+   * declares none.
+   */
+  static int standardScale(Currency currency) {
+    return currency != null && currency.getStandardPrecision() != null
+        ? currency.getStandardPrecision().intValue()
+        : DEFAULT_CURRENCY_SCALE;
+  }
+
+  /**
+   * A rate for which {@code paymentAmount x rate}, rounded HALF_UP to {@code accountScale}, gives
+   * back exactly {@code txnAmount}. Accounting ({@code AcctServer.getConvertedAmt}) recomputes the
+   * account-currency amount as amount x rate; when that does not reproduce the booked transaction
+   * amount, the posting ends in a Currency Balancing line instead of a clean exchange difference.
+   *
+   * <p>Candidates, first match wins: {@code preferred} verbatim (the rate the user typed, so it is
+   * kept whenever it is consistent), then {@code txnAmount / paymentAmount} at 6, 8, 10 and 12
+   * decimals (HALF_UP). {@link MathContext#DECIMAL64} is the last resort. Example: 40.91 settled for
+   * 27.87 gives 0.681252 (40.91 x 0.681252 = 27.870019, which rounds to 27.87).
+   *
+   * @param paymentAmount the payment in the invoice currency; must be greater than zero
+   * @param txnAmount     the transaction amount in the account currency
+   * @param preferred     the rate to keep when consistent, or {@code null}
+   * @param accountScale  the account currency's precision
+   */
+  static BigDecimal consistentRate(BigDecimal paymentAmount, BigDecimal txnAmount,
+      BigDecimal preferred, int accountScale) {
+    if (preferred != null && reproduces(paymentAmount, txnAmount, preferred, accountScale)) {
+      return preferred;
+    }
+    for (int scale : DERIVED_RATE_SCALES) {
+      BigDecimal candidate = txnAmount.divide(paymentAmount, scale, RoundingMode.HALF_UP);
+      if (reproduces(paymentAmount, txnAmount, candidate, accountScale)) {
+        return candidate;
+      }
+    }
+    return txnAmount.divide(paymentAmount, MathContext.DECIMAL64);
+  }
+
+  private static boolean reproduces(BigDecimal paymentAmount, BigDecimal txnAmount,
+      BigDecimal rate, int accountScale) {
+    return paymentAmount.multiply(rate).setScale(accountScale, RoundingMode.HALF_UP)
+        .compareTo(txnAmount) == 0;
   }
 }

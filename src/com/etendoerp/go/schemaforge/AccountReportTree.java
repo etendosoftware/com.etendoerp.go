@@ -60,7 +60,7 @@ import java.util.Set;
  * sign-propagation rule, the formula-resolution algorithm, the level cutoff, the "has value"
  * threshold, the group-start rule) MUST be mirrored here by hand, and vice versa.
  *
- * <p>Four Classic behaviours this reproduces, all verified against {@code report-grouping.js}'s own
+ * <p>Five Classic behaviours this reproduces, all verified against {@code report-grouping.js}'s own
  * javadoc-equivalent comment (itself verified against real PDFs):
  * <ul>
  *   <li>A node's value is the roll-up of its children; a node with NO children but WITH operands is
@@ -79,7 +79,19 @@ import java.util.Set;
  *   <li>{@code showOnlyWithValue} keeps a node when EITHER period is non-zero (an OR of {@code
  *       amount}/{@code amount_ref}), and never hides a node whose row carries {@code
  *       isalwaysshown = 'Y'}.</li>
+ *   <li>{@code ShowValueCond} (ETP-5662, {@code applyShowValueCond}/{@code filterSVC}): a SUMMARY
+ *       node with {@code P} (or {@code N}) keeps its value only when strictly positive (negative),
+ *       otherwise it becomes 0 and that 0 is what rolls up to its parent; every descendant of such
+ *       a "reset" node displays 0; a formula node reads its operand's RAW value (after the
+ *       operand's descendants' clamp, before its own), which is how the mirror account
+ *       {@code (551)} shows the balance on the side where it is positive. Main and comparison
+ *       periods reset independently.</li>
  * </ul>
+ *
+ * <p>Deliberate deviation (ETP-5662): {@code reset} means "the clamp changed the value", per period,
+ * so the descendants of a KEPT P/N node stay visible ({@code 551} 5 shows {@code 5510} and
+ * {@code 55100000}). Classic flags reset whenever the condition fails, including on 0, and lets the
+ * reference period overwrite the main one, so with Compare To off it hides them. Totals are equal.
  */
 final class AccountReportTree {
 
@@ -112,6 +124,10 @@ final class AccountReportTree {
     final String accountSign;
     final BigDecimal ownAmt;
     final BigDecimal ownAmtRef;
+    /** {@code C_ElementValue.ShowValueCond}: {@code P}/{@code N} clamp a summary node; else none. */
+    final String showValueCond;
+    /** {@code C_ElementValue.IsSummary} — the clamp only applies to summary nodes. */
+    final boolean summary;
 
     private NodeRow(Builder b) {
       this.nodeId = b.nodeId;
@@ -125,6 +141,8 @@ final class AccountReportTree {
       this.accountSign = b.accountSign;
       this.ownAmt = b.ownAmt == null ? BigDecimal.ZERO : b.ownAmt;
       this.ownAmtRef = b.ownAmtRef == null ? BigDecimal.ZERO : b.ownAmtRef;
+      this.showValueCond = b.showValueCond;
+      this.summary = b.summary;
     }
 
     static Builder builder() {
@@ -144,6 +162,8 @@ final class AccountReportTree {
       private String accountSign;
       private BigDecimal ownAmt;
       private BigDecimal ownAmtRef;
+      private String showValueCond;
+      private boolean summary;
 
       Builder nodeId(String v) {
         this.nodeId = v;
@@ -197,6 +217,16 @@ final class AccountReportTree {
 
       Builder ownAmtRef(BigDecimal v) {
         this.ownAmtRef = v;
+        return this;
+      }
+
+      Builder showValueCond(String v) {
+        this.showValueCond = v;
+        return this;
+      }
+
+      Builder summary(boolean v) {
+        this.summary = v;
         return this;
       }
 
@@ -359,6 +389,12 @@ final class AccountReportTree {
     String sign;
     BigDecimal amount;
     BigDecimal amountRef;
+    /** Value BEFORE this node's own ShowValueCond clamp (what a formula operand reads). */
+    BigDecimal rawAmount;
+    BigDecimal rawAmountRef;
+    /** The clamp changed the value, so every descendant displays 0 (Classic's filterSVC). */
+    boolean reset;
+    boolean resetRef;
     boolean resolved;
 
     Node(NodeRow row) {
@@ -407,10 +443,10 @@ final class AccountReportTree {
     VisitContext ctx = new VisitContext(cutoffRank, showOnlyWithValue, operandsByOwner, out,
         lastGroup, byPath);
     for (Node root : sortedRoots) {
-      visit(root, 0, true, ctx);
+      visit(root, 0, true, false, false, ctx);
     }
 
-    forceFirstGroupStartWhenMultipleGroups(out);
+    forceFirstGroupStartWhenMultipleGroups(out, roots);
 
     return out;
   }
@@ -468,13 +504,17 @@ final class AccountReportTree {
    * actually has more than one distinct group. A single-group report (Profit &amp; Loss) never has
    * more than one, so this is a no-op for it.
    */
-  private static void forceFirstGroupStartWhenMultipleGroups(List<OutputRow> out) {
+  private static void forceFirstGroupStartWhenMultipleGroups(List<OutputRow> out,
+      List<Node> roots) {
     if (out.isEmpty()) {
       return;
     }
+    // ETP-5662: counted over the report's ROOTS, not the visible rows, so a single visible group
+    // (e.g. only Pasivo after ShowValueCond) still gets its header. Deliberately differs from
+    // Classic; display only.
     Set<String> groups = new HashSet<>();
-    for (OutputRow r : out) {
-      groups.add(r.group);
+    for (Node root : roots) {
+      groups.add(root.row.groupName);
     }
     if (groups.size() > 1) {
       out.set(0, out.get(0).withGroupStart(true));
@@ -507,6 +547,8 @@ final class AccountReportTree {
     if (inProgress.contains(node.row.nodeId)) {
       node.amount = BigDecimal.ZERO;
       node.amountRef = BigDecimal.ZERO;
+      node.rawAmount = BigDecimal.ZERO;
+      node.rawAmountRef = BigDecimal.ZERO;
       node.resolved = true;
       return;
     }
@@ -528,11 +570,13 @@ final class AccountReportTree {
           continue;
         }
         resolve(target, byId, operandsByOwner, inProgress);
-        sum = sum.add(target.amount.multiply(BigDecimal.valueOf(o.sign)));
-        sumRef = sumRef.add(target.amountRef.multiply(BigDecimal.valueOf(o.sign)));
+        // A formula reads the operand's RAW value (after its descendants' clamp, before its own):
+        // the mirror (5510) must see the unclamped -1 of the node Activo zeroed (ETP-5662).
+        sum = sum.add(target.rawAmount.multiply(BigDecimal.valueOf(o.sign)));
+        sumRef = sumRef.add(target.rawAmountRef.multiply(BigDecimal.valueOf(o.sign)));
       }
-      node.amount = sum;
-      node.amountRef = sumRef;
+      node.rawAmount = sum;
+      node.rawAmountRef = sumRef;
     } else if (!node.children.isEmpty()) {
       BigDecimal sum = own;
       BigDecimal sumRef = ownRef;
@@ -541,14 +585,37 @@ final class AccountReportTree {
         sum = sum.add(child.amount);
         sumRef = sumRef.add(child.amountRef);
       }
-      node.amount = sum;
-      node.amountRef = sumRef;
+      node.rawAmount = sum;
+      node.rawAmountRef = sumRef;
     } else {
-      node.amount = own;
-      node.amountRef = ownRef;
+      node.rawAmount = own;
+      node.rawAmountRef = ownRef;
     }
+    node.amount = applyShowValueCond(node.rawAmount, node.row);
+    node.amountRef = applyShowValueCond(node.rawAmountRef, node.row);
+    node.reset = node.amount.compareTo(node.rawAmount) != 0;
+    node.resetRef = node.amountRef.compareTo(node.rawAmountRef) != 0;
     inProgress.remove(node.row.nodeId);
     node.resolved = true;
+  }
+
+  /**
+   * Classic's {@code applyShowValueCond}: a SUMMARY node with {@code P} keeps its value only when
+   * strictly positive, with {@code N} only when strictly negative; otherwise it becomes 0. Any
+   * other node/condition passes through. Strict comparison, no epsilon.
+   */
+  private static BigDecimal applyShowValueCond(BigDecimal value, NodeRow row) {
+    if (!row.summary || row.showValueCond == null) {
+      return value;
+    }
+    int cmp = value.signum();
+    if ("P".equals(row.showValueCond)) {
+      return cmp > 0 ? value : BigDecimal.ZERO;
+    }
+    if ("N".equals(row.showValueCond)) {
+      return cmp < 0 ? value : BigDecimal.ZERO;
+    }
+    return value;
   }
 
   /**
@@ -576,46 +643,75 @@ final class AccountReportTree {
     }
   }
 
-  private static void visit(Node node, int indent, boolean isRoot, VisitContext ctx) {
-    boolean withinCutoff = true;
+  private static void visit(Node node, int indent, boolean isRoot, boolean underReset,
+      boolean underResetRef, VisitContext ctx) {
     if (!isRoot) {
-      // An unknown/blank elementlevel is never a reason to drop a row.
-      Integer rank = ELEMENT_LEVEL_RANK.get(node.row.elementLevel);
-      withinCutoff = rank == null || rank <= ctx.cutoffRank;
-      boolean hasValue = node.amount.abs().compareTo(HAS_VALUE_EPSILON) > 0
-          || node.amountRef.abs().compareTo(HAS_VALUE_EPSILON) > 0;
-      if (withinCutoff && (!ctx.showOnlyWithValue || hasValue || node.row.alwaysShown)) {
-        boolean isGroupStart =
-            !ctx.out.isEmpty() && !equalsNullable(node.row.groupName, ctx.lastGroup[0]);
-        ctx.lastGroup[0] = node.row.groupName;
-        boolean isFormula = node.children.isEmpty()
-            && !ctx.operandsByOwner.getOrDefault(node.row.nodeId, List.of()).isEmpty();
-        ctx.out.add(OutputRow.builder()
-            .nodeId(node.row.nodeId)
-            .value(node.row.value)
-            .name(node.row.name)
-            .element(node.row.value + " - " + node.row.name)
-            .elementLevel(node.row.elementLevel)
-            .amount(node.amount)
-            .amountRef(node.amountRef)
-            .indent(indent)
-            .isHeading("E".equals(node.row.elementLevel))
-            .group(node.row.groupName)
-            .isGroupStart(isGroupStart)
-            .isFormula(isFormula)
-            .build());
+      if (!isWithinCutoff(node, ctx)) {
+        return; // cutoff reached: neither a row nor its descendants are shown
       }
-      if (!withinCutoff) {
-        return; // cutoff reached: do not descend further
-      }
+      emitRowIfShown(node, indent, underReset, underResetRef, ctx);
     }
     // The report's root node is a container (the accounting report's own node), never a row — so
     // its children start the visible tree at indent 0.
     List<Node> sortedChildren = new ArrayList<>(node.children);
     sortedChildren.sort(ctx.byPath);
     for (Node child : sortedChildren) {
-      visit(child, isRoot ? 0 : indent + 1, false, ctx);
+      visit(child, isRoot ? 0 : indent + 1, false, underReset || node.reset,
+          underResetRef || node.resetRef, ctx);
     }
+  }
+
+  /** An unknown/blank elementlevel is never a reason to drop a row. */
+  private static boolean isWithinCutoff(Node node, VisitContext ctx) {
+    Integer rank = ELEMENT_LEVEL_RANK.get(node.row.elementLevel);
+    return rank == null || rank <= ctx.cutoffRank;
+  }
+
+  /**
+   * Display: a descendant of a reset node shows 0 (filterSVC); every row re-applies its own clamp
+   * (filterStructure). Main and comparison periods reset independently.
+   */
+  private static BigDecimal displayedAmount(BigDecimal value, boolean underReset, NodeRow row) {
+    return underReset ? BigDecimal.ZERO : applyShowValueCond(value, row);
+  }
+
+  private static boolean hasValue(BigDecimal amount, BigDecimal amountRef) {
+    return amount.abs().compareTo(HAS_VALUE_EPSILON) > 0
+        || amountRef.abs().compareTo(HAS_VALUE_EPSILON) > 0;
+  }
+
+  private static void emitRowIfShown(Node node, int indent, boolean underReset,
+      boolean underResetRef, VisitContext ctx) {
+    BigDecimal amount = displayedAmount(node.amount, underReset, node.row);
+    BigDecimal amountRef = displayedAmount(node.amountRef, underResetRef, node.row);
+    if (ctx.showOnlyWithValue && !hasValue(amount, amountRef) && !node.row.alwaysShown) {
+      return;
+    }
+    ctx.out.add(buildOutputRow(node, indent, amount, amountRef, ctx));
+  }
+
+  /** Builds the visible row; advances {@code ctx.lastGroup} to detect the next group start. */
+  private static OutputRow buildOutputRow(Node node, int indent, BigDecimal amount,
+      BigDecimal amountRef, VisitContext ctx) {
+    boolean isGroupStart =
+        !ctx.out.isEmpty() && !equalsNullable(node.row.groupName, ctx.lastGroup[0]);
+    ctx.lastGroup[0] = node.row.groupName;
+    boolean isFormula = node.children.isEmpty()
+        && !ctx.operandsByOwner.getOrDefault(node.row.nodeId, List.of()).isEmpty();
+    return OutputRow.builder()
+        .nodeId(node.row.nodeId)
+        .value(node.row.value)
+        .name(node.row.name)
+        .element(node.row.value + " - " + node.row.name)
+        .elementLevel(node.row.elementLevel)
+        .amount(amount)
+        .amountRef(amountRef)
+        .indent(indent)
+        .isHeading("E".equals(node.row.elementLevel))
+        .group(node.row.groupName)
+        .isGroupStart(isGroupStart)
+        .isFormula(isFormula)
+        .build();
   }
 
   private static boolean equalsNullable(String a, String b) {

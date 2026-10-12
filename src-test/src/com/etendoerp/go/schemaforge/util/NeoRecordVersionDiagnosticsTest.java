@@ -70,6 +70,8 @@ import org.openbravo.dal.service.OBDal;
  * with no offset, so such a token is compared AS UTC — and the stored values below say UTC
  * outright, which is what makes these assertions fail on a server whose zone is not UTC if that
  * behaviour ever changes.
+ *
+ * @covers com.etendoerp.go.schemaforge.util.NeoRecordVersion
  */
 class NeoRecordVersionDiagnosticsTest {
 
@@ -130,8 +132,8 @@ class NeoRecordVersionDiagnosticsTest {
   @Test
   @DisplayName("routeOf keeps the spec entity, not the DAL entity, in the third position")
   void routeOfRendersMcpStyleRoutes() {
-    assertEquals("neo_update /sales-order/lines/ABC123",
-        NeoRecordVersion.routeOf("neo_update", "sales-order", "lines", "ABC123"));
+    assertEquals("etendo_update /sales-order/lines/ABC123",
+        NeoRecordVersion.routeOf("etendo_update", "sales-order", "lines", "ABC123"));
   }
 
   /**

@@ -32,21 +32,21 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * own arithmetic:</p>
  * <ul>
  *   <li>{@link McpSchemaFieldBuilder#loadFieldMetadata} read {@code getVisibility()},
- *       {@code isBusinessCritical()} and {@code isReadOnly()} — this is what {@code neo_schema}
+ *       {@code isBusinessCritical()} and {@code isReadOnly()} — this is what {@code etendo_schema}
  *       reports and what {@code McpToolRouter}'s method gate reads;</li>
  *   <li>{@link McpQuerySupport#editablePropertyNames} ignored {@code visibility} entirely and
- *       computed {@code isIncluded && !isReadOnly} instead — {@code neo_selectors}' notion of
+ *       computed {@code isIncluded && !isReadOnly} instead — {@code etendo_selectors}' notion of
  *       editable;</li>
  *   <li>{@link McpResourceProvider} read {@code isReadOnly()} for the resource field list.</li>
  * </ul>
  *
  * <p>An override honoured by only the first of those is a worse state than no override: an agent
- * would be told a field is {@code editable} by {@code neo_schema} and not editable by
- * {@code neo_selectors}, with nothing in either response admitting the disagreement. So all three
+ * would be told a field is {@code editable} by {@code etendo_schema} and not editable by
+ * {@code etendo_selectors}, with nothing in either response admitting the disagreement. So all three
  * now go through this class, and there is exactly one answer per field.</p>
  *
  * <h2>What "editable" means here</h2>
- * <p>{@link #isEditable()} keeps {@code neo_selectors}' original meaning —
+ * <p>{@link #isEditable()} keeps {@code etendo_selectors}' original meaning —
  * {@code isIncluded && !isReadOnly}, which is what {@code push-to-neo.js} writes for the
  * {@code editable} visibility — and adds the curated string as a further requirement wherever one
  * is available, from the {@code SFField} row or from the override. The two agree wherever curation
@@ -125,7 +125,7 @@ final class McpFieldView {
    * @return one of {@code editable}/{@code readOnly}/{@code system}/{@code discarded}, or
    *         {@code null} when neither the {@code SFField} row nor the override classifies this
    *         field. Callers that report it must keep omitting the key in that case — an absent
-   *         {@code visibility} is what {@code neo_schema} has always emitted for an uncurated
+   *         {@code visibility} is what {@code etendo_schema} has always emitted for an uncurated
    *         field, and inventing a value here would change every existing response
    */
   String getVisibility() {
@@ -139,7 +139,7 @@ final class McpFieldView {
    * <p>Distinct from {@link #isEditable()} on purpose: {@code readOnly} and {@code system} fields
    * are included and not editable, while a {@code discarded} field is not included at all. The
    * question this answers is "does this field exist as far as the agent surface is concerned",
-   * which gates whether {@code neo_schema} may name it and whether a write or a filter may carry
+   * which gates whether {@code etendo_schema} may name it and whether a write or a filter may carry
    * it — not whether a value may be assigned to it.</p>
    *
    * <p><b>Read it through this class, never off the row.</b> Two independent reasons, and each one
@@ -192,7 +192,7 @@ final class McpFieldView {
    * where the visibility branch and the fallback disagree.</p>
    *
    * <p><b>Scope.</b> The one consumer of this is {@link McpQuerySupport#editablePropertyNames},
-   * read by {@code McpToolRouter} for {@link McpDefaultsView#apply} — the {@code neo_defaults}
+   * read by {@code McpToolRouter} for {@link McpDefaultsView#apply} — the {@code etendo_defaults}
    * grouped/minimal split between {@code confirm} and {@code systemManaged}. It is purely
    * presentational and gates no write; {@link #isIncluded()} is what gates the write, since
    * IMP-39.</p>

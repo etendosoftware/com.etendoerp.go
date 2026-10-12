@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -41,6 +42,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -70,6 +72,8 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
  * Unit tests for {@link SalesInvoiceHeaderHandler}.
@@ -80,7 +84,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  *       (clone record / register payment) or returns null when none matches.</li>
  *   <li>{@code afterHandle()} — adjusts {@code grandTotalAmount} and {@code outstandingAmount}
  *       in GET responses for draft invoices that carry a positive {@code etgoTotalDiscount}.</li>
+ *   <li>{@code followUpFlows()} — the one goods-shipment follow-up and its sales-side wiring,
+ *       and the {@code followUp} annotation written by {@code afterHandle()} (ETP-5576).</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesInvoiceHeaderHandler
  */
 public class SalesInvoiceHeaderHandlerTest {
 
@@ -362,7 +370,12 @@ public class SalesInvoiceHeaderHandlerTest {
     NeoContext ctx = getCtx();
     ctx.setPreviousResult(NeoResponse.ok(body));
 
-    NeoResponse result = handler.afterHandle(ctx);
+    // ETP-5576: the record has an id, so afterHandle runs the follow-up lookup. Mock OBDal so it
+    // degrades deterministically (FOLLOW_UP_LOOKUP_FAILED) instead of reaching a real DAL.
+    NeoResponse result;
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      result = handler.afterHandle(ctx);
+    }
 
     assertNotNull(result);
     double grand = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0).getDouble(
@@ -497,8 +510,15 @@ public class SalesInvoiceHeaderHandlerTest {
       obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
+      // ETP-5576: afterHandle now also runs the follow-up lookup (and other enrichers) on the
+      // same connection. Route only enrichSourceInvoice's statement to the stubbed row; every
+      // other statement reads an empty result, so none of them consumes rs.next().
+      PreparedStatement otherPs = mock(PreparedStatement.class);
+      ResultSet emptyRs = mock(ResultSet.class);
+      when(otherPs.executeQuery()).thenReturn(emptyRs);
+      when(conn.prepareStatement(anyString())).thenReturn(otherPs);
       PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
 
@@ -542,8 +562,15 @@ public class SalesInvoiceHeaderHandlerTest {
       obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
+      // ETP-5576: afterHandle now also runs the follow-up lookup (and other enrichers) on the
+      // same connection. Route only enrichSourceInvoice's statement to the stubbed row; every
+      // other statement reads an empty result, so none of them consumes rs.next().
+      PreparedStatement otherPs = mock(PreparedStatement.class);
+      ResultSet emptyRs = mock(ResultSet.class);
+      when(otherPs.executeQuery()).thenReturn(emptyRs);
+      when(conn.prepareStatement(anyString())).thenReturn(otherPs);
       PreparedStatement ps = mock(PreparedStatement.class);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(conn.prepareStatement(contains("Canceled_Inoutline_ID"))).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
 
@@ -598,6 +625,14 @@ public class SalesInvoiceHeaderHandlerTest {
 
       assertFalse(rec.has("sourceReturnReceipt"));
       assertFalse(rec.has("sourceInvoice"));
+      // ETP-5576: the page is annotated with the sales follow-up; the pending query found no
+      // row for this id, so the shipment is not offered.
+      JSONObject followUp = rec.getJSONObject("followUp");
+      assertEquals(0, followUp.getJSONArray("available").length());
+      JSONObject shipment = followUp.getJSONObject("shipment");
+      assertFalse(shipment.getBoolean("needed"));
+      assertEquals("FOLLOW_UP_SOURCE_NOT_FOUND", shipment.getString("reason"));
+      assertEquals("createShipment", shipment.getString("action"));
     }
   }
 
@@ -1280,5 +1315,95 @@ public class SalesInvoiceHeaderHandlerTest {
   public void testHandleStillReturnsNullForNonSelectorRequestAfterPaymentMethodWiring() {
     NeoContext ctx = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new SalesInvoiceHeaderHandler().handle(ctx));
+  }
+
+  // ── follow-up document registration (ETP-5576) ────────────────────────────
+
+  /**
+   * A sales invoice offers exactly one follow-up, the goods shipment, wired end to end to the
+   * SALES side: its resolver rejects a purchase invoice, its eligibility is this handler's own FAC
+   * classification (a credit memo is not eligible), its creator builds a SALES movement through
+   * {@link InvoiceInOutMapping}, and the created lines are linked through M_MatchSI.
+   */
+  @Test
+  public void followUpFlowsRegisterTheGoodsShipmentWiredToTheSalesSide() throws Exception {
+    List<FollowUpFlow> flows = new SalesInvoiceHeaderHandler().followUpFlows();
+
+    assertEquals(1, flows.size());
+    FollowUpFlow flow = flows.get(0);
+    assertSame(FollowUpTarget.GOODS_SHIPMENT, flow.target());
+    assertEquals(Invoice.class, flow.sourceEntity());
+    InvoicePendingResolver resolver = (InvoicePendingResolver) flow.resolver();
+    assertEquals(FollowUpException.Reason.WRONG_DIRECTION,
+        resolver.ineligibility("N", "CO", "dt-ari"));
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType creditMemo = mock(DocumentType.class);
+      when(creditMemo.getDocumentCategory()).thenReturn("ARC");
+      DocumentType standard = mock(DocumentType.class);
+      when(standard.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(creditMemo);
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(standard);
+
+      assertEquals(FollowUpException.Reason.NOT_ELIGIBLE_TYPE,
+          resolver.ineligibility("Y", "CO", "dt-arc"));
+      assertNull(resolver.ineligibility("Y", "CO", "dt-ari"));
+    }
+
+    InOutTargetBuilder.Line line = InOutTargetBuilder.Line.builder().sourceLineId("il-1")
+        .quantity(BigDecimal.ONE).stockable(false).build();
+    Object[] buildArgs = createThroughFlow(flow, line);
+
+    assertEquals(InOutTargetBuilder.Direction.SALES, buildArgs[0]);
+    ShipmentInOutLine created = mock(ShipmentInOutLine.class);
+    when(created.getId()).thenReturn("iol-1");
+    try (MockedStatic<InvoiceLineLinker> linkerMock = Mockito.mockStatic(InvoiceLineLinker.class)) {
+      ((InOutTargetBuilder.LineLinker) buildArgs[3]).link(line, created);
+
+      linkerMock.verify(() -> InvoiceLineLinker.linkInvoiceLineToInOutLine("il-1", "iol-1",
+          InOutInvoiceLinks.MatchTable.SALES));
+    }
+  }
+
+  /**
+   * Runs {@code flow.createTarget} with {@link InvoiceInOutMapping#map} answering one
+   * {@code line} and {@link InOutTargetBuilder#build} mocked, and returns the arguments the
+   * builder received (direction, header, lines, linker).
+   */
+  private static Object[] createThroughFlow(FollowUpFlow flow, InOutTargetBuilder.Line line) {
+    List<PendingResolver.SourceLine> pending = Collections.singletonList(
+        new PendingResolver.SourceLine("il-1", BigDecimal.ONE));
+    InOutFollowUpCreator.Mapping mapping = new InOutFollowUpCreator.Mapping(
+        new InOutTargetBuilder.Header(null, null, null, null, null, null, null),
+        Collections.singletonList(line));
+    ShipmentInOut inout = mock(ShipmentInOut.class);
+    when(inout.getId()).thenReturn("io-1");
+    AtomicReference<Object[]> buildArgs = new AtomicReference<>();
+    try (MockedStatic<InvoiceInOutMapping> mappingMock = Mockito.mockStatic(InvoiceInOutMapping.class);
+         MockedStatic<InOutTargetBuilder> builderMock = Mockito.mockStatic(InOutTargetBuilder.class)) {
+      mappingMock.when(() -> InvoiceInOutMapping.map("inv-1", pending, FollowUpInputs.none()))
+          .thenReturn(mapping);
+      builderMock.when(() -> InOutTargetBuilder.build(any(), any(), any(), any()))
+          .thenAnswer(inv -> {
+            buildArgs.set(inv.getArguments());
+            return inout;
+          });
+
+      assertEquals("io-1", flow.createTarget("inv-1", pending, FollowUpInputs.none()).getId());
+    }
+    return buildArgs.get();
+  }
+
+  /**
+   * ETP-5576 (MCP obs. 11): the keys this header injects on every GET record without a spec field
+   * behind them — {@code followUp} and the subtype key — are declared, so an MCP
+   * {@code fields:[…]} projection does not report them in {@code unknownFields} while the same
+   * response carries them.
+   */
+  @Test
+  public void responseEnrichedFields_declaresFollowUpAndSubtypeKey() {
+    assertEquals(java.util.Set.of("followUp", "arInvoiceSubtype"),
+        new SalesInvoiceHeaderHandler().responseEnrichedFields());
   }
 }

@@ -37,8 +37,8 @@ public class SelectorMeta {
   public final String valueProperty;
   /** Visible grid field metadata for rich selectors. */
   public final List<RichFieldMeta> gridFields;
-  /** Searchable property fragments used to build the suggestion-box filter. */
-  public final List<String> searchableProperties;
+  /** Searchable fragments, with their origin, used to build the suggestion-box filter. */
+  public final List<SearchableFragment> searchableProperties;
   /** Full custom HQL definition for selectors marked as custom query. */
   public final String customHql;
   /** Entity alias used by the selector HQL. */
@@ -90,7 +90,7 @@ public class SelectorMeta {
     private boolean isCustomQuery;
     private String valueProperty = "id";
     private List<RichFieldMeta> gridFields = new ArrayList<>();
-    private List<String> searchableProperties = new ArrayList<>();
+    private List<SearchableFragment> searchableProperties = new ArrayList<>();
     private String customHql;
     private String entityAlias = "e";
     private List<AuxFieldMeta> auxFields = new ArrayList<>();
@@ -147,12 +147,12 @@ public class SelectorMeta {
     public Builder gridFields(List<RichFieldMeta> val) { this.gridFields = val; return this; }
 
     /**
-     * Supply searchable property fragments.
+     * Supply searchable fragments.
      *
-     * @param val searchable property fragments used for suggestion-box filtering
+     * @param val searchable fragments used for suggestion-box filtering
      * @return this builder
      */
-    public Builder searchableProperties(List<String> val) { this.searchableProperties = val; return this; }
+    public Builder searchableProperties(List<SearchableFragment> val) { this.searchableProperties = val; return this; }
 
     /**
      * Supply the raw custom HQL definition.

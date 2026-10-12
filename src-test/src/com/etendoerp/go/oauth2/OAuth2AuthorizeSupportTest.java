@@ -47,6 +47,8 @@ import com.etendoerp.go.oauth2.OAuth2AuthorizeSupport.AuthorizeRequestData;
  * Unit tests for {@link OAuth2AuthorizeSupport}: request parsing (including the
  * {@code validity_seconds} authorize-request parameter — ETP-4393), auth-code data assembly and
  * the success redirect writer. No servlet container or DAL model is required.
+ *
+ * @covers com.etendoerp.go.oauth2.OAuth2AuthorizeSupport
  */
 class OAuth2AuthorizeSupportTest {
 
@@ -260,21 +262,21 @@ class OAuth2AuthorizeSupportTest {
     @DisplayName("rejects null authorize data")
     void nullAuthorize() {
       assertThrows(IllegalArgumentException.class, () -> OAuth2AuthorizeSupport.buildAuthCodeData(
-          null, "u", "r", set("neo:read"), set("neo:read"), "*", 1000L));
+          null, "u", "r", set("neo:read"), set("neo:read"), 1000L));
     }
 
     @Test
     @DisplayName("rejects null requested scopes")
     void nullRequestedScopes() {
       assertThrows(IllegalArgumentException.class, () -> OAuth2AuthorizeSupport.buildAuthCodeData(
-          authorize(), "u", "r", null, set("neo:read"), "*", 1000L));
+          authorize(), "u", "r", null, set("neo:read"), 1000L));
     }
 
     @Test
     @DisplayName("copies identity fields from the authorize request")
     void copiesIdentity() {
       OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
-          authorize(), "user-1", "role-1", set("neo:read"), set("neo:read"), "*", 5000L);
+          authorize(), "user-1", "role-1", set("neo:read"), set("neo:read"), 5000L);
 
       assertEquals("client-9", data.clientId);
       assertEquals("user-1", data.userId);
@@ -289,7 +291,7 @@ class OAuth2AuthorizeSupportTest {
     @DisplayName("grants all allowed scopes when none are explicitly requested")
     void emptyRequestGrantsAllowed() {
       OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
-          authorize(), "u", "r", Collections.emptySet(), set("neo:read", "neo:write"), "*", 1000L);
+          authorize(), "u", "r", Collections.emptySet(), set("neo:read", "neo:write"), 1000L);
 
       assertEquals("neo:read neo:write", data.scopes);
     }
@@ -298,7 +300,7 @@ class OAuth2AuthorizeSupportTest {
     @DisplayName("grants exactly the requested scopes when the wildcard scope is allowed")
     void wildcardGrantsRequested() {
       OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
-          authorize(), "u", "r", set("neo:process"), set("*"), "*", 1000L);
+          authorize(), "u", "r", set("neo:process"), set("neo:*"), 1000L);
 
       assertEquals("neo:process", data.scopes);
     }
@@ -308,9 +310,55 @@ class OAuth2AuthorizeSupportTest {
     void intersectsWithoutWildcard() {
       OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorize(), "u", "r", set("neo:read", "neo:process"),
-          set("neo:read", "neo:write"), "*", 1000L);
+          set("neo:read", "neo:write"), 1000L);
 
       assertEquals("neo:read", data.scopes);
+    }
+
+    @Test
+    @DisplayName("grants a requested etendo: scope from its neo: alias, echoing the requested name")
+    void grantsAcrossPrefixesEchoingRequestedName() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("etendo:read", "neo:write"),
+          set("neo:read", "etendo:write"), 1000L);
+
+      assertEquals("etendo:read neo:write", data.scopes);
+    }
+
+    @Test
+    @DisplayName("an etendo: allow-list grants the requested neo: alias, echoing the requested name")
+    void etendoAllowListGrantsLegacyRequest() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("neo:read"), set("etendo:read"), 1000L);
+
+      assertEquals("neo:read", data.scopes);
+    }
+
+    @Test
+    @DisplayName("a neo: allow-list grants the requested etendo: name")
+    void legacyAllowListGrantsEtendoRequest() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("etendo:read"), set("neo:read"), 1000L);
+
+      assertEquals("etendo:read", data.scopes);
+    }
+
+    @Test
+    @DisplayName("the etendo:* wildcard grants a requested neo: scope")
+    void etendoWildcardGrantsLegacyScope() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("neo:process"), set("etendo:*"), 1000L);
+
+      assertEquals("neo:process", data.scopes);
+    }
+
+    @Test
+    @DisplayName("an alias never widens access: neo:read does not grant etendo:write")
+    void aliasDoesNotWidenAccess() {
+      OAuth2Servlet.AuthCodeData data = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorize(), "u", "r", set("etendo:write"), set("neo:read"), 1000L);
+
+      assertEquals("", data.scopes);
     }
 
     // ---- validity_seconds normalization (ETP-4393) ----
@@ -320,7 +368,7 @@ class OAuth2AuthorizeSupportTest {
     void setsExplicitRequestedValidity() {
       OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeWithValidity(604_800L), "user-1", "role-1",
-          set("neo:read"), set("neo:read"), "neo:*", 300_000);
+          set("neo:read"), set("neo:read"), 300_000);
 
       assertEquals(604_800L, codeData.validitySeconds);
     }
@@ -330,7 +378,7 @@ class OAuth2AuthorizeSupportTest {
     void normalizesAbsentSentinelToDefault() {
       OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeWithValidity(-1L), "user-1", "role-1",
-          set("neo:read"), set("neo:read"), "neo:*", 300_000);
+          set("neo:read"), set("neo:read"), 300_000);
 
       assertEquals(86_400L, codeData.validitySeconds);
     }
@@ -340,7 +388,7 @@ class OAuth2AuthorizeSupportTest {
     void preservesZeroAsNoExpiration() {
       OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeWithValidity(0L), "user-1", "role-1",
-          set("neo:read"), set("neo:read"), "neo:*", 300_000);
+          set("neo:read"), set("neo:read"), 300_000);
 
       assertEquals(0L, codeData.validitySeconds);
     }
@@ -350,7 +398,7 @@ class OAuth2AuthorizeSupportTest {
     void clampsExcessiveValidityToMax() {
       OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeWithValidity(99_999_999L), "user-1", "role-1",
-          set("neo:read"), set("neo:read"), "neo:*", 300_000);
+          set("neo:read"), set("neo:read"), 300_000);
 
       assertEquals(2_592_000L, codeData.validitySeconds);
     }
@@ -360,7 +408,7 @@ class OAuth2AuthorizeSupportTest {
     void clampsBelowMinValidityToMin() {
       OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeWithValidity(60L), "user-1", "role-1",
-          set("neo:read"), set("neo:read"), "neo:*", 300_000);
+          set("neo:read"), set("neo:read"), 300_000);
 
       assertEquals(300L, codeData.validitySeconds);
     }

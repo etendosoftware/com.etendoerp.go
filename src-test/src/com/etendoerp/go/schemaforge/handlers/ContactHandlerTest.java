@@ -18,11 +18,13 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
@@ -37,9 +39,15 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.go.rest.CompanyInvitationEmailCorrection;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
 /**
  * Unit tests for {@link ContactHandler} (ETP-4156).
@@ -52,6 +60,8 @@ import com.etendoerp.go.schemaforge.NeoContext;
  * <p>Tests that reach the database use {@code mockStatic(OBDal.class)} with a mock JDBC
  * {@link Connection}, mirroring {@code BusinessPartnerHandlerTest}, so no live Etendo
  * environment is required.
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.ContactHandler
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -349,5 +359,115 @@ class ContactHandlerTest {
 
     assertEquals("Jane PersistedLast", body.getString("name"));
     assertFalse(body.has("username"));
+  }
+
+  // ── email of an Etendo user on the contacts path (ETP-5194) ────────────────
+
+  private static final String CONTACT_ID = "USER_001";
+  private static final String CLIENT_ID = "CLIENT_001";
+
+  /**
+   * Runs a {@code PATCH} carrying {@code incomingEmail} against an {@code AD_User} that holds
+   * {@code persistedEmail}, with the owner flag and the "has an invitation of its own" lookup
+   * stubbed. Returns the handler's response.
+   */
+  private NeoResponse patchEmail(String persistedEmail, String incomingEmail, boolean owner,
+      boolean invited) throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("email", incomingEmail);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn(CONTACT_ID);
+    User user = mock(User.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(user.getId()).thenReturn(CONTACT_ID);
+    when(user.getClient()).thenReturn(client);
+    when(user.getEmail()).thenReturn(persistedEmail);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> mDal = mockStatic(OBDal.class);
+        MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<CompanyInvitationEmailCorrection> correctionMock =
+            mockStatic(CompanyInvitationEmailCorrection.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      when(obDalMock.get(User.class, CONTACT_ID)).thenReturn(user);
+      ownerMock.when(() -> OwnerSupport.isOwner(CONTACT_ID)).thenReturn(owner);
+      correctionMock.when(() -> CompanyInvitationEmailCorrection.hasInvitationForUser(CLIENT_ID,
+          CONTACT_ID)).thenReturn(invited);
+      return handler.handle(ctx);
+    }
+  }
+
+  /**
+   * A user with an invitation of its own reached as a business partner's contact person must
+   * not get its email changed here, bypassing the {@code user} spec's correction window.
+   */
+  @Test
+  void testHandlePatchRefusesEmailChangeOfAnInvitedUser() throws Exception {
+    NeoResponse response = patchEmail("go.user@example.com", "other@example.com", false, true);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().toString()
+        .contains(UserEmailCorrection.MSG_CONTACT_IS_GO_USER));
+  }
+
+  /** The tenant owner is an Etendo user too, invited or not. */
+  @Test
+  void testHandlePatchRefusesEmailChangeOfTheOwner() throws Exception {
+    NeoResponse response = patchEmail("owner@example.com", "other@example.com", true, false);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** A real contact person (never invited, not the owner) keeps a freely editable email. */
+  @Test
+  void testHandlePatchLetsAContactPersonChangeItsEmail() throws Exception {
+    assertNull(patchEmail("contact@example.com", "contact.new@example.com", false, false));
+  }
+
+  /** Re-submitting the persisted email is not a change, even for an Etendo user. */
+  @Test
+  void testHandlePatchIgnoresUnchangedEmailOfAnInvitedUser() throws Exception {
+    assertNull(patchEmail("go.user@example.com", " go.user@example.com ", false, true));
+  }
+
+  /** A create never runs the guard: there is no persisted user to protect yet. */
+  @Test
+  void testHandlePostDoesNotRunTheEmailGuard() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("email", "new.contact@example.com");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      assertNull(handler.handle(ctx));
+      mDal.verify(OBDal::getInstance, never());
+    }
+  }
+
+  /** An unexpected lookup error must not let the change through. */
+  @Test
+  void testHandlePatchFailsClosedWhenTheEmailGuardThrows() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("email", "other@example.com");
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(body);
+    when(ctx.getRecordId()).thenReturn(CONTACT_ID);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      when(obDalMock.get(User.class, CONTACT_ID)).thenThrow(new RuntimeException("DB down"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(500, response.getHttpStatus());
+    }
   }
 }

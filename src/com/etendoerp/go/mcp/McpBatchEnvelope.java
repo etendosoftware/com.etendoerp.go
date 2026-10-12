@@ -24,7 +24,7 @@ import org.codehaus.jettison.json.JSONObject;
 import com.etendoerp.go.schemaforge.BatchService;
 
 /**
- * The outcome envelope {@code neo_batch} answers a failed batch with, whether the batch was
+ * The outcome envelope {@code etendo_batch} answers a failed batch with, whether the batch was
  * rejected by the MCP pre-pass before the transaction opened or failed inside
  * {@link BatchService#executeBatch}. Split from {@link McpToolRouterSupport} (ETP-5558).
  */
@@ -99,7 +99,7 @@ final class McpBatchEnvelope {
   /**
    * Rewrite a {@code BatchService} failure body into the IMP-5 error envelope (IMP-15).
    * <p>
-   * {@code BatchService} serves both the REST {@code /batch} endpoint and {@code neo_batch}, and it
+   * {@code BatchService} serves both the REST {@code /batch} endpoint and {@code etendo_batch}, and it
    * forwards the failing operation's sub-response verbatim as {@code error.detail}. For an MCP agent
    * that meant a raw DAL payload — {@code {"response":{"status":-4,"errors":{"id":"New object
    * Currency(null) (key: EUR_Currency) refered to but not present in the import set"}}}} — with no

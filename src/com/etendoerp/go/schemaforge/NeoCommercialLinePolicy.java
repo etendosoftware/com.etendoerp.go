@@ -94,7 +94,7 @@ public final class NeoCommercialLinePolicy {
    * is what stops the two call sites from drifting apart again.
    *
    * <p>ETP-5528: public so an entity customization can call it explicitly (T12). The MCP
-   * {@code neo_create} pipeline is a separate implementation of the REST one and never reaches this
+   * {@code etendo_create} pipeline is a separate implementation of the REST one and never reaches this
    * sequence, so a line an agent created kept {@code LINE_GROSS_AMOUNT = 0} on a net price list —
    * {@code SL_Order_Amt} publishes {@code grossUnitPrice × qty}, which is 0 there, and the
    * {@code C_OrderLine} trigger only derives the gross for tax-included lists. The shared MCP path
@@ -270,7 +270,7 @@ public final class NeoCommercialLinePolicy {
   /**
    * Set {@code uOM} from the line's product unless the caller explicitly chose one.
    * <p>
-   * Public because {@code neo_create} (MCP) runs its own create pipeline rather than
+   * Public because {@code etendo_create} (MCP) runs its own create pipeline rather than
    * {@code NeoCrudHandler#executePostCreate}, and omitting this injection there made an otherwise
    * complete line body fail with a bare DAL 500 (IMP-15).
    *

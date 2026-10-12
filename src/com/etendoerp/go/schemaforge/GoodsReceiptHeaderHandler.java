@@ -240,13 +240,19 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static String buildInvoiceStatusSql(String whereClause) {
     // Three detection paths per receipt line, to handle the full invoice lifecycle:
     //
-    // msi_qty   — via M_MatchSI: populated by m_inout_post after the receipt is posted.
+    // msi_qty   — via M_MatchInv (the purchase-side match table — a receipt is never matched in
+    //              M_MatchSI): written by m_inout_post when the receipt is completed, and by
+    //              InvoiceLineLinker for a second or later partial receipt of an invoice line,
+    //              which the m_inoutline_id column cannot hold (ETP-5576).
     // direct_qty — via c_invoiceline.m_inoutline_id: set by InvoiceLineLinker when the
     //              invoice was created directly from this receipt.
     // ol_qty    — via c_orderline_id fallback: covers invoices created from the purchase
     //              order (not from the receipt) where m_inoutline_id is never set.
     //              Each line's contribution is capped at movementqty to avoid over-stating
     //              when the order invoice covers more units than this receipt delivered.
+    //
+    // The arms are combined with GREATEST, never added: the first receipt of an invoice line is
+    // linked by the column AND by the M_MatchInv row m_inout_post writes for it.
     return
       "SELECT iol.m_inout_id, "
       + "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 "
@@ -263,12 +269,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       + "  END "
       + "FROM m_inoutline iol "
       + "LEFT JOIN ("
-      + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
-      + "  FROM m_matchsi msi "
-      + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
-      + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-      + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
-      + "  GROUP BY msi.m_inoutline_id "
+      + InOutInvoiceLinks.matchedQtyPerInOutLineSql(InOutInvoiceLinks.MatchTable.PURCHASE)
       + ") msi_qty ON msi_qty.m_inoutline_id = iol.m_inoutline_id "
       + "LEFT JOIN ("
       + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
@@ -291,21 +292,23 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       + "GROUP BY iol.m_inout_id";
   }
 
+  /**
+   * Injects {@code linkedInvoices}: every invoice linked to one of this receipt's lines, through
+   * {@link InOutInvoiceLinks#linkedInvoiceIdsSql} — the invoice line's {@code M_InOutLine_ID},
+   * the {@code M_MatchInv} match table (read since ETP-5576: a second partial receipt of an
+   * invoice line can only be linked there) and the pre-existing shared {@code C_OrderLine_ID} arm.
+   */
+  // The sub-select is built from a fixed enum literal; every value is bound — no injection risk.
   @SuppressWarnings("java:S2077")
   private void enrichLinkedInvoices(JSONObject rec, String receiptId) {
     String sql =
         "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code "
-        + "FROM m_inoutline ril "
-        + "JOIN c_invoiceline il ON ("
-        + "  il.m_inoutline_id = ril.m_inoutline_id "
-        + "  OR (ril.c_orderline_id IS NOT NULL AND il.c_orderline_id = ril.c_orderline_id)"
-        + ") "
-        + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+        + "FROM (" + InOutInvoiceLinks.linkedInvoiceIdsSql(InOutInvoiceLinks.MatchTable.PURCHASE) + ") lk "
+        + "JOIN c_invoice i ON i.c_invoice_id = lk.c_invoice_id "
         + "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id "
-        + "WHERE ril.m_inout_id = ? AND ril.isactive = 'Y' "
-        + "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO','CL')";
+        + "WHERE i.isactive = 'Y' AND i.docstatus NOT IN ('VO','CL')";
     try (PreparedStatement ps = OBDal.getReadOnlyInstance().getConnection().prepareStatement(sql)) {
-      ps.setString(1, receiptId);
+      InOutInvoiceLinks.bindRepeated(ps, 1, receiptId, InOutInvoiceLinks.LINKED_INVOICES_PARAMS);
       JSONArray invoices = new JSONArray();
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

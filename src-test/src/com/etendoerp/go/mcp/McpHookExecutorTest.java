@@ -53,6 +53,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * The CDI lookup path of {@code resolveEntityHandler} is covered by integration tests.
  * {@code buildActionHookContext} is covered here with a statically mocked
  * {@code OBContext}; the CRUD/DEFAULTS context builders remain integration-covered.
+ *
+ * @covers com.etendoerp.go.mcp.McpHookExecutor
  */
 public class McpHookExecutorTest {
 
@@ -183,6 +185,31 @@ public class McpHookExecutorTest {
     assertEquals("validation_error", envelope.getString("error"));
     assertEquals(422, envelope.getInt(FIELD_STATUS));
     assertTrue(envelope.getString("detail").startsWith("No accounting schema"));
+  }
+
+  /**
+   * ETP-5529: a posting customization answers a locked document with a flat 422 body
+   * ({@code success}, the GO-locale {@code message}, {@code messageKeys}). Normalizing it for an
+   * agent must keep both — the message is the only localized text an MCP client gets, and the key
+   * is how it can tell this transient lock apart from a real posting error.
+   */
+  @Test
+  public void testNeoResponseToMcpResultKeepsPostingFailureMessageAndKeys() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("success", false);
+    body.put("message", "Este registro está siendo contabilizado por otro proceso");
+    body.put("messageKeys", new JSONArray().put("OtherPostingProcessActive"));
+    NeoResponse response = NeoResponse.error(422, body);
+
+    JSONObject result = McpHookExecutor.neoResponseToMcpResult(response);
+
+    assertTrue(result.getBoolean(FIELD_IS_ERROR));
+    JSONObject envelope = new JSONObject(
+        result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString(FIELD_TEXT));
+    assertEquals("validation_error", envelope.getString("error"));
+    assertEquals(422, envelope.getInt(FIELD_STATUS));
+    assertEquals("Este registro está siendo contabilizado por otro proceso", envelope.getString("message"));
+    assertEquals("OtherPostingProcessActive", envelope.getJSONArray("messageKeys").getString(0));
   }
 
   // ── runPreHook ────────────────────────────────────────────────────────

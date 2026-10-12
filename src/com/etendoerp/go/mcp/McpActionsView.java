@@ -29,14 +29,14 @@ import org.codehaus.jettison.json.JSONObject;
 import com.etendoerp.go.schemaforge.util.NeoActionContract;
 
 /**
- * Pure (DAL-free) re-shaper for {@code neo_schema({view:"actions"})} (IMP-6).
+ * Pure (DAL-free) re-shaper for {@code etendo_schema({view:"actions"})} (IMP-6).
  *
- * <p>A full {@code neo_schema} dump can carry ~97 fields for a compliance-heavy window, most of
+ * <p>A full {@code etendo_schema} dump can carry ~97 fields for a compliance-heavy window, most of
  * which are irrelevant to an agent that only wants to know which buttons/processes it can invoke.
  * The {@code type:"button"} fields are already fully described inline by
  * {@link McpSchemaFieldBuilder#buildSchemaFieldsArray} (name, label, {@code action},
  * {@code processType}/{@code processName}/{@code processId}, and either
- * {@code invokeVia:"neo_action"} or {@code invokable:false} + {@code notInvokableReason}) — this
+ * {@code invokeVia:"etendo_action"} or {@code invokable:false} + {@code notInvokableReason}) — this
  * view just filters the already-built field array down to those, no extra DAL access needed.
  *
  * <p><b>IMP-21:</b> the catalog stays complete — every button the window has is listed, including
@@ -87,7 +87,7 @@ final class McpActionsView {
   }
 
   /**
-   * Builds the {@code neo_schema({view:"actions"})} response shape: {@code {spec, entity,
+   * Builds the {@code etendo_schema({view:"actions"})} response shape: {@code {spec, entity,
    * actions, actionCount, invokableCount}}, dropping the full field dump.
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields)
@@ -102,7 +102,7 @@ final class McpActionsView {
    *
    * <p>For an entity that has fields AND declares actions — a window whose customization serves
    * actions no AD button column stands behind, such as the sales quotation's
-   * {@code rejectQuotation}. Before ETP-5535 such an action was reachable through {@code neo_action}
+   * {@code rejectQuotation}. Before ETP-5535 such an action was reachable through {@code etendo_action}
    * but listed nowhere, so an agent fell back on the AD button closest in meaning and failed there.
    * A declared entry carries {@code invokeVia}, so it counts towards {@code invokableCount} like any
    * callable button. With no declared action the response is byte-for-byte the 3-argument one.</p>
@@ -142,7 +142,7 @@ final class McpActionsView {
 
   /**
    * Same, also leaving out the buttons the customization excludes from agents
-   * ({@code NeoHandler#agentExcludedActions()}, ETP-5558) — {@code neo_action} refuses them.
+   * ({@code NeoHandler#agentExcludedActions()}, ETP-5558) — {@code etendo_action} refuses them.
    *
    * @param excluded the excluded action names
    */
@@ -166,7 +166,7 @@ final class McpActionsView {
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
     if (hasDeclared) {
       response.put("declaredActionsHint", "Entries carrying 'parameters' are served by this "
-          + "window's own logic rather than an AD button: call neo_action with action = the "
+          + "window's own logic rather than an AD button: call etendo_action with action = the "
           + "entry's 'action', id = the record its idDescription names, and parameters matching "
           + "its schema. Prefer them over an AD button with a similar meaning.");
     }
@@ -177,14 +177,14 @@ final class McpActionsView {
    * Shape the AD buttons of a schema field array the way {@code MCP_CONFIG.actions} and the
    * customization's agent-excluded actions say (ETP-5558), leaving every other field untouched.
    *
-   * <p>Every projection of {@code neo_schema} that describes a button goes through here —
+   * <p>Every projection of {@code etendo_schema} that describes a button goes through here —
    * {@code view:"actions"}, {@code view:"full"} and its {@code fields:[…]} whitelist — so they
    * cannot disagree. Before this, only the actions view was shaped: a blind agent read the full
    * view, found {@code aPRMProcessPayment} still offering Void, and offered it to its user. A
    * hidden or excluded button is left out, a redirected one is withdrawn with {@code useInstead},
    * a narrowed one keeps only its allowed {@code actionValues}, and an unusable configuration
    * withdraws every button. A button is matched by its field name and by its DB column, the two
-   * names {@code neo_action} fires it by.</p>
+   * names {@code etendo_action} fires it by.</p>
    *
    * @param fields   the full schema field array; its kept buttons are shaped in place
    * @param config   the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
@@ -340,7 +340,7 @@ final class McpActionsView {
 
   /**
    * {@link #buildDeclaredResponse(String, String, Map)} that also reports an unusable
-   * {@code MCP_CONFIG} (ETP-5558): {@code neo_action} then refuses every action, so none is listed
+   * {@code MCP_CONFIG} (ETP-5558): {@code etendo_action} then refuses every action, so none is listed
    * as invokable.
    *
    * @param config the entity's {@code MCP_CONFIG.actions}, or {@code null} for none
@@ -359,7 +359,7 @@ final class McpActionsView {
     response.put(KEY_ACTIONS, actions);
     response.put("actionCount", actions.length());
     response.put(KEY_INVOKABLE_COUNT, countInvokable(actions));
-    response.put("hint", "Call neo_action with this spec and entity, id = the record each action "
+    response.put("hint", "Call etendo_action with this spec and entity, id = the record each action "
         + "acts on (its idDescription says which), action = one of the names above and "
         + "parameters matching its schema. Undeclared or mistyped parameters are refused with 422 "
         + "before anything runs.");
@@ -395,7 +395,7 @@ final class McpActionsView {
   }
 
   /**
-   * An unusable {@code MCP_CONFIG} makes {@code neo_action} refuse every action of the entity
+   * An unusable {@code MCP_CONFIG} makes {@code etendo_action} refuse every action of the entity
    * (ETP-5558), so the catalogue must not call any of them invokable.
    */
   private static void withdrawAllIfUnusable(JSONArray actions, McpActionsSection.View config)
@@ -414,7 +414,7 @@ final class McpActionsView {
     action.put(McpSchemaFieldBuilder.KEY_NOT_INVOKABLE_REASON, reason);
   }
 
-  /** @return how many of the catalog's actions {@code neo_action} can actually run (IMP-21). */
+  /** @return how many of the catalog's actions {@code etendo_action} can actually run (IMP-21). */
   private static int countInvokable(JSONArray actions) throws JSONException {
     int invokable = 0;
     for (int i = 0; i < actions.length(); i++) {

@@ -33,7 +33,10 @@ Only these public capabilities are accepted:
 - `public-api:write`
 - `public-api:process`
 
-They are mapped server-side to internal scopes after role access checks. A private
+They are mapped server-side to internal scopes after role access checks — `etendo:read`,
+`etendo:write` and `etendo:process`. Keys created before ETP-5602 store the deprecated `neo:read`,
+`neo:write` and `neo:process` names; they keep working and map back to the same capabilities
+(see `neo-headless.md` §4.1.1). A private
 `neo:public-api-key` marker distinguishes these records from administrator/MCP clients. Wildcards,
 unknown capabilities, AD identity fields, and raw internal scopes are never accepted from callers.
 
@@ -64,6 +67,7 @@ through a later list or update request. Rotation invalidates the previous secret
 
 The `client_credentials` grant returns an opaque token. `/sws/neo/*` accepts it through
 `NeoAuthenticator`'s existing `OAuth2Filter.validateToken` fallback, so the resolved identity,
-expiry, revocation, and `neo:read`/`neo:write` checks remain server-side. End-to-end consumption
+expiry, revocation, and `etendo:read`/`etendo:write` checks (with their deprecated `neo:` aliases)
+remain server-side. End-to-end consumption
 still requires a healthy local Etendo deployment and tenant/user fixtures; unit tests alone do not
 claim that flow.

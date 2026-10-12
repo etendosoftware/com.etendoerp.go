@@ -26,9 +26,9 @@ final class PublicApiKeyPolicy {
   private static final Map<String, String> CAPABILITY_SCOPES;
   static {
     Map<String, String> capabilities = new LinkedHashMap<>();
-    capabilities.put(CAPABILITY_READ, "neo:read");
-    capabilities.put(CAPABILITY_WRITE, "neo:write");
-    capabilities.put(CAPABILITY_PROCESS, "neo:process");
+    capabilities.put(CAPABILITY_READ, ApiScopes.READ);
+    capabilities.put(CAPABILITY_WRITE, ApiScopes.WRITE);
+    capabilities.put(CAPABILITY_PROCESS, ApiScopes.PROCESS);
     CAPABILITY_SCOPES = Collections.unmodifiableMap(capabilities);
   }
 
@@ -100,7 +100,8 @@ final class PublicApiKeyPolicy {
     }
     for (String scope : scopes.trim().split("\\s+")) {
       for (Map.Entry<String, String> entry : CAPABILITY_SCOPES.entrySet()) {
-        if (entry.getValue().equals(scope)) {
+        // Keys issued before ETP-5602 carry neo: scopes; they map to the same capabilities.
+        if (entry.getValue().equals(ApiScopes.canonical(scope))) {
           result.add(entry.getKey());
         }
       }

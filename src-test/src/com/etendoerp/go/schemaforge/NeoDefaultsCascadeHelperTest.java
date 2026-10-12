@@ -60,6 +60,8 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * <p>Covers the callout cascade, interactive cascade, FK cleanup,
  * identifier propagation, safe type defaults, entity resolution,
  * and protected-field semantics.</p>
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper
  */
 public class NeoDefaultsCascadeHelperTest {
 
@@ -1985,6 +1987,59 @@ public class NeoDefaultsCascadeHelperTest {
 
     assertFalse("Null reference should not inject anything",
         body.has("field"));
+  }
+
+  // ===================================================================
+  // hasSafeTypeDefault — decides whether the create path may skip the DB DEFAULT
+  // ===================================================================
+
+  private static Column columnWithReference(String refId) {
+    Column col = mock(Column.class);
+    Reference ref = mock(Reference.class);
+    when(ref.getId()).thenReturn(refId);
+    when(col.getReference()).thenReturn(ref);
+    return col;
+  }
+
+  @Test
+  public void testHasSafeTypeDefaultFalseForNullReference() {
+    Column col = mock(Column.class);
+    when(col.getReference()).thenReturn(null);
+
+    assertFalse("A column without a reference has no safe-type default",
+        NeoDefaultsCascadeHelper.hasSafeTypeDefault(col));
+  }
+
+  @Test
+  public void testHasSafeTypeDefaultTrueForYesNoAndNumericReferences() {
+    for (String refId : Arrays.asList("20", "11", "12", "22", "29")) {
+      assertTrue("Reference " + refId + " has a safe-type default",
+          NeoDefaultsCascadeHelper.hasSafeTypeDefault(columnWithReference(refId)));
+    }
+  }
+
+  @Test
+  public void testHasSafeTypeDefaultFalseForPriceAndListAndOtherReferences() {
+    // 800008 = Price, 800019 = General Quantity, 17 = List: none of them is filled by
+    // injectSafeTypeDefault, so the DB DEFAULT must stay reachable for them.
+    for (String refId : Arrays.asList("800008", "800019", "17")) {
+      assertFalse("Reference " + refId + " has no safe-type default",
+          NeoDefaultsCascadeHelper.hasSafeTypeDefault(columnWithReference(refId)));
+    }
+  }
+
+  @Test
+  public void testHasSafeTypeDefaultAgreesWithInjectSafeTypeDefault() throws Exception {
+    // The two methods share their reference constants: whatever hasSafeTypeDefault promises,
+    // injectSafeTypeDefault must actually fill, and nothing else.
+    for (String refId : Arrays.asList("20", "11", "12", "22", "29", "800008", "800019", "17",
+        "10", "19")) {
+      Column col = columnWithReference(refId);
+      JSONObject body = new JSONObject();
+      NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, "field", col);
+      assertEquals("Reference " + refId, body.has("field"),
+          NeoDefaultsCascadeHelper.hasSafeTypeDefault(col));
+    }
   }
 
   // ===================================================================

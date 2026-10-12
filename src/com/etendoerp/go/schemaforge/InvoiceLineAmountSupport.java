@@ -70,11 +70,11 @@ final class InvoiceLineAmountSupport {
    * calling {@link NeoCommercialLinePolicy#injectCommercialAmounts} explicitly (T12) over the
    * line's quantity, price, gross price and tax.
    *
-   * <p><b>Why here.</b> {@code neo_create} is a separate pipeline from the REST create path and
+   * <p><b>Why here.</b> {@code etendo_create} is a separate pipeline from the REST create path and
    * never reaches {@code NeoCrudHandler#executePostCreate}, where every other channel gets these
    * amounts. Without this a line an agent created persisted {@code LineNetAmt = 0} and
-   * {@code Line_Gross_Amount = 0} (Fernet at 18, qty 10, 21 %: {@code neo_batch} 180 / 217.8,
-   * {@code neo_create} 0 / 0). The fix lives in this customization, not in the shared MCP path,
+   * {@code Line_Gross_Amount = 0} (Fernet at 18, qty 10, 21 %: {@code etendo_batch} 180 / 217.8,
+   * {@code etendo_create} 0 / 0). The fix lives in this customization, not in the shared MCP path,
    * so no other entity changes.
    *
    * <p><b>Never overwrites the caller.</b> Each amount is written only when
@@ -88,12 +88,12 @@ final class InvoiceLineAmountSupport {
    * reaches its pre-hook before the create cascade resolves one — this abstains, and
    * {@code executePostCreate} derives both amounts after its cascade, as it always has. With a tax,
    * {@code executePostCreate} runs the same function over the same inputs afterwards and writes the
-   * same values, so the pre-hook's write changes nothing on those channels. On {@code neo_create}
+   * same values, so the pre-hook's write changes nothing on those channels. On {@code etendo_create}
    * the tax is mandatory and already resolved by the defaults cascade when the pre-hook runs.
    *
-   * <p><b>Typed values.</b> On {@code neo_create} the pre-hook runs after
+   * <p><b>Typed values.</b> On {@code etendo_create} the pre-hook runs after
    * {@code coerceFieldTypes}, so the amounts are written as {@link BigDecimal}, the DAL type of
-   * both columns. The value is the policy's own, unrounded, exactly what {@code neo_batch}
+   * both columns. The value is the policy's own, unrounded, exactly what {@code etendo_batch}
    * persists for the same line.
    *
    * <p>Total: never throws.

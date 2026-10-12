@@ -26,9 +26,9 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * Pure (DAL-free) re-shaper for the {@code neo_defaults} response (IMP-7).
+ * Pure (DAL-free) re-shaper for the {@code etendo_defaults} response (IMP-7).
  *
- * <p>{@code neo_defaults} pre-fills every column of a new record — for compliance-heavy specs
+ * <p>{@code etendo_defaults} pre-fills every column of a new record — for compliance-heavy specs
  * (invoices, payments) that is ~65 keys, most of them audit/compliance flags the server owns and
  * the agent should never touch. The optional {@code view} argument lets the caller collapse that
  * noise:
@@ -53,7 +53,7 @@ import org.codehaus.jettison.json.JSONObject;
  * agent's problem and would only pad the list.
  *
  * <p>The default (no {@code view}) response is deliberately left untouched — same reasoning as
- * {@code neo_schema}'s: the projections are the authoritative agent-facing surface, and the flat dump
+ * {@code etendo_schema}'s: the projections are the authoritative agent-facing surface, and the flat dump
  * keeps its historical shape for backward compatibility.
  *
  * <p>The classification input — the set of writable DAL property names — is computed by
@@ -108,7 +108,7 @@ final class McpDefaultsView {
    * groups. Returns {@code response} untouched when {@code view} is not a grouping view or the
    * payload has no {@code defaults} object, so the default (full) behavior is preserved.
    *
-   * @param response      the original neo_defaults body
+   * @param response      the original etendo_defaults body
    * @param editableProps DAL property names the agent may write ({@code editable} visibility)
    * @param view          the requested view ({@code grouped}/{@code minimal}); anything else is a no-op
    */

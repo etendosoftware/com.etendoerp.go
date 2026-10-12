@@ -65,6 +65,8 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * {@link SiiConfigDeactivateHandler#smartDeactivate}: config not found, no adoption date (→
  * delete), adoption date set with SII invoices (→ null / fall through to CRUD), and adoption date
  * set without SII invoices (→ delete).
+ *
+ * @covers com.etendoerp.go.schemaforge.handlers.SiiConfigDeactivateHandler
  */
 public class SiiConfigDeactivateHandlerTest {
 
@@ -482,7 +484,7 @@ public class SiiConfigDeactivateHandlerTest {
   // ─── afterHandle(): ETP-5117 twice-a-day auto-send schedule ─────────────────
 
   private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
-      "Automatic SII invoice sending (Etendo GO)";
+      "Automatic SII invoice sending (Etendo)";
   private static final String CLIENT_ID = "client-001";
   private static final String USER_ID = "user-001";
   private static final String ROLE_ID = "role-001";

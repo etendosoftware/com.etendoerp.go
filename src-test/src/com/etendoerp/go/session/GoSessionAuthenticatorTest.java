@@ -31,7 +31,10 @@ import org.junit.Test;
 
 /**
  * Red-first unit tests for {@link GoSessionAuthenticator} (ETP-4575): the cookie → auth decision,
- * including CSRF/Origin enforcement on unsafe methods. {@link GoSessionService} is mocked, so no DB.
+ * including CSRF/Origin enforcement on unsafe methods and the ETP-5675 account header on every
+ * method. {@link GoSessionService} is mocked, so no DB.
+ *
+ * @covers com.etendoerp.go.session.GoSessionAuthenticator
  */
 public class GoSessionAuthenticatorTest {
 
@@ -41,6 +44,9 @@ public class GoSessionAuthenticatorTest {
   private static final String CSRF = "csrf-token-1234567890";
   private static final String CSRF_TOKEN_INVALID = "CSRF validation failed";
   private static final String ORIGIN_NOT_ALLOWED = "Origin not allowed";
+  private static final String ACCOUNT_MISMATCH = "Session belongs to another account";
+  private static final String SESSION_ACCOUNT = "ACCOUNT-B";
+  private static final String OTHER_ACCOUNT = "ACCOUNT-C";
 
   @Test
   public void noCookieYieldsNoSession() {
@@ -189,6 +195,68 @@ public class GoSessionAuthenticatorTest {
     new GoSessionAuthenticator(service).authenticate(req);
 
     verify(service, never()).renewIdleExpiry(any());
+  }
+
+  // ===================== ETP-5675 — account header =====================
+
+  @Test
+  public void readFromATabOfAnotherAccountIsRefused() {
+    GoSessionService service = serviceResolving(recordForAccount(SESSION_ACCOUNT));
+    HttpServletRequest req = mockRequest("GET", RAW_TOKEN, null, null);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn(OTHER_ACCOUNT);
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(GoSessionAuthResult.Status.CSRF_FAILED, result.getStatus());
+    assertEquals(ACCOUNT_MISMATCH, result.getRefusalMessage());
+    verify(service, never()).renewIdleExpiry(any());
+  }
+
+  @Test
+  public void accountMismatchIsReportedBeforeAStaleCsrf() {
+    GoSessionService service = serviceResolving(recordForAccount(SESSION_ACCOUNT));
+    HttpServletRequest req = mockRequest("POST", RAW_TOKEN, APP_ORIGIN, "stale-proof");
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn(OTHER_ACCOUNT);
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(ACCOUNT_MISMATCH, result.getRefusalMessage());
+  }
+
+  @Test
+  public void matchingAccountHeaderIsAuthenticated() {
+    GoSessionRecord sessionRecord = recordForAccount(SESSION_ACCOUNT);
+    GoSessionService service = serviceResolving(sessionRecord);
+    HttpServletRequest req = mockRequest("GET", RAW_TOKEN, null, null);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn(SESSION_ACCOUNT);
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(GoSessionAuthResult.Status.AUTHENTICATED, result.getStatus());
+    assertSame(sessionRecord, result.getRecord());
+  }
+
+  @Test
+  public void blankAccountHeaderIsNotChecked() {
+    GoSessionService service = serviceResolving(recordForAccount(SESSION_ACCOUNT));
+    HttpServletRequest req = mockRequest("GET", RAW_TOKEN, null, null);
+    when(req.getHeader(GoSessionSecurity.ACCOUNT_HEADER)).thenReturn("  ");
+
+    GoSessionAuthResult result = new GoSessionAuthenticator(service).authenticate(req);
+
+    assertEquals(GoSessionAuthResult.Status.AUTHENTICATED, result.getStatus());
+  }
+
+  private static GoSessionService serviceResolving(GoSessionRecord sessionRecord) {
+    GoSessionService service = mock(GoSessionService.class);
+    when(service.resolve(RAW_TOKEN)).thenReturn(sessionRecord);
+    return service;
+  }
+
+  private static GoSessionRecord recordForAccount(String accountId) {
+    GoSessionRecord sessionRecord = recordWithCsrf(CSRF);
+    sessionRecord.setAccountId(accountId);
+    return sessionRecord;
   }
 
   private static GoSessionRecord recordWithCsrf(String csrf) {

@@ -37,10 +37,10 @@ import org.openbravo.test.base.OBBaseTest;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * End-to-end integration tests for the {@code neo_widget} MCP tool (gap G4, ETP-4284),
+ * End-to-end integration tests for the {@code etendo_widget} MCP tool (gap G4, ETP-4284),
  * run against a live Etendo instance via {@link OBBaseTest}.
  * <p>
- * These tests exercise {@link McpToolRouter#route} for the real {@code neo_widget}
+ * These tests exercise {@link McpToolRouter#route} for the real {@code etendo_widget}
  * tool, which resolves the selected widget to its backing {@code dashboard}-spec
  * entity, looks up the entity's {@code NeoHandler} via its {@code Java_Qualifier},
  * and invokes it with a GET {@link com.etendoerp.go.schemaforge.NeoContext}.
@@ -55,6 +55,9 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * empty-state ({@code {response:{data:[],count:0}}}) for clients with no activity.
  * To assert non-zero counts you would additionally need a seeded client with
  * completed sales invoices, products, sellers and outstanding amounts.
+ *
+ * @covers com.etendoerp.go.mcp.McpToolRouter
+ * @covers com.etendoerp.go.mcp.McpWidgetHandler
  */
 public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
 
@@ -74,7 +77,7 @@ public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
   public void setUp() {
     setTestAdminContext();
     router = new McpToolRouter();
-    assumeTrue("Skipping neo_widget integration test: the 'dashboard' spec is not "
+    assumeTrue("Skipping etendo_widget integration test: the 'dashboard' spec is not "
         + "configured in this instance (push-to-neo the dashboard spec first).",
         dashboardSpecExists());
   }
@@ -124,7 +127,7 @@ public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
    * message in {@code content[0].text}). So the only way to detect the limitation is to
    * inspect the returned content, not to catch a thrown exception.
    * <p>
-   * In production neo_widget always runs inside the {@code McpServlet} HTTP request
+   * In production etendo_widget always runs inside the {@code McpServlet} HTTP request
    * where the servlet context is present, so this path is validated live via the MCP
    * post-deploy check — it is an environment-only gap, NOT a silent coverage loss. When
    * we detect this specific limitation we SKIP the data/handler-dependent assertions
@@ -133,7 +136,7 @@ public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
    * never mask genuine bugs). The routing + unknown-widget path is still proven by
    * {@link #testUnknownWidgetReturnsErrorContent()}, which short-circuits before CDI.
    *
-   * @param result the MCP content returned by {@code neo_widget}
+   * @param result the MCP content returned by {@code etendo_widget}
    * @return the error text if the result is an error, otherwise {@code null} (used only
    *         for the failure message; the skip happens inside this method)
    */
@@ -149,10 +152,10 @@ public class NeoWidgetMcpIntegrationTest extends OBBaseTest {
     if (isServletCtxLimitation) {
       // Actively SKIP (assumeTrue(..., false)): the servlet-context-only handler path
       // is validated live via MCP post-deploy, not here.
-      assumeTrue("Skipping widget handler invocation: neo_widget handler requires a "
+      assumeTrue("Skipping widget handler invocation: etendo_widget handler requires a "
           + "servlet context / CDI bean manager not available in OBBaseTest "
           + "(handler resolution needs the McpServlet HTTP request). This path is "
-          + "validated live via the MCP post-deploy; neo_widget routing is still "
+          + "validated live via the MCP post-deploy; etendo_widget routing is still "
           + "covered by the unknown-widget test.", false);
     }
     // Any other error is a real failure: return the text so the caller's

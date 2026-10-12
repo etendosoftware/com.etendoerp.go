@@ -115,7 +115,7 @@ public final class CompanyInvitationEmailContract implements EmailContract {
     Invitation inv = invitation.get();
     String companyName = inv.getClient() != null && StringUtils.isNotBlank(inv.getClient().getName())
         ? inv.getClient().getName()
-        : "Etendo Go";
+        : "Etendo";
     String language = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_LANGUAGE);
 

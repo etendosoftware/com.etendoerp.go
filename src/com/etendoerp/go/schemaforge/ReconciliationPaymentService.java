@@ -67,13 +67,21 @@ final class ReconciliationPaymentService {
    * Registers a bank-reconciliation payment against an invoice installment, in either the same
    * currency as the account ({@code rate} = {@link BigDecimal#ONE}) or a different one. The payment
    * is created for {@code paymentAmount} (invoice currency) and the financial transaction is booked
-   * for the exact {@code accountAmount} (account currency) — the caller
-   * ({@link ReconciliationFlowSupport}) computes {@code accountAmount} as
-   * {@code paymentAmount × rate}, per the "invoice amount times its own exchange rate" contract:
-   * the rate comes from the invoice's own exchange rate (see
-   * {@link PaymentCurrencyConverter#resolveInvoiceRate}), not from what the statement line happens
-   * to carry, so a mismatch between the two settles the invoice correctly and simply leaves the
-   * difference unreconciled on the statement line (handled by the caller's remaining-amount check).
+   * for the exact {@code accountAmount} (account currency); both, and {@code rate}, are stored
+   * verbatim. Which rate the caller passes depends on the mode of the request:
+   *
+   * <ul>
+   * <li><b>Default</b> ({@link ReconciliationFlowSupport#createInvoicePayments}): the invoice's own
+   * exchange rate (see {@link PaymentCurrencyConverter#resolveInvoiceRate}), with
+   * {@code accountAmount = paymentAmount × rate}, not what the statement line happens to carry — so
+   * a mismatch between the two settles the invoice correctly and simply leaves the difference
+   * unreconciled on the statement line (handled by the caller's remaining-amount check).</li>
+   * <li><b>Explicit conversion</b> ({@link ReconciliationConversionSupport}, ETP-5657): the
+   * {@code accountAmount} the user stated (what the bank moved) and a rate chosen so that
+   * {@code paymentAmount × rate} rounds back to it exactly (see
+   * {@link PaymentCurrencyConverter#consistentRate}). Core then records the realized exchange
+   * difference against the invoice's rate when the payment is posted.</li>
+   * </ul>
    *
    * <p>{@code chosenMethod}, when non-null, is the payment method the user picked in the
    * reconciliation modal (one method for the whole match); validated against the account/direction.

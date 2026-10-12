@@ -62,7 +62,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
  * {@code /sws/neo/*} endpoints also use. Fixing it there would change behaviour for both, so by
  * decision this compensation sits in the MCP write path and those two callers keep the existing
  * behaviour. Both MCP write verbs are covered: {@code McpToolRouter#handleCreate} for a single
- * record, and — since ETP-5415 — each {@code neo_batch} operation, through the per-operation
+ * record, and — since ETP-5415 — each {@code etendo_batch} operation, through the per-operation
  * preprocessor {@code BatchService} invokes once the op's references are resolved. Anything that
  * reaches {@code NeoCrudHandler} by another route (the React frontend, REST {@code /sws/neo/*},
  * REST {@code /sws/neo/batch}) is NOT covered, by the decision above.

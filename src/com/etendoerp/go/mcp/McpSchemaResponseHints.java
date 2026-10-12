@@ -35,7 +35,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
- * The derivations {@code neo_schema} adds on top of the field list: what a caller must supply,
+ * The derivations {@code etendo_schema} adds on top of the field list: what a caller must supply,
  * and what the server will fill in for it.
  *
  * <p>Split out of {@link McpToolRouter} under Sonar's class-size rule (S1448). They belong
@@ -105,7 +105,7 @@ final class McpSchemaResponseHints {
       }
       return McpSchemaCreateView.resolvedDefaultNames(defaults.getBody());
     } catch (Exception e) {
-      log.warn("neo_schema view:create could not resolve defaults for {}/{}; falling back to the "
+      log.warn("etendo_schema view:create could not resolve defaults for {}/{}; falling back to the "
           + "AD_Column.DefaultValue rule", specName, entityName, e);
       return Collections.emptySet();
     }

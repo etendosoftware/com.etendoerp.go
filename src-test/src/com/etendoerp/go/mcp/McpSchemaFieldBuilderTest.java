@@ -49,10 +49,12 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -66,7 +68,9 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * <p>Extracted from {@code McpToolRouterSupportTest} together with the production class
  * (ETP-4510, Sonar S1448) — covers AD_Column → JSON field mapping (type/selector inference,
  * visibility, defaults, business-critical flags, button/process metadata) and the
- * per-entity field metadata load used by neo_schema.</p>
+ * per-entity field metadata load used by etendo_schema.</p>
+ *
+ * @covers com.etendoerp.go.mcp.McpSchemaFieldBuilder
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -121,7 +125,7 @@ class McpSchemaFieldBuilderTest {
         "'18', foreignKey",
         "'30', foreignKey",
         // ETP-5184: Image BLOB. Before this case existed it fell through to "string", so
-        // neo_schema advertised an image column as ordinary text.
+        // etendo_schema advertised an image column as ordinary text.
         "'4AA6C3BE9D3B4D84A3B80489505A23E5', image"
     })
     void knownRefIdsMappedCorrectly(String refId, String expectedType) {
@@ -340,15 +344,89 @@ class McpSchemaFieldBuilderTest {
   @DisplayName("addDefaultExpression")
   class AddDefaultExpression {
 
+    private void addDefaultExpression(JSONObject fieldObj, Column col, Entity dalEntity)
+        throws Exception {
+      invokeStatic("addDefaultExpression",
+          new Class<?>[]{ JSONObject.class, Column.class, Entity.class },
+          fieldObj, col, dalEntity);
+    }
+
+    /** A DAL entity whose FK property for {@code dbColName} targets {@code target}. */
+    private Entity entityWithFk(String dbColName, Entity target, Property... others) {
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+      when(prop.getTargetEntity()).thenReturn(target);
+      Entity entity = mock(Entity.class);
+      when(entity.getPropertyByColumnName(dbColName)).thenReturn(prop);
+      List<Property> all = new java.util.ArrayList<>(List.of(others));
+      all.add(prop);
+      when(entity.getProperties()).thenReturn(all);
+      return entity;
+    }
+
+    /**
+     * A "0" default on an FK whose target holds a record with id "0" (AD_Org "*") is a usable
+     * value, not the resolve-later placeholder: it must be reported as the literal default.
+     */
+    @Test
+    void zeroDefaultThatIsARealRecordIsReportedAsIs() throws Exception {
+      Column col = mock(Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("AD_Org_ID");
+      Entity org = mock(Entity.class);
+      when(org.getName()).thenReturn("SchemaZeroRealOrg");
+      Entity calendar = entityWithFk("AD_Org_ID", org);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get("SchemaZeroRealOrg", "0")).thenReturn(mock(Organization.class));
+
+      JSONObject fieldObj = new JSONObject();
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        dal.when(OBDal::getInstance).thenReturn(obDal);
+        addDefaultExpression(fieldObj, col, calendar);
+      }
+
+      assertEquals("0", fieldObj.getString("defaultExpression"));
+      assertFalse(fieldObj.has("defaultSource"));
+      assertFalse(fieldObj.has("defaultHint"));
+    }
+
+    /**
+     * The document-type target holds a "0" record too ("** New **"), yet on an entity with a
+     * sibling FK to the same target "0" stays the placeholder the write path resolves from it.
+     */
+    @Test
+    void zeroDefaultWithSiblingFkStaysThePlaceholder() throws Exception {
+      Column col = mock(Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("C_DocType_ID");
+      Entity docType = mock(Entity.class);
+      when(docType.getName()).thenReturn("SchemaZeroSiblingDocType");
+      Property sibling = mock(Property.class);
+      when(sibling.isPrimitive()).thenReturn(false);
+      when(sibling.getTargetEntity()).thenReturn(docType);
+      Entity order = entityWithFk("C_DocType_ID", docType, sibling);
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get("SchemaZeroSiblingDocType", "0")).thenReturn(mock(Organization.class));
+
+      JSONObject fieldObj = new JSONObject();
+      try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+          MockedStatic<OBContext> ctx = mockStatic(OBContext.class)) {
+        dal.when(OBDal::getInstance).thenReturn(obDal);
+        addDefaultExpression(fieldObj, col, order);
+      }
+
+      assertFalse(fieldObj.has("defaultExpression"));
+      assertEquals("server", fieldObj.getString("defaultSource"));
+    }
+
     @Test
     void addsNonBlankDefault() throws Exception {
       org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
       when(col.getDefaultValue()).thenReturn("@SQL=SELECT 1");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
       assertEquals("@SQL=SELECT 1", fieldObj.getString("defaultExpression"));
     }
 
@@ -358,9 +436,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDefaultValue()).thenReturn(null);
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
       assertFalse(fieldObj.has("defaultExpression"));
     }
 
@@ -370,17 +446,15 @@ class McpSchemaFieldBuilderTest {
       when(col.getDefaultValue()).thenReturn("   ");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
       assertFalse(fieldObj.has("defaultExpression"));
     }
 
     /**
      * ETP-4288: "0" is a legacy AD placeholder on FK (`_ID`) columns meaning "resolve via
      * callout/session logic" — it is not a usable FK value (see DocTypeResolver on the write
-     * path). neo_schema must never surface it as a literal defaultExpression, since an agent
-     * reading only the schema would treat "0" as a valid id and fail on neo_create/neo_update.
+     * path). etendo_schema must never surface it as a literal defaultExpression, since an agent
+     * reading only the schema would treat "0" as a valid id and fail on etendo_create/etendo_update.
      */
     @Test
     void legacyZeroFkSentinelReplacedWithDynamicHint() throws Exception {
@@ -389,14 +463,12 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("C_DocType_ID");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertFalse(fieldObj.has("defaultExpression"));
       assertEquals("server", fieldObj.getString("defaultSource"));
       assertEquals("32-char hex ID (FK)", fieldObj.getString("defaultFormat"));
-      assertEquals("Resolved per-tenant at request time — call neo_defaults to get the value",
+      assertEquals("Resolved per-tenant at request time — call etendo_defaults to get the value",
           fieldObj.getString("defaultHint"));
     }
 
@@ -412,9 +484,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("ChargeAmt");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertEquals("0", fieldObj.getString("defaultExpression"));
       assertFalse(fieldObj.has("defaultSource"));
@@ -434,9 +504,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("C_Currency_ID");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertEquals("@C_Currency_ID@", fieldObj.getString("defaultExpression"));
       assertFalse(fieldObj.has("defaultSource"));
@@ -456,9 +524,7 @@ class McpSchemaFieldBuilderTest {
       when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
 
       JSONObject fieldObj = new JSONObject();
-      invokeStatic("addDefaultExpression",
-          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
-          fieldObj, col);
+      addDefaultExpression(fieldObj, col, null);
 
       assertFalse(fieldObj.has("defaultExpression"));
       assertEquals("server", fieldObj.getString("defaultSource"));
@@ -645,7 +711,7 @@ class McpSchemaFieldBuilderTest {
    * Rewritten for IMP-39 (ETP-5335): the predicate gained a third argument and a third question.
    *
    * <p>It used to answer "is this column active and not an audit column". It now also asks whether
-   * the spec exposes it — {@code neo_schema} stopped naming a field the write verbs and the filter
+   * the spec exposes it — {@code etendo_schema} stopped naming a field the write verbs and the filter
    * path refuse, which is the three-way agreement IMP-39 exists to produce. The two exemptions it
    * carries are the reason this is a predicate and not a set lookup, and both are asserted below
    * because each was a measured decision: a button is always published (IMP-21 — an excluded action
@@ -707,8 +773,8 @@ class McpSchemaFieldBuilderTest {
     }
 
     /**
-     * IMP-39. Before this, {@code neo_schema} named a field that {@code neo_create} now refuses
-     * with {@code field_not_allowed} and that {@code neo_list} refuses as a filter key — an agent
+     * IMP-39. Before this, {@code etendo_schema} named a field that {@code etendo_create} now refuses
+     * with {@code field_not_allowed} and that {@code etendo_list} refuses as a filter key — an agent
      * was told a field existed by one tool and denied it by three.
      */
     @Test
@@ -863,7 +929,7 @@ class McpSchemaFieldBuilderTest {
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("Processed", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("etendo_action", fieldObj.getString("invokeVia"));
       assertEquals("OBUIAPP", fieldObj.getString("processType"));
       assertEquals("Complete Order", fieldObj.getString("processName"));
       assertEquals("OBUIAPP-PROC-001", fieldObj.getString("processId"));
@@ -890,14 +956,14 @@ class McpSchemaFieldBuilderTest {
 
       assertEquals("Y", fieldObj.getString("triggerValue"));
       assertEquals("DocAction", fieldObj.getString("action"));
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("etendo_action", fieldObj.getString("invokeVia"));
       assertEquals("Classic", fieldObj.getString("processType"));
       assertEquals("Post Document", fieldObj.getString("processName"));
       assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
     }
 
     /**
-     * IMP-21: a button with no process behind it has nothing for {@code neo_action} to run, so it
+     * IMP-21: a button with no process behind it has nothing for {@code etendo_action} to run, so it
      * must not claim {@code invokeVia} — it used to, which is how {@code CreateFrom} was advertised
      * as callable while carrying neither {@code processName} nor {@code processId}.
      */
@@ -931,7 +997,7 @@ class McpSchemaFieldBuilderTest {
 
     /**
      * IMP-21: 17 of the 22 sales-invoice actions were curated {@code discarded} and still
-     * advertised {@code invokeVia:"neo_action"}. A discarded action stays in the catalog — the
+     * advertised {@code invokeVia:"etendo_action"}. A discarded action stays in the catalog — the
      * agent should know it exists — but is reported as out of scope, not as callable.
      */
     @Test
@@ -984,7 +1050,7 @@ class McpSchemaFieldBuilderTest {
               String.class, boolean.class },
           fieldObj, col, "system", false);
 
-      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("etendo_action", fieldObj.getString("invokeVia"));
       assertFalse(fieldObj.has("invokable"));
       assertFalse(fieldObj.has("notInvokableReason"));
     }

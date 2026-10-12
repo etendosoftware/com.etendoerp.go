@@ -55,11 +55,14 @@ import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.MODIFIED;
 import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.PERIOD_KEY;
 import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.SINCE_KEY;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -165,9 +168,25 @@ public class AbstractFiscalHandlerTest {
 
   private NeoServlet servlet;
 
+  /**
+   * ETP-5546 — {@link AbstractFiscalHandler#handle} now gates every /fiscal303 and /fiscal349
+   * sub-route on the Tax Report window grant before any of the routing below runs. Default every
+   * test to "granted" here so the pre-existing routing tests keep exercising what they were
+   * written for; the denial itself gets its own tests below with this stub overridden to deny.
+   */
+  private MockedStatic<NeoAccessHelper> accessMock;
+
   @Before
   public void setUp() {
     servlet = mock(NeoServlet.class);
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+  }
+
+  @After
+  public void tearDown() {
+    accessMock.close();
   }
 
   // ── declarations entity ───────────────────────────────────────────
@@ -241,6 +260,49 @@ public class AbstractFiscalHandlerTest {
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         anyString());
+  }
+
+  // ── window-access gate (ETP-5546) ─────────────────────────────────
+
+  /**
+   * ETP-5546 — a role without the Tax Report window grant (the "Modelos Fiscales" access proxy,
+   * ETP-5116) gets 403 from {@code handle()} before any routing — declarations, incidents, boxes
+   * or a known entity alike, since this gate runs first. Covers the "declarations" sub-route
+   * explicitly, which otherwise bypasses {@code isKnownEntity}/the year-period gate entirely.
+   */
+  @Test
+  public void testWindowAccessDeniedReturnsForbiddenForDeclarations() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+
+    StubHandler handler = new StubHandler(servlet, false);
+    handler.handle("declarations", "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
+  }
+
+  /**
+   * ETP-5546 — same gate, tiered against the HTTP method: a role whose grant is read-only
+   * ({@code IsReadWrite = 'N'}) is denied a write (e.g. {@code POST /fiscal303/submit}), proven
+   * here via the generic "known" entity POST path, even though {@link #testAllowsPostDefaultReturnsFalse}
+   * shows the stub's own {@code allowsPost} would otherwise 405 it — the access gate runs first and
+   * must short-circuit before that routing is ever reached.
+   */
+  @Test
+  public void testWindowAccessDeniedReturnsForbiddenForWriteMethod() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("POST"))).thenReturn(false);
+
+    StubHandler handler = new StubHandler(servlet, false);
+    handler.handle("known", "POST", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_FORBIDDEN), eq("Access denied"));
   }
 
   /**

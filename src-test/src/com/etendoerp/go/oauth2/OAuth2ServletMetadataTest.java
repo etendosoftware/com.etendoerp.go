@@ -37,7 +37,11 @@ import org.openbravo.base.session.OBPropertiesProvider;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 
-/** Tests OAuth2 discovery metadata used by remote MCP clients. */
+/**
+ * Tests OAuth2 discovery metadata used by remote MCP clients.
+ *
+ * @covers com.etendoerp.go.oauth2.OAuth2Servlet
+ */
 public class OAuth2ServletMetadataTest {
 
   private MockedStatic<OBPropertiesProvider> propertiesMock;
@@ -89,6 +93,28 @@ public class OAuth2ServletMetadataTest {
         metadata.getString("token_endpoint"));
     assertEquals("https://core.experimental.etendo.cloud/etendo/oauth2/register",
         metadata.getString("registration_endpoint"));
+  }
+
+  /** Only the current etendo: scopes are advertised; the deprecated neo: aliases are not (ETP-5602). */
+  @Test
+  public void metadataAdvertisesOnlyEtendoScopes() throws Exception {
+    OAuth2Servlet servlet = new OAuth2Servlet();
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+
+    when(request.getPathInfo()).thenReturn("/.well-known/oauth-authorization-server");
+    when(request.getScheme()).thenReturn("https");
+    when(request.getServerName()).thenReturn("core.experimental.etendo.cloud");
+    when(request.getServerPort()).thenReturn(443);
+    when(request.getContextPath()).thenReturn("/etendo");
+    when(response.getWriter()).thenReturn(new PrintWriter(body));
+
+    servlet.doGet(request, response);
+
+    JSONObject metadata = new JSONObject(body.toString());
+    assertEquals("[\"etendo:read\",\"etendo:write\",\"etendo:process\",\"etendo:report\","
+        + "\"etendo:*\"]", metadata.getJSONArray("scopes_supported").toString());
   }
 
   @Test

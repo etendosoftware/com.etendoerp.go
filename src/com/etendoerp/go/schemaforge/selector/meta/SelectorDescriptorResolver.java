@@ -192,7 +192,8 @@ public final class SelectorDescriptorResolver {
       String whereClause = StringUtils.trimToNull(selector.getHQLWhereClause());
       ObuiselFieldLists fieldLists = classifySelectorFields(selector.getOBUISELSelectorFieldList());
       fieldLists.gridFields.sort((a, b) -> Long.compare(a.sortNo, b.sortNo));
-      ensureSearchableFallback(fieldLists.searchableProps, targetEntity, displayProp, valueProp);
+      List<SearchableFragment> searchableProps = withSearchableFallback(fieldLists.searchableProps,
+          targetEntity, displayProp, valueProp);
 
       return new SelectorMeta.Builder(targetEntity.getName(), displayProp)
           .whereClause(whereClause)
@@ -200,7 +201,7 @@ public final class SelectorDescriptorResolver {
           .isCustomQuery(isCustom)
           .valueProperty(valueProp)
           .gridFields(fieldLists.gridFields)
-          .searchableProperties(fieldLists.searchableProps)
+          .searchableProperties(searchableProps)
           .customHql(customHql)
           .entityAlias(entityAlias)
           .auxFields(fieldLists.auxFields)
@@ -229,7 +230,7 @@ public final class SelectorDescriptorResolver {
 
   private static ObuiselFieldLists classifySelectorFields(List<SelectorField> selectorFields) {
     List<RichFieldMeta> gridFields = new ArrayList<>();
-    List<String> searchableProps = new ArrayList<>();
+    List<SearchableFragment> searchableProps = new ArrayList<>();
     List<AuxFieldMeta> auxFields = new ArrayList<>();
 
     for (SelectorField sf : selectorFields) {
@@ -254,7 +255,7 @@ public final class SelectorDescriptorResolver {
   }
 
   private static void collectGridAndSearchFields(SelectorField sf,
-      List<RichFieldMeta> gridFields, List<String> searchableProps) {
+      List<RichFieldMeta> gridFields, List<SearchableFragment> searchableProps) {
     String prop = sf.getProperty();
     String searchFragment = resolveSearchableFragment(prop, sf.getClauseLeftPart());
 
@@ -267,8 +268,27 @@ public final class SelectorDescriptorResolver {
     if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox())
         && StringUtils.isNotBlank(searchFragment)
         && !searchFragment.endsWith("_identifier")) {
-      searchableProps.add(searchFragment);
+      // resolveSearchableFragment only falls back to clause_left_part when property is blank
+      searchableProps.add(StringUtils.isNotBlank(prop)
+          ? SearchableFragment.ofRelativePath(searchFragment)
+          : SearchableFragment.ofClauseLeftPart(searchFragment));
     }
+  }
+
+  /**
+   * Apply {@link #ensureSearchableFallback} to the classified fragments. Everything the fallback
+   * adds is a DAL path relative to the target entity.
+   */
+  private static List<SearchableFragment> withSearchableFallback(List<SearchableFragment> classified,
+      Entity targetEntity, String displayProp, String valueProp) {
+    List<String> expressions = SearchableFragment.expressions(classified);
+    int classifiedCount = expressions.size();
+    ensureSearchableFallback(expressions, targetEntity, displayProp, valueProp);
+    List<SearchableFragment> result = new ArrayList<>(classified);
+    for (String path : expressions.subList(classifiedCount, expressions.size())) {
+      result.add(SearchableFragment.ofRelativePath(path));
+    }
+    return result;
   }
 
   /**

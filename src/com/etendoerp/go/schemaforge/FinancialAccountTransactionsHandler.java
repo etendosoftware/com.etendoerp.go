@@ -86,7 +86,10 @@ import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
  *           "amount": 12450.00,
  *           "balance": 211841.01,
  *           "currencyIso": "EUR",
- *           "posted": "Y"
+ *           "posted": "Y",
+ *           "foreignAmount": 40.91,           // only on a cross-currency movement (ETP-5657)
+ *           "foreignCurrency": "USD",         //   idem
+ *           "foreignConversionRate": 0.67954  //   idem, when a rate is stored
  *         }
  *       ],
  *       "totals": {
@@ -267,6 +270,13 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       COALESCE(tfa.fin_financial_account_id, '') AS transfer_account_id,"
           + "       COALESCE(tfa.name, '') AS transfer_account_name,"
           + "       cur.iso_code AS currency_iso,"
+          // ETP-5657: the original-currency trio Core stores for a cross-currency payment, read
+          // as-is (see ForeignOriginal). The account currency is joined on the ACCOUNT, since the
+          // "is this foreign" rule compares against it.
+          + "       ft.foreign_amount,"
+          + "       ft.foreign_convert_rate,"
+          + "       fcur.iso_code AS foreign_currency_iso,"
+          + "       facur.iso_code AS account_currency_iso,"
           + "       (fa.currentbalance"
           + "         - SUM(CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END)"
           // Ordered by the DAY, not the raw timestamp — see the ORDER BY at the end of this
@@ -279,6 +289,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "  FROM fin_finacc_transaction ft"
           + "  JOIN fin_financial_account fa ON fa.fin_financial_account_id = ft.fin_financial_account_id"
           + "  JOIN c_currency cur ON cur.c_currency_id = ft.c_currency_id"
+          + "  LEFT JOIN c_currency facur ON facur.c_currency_id = fa.c_currency_id"
+          + "  LEFT JOIN c_currency fcur ON fcur.c_currency_id = ft.foreign_currency_id"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
           + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
@@ -478,6 +490,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           // again. The UI drives the Borrador state and the Editar/Procesar row actions from this.
           row.put("processed", "Y".equals(StringUtils.trimToEmpty(rs.getString("processed_flag"))));
           row.put("paymentLabel", buildPaymentLabel(documentNo, dateTs, contact, amount));
+          FinancialAccountTransactionsSupport.putForeignOriginal(row, rs);
           // Accounting dimensions for the expandable "more info" panel. All are
           // marshalled; the UI shows only the ones enabled in the chart of
           // accounts (see enabledDimensions in the payload).

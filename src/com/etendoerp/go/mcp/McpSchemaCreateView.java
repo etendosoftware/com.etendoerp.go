@@ -26,11 +26,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * Pure (DAL-free) create-shaped projection for {@code neo_schema} (IMP-12).
+ * Pure (DAL-free) create-shaped projection for {@code etendo_schema} (IMP-12).
  *
  * <p>A compliance-heavy window returns ~157 fields / 62 kB, which on 2026-08-06 did not merely waste
  * the agent's budget — the call <b>failed outright</b> against the client token limit, making
- * {@code neo_schema} unusable for exactly the widest windows. Yet to create a record the agent must
+ * {@code etendo_schema} unusable for exactly the widest windows. Yet to create a record the agent must
  * decide values for a handful of fields; the rest are audit columns, computed totals, compliance
  * flags and buttons.
  *
@@ -40,7 +40,7 @@ import org.codehaus.jettison.json.JSONObject;
  *       {@code required} (mandatory <i>and</i> unresolved by anything else) and {@code optional} (the
  *       rest, so an agent can still enrich the record). Both are filtered through
  *       {@link McpSchemaFieldBuilder#isAgentSuppliable} first. Membership of {@code required} is
- *       cross-checked against {@code neo_defaults} — see {@link #resolvedDefaultNames}.</li>
+ *       cross-checked against {@code etendo_defaults} — see {@link #resolvedDefaultNames}.</li>
  *   <li><b>{@code fields:[…]}</b> — an explicit whitelist of descriptor names, for an agent that
  *       already knows what it wants and needs the shape of those fields only.</li>
  * </ul>
@@ -77,7 +77,7 @@ final class McpSchemaCreateView {
 
   private static final String KEY_NAME = "name";
   private static final String KEY_REQUIRED = "required";
-  /** ETP-5184: entity-level curated guidance, mirrored from {@code neo_discover}. */
+  /** ETP-5184: entity-level curated guidance, mirrored from {@code etendo_discover}. */
   private static final String KEY_AGENT_PROMPT = "agentPrompt";
   private static final String KEY_OPTIONAL = "optional";
 
@@ -95,52 +95,52 @@ final class McpSchemaCreateView {
    * <p>{@code defaultExpression} / {@code defaultSource} go too, and that one is a size decision as
    * much as a clarity one: on {@code sales-invoice/header} two AEAT compliance columns carry 806 and
    * 604 characters of raw {@code @SQL=…} between them. An agent cannot evaluate an AD default
-   * expression — {@code neo_defaults} resolves it server-side, and the hint says so.
+   * expression — {@code etendo_defaults} resolves it server-side, and the hint says so.
    */
   private static final Set<String> REDUNDANT_KEYS = Set.of(
       "visibility", "readOnly", McpSchemaFieldBuilder.KEY_USER_REQUIRED, KEY_REQUIRED,
       McpSchemaFieldBuilder.KEY_DEFAULT_EXPRESSION, McpSchemaFieldBuilder.KEY_DEFAULT_SOURCE);
 
   static final String CREATE_HINT =
-      "Every field listed here is one you may send to neo_create. Fields under 'required' MUST be "
-      + "provided — they are mandatory and neither an AD default nor neo_defaults resolves a value "
+      "Every field listed here is one you may send to etendo_create. Fields under 'required' MUST be "
+      + "provided — they are mandatory and neither an AD default nor etendo_defaults resolves a value "
       + "for them, so nothing else supplies them. Fields under 'optional' are accepted but not "
       + "needed; those carrying serverDefaulted=true are mandatory in Etendo but the server already "
       + "has a value for them, so do not ask the user — send one only to override it. "
       + "Anything omitted from this view is either auto-derived, read-only, or excluded — 'visibility' "
       + "is the authoritative field for why (editable/readOnly/system/discarded), 'readOnly' agrees "
       + "with it and is a shorthand of the same signal, so trust either one alone. Do not send an "
-      + "omitted field to neo_create. If the value you need lives on a field that was omitted for "
-      + "this reason, that value may still be writable elsewhere: call neo_schema again with "
+      + "omitted field to etendo_create. If the value you need lives on a field that was omitted for "
+      + "this reason, that value may still be writable elsewhere: call etendo_schema again with "
       + "view:\"full\" (or on a sibling entity of this spec) to see the full field list and each "
       + "field's visibility — do not assume the value is unreachable just because this view left it "
       + "out. When you do, check that field's writableVia: if present, it names the exact spec/entity "
       + "(e.g. product/price for a computed sale or purchase price) where the value is actually set, "
-      + "sparing you a guess. Fields with hasSelector=true take a record id: resolve it with neo_selectors, or pass "
+      + "sparing you a guess. Fields with hasSelector=true take a record id: resolve it with etendo_selectors, or pass "
       + "the display name and let the server resolve it. Fields with businessCritical=true carry core "
       + "business data — you MUST confirm those values with the user before creating the record. "
       + "Every field here is editable and writable, so visibility/readOnly/userRequired are omitted — "
-      + "the group already says it. Default values are omitted too: call neo_defaults to get the "
+      + "the group already says it. Default values are omitted too: call etendo_defaults to get the "
       + "values the server will fill in, already resolved. For the full descriptor of any field "
-      + "listed here, call neo_schema again with view:\"full\" and fields:[\"<name>\"].";
+      + "listed here, call etendo_schema again with view:\"full\" and fields:[\"<name>\"].";
 
   /**
    * Appended to {@link #CREATE_HINT} when the entity is a child/line tab ({@code tabLevel > 0}),
    * so the agent is told the one call that differs for a child create: pass {@code parentId}.
    *
-   * <p>Without it, {@code neo_defaults(spec, entity)} on a child entity silently omits every field
+   * <p>Without it, {@code etendo_defaults(spec, entity)} on a child entity silently omits every field
    * whose default expression reads from the parent record (the parent's warehouse for a storage
    * bin, its price-list version, its running line number) — it does not error, the field is simply
    * absent from {@code confirm}. Passing {@code parentId} is what resolves them. This is additive
    * text only; the {@code required}/{@code optional} split above is unaffected. {@code parentId}
    * itself does not appear there because {@code view:"create"} lists only fields the schema
    * describes as belonging to this entity — the parent is named by {@code parentId} on both
-   * {@code neo_defaults} and {@code neo_create}, never by its own foreign key, which the server
+   * {@code etendo_defaults} and {@code etendo_create}, never by its own foreign key, which the server
    * does not read to load the parent record.</p>
    */
   static final String CHILD_ENTITY_HINT_SUFFIX =
-      " This is a child/line entity: pass parentId — the parent record's id — on neo_create, and "
-      + "on neo_defaults before it. Fields whose default reads from the parent (a storage bin "
+      " This is a child/line entity: pass parentId — the parent record's id — on etendo_create, and "
+      + "on etendo_defaults before it. Fields whose default reads from the parent (a storage bin "
       + "scoped to the parent's warehouse, a price-list version, a running line number, a date or "
       + "warehouse inherited from the parent document) are resolved only from parentId; omitting "
       + "it does not error, it just leaves those fields absent. Do NOT name the parent by its own "
@@ -164,7 +164,7 @@ final class McpSchemaCreateView {
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
   /**
-   * The field names {@code neo_defaults} resolves a usable value for, read off its response body.
+   * The field names {@code etendo_defaults} resolves a usable value for, read off its response body.
    *
    * <p><b>Why this cannot be derived from the schema.</b> {@link McpSchemaFieldBuilder#addVisibility}
    * asks {@code AD_Column.DefaultValue} whether the server will supply a field, and that is an
@@ -211,7 +211,7 @@ final class McpSchemaCreateView {
   }
 
   /**
-   * Builds the {@code neo_schema({view:"create"})} response:
+   * Builds the {@code etendo_schema({view:"create"})} response:
    * {@code {spec, entity, required[], optional[], requiredCount, optionalCount, hint}}.
    *
    * <p>{@code table}, {@code methods} and {@code namedFilters} are deliberately dropped — none of
@@ -219,7 +219,7 @@ final class McpSchemaCreateView {
    *
    * @param fields the array built by {@link McpSchemaFieldBuilder#buildSchemaFieldsArray}, with the
    *     IMP-1 labels and the precondition requirements already applied
-   * @param serverResolved names {@code neo_defaults} resolves a value for
+   * @param serverResolved names {@code etendo_defaults} resolves a value for
    *     ({@link #resolvedDefaultNames}). A field in this set is demoted to {@code optional} and
    *     flagged {@code serverDefaulted}, however mandatory AD says it is — otherwise {@code required}
    *     would tell the agent to interrogate the user for a value the server already has. Pass an
@@ -234,7 +234,7 @@ final class McpSchemaCreateView {
    * Same as {@link #buildResponse(String, String, JSONArray, Set)}, plus {@code isChildEntity} —
    * whether {@code entityName} is a child/line tab ({@code tabLevel > 0}) — which appends
    * {@link #CHILD_ENTITY_HINT_SUFFIX} to the emitted {@code hint} so the agent is told to pass
-   * {@code parentId} to {@code neo_defaults} before creating. Cheap to compute at the call site
+   * {@code parentId} to {@code etendo_defaults} before creating. Cheap to compute at the call site
    * from the already-loaded {@code Tab} (see {@code McpToolRouter#handleSchema}), so it costs
    * nothing extra here.
    */
@@ -247,7 +247,7 @@ final class McpSchemaCreateView {
    * Same as {@link #buildResponse(String, String, JSONArray, Set, boolean)}, plus the entity-level
    * {@code agentPrompt} from {@code ETGO_SF_ENTITY.AGENT_PROMPT}.
    *
-   * <p>ETP-5184. The prompt was reaching {@code neo_discover} only, and discover is a catalogue an
+   * <p>ETP-5184. The prompt was reaching {@code etendo_discover} only, and discover is a catalogue an
    * agent reads once; {@code view:"create"} is what it reads immediately before writing. When the
    * entity is handler-backed, the prompt is the only place the divergence between the advertised
    * contract and the one the handler implements can be stated. Its two current consumers are
@@ -291,7 +291,7 @@ final class McpSchemaCreateView {
    * half that carries the branching, and they are what this class's tests exercise field by field.
    *
    * <p>Three rules, in precedence order: buttons and non-agent-suppliable descriptors are dropped
-   * entirely; a field {@code neo_defaults} resolves is {@code optional} and flagged
+   * entirely; a field {@code etendo_defaults} resolves is {@code optional} and flagged
    * {@code serverDefaulted}, however mandatory AD says it is; otherwise the static
    * {@code userRequired} rule decides. Both arrays are mutated in place rather than returned as a
    * pair, because the caller already owns them and a wrapper type would exist only to be unpacked.
@@ -371,7 +371,7 @@ final class McpSchemaCreateView {
   /**
    * Names in {@code requested} that matched no descriptor. Reported back as {@code unknownFields} so
    * a typo surfaces instead of a field silently vanishing — the same defect IMP-18 tracks for
-   * {@code neo_list}'s projection, avoided here at birth rather than fixed later.
+   * {@code etendo_list}'s projection, avoided here at birth rather than fixed later.
    */
   static JSONArray unknownFields(JSONArray fields, Set<String> requested) {
     JSONArray unknown = new JSONArray();

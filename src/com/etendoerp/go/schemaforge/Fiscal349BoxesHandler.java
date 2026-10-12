@@ -223,16 +223,18 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
     JSONObject summary = buildKeyTotals(summaryByKey);
 
-    // Per-invoice AEAT349 key (E/S/A/I), resolved separately for purchase/sales invoices
-    // against their respective tax rate sets, then merged — purch/sales invoice ids never
-    // overlap, so a plain putAll is safe. Lets the frontend split "origin" counts per
-    // operator key instead of aggregating solely by nifIva (ETP-4755).
-    Map<String, String> invoiceKeys = new HashMap<>(
-        resolveInvoiceKeys(purch, taxesPurchase, taxReport.getId()));
-    invoiceKeys.putAll(resolveInvoiceKeys(sales, taxesSales, taxReport.getId()));
+    // Per-invoice AEAT349 keys (E/S/A/I) with the base each key carries, resolved separately for
+    // purchase/sales invoices against their respective tax rate sets, then merged — purch/sales
+    // invoice ids never overlap, so a plain putAll is safe. Lets the frontend split "origin"
+    // counts per operator key instead of aggregating solely by nifIva (ETP-4755). ETP-5597: an
+    // invoice mixing goods and services lines carries BOTH keys — the same per-tax split
+    // getTaxBaseAmountPerBusinessPartner applies to the operator rows — so it backs both rows.
+    Map<String, Map<String, BigDecimal>> invoiceKeyBases = new HashMap<>(
+        resolveInvoiceKeyBases(purch, taxesPurchase, taxReport.getId(), true));
+    invoiceKeyBases.putAll(resolveInvoiceKeyBases(sales, taxesSales, taxReport.getId(), false));
 
     String    orgNif      = generateSupport.resolveOrgNif(orgId);
-    JSONArray invoicesArr = collectInvoices(purch, sales, invoiceKeys);
+    JSONArray invoicesArr = collectInvoices(purch, sales, invoiceKeyBases);
     JSONArray rectifArr   = collectRectifications(corrPurch, corrSales);
 
     JSONObject root = new JSONObject();
@@ -576,62 +578,119 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return signed;
   }
 
+  /**
+   * The "Facturas origen" rows: one row per (invoice, AEAT349 key).
+   *
+   * <p>ETP-5597: an invoice mixing goods and services lines (e.g. E + S on a sale, A + I on a
+   * purchase) is split by {@code getTaxBaseAmountPerBusinessPartner} into BOTH operator rows, so
+   * it must back both origins too. It therefore produces one row per key, each carrying only the
+   * base of that key's tax lines (the per-key base from the same HQL the DAO uses: halved for a
+   * purchase line with a non-zero tax amount, in the invoice currency).
+   * A single-key invoice keeps exactly the row it always had (one row, the invoice's
+   * {@code summedLineAmount}).
+   *
+   * <p>The rows are origin evidence, not a reconciliation: their bases are NOT guaranteed to add
+   * up to the operator's base (a single-key row shows {@code summedLineAmount}, which is neither
+   * halved nor converted, and no row is currency-converted).
+   *
+   * <p>Every row of a mixed invoice keeps {@code id} = invoice id; {@code (id, key)} is the
+   * unique pair, and the frontend keys rows on it.
+   */
   JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales,
-      Map<String, String> invoiceKeys) throws Exception {
+      Map<String, Map<String, BigDecimal>> invoiceKeyBases) throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
     JSONArray arr = new JSONArray();
     for (Invoice inv : purch) {
-      arr.put(buildInvoiceRow(inv, "Compra", sdf, invoiceKeys));
+      appendInvoiceRows(arr, inv, "Compra", sdf, invoiceKeyBases);
     }
     for (Invoice inv : sales) {
-      arr.put(buildInvoiceRow(inv, "Venta", sdf, invoiceKeys));
+      appendInvoiceRows(arr, inv, "Venta", sdf, invoiceKeyBases);
     }
     return arr;
   }
 
-  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf,
-      Map<String, String> invoiceKeys) throws Exception {
+  /**
+   * Appends the "Facturas origen" row(s) of one invoice: a single row with the invoice-level
+   * {@code summedLineAmount} when it resolves to at most one key, or one row per key with that
+   * key's per-key HQL base when it is mixed — see {@link #collectInvoices} for why those bases are
+   * not a reconciliation of the operator's base.
+   */
+  private void appendInvoiceRows(JSONArray arr, Invoice inv, String type, SimpleDateFormat sdf,
+      Map<String, Map<String, BigDecimal>> invoiceKeyBases) throws Exception {
+    Map<String, BigDecimal> bases = invoiceKeyBases != null ? invoiceKeyBases.get(inv.getId()) : null;
+    if (bases == null || bases.isEmpty()) {
+      arr.put(buildInvoiceRow(inv, type, sdf, null, null));
+      return;
+    }
+    // Only a mixed invoice needs the per-key base; a single-key one keeps its invoice-level base.
+    boolean mixed = bases.size() > 1;
+    for (Map.Entry<String, BigDecimal> e : bases.entrySet()) {
+      arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), mixed ? e.getValue() : null));
+    }
+  }
+
+  /**
+   * One "Facturas origen" row.
+   *
+   * @param key
+   *          AEAT349 key of the row ({@code ""} when unresolved)
+   * @param keyBase
+   *          base of the row's key alone (mixed invoice), or {@code null} to use the invoice's
+   *          summed line amount (single-key invoice)
+   */
+  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf, String key,
+      BigDecimal keyBase) throws Exception {
     BusinessPartner bp   = inv.getBusinessPartner();
-    BigDecimal      base = inv.getSummedLineAmount() != null
-        ? inv.getSummedLineAmount().abs().setScale(2, RoundingMode.HALF_UP)
+    BigDecimal      raw  = keyBase != null ? keyBase : inv.getSummedLineAmount();
+    BigDecimal      base = raw != null
+        ? raw.abs().setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
-    String resolvedKey = invoiceKeys != null ? invoiceKeys.get(inv.getId()) : null;
     JSONObject row = new JSONObject();
+    // ETP-5597: the invoice id gives the frontend a collision-free row key (documentNo is not
+    // unique across AR/AP — same rationale as ETP-5393 in Fiscal303SourcesSupport). A mixed
+    // invoice emits one row per key with the same id; the frontend keys on (id, key).
+    row.put("id",     inv.getId());
     row.put("ref",    inv.getDocumentNo());
     row.put("date",   inv.getInvoiceDate() != null ? sdf.format(inv.getInvoiceDate()) : "");
+    // ETP-5597: feeds the "Fecha contable" column; same key/format/null handling as the 303
+    // sources row (JSONObject.put with null omits the key, so a missing date stays absent).
+    row.put("accountingDate",
+        inv.getAccountingDate() != null ? sdf.format(inv.getAccountingDate()) : null);
     row.put("type",   type);
     row.put("party",  bp != null ? bp.getName() : "");
     row.put(NIF_IVA_KEY, bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
     row.put("base",   base.toString());
-    row.put("key",    resolvedKey != null ? resolvedKey : "");
+    row.put("key",    key != null ? key : "");
     return row;
   }
 
   /**
-   * Resolves the AEAT349 classification key (E/S/A/I) for each invoice in {@code invoices},
-   * mirroring the join {@link org.openbravo.module.aeat349.es.AEAT3492010ReportDao
-   * #getTaxBaseAmountPerBusinessPartner} uses to derive the key per-BusinessPartner, but
-   * grouped per-invoice instead — this method does not need that DAO's amount-summing or
-   * multi-currency conversion, only the classification key.
+   * Resolves, for each invoice in {@code invoices}, every AEAT349 classification key (E/S/A/I)
+   * its tax lines map to, with the taxable base of each key — the same join and the same amount
+   * expression {@link org.openbravo.module.aeat349.es.AEAT3492010ReportDao
+   * #getTaxBaseAmountPerBusinessPartner} uses to build the operator rows, grouped per invoice
+   * instead of per partner (purchases halve the base of a line with a non-zero tax amount, the
+   * DAO's own rule for self-assessed intra-community VAT).
    *
-   * <p>Edge case: an invoice could in principle have lines mapping to more than one key
-   * (the HQL groups by (invoice, key), so a single invoice can produce multiple result rows).
-   * This is a simplification for a rare case: whichever key has the most matching
-   * {@code InvoiceTax} lines for that invoice wins; on an exact tie, the alphabetically first
-   * key wins — the HQL's {@code order by ... trp.tributaryKey.name} guarantees rows for the
-   * same invoice arrive in ascending key order, so "first encountered" is deterministic rather
-   * than depending on undefined DB row-return order. A single invoice almost always maps to
-   * exactly one key in practice for this report.
+   * <p>ETP-5597: this used to keep a single key per invoice (the one with most tax lines), so an
+   * invoice mixing goods and services backed only one of its two operator rows and the other
+   * showed "—" in Origen. Keys come back in ascending order ({@code order by}), so the per-invoice
+   * map is deterministic. Amounts are in the invoice currency (no EUR conversion — the same as
+   * the summed line amount a single-key row shows).
    *
-   * @return a map of invoice id -&gt; AEAT349 key ("E"/"S"/"A"/"I"); never null.
+   * @return invoice id -&gt; (key -&gt; base), keys in ascending order; never null.
    */
-  Map<String, String> resolveInvoiceKeys(Set<Invoice> invoices, Collection<TaxRate> taxRates,
-      String taxReportId) {
+  Map<String, Map<String, BigDecimal>> resolveInvoiceKeyBases(Set<Invoice> invoices,
+      Collection<TaxRate> taxRates, String taxReportId, boolean isPurchase) {
     if (invoices == null || invoices.isEmpty() || taxRates == null || taxRates.isEmpty()) {
       return new HashMap<>();
     }
+    String amountExpr = isPurchase
+        ? "sum(case it.taxAmount when 0 then coalesce(it.taxableAmount, 0)"
+            + " else (coalesce(it.taxableAmount, 0) / 2) end)"
+        : "sum(coalesce(it.taxableAmount, 0))";
     List<Object[]> rows = OBDal.getInstance().getSession()
-        .createQuery("select i.id, trp.tributaryKey.name, count(it.id) "
+        .createQuery("select i.id, trp.tributaryKey.name, " + amountExpr + " "
             + "from InvoiceTax as it, Invoice i, FinancialMgmtTaxRate tr, "
             + "OBTL_Tax_Parameter tp, OBTL_Tax_Report_Parameter trp "
             + "where i.id = it.invoice "
@@ -648,19 +707,25 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         .setParameterList("taxRates", taxRates)
         .list();
 
-    Map<String, String> keyByInvoice   = new HashMap<>();
-    Map<String, Long>   lineCountByInv = new HashMap<>();
+    Map<String, Map<String, BigDecimal>> basesByInvoice = new HashMap<>();
     for (Object[] row : rows) {
-      String invId = (String) row[0];
-      String key   = (String) row[1];
-      Long   count = (Long)   row[2];
-      Long prevCount = lineCountByInv.get(invId);
-      if (prevCount == null || count > prevCount) {
-        lineCountByInv.put(invId, count);
-        keyByInvoice.put(invId, key);
+      String     invId = (String) row[0];
+      String     key   = (String) row[1];
+      if (key == null) {
+        continue;
       }
+      basesByInvoice.computeIfAbsent(invId, k -> new LinkedHashMap<>())
+          .merge(key, toBigDecimal(row[2]), BigDecimal::add);
     }
-    return keyByInvoice;
+    return basesByInvoice;
+  }
+
+  // HQL sum() over a BigDecimal column comes back as BigDecimal; the /2 branch may widen it.
+  private static BigDecimal toBigDecimal(Object value) {
+    if (value instanceof BigDecimal) {
+      return (BigDecimal) value;
+    }
+    return value != null ? new BigDecimal(value.toString()) : BigDecimal.ZERO;
   }
 
   // ── generate ──────────────────────────────────────────────────────

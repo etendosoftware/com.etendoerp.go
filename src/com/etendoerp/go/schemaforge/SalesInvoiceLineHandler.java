@@ -20,7 +20,7 @@ package com.etendoerp.go.schemaforge;
 /**
  * Customization of sales-invoice/lines (ETP-5528): everything {@link InvoiceLineHandler} does, plus
  * the amounts of a new line — {@code lineNetAmount} and {@code grossAmount} — which
- * {@code neo_create} never derives through the shared path (see {@link InvoiceLineAmountSupport}).
+ * {@code etendo_create} never derives through the shared path (see {@link InvoiceLineAmountSupport}).
  *
  * <p><b>Binding.</b> Resolved by {@link NeoExtension} on every channel, ahead of the row's
  * {@code Java_Qualifier}. The row still carries {@code invoiceLineHandler}, on purpose: several

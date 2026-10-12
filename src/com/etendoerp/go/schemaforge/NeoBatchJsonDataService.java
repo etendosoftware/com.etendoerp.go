@@ -47,7 +47,7 @@ import org.openbravo.service.json.JsonUtils;
  * caller that owns the transaction can make several writes atomic.
  *
  * <h2>Why this class exists (IMP-23)</h2>
- * <p>{@link BatchService} advertised {@code neo_batch} as atomic and was not. It does own the
+ * <p>{@link BatchService} advertised {@code etendo_batch} as atomic and was not. It does own the
  * transaction correctly — one {@code commitAndClose()} after the loop, {@code rollbackAndClose()}
  * on failure — but each operation reached
  * {@link DefaultJsonDataService#update(Map, String)}, whose success branch ends with
@@ -91,7 +91,7 @@ import org.openbravo.service.json.JsonUtils;
  * <p>A batch is still not hermetic. An operation whose handler runs an Etendo <i>process</i>
  * commits inside that process by design — {@code ProcessInvoiceUtil#process} is the known case —
  * and no caller-side transaction ownership can undo that. Atomicity here covers the ordinary
- * create/update write path, which is what {@code neo_batch} exposes.</p>
+ * create/update write path, which is what {@code etendo_batch} exposes.</p>
  *
  * <p>Whether a caller owns the transaction is tracked by
  * {@link BatchService#beginCallerOwnedTransaction()}, not here — see {@link #deferredCommitInstance()} for
