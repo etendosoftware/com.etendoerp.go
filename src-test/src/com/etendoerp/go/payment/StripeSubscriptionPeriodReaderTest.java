@@ -104,6 +104,44 @@ class StripeSubscriptionPeriodReaderTest {
   }
 
   @Test
+  void onAMultiItemSubscriptionTheFirstItemsPeriodWins() {
+    long laterEnd = END + 86_400L;
+    stripe.answering(200, "{\"id\":\"" + SUBSCRIPTION_ID + "\",\"items\":{\"data\":["
+        + "{\"current_period_start\":" + START + ",\"current_period_end\":" + END + "},"
+        + "{\"current_period_start\":" + (START + 3_600L) + ",\"current_period_end\":" + laterEnd
+        + "}]}}");
+
+    SubscriptionLifecycleApplier.BillingPeriod period = reader().read(CLIENT_ID, SUBSCRIPTION_ID);
+
+    assertEquals(Instant.ofEpochSecond(START), period.start());
+    assertEquals(Instant.ofEpochSecond(END), period.end());
+  }
+
+  @Test
+  void aPeriodThatStartsWhereItEndsIsAccepted() {
+    // ETGO_SUB_PERIOD_CHK is END >= START: an empty period is still a valid one.
+    stripe.answering(200, "{\"current_period_start\":" + START + ",\"current_period_end\":"
+        + START + "}");
+
+    SubscriptionLifecycleApplier.BillingPeriod period = reader().read(CLIENT_ID, SUBSCRIPTION_ID);
+
+    assertEquals(Instant.ofEpochSecond(START), period.start());
+    assertEquals(Instant.ofEpochSecond(START), period.end());
+  }
+
+  @Test
+  void eachBoundaryFallsBackToTheItemOnItsOwn() {
+    // Mixed shape: the start at the top level, the end only on the first item.
+    stripe.answering(200, "{\"current_period_start\":" + START + ",\"items\":{\"data\":["
+        + "{\"current_period_end\":" + END + "}]}}");
+
+    SubscriptionLifecycleApplier.BillingPeriod period = reader().read(CLIENT_ID, SUBSCRIPTION_ID);
+
+    assertEquals(Instant.ofEpochSecond(START), period.start());
+    assertEquals(Instant.ofEpochSecond(END), period.end());
+  }
+
+  @Test
   void encodesTheIdIntoThePath() {
     stripe.answering(404, "{}");
 

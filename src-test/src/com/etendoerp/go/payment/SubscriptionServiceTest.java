@@ -1084,14 +1084,21 @@ class SubscriptionServiceTest {
       verify(obDal, never()).commitAndClose();
     }
 
-    @Test
-    void aRowWithoutAStripeSubscriptionHasNothingToRead() {
-      openRow("   ");
+    /**
+     * The blank guard that matters lives here, not only in the reader: a row without a Stripe
+     * subscription id asks the provider nothing and leaves the read transaction to the caller.
+     */
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = { "", "   " })
+    void aRowWithoutAStripeSubscriptionHasNothingToRead(String stripeSubscriptionId) {
+      openRow(stripeSubscriptionId);
 
       assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
 
       verify(reader, never()).read(any(), any());
       verify(session, never()).createQuery(anyString());
+      verify(obDal, never()).commitAndClose();
     }
 
     @Test

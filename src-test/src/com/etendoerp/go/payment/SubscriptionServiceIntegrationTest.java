@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.hibernate.Session;
 import org.hibernate.Transaction;
@@ -432,6 +433,56 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
   }
 
   /**
+   * A lifecycle event (here a status-only {@code past_due}, as {@code invoice.payment_failed}
+   * brings) that loaded the row <em>before</em> the fill committed still holds it with no period.
+   * Saving its outcome must not write that stale null back over the period the fill committed:
+   * only the columns the event changed may reach the database.
+   *
+   * <p>The fill runs on another thread, as it does in production (the onboarding request), so it
+   * has its own DAL session and commits independently of the event's.
+   */
+  @Test
+  public void testAnEventThatLoadedTheRowBeforeTheFillKeepsTheFilledPeriod() throws Exception {
+    String tenant = createTenant("fill-stale");
+    String subscriptionId = openCommitted(tenant, createPricedPlan());
+    String stripeSubscriptionId = (String) rawColumn(subscriptionId, "STRIPE_SUBSCRIPTION_ID");
+    StripeSubscriptionPeriodReader reader = mock(StripeSubscriptionPeriodReader.class);
+    when(reader.read(tenant, stripeSubscriptionId)).thenReturn(
+        new SubscriptionLifecycleApplier.BillingPeriod(PROVIDER_START, PROVIDER_END));
+    Instant dueAt = Instant.parse("2026-10-20T00:00:00Z");
+    Instant eventAt = Instant.parse("2026-10-12T09:30:00Z");
+
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      Subscription loadedByTheEvent = OBDal.getInstance().get(Subscription.class, subscriptionId);
+      assertNull("Sanity: the event loaded the row before it had a period",
+          loadedByTheEvent.getCurrentPeriodStart());
+
+      runOnAnotherThread(() -> assertTrue("The fill wrote and committed the period",
+          fillCommitted(reader, tenant)));
+      assertEquals("Sanity: the fill's period is committed", PROVIDER_START,
+          rawInstantOnAnotherThread(subscriptionId, "CURRENT_PERIOD_START"));
+
+      service.applyLifecycleOutcome(loadedByTheEvent, SubscriptionEventOutcome.apply(
+          EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, dueAt), eventAt);
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+
+    assertEquals("The event's stale null must not overwrite the filled start", PROVIDER_START,
+        rawInstant(subscriptionId, "CURRENT_PERIOD_START"));
+    assertEquals("The event's stale null must not overwrite the filled end", PROVIDER_END,
+        rawInstant(subscriptionId, "CURRENT_PERIOD_END"));
+    assertEquals("The event's own change is written", SubscriptionService.STATUS_PAST_DUE,
+        rawColumn(subscriptionId, "STATUS"));
+    assertEquals(dueAt, rawInstant(subscriptionId, "GRACE_ANCHOR"));
+    assertEquals(eventAt, rawInstant(subscriptionId, "LAST_EVENT_AT"));
+  }
+
+  /**
    * Re-subscription: the tenant's closed row and its new open row each name a Stripe
    * subscription. Only the open row is read and filled; the closed row is not touched at all.
    */
@@ -495,6 +546,41 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
       update.executeUpdate();
       transaction.commit();
     }
+  }
+
+  /**
+   * Runs {@code body} on a fresh thread — its own OBContext and DAL session — and rethrows
+   * whatever it threw, assertion failures included.
+   */
+  private static void runOnAnotherThread(Runnable body) throws InterruptedException {
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread thread = new Thread(() -> {
+      try {
+        body.run();
+      } catch (Throwable t) { // NOSONAR - handed back to the test thread below
+        failure.set(t);
+      } finally {
+        OBDal.getInstance().rollbackAndClose();
+        OBContext.setOBContext((OBContext) null);
+      }
+    }, "period-fill");
+    thread.start();
+    thread.join(60_000L);
+    assertFalse("The other thread did not finish", thread.isAlive());
+    if (failure.get() instanceof Error) {
+      throw (Error) failure.get();
+    }
+    if (failure.get() != null) {
+      throw new IllegalStateException(failure.get());
+    }
+  }
+
+  /** Reads a committed column from another thread, so the caller's session is left untouched. */
+  private Instant rawInstantOnAnotherThread(String subscriptionId, String column)
+      throws InterruptedException {
+    AtomicReference<Instant> value = new AtomicReference<>();
+    runOnAnotherThread(() -> value.set(rawInstant(subscriptionId, column)));
+    return value.get();
   }
 
   /** @return the committed timestamp column as an instant, or null */

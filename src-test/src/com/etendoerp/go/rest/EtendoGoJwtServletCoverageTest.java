@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import java.io.BufferedReader;
 import java.io.PrintWriter;
@@ -83,6 +85,7 @@ import org.junit.Before;
 import org.junit.After;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.exception.OBException;
@@ -2481,7 +2484,7 @@ public class EtendoGoJwtServletCoverageTest {
       return true;
     });
 
-    String body = runCommittedPaidOnboarding(subscriptions, steps);
+    String body = runCommittedPaidOnboarding(true, subscriptions, steps);
 
     assertEquals(List.of("commit:onboarding", "recordProvisioned", "fill",
         "commit:" + PERIOD_STEP, "activateSchedule"), steps);
@@ -2499,7 +2502,7 @@ public class EtendoGoJwtServletCoverageTest {
       throw new IllegalStateException("provider read exploded");
     });
 
-    String body = runCommittedPaidOnboarding(subscriptions, steps);
+    String body = runCommittedPaidOnboarding(true, subscriptions, steps);
 
     assertEquals(List.of("commit:onboarding", "recordProvisioned", "fill",
         "rollback:" + PERIOD_STEP, "activateSchedule"), steps);
@@ -2508,16 +2511,62 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   /**
-   * Drives a pooled paid onboarding to a successful commit, recording, in order, every DAL commit
-   * and rollback by operation name and the closing of the checkout request.
+   * The classic path (no pooled tenant: here a half-built client this purchase left behind, which
+   * the attempt resumes) commits the tenant the same way, so it must fill the period at the same
+   * point: after the checkout is closed, before the costing schedule.
+   */
+  @Test
+  public void aClassicPaidOnboardingAlsoFillsThePeriodAfterClosingTheCheckout()
+      throws Exception {
+    SubscriptionService subscriptions = mock(SubscriptionService.class);
+    List<String> steps = new ArrayList<>();
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenAnswer(invocation -> {
+      steps.add("fill");
+      return true;
+    });
+
+    String body = runCommittedPaidOnboarding(false, subscriptions, steps);
+
+    assertEquals(List.of("dataset", "commit:onboarding", "recordProvisioned", "fill",
+        "commit:" + PERIOD_STEP, "activateSchedule"), steps);
+    verify(servlet.pooledTenantClaimService, never()).claim(any(), any(), anyString());
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
+    assertTrue(body, body.contains("\"success\":true"));
+  }
+
+  /**
+   * Drives a paid onboarding to a successful commit, recording, in order, every DAL commit and
+   * rollback by operation name, the closing of the checkout request and the costing schedule.
    *
+   * <p>Pooled: the pool hands out {@code client-1}. Classic: {@code client-1} is the half-built
+   * client this purchase left under its provisioning name, resumed with its organization in
+   * place; the provisioning chain's dataset pass is stubbed (recorded as {@code dataset}) and the
+   * requested-name step finds no client to rename.
+   *
+   * @param pooled which path the tenant takes
    * @param subscriptions the subscription service the servlet uses
    * @param steps where the steps are recorded; the caller's own stubs may add to it
    * @return the NDJSON body written to the client
    */
-  private String runCommittedPaidOnboarding(SubscriptionService subscriptions,
+  private String runCommittedPaidOnboarding(boolean pooled, SubscriptionService subscriptions,
       List<String> steps) throws Exception {
-    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    if (!pooled) {
+      try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+           MockedConstruction<OnboardingProvisioningChain> chains = mockConstruction(
+               OnboardingProvisioningChain.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+               (chain, context) -> doAnswer(invocation -> steps.add("dataset")).when(chain)
+                   .ensureOnboardingDataset(any(), anyString(), anyString(), anyString(),
+                       anyString(), any()))) {
+        obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+        return runCommittedPaidOnboardingOnPath(false, subscriptions, steps);
+      }
+    }
+    return runCommittedPaidOnboardingOnPath(true, subscriptions, steps);
+  }
+
+  private String runCommittedPaidOnboardingOnPath(boolean pooled,
+      SubscriptionService subscriptions, List<String> steps) throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(pooled);
     doAnswer(invocation -> steps.add("recordProvisioned")).when(stage.store)
         .recordProvisioned("purchase-1", "client-1", 1L);
     servlet.subscriptionService = subscriptions;
@@ -2532,6 +2581,11 @@ public class EtendoGoJwtServletCoverageTest {
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(true);
+      if (!pooled) {
+        support.when(() -> EtendoGoJwtSupport.findClientIdByName(PAID_PROVISIONING_NAME))
+            .thenReturn("client-1");
+        support.when(() -> EtendoGoJwtSupport.organizationExists("client-1")).thenReturn(true);
+      }
       transactions.when(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()))
           .thenAnswer(invocation -> steps.add("commit:" + invocation.getArgument(0)));
       transactions.when(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()))
