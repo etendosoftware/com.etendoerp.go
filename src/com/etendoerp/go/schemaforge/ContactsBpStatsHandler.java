@@ -63,6 +63,7 @@ public class ContactsBpStatsHandler implements NeoHandler {
 
   private static final String PARAM_BP_ID = "businessPartnerId";
   static final String PARAM_MONTHS = "months";
+  private static final String FORMAT_CURRENCY = "currency";
   static final Set<Integer> ALLOWED_MONTHS = Set.of(3, 6);
 
   private static final String BP_STATS_SQL =
@@ -133,9 +134,9 @@ public class ContactsBpStatsHandler implements NeoHandler {
 
         JSONArray data = new JSONArray();
         data.put(buildKpi("revenueThisMonth", "Revenue this month",
-            revenue[0], revenue[1], "currency", "DollarSign"));
+            revenue[0], revenue[1], FORMAT_CURRENCY, "DollarSign"));
         data.put(buildKpi("expensesThisMonth", "Expenses this month",
-            expenses[0], expenses[1], "currency", "CreditCard"));
+            expenses[0], expenses[1], FORMAT_CURRENCY, "CreditCard"));
         if (months != null) {
           data.put(buildPeriodKpi("revenue", "Revenue",
               revenue[2], revenue[3], "DollarSign"));
@@ -209,7 +210,7 @@ public class ContactsBpStatsHandler implements NeoHandler {
 
   private static JSONObject buildPeriodKpi(String key, String label,
       BigDecimal current, BigDecimal previous, String icon) throws Exception {
-    JSONObject obj = buildKpi(key, label, current, previous, "currency", icon);
+    JSONObject obj = buildKpi(key, label, current, previous, FORMAT_CURRENCY, icon);
     obj.put("hasPrevious", hasPrevious(previous));
     return obj;
   }
