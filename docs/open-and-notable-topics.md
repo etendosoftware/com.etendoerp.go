@@ -1,60 +1,144 @@
 # Open and notable topics — recurring billing block (ETP-5045 … ETP-5053)
 
 A living register of the decisions still owed, the operational constraints that are not visible
-from the code, and the traps that would otherwise be rediscovered the hard way.
+from the code, the traps that would otherwise be rediscovered the hard way, and the decisions taken
+since, with the implementation work each one still leaves.
 
 **Scope:** the whole billing development — ETP-5045 (durable checkout state), ETP-5050 (usage
 measurement), ETP-5046 (Subscription Plan Catalog + subscriptions), and what they hand to ETP-5047/5048/5051/5053.
 
-**Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around
+**Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around ·
+✅ clarified or solved — the decision is taken; implementation may still be owed (§6)
 
 **Ticket line:** every topic carries a `**Ticket:**` line under its heading. *Owner* = the ticket that must resolve or respect it. *Related* = where it came from or what it touches. **No ticket** = nothing currently covers it; it needs its own ticket or a decision on where it goes.
 
-**This register carries only what is still live.** A topic is deleted once it is fixed or settled —
-it does not graduate to a "closed" section. The history stays in the commit that resolved it, which
-is the only copy that cannot drift from the code. **Section numbers are stable**: other documents
-cite them (`§3.7`, `§4.8`), so a deleted topic leaves a gap in the numbering rather than shifting
-its neighbours.
+**To raise with:** a topic whose answer must come from a named person carries a `**To raise
+with:**` line under its ticket line. Most 🔴 decisions were answered by Sebastián Barrozo
+(product/tech lead) in a chat with Martin Taal on 2026-09-28; the points that chat left open, or
+opened, are §1.2–§1.7.
+
+**A settled topic moves to §6, it is not deleted.** Once a topic is decided or fixed it moves to
+§6 "Clarified and solved" and **keeps its original number and heading text**, so a citation such
+as `§1.1` or `§5.10` still resolves. A moved topic carries a `**Status:**` line (`decided <date>
+(<who>)` or `partly decided`), the decision in one to three sentences, a `**Follow-up:**` line
+naming the implementation work still owed and its ticket (or `no ticket`), and only as much of the
+original analysis as a reader still needs; the full history stays in git, the only copy that cannot
+drift from the code. **Section numbers are stable**: other documents cite them (`§3.7`, `§4.8`), so
+a moved topic leaves a gap in its old section rather than shifting its neighbours, and a new topic
+takes the next free number of the section it belongs to — a topic decided on arrival too (§5.15
+sits in §6 under its §5 number). Gaps older than 2026-09-28 are topics deleted under the earlier
+rule; their history is in git.
 
 ---
 
 ## 1. Decisions still owed
 
-### 🔴 1.1 The stock resources (`activeUsers`, `productiveEnvironments`) have no history (ETP-5050)
+*Moved to §6 on 2026-09-28: §1.1.*
 
-**Ticket:** owner ETP-5050 (product decision owed); affects ETP-5051, which would quota it.
+### 🔴 1.2 The billing period is per subscription, not per price
 
-The significant unresolved issue in the usage design, and it decides whether `activeUsers` can be
-implemented at all. `AD_SESSION` is explicitly ruled out.
+**Ticket:** related §5.9 / ETP-5051 (the evaluator that reads the period); no ticket for the
+lookup script.
 
-A **flow** happens *on* a day (three invoices dated 14 March count as 3 on 14 March, forever). A
-**stock** *exists on* a day (a tenant with 12 active users has 12 every day until something
-changes). **A stock cannot be expressed declaratively**, because there are no rows dated that day
-to count — which is exactly why the strategy SPI exists.
+**To raise with:** Sebastián Barrozo
 
-The problem is that **a stock has no history to recompute from**. Asked "how many active users on
-2010-01-01?", `AD_USER` can only answer "how many are active *now*". Observed directly: a trial
-backfill of a stock resource over 2010–2027 wrote 74,520 rows carrying essentially one figure
-repeated across seventeen years. The mechanism worked as designed; the numbers were meaningless
-for every day but the current one. Neither the settling window nor the aggregation engine can fix
-this — the information is not in the database.
+On 2026-09-28 Sebastián confirmed that every tenant backfilled from the preference has the same
+billing period, "since they all have the same price id". A shared price gives the same *interval*
+(`month` / `year` and its count), not the same *dates*: Stripe anchors each subscription's period
+to its own start or billing-cycle anchor, so two subscriptions on one price renew on different
+days. The §5.9 lookup script must therefore read each subscription's current period separately —
+from the subscription, or its first item under `billing_mode: flexible`, the same source the
+webhook reads (§3.7) — and never copy one period onto every row.
 
-Three options, and the choice is a product decision:
+**A tenant with no Stripe subscription has no period at all.** R37 copies `STRIPE_CUSTOMER_ID` /
+`STRIPE_SUBSCRIPTION_ID` only from the tenant's latest active `ETGO_CHECKOUT_REQUEST` that carries
+a Stripe subscription id; a tenant made productive without such a checkout gets both NULL (its
+`@report`: "no usable etgo_checkout_request found, stripe ids left NULL"). There is no Stripe
+subscription to look up, so neither the script nor a lifecycle event (§5.5) can ever give that row
+a period. **To decide:** the rule for it — e.g. a period computed locally from `START_DATE`, no
+quota at all (true today, while `legacy-productive` has no quota rows, §5.1), or moving the tenant
+onto a real Stripe subscription (a plan change, ETP-5053) before any quota applies to it.
 
-1. **Keep a dated history** (audit/snapshot table) so a past day has a real answer. Most faithful, most expensive.
-2. **Only ever record the current day**, never backfill. Cheap and honest; history begins when measurement is switched on.
-3. **Redefine the resource as a flow** — e.g. "users created that day" rather than "users active that day". A *different quantity*, so this is a product call, not a technical shortcut.
+### 🔴 1.3 Enforcement default: shipped ON with a kill switch, or OFF behind a feature flag
 
-**`productiveEnvironments` is the second stock, with the same problem.** The ticket specified it
-as `Client` bucketed by `creationDate` — clients *created* that day, a flow. The ETP-5050 design
-(§"Seeded resources") corrected that to a strategy (`S`, qualifier `productiveEnvironments`): a
-daily snapshot of the active clients, i.e. a stock — so the three options above apply to it too.
-Neither stock counter exists yet: no `@Named("activeUsers")` or `@Named("productiveEnvironments")`
-bean is deployed, so a catalog row for either would fail its run ("No UsageResourceCounter
-deployed", `UsageAggregationService`) until one is.
+**Ticket:** related ETP-5047 (§3.8); the production rollout has no ticket.
 
-Full analysis: `schema_forge/docs/usage-measurement.md` §4 (its note on `productiveEnvironments`
-still describes the ticket's `creationDate` wording, not the design's snapshot).
+**To raise with:** Sebastián Barrozo
+
+Sebastián's rollout preference (2026-09-28): deploy reviewed code to production with the feature
+**off** by default, enable it for selected users or tenants, possibly validating on a demo server
+first. ETP-5047's environment-access enforcement ships the opposite way, by Martin's decision of
+2026-09-25 (§3.8): it enforces by default, and the kill switch `environment-access-enforcement-off`
+stops it per `clientId` only when the flag resolves to `true` (`EnvironmentAccessEnforcementFlag`).
+`GoFeatureFlags.isEnabled` answers `false` for an unconfigured flag, an unreachable control plane
+and any evaluation error, so today every failure of the flag provider keeps enforcing. An
+off-by-default rollout needs a positive "enforce" flag, and inverts that failure mode: an
+unreachable provider would let every blocked tenant in. The production default needs an explicit
+agreement before the ETP-5047 deploy. Operator procedure: `feature-flags-and-tenant-upgrade.md` §1,
+"Operating environment-access enforcement".
+
+### 🔴 1.4 Per-client transactions versus today's per-resource-day transactions
+
+**Ticket:** related ETP-5050 (the usage job) and the scheduling follow-up of §5.15 (no ticket).
+
+**To raise with:** Sebastián Barrozo
+
+Sebastián asked for the scheduled usage job to run a separate transaction per client, so the whole
+run need not be atomic (§5.15). The run already is not atomic:
+`UsageAggregationService.aggregateResourceDay` commits each resource-day on its own
+(`commitAndClose`, `rollbackAndClose` on failure; `UsageRunLedger` writes the run log once at the
+end so a failure survives its rollback), so a failing resource or day loses only itself. But each
+of those transactions counts **every tenant at once**: `DeclarativeHqlCounter` runs one query per
+day grouped by client, on purpose — per tenant it would be *tenants × resources × days* queries per
+run, "tens of thousands of round trips nightly" with a few hundred tenants (its javadoc). A
+per-tenant query form exists (`UsageQueryComposer`, used by the single-tenant backfill and the
+save-time validation probe), so per-client transactions are possible, at that cost multiplied by
+the two-hour cadence of §5.15. **To confirm:** whether per-resource-day transactions satisfy the
+concern, or whether isolation per client is wanted for another reason — today a resource-day that
+fails, fails for every tenant in it.
+
+### 🔴 1.5 ETP-5049: which two cards, and where does each card's `price_id` come from?
+
+**Ticket:** owner ETP-5049 (§5.14).
+
+**To raise with:** Sebastián Barrozo
+
+The 2026-09-28 decision (§5.14) is two cards, each configured with a Stripe `price_id`, prices read
+from Stripe. Still open:
+
+- **Which two.** Today's Plan step has one real card (`upgrade-plan-productive`, static name and
+  tagline) and two `SkeletonPlanCard` placeholders (`upgrade-plan-coming-soon-1/-2`).
+- **Where each `price_id` lives.** If it is the catalog plan's `ETGO_PLAN.PROVIDER_PRICE_ID`, the
+  card selects a `planKey` and ETP-5046's checkout stays as is: `HostedCheckoutService` takes a
+  `planKey`, never a price, and the browser never receives a provider price id (§4.8). If it is
+  configured outside the catalog, checkout bypasses it — the checkout request records no plan
+  (§4.6), the subscription opens on none — and the browser holds Stripe price ids.
+- **The Payment step.** Whether it keeps its second chooser (`PlanSelector`: `upgrade-plan-single`
+  / `upgrade-plan-choice`) or shows the plan chosen on the Plan step.
+
+### 🔴 1.6 One-time cutover now (Phase F early) — proposed, not decided
+
+**Ticket:** no ticket (Phase F, §3.2).
+
+**To raise with:** Sebastián Barrozo
+
+Sebastián proposed (2026-09-28): there are no real customers yet, only demos, and one or two real
+subscriptions are expected in the coming weeks, so make a one-time cutover now — migrate the state
+worth keeping, switch to `ETGO_SUBSCRIPTION`, remove the preference fallback — after confirming
+there are no live subscriptions to adopt (§2.4). Martin raised that this means moving the code to
+production quickly; Sebastián's answer was the off-by-default feature-flag rollout of §1.3, which
+this module's enforcement does not follow. **Still to decide.** Prerequisites, from §3.2, on every
+environment: R37 has run after R42, the `ETGO_TenantPlan` marker count reaches 0, and the fallback
+WARN no longer appears. The cutover deletes §3.2's list, and with it the watermark preference of
+§3.7.
+
+### 🔴 1.7 `END_DATE` meaning — not discussed on 2026-09-28
+
+**Ticket:** owner ETP-5053.
+
+**To raise with:** Sebastián Barrozo
+
+The one 🔴 decision the 2026-09-28 answers did not touch. Options and default: §5.13.
 
 ---
 
@@ -494,6 +578,13 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
   columns, so it must run after the ETP-5047 deploy — see §2.3. A tenant it reached in its
   pre-ETP-5047 form (anchor in `CURRENT_PERIOD_END`) reads correctly through the fallback above.
 
+**The watermark lives on `ETGO_SUBSCRIPTION` — decided (Sebastián Barrozo, 2026-09-28).** The Stripe
+event-ordering watermark moves into the subscription row and AD_Preference stops being used for it.
+ETP-5047 delivered most of it: `LAST_EVENT_AT`, carried over from `ETGO_SubscriptionEventAt` by R37.
+What remains — the preference write for a tenant with no row (`recordSubscriptionEventAt`) and the
+read fallback while a row's `LAST_EVENT_AT` is NULL (`readEventWatermark`, both marked
+`ETP-5046-TRANSITIONAL-FALLBACK` in `TenantEnvironmentLifecycleService`) — ends with Phase F (§3.2).
+
 ### 🟠 3.8 One environment-access check, one 402 body, one kill switch (ETP-5047)
 
 **Ticket:** owner ETP-5047 (delivered); related ETP-5455 (the shared auth pipeline whose bind step runs the check).
@@ -638,8 +729,8 @@ SELECT format('SELECT %L AS tbl, count(*) FROM %I WHERE ad_client_id = ''0'' AND
 
 A hit is not automatically residue (an OAuth2 client of a System role writes on `0` legitimately),
 so move a row only after confirming the role behind it belongs to a tenant. Not run locally: the
-dev DB has no OAuth2 clients or tokens. Delete this topic once both checks have run on every shared
-environment.
+dev DB has no OAuth2 clients or tokens. Move this topic to §6 once both checks have run on every
+shared environment.
 
 ## 4. Known issues
 
@@ -882,6 +973,8 @@ on 2026-09-28, after the ETP-5046 → ETP-5047 merge; not yet actioned.
 
 ## 5. Handed forward to later tickets
 
+*Moved to §6 on 2026-09-28: §5.7, §5.10, §5.12; §5.15 was decided on arrival and sits there too.*
+
 ### 🟠 5.1 ETP-5051: "no quota row" means UNLIMITED
 
 **Ticket:** owner ETP-5051.
@@ -895,8 +988,9 @@ at zero. `PlanQuotaSchemaInvariantTest` guards the schema side (mutation-tested)
 guard the evaluator except this paragraph.** `ETGO_PLAN_QUOTA` is also the only new table with
 `ISDELETEABLE='Y'`, because deleting the last quota row is how an operator restores unlimited.
 
-The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9; usage per subscription, which
-no ticket owns yet, is in §5.10 and §5.12.
+The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9 (§5.7 decided, now in §6).
+Usage per subscription (§5.10, §5.12) and the resource-limit check with its freshness (§5.15) were
+decided on 2026-09-28 and are in §6; none of their follow-up work has a ticket yet.
 
 ---
 
@@ -926,32 +1020,24 @@ shape as "no period"). §5.9 covers the periodless cases.
 
 **Ticket:** no ticket — falls between ETP-5050 and ETP-5051; needs an owner.
 
+**To raise with:** Sebastián Barrozo — the owner ticket, and the column's values.
+
 The same problem as §1.1, one level up. `ETGO_USAGE_DAILY` stores one `QTY` per tenant,
 resource and `USAGE_DAY`. Summing the days of a period is right for a **flow** (posted sales
 invoices) and wrong for a **stock** (active users, productive environments — daily snapshots): 5
 users every day for 30 days sums to 150. ETP-5050 delivers daily counts only (its design §10
 excludes "rollup of any kind — SUM or MAX over a period") and ETP-5051 does not define it either.
 
-**To decide:** an aggregation per **resource** — proposal: a column on `ETGO_BILLING_RESOURCE`
-(`sum` for flows, `max` or `last` for stocks). It is a property of what is measured, not of the
-quota, so it does not belong on `ETGO_PLAN_QUOTA`. `ETGO_BILLING_RESOURCE.COUNTING_MODE` (`D`
-declarative HQL / `S` named strategy) says how a day is counted, not how days combine, so nothing
-existing covers it.
+**Where it lives is settled (Sebastián Barrozo, 2026-09-28):** the §5.7 decision configures
+aggregation on the billing resource, `ETGO_BILLING_RESOURCE` — a property of what is measured, not
+of the quota. `ETGO_BILLING_RESOURCE.COUNTING_MODE` (`D` declarative HQL / `S` named strategy)
+says how a day is counted, not how days combine, so nothing existing covers it.
 
-### 🔴 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
-
-**Ticket:** owner ETP-5051.
-
-ETP-5046 shipped `CONSUMPTION_SOURCE` (String, list reference `ETGO_QuotaConsumptionSource`, single
-`AD_REF_LIST` value `sum`, check `ETGO_PLNQTA_SOURCE_CHK`: `NULL OR = 'sum'`) — i.e. an aggregation.
-ETP-5051 defines the field as the **data source**: the daily aggregate (lagged by up to a day)
-versus a live count at evaluation time. The two meanings do not overlap, and aggregation belongs on
-the resource anyway (§5.6).
-
-**To decide in ETP-5051, before any quota row uses the column:** its values, then change the check
-constraint, the `AD_REF_LIST` values and the reference description together. It is cheap now — no
-`ETGO_PLAN_QUOTA` row exists anywhere (no sourcedata, no data-fix creates one) — and a data
-migration once operators have filled it in.
+**Still to decide:** the column and its values — proposal `sum` for flows, `max` or `last` for
+stocks — and the ticket that adds it. One consequence of §1.1 to design for: a stock has stored
+days only from the day its measurement was enabled, and an omitted day counts as zero
+(`UsageResourceCounter`), so over a period that began earlier `max` and `last` stay right while
+any average would not.
 
 ### 🟠 5.8 A quota on a yearly plan is a yearly quota
 
@@ -965,72 +1051,45 @@ deferred in PRD §16, yet the schema already accepts them.)
 
 ### 🔴 5.9 A subscription with no current period needs a defined answer
 
-**Ticket:** owner ETP-5051.
+**Ticket:** owner ETP-5051 (the evaluator's answer); no ticket for the lookup script.
+
+**To raise with:** Sebastián Barrozo — the evaluator's answer, and the per-subscription period of
+§1.2.
 
 Periodless rows (§5.5): a row until its first period-bearing event, rows backfilled by R37
 (period NULL, design §7.0) and rows in the pre-ETP-5047 shape. A `canceled` row keeps its last
 period since ETP-5047 (it is closed, `END_DATE` set — §3.7), so it has a window but no longer a
-current one. **To decide in ETP-5051:** what the evaluator does with no
-window — skip, treat as unlimited, or use the last known period. Latent today only because
-`legacy-productive` has no quota rows (§5.1); the first quota on a plan such a tenant can be on
-makes it live.
+current one. Latent today only because `legacy-productive` has no quota rows (§5.1); the first
+quota on a plan such a tenant can be on makes it live.
+
+**Partly decided (Sebastián Barrozo, 2026-09-28): fix periodless rows by hand.** The current
+billing period is read from Stripe and the subscription row updated manually. A helper **bash
+script** that crosses the Stripe API with the SQL data is enough; it only looks up and must never
+update data automatically. It is not a button or process in the back-office UI — that comes only if
+it has to be run more than once. The manual period only bridges a gap: a row with a real Stripe
+subscription fills its own period at its first `customer.subscription.updated` / `invoice.paid`
+(§5.5), so the fix covers the time until the next renewal.
+
+**Still open:**
+
+- **What the ETP-5051 evaluator does with a periodless row until it is fixed** — skip, treat as
+  unlimited, or use the last known period.
+- **No ticket owns the script.**
+- **The script must read each subscription's period separately, and a row with no Stripe
+  subscription has none to read** — §1.2.
 
 ---
 
-**Usage per subscription — owner: the ticket that introduces usage-based charging.**
-
-PRD §3 and §16 defer overage charging "with its own PRD"; ETP-5047 records the billed periods on
-the billing ledger (§5.10).
-
-### 🔴 5.10 Per-period usage cannot be produced — the usage per period is not recorded, the periods only on the ledger
-
-**Ticket:** no ticket — ETP-5047 records the billed periods on the ledger (whether that suffices
-is still open); storing usage per period belongs to the not-yet-created usage-based charging
-ticket.
-
-Overage billing bills a **closed** billing period, so it needs two things this block records
-neither of:
-
-- **The periods themselves.** `ETGO_SUBSCRIPTION` has one period slot and no history; once it is
-  filled (§5.5), each renewal overwrites it. **Since ETP-5047 the ledger records the billed
-  period:** for `invoice.*` events `WebhookPayloadSummary` keeps `service_period_start` /
-  `service_period_end` (epoch seconds), so every `invoice.paid` row of `ETGO_BILLING_EVENT` carries
-  the period it paid for from the deploy onwards. It is the invoice **line** period — the same
-  extraction (`SubscriptionLifecycleApplier.invoiceServicePeriod`) that fills the row — not the
-  invoice's own `period_start`/`period_end`, which on a subscription invoice looks back one period.
-  One caveat: the summary is an abbreviated JSON string, not a queryable column. Periods before the
-  ETP-5047 deploy were never recorded and cannot be backfilled from local data.
-- **The usage per period.** `ETGO_USAGE_DAILY` (`MEASURED_CLIENT_ID`, `ETGO_BILLING_RESOURCE_ID`,
-  `USAGE_DAY`, `QTY`, `IS_SETTLED`) has no link to a subscription. It joins one only **by value**
-  (`ETGO_SUBSCRIPTION.ENVIRONMENT_CLIENT_ID = MEASURED_CLIENT_ID`, `USAGE_DAY` inside the period),
-  which ETP-5051 computes on the fly for evaluation only. ETP-5048's reconciliation covers payments
-  and subscription status, not usage.
-
-The second depends on the first: usage cannot be attributed to a past period whose boundaries were
-never recorded.
-
-**To decide:**
-
-1. **Whether the ledger's recorded period is enough** for overage billing of a closed period, or
-   a small period-history table (a queryable column) is needed. The urgent half — starting to
-   record — is done since ETP-5047.
-2. **Whether a period's usage is ever stored, and by whom** — or always recomputed from
-   `ETGO_USAGE_DAILY` over the recorded period.
-
-### 🔴 5.12 The would-have-billed report is scheduled in the PRD and excluded by its owner
-
-**Ticket:** assigned to ETP-5050 by the PRD but excluded by its design — effectively no ticket; needs an owner.
-
-PRD §14 assigns "would-have-billed report. Shadow mode" to **ETP-5050** (PRD §6 motivates the
-historical backfill by shadow mode). ETP-5050's design (`plans/2026-09-15-etp-5050-usage-measurement-design.md` §10) lists
-"Rollup of any kind — SUM or MAX over a period, the would-have-billed figure, price" as **out of
-scope**. Nobody delivers it now. **To decide:** which ticket owns it — it also depends on §5.6
-(how days combine) and §5.5 (which period).
+*Usage per subscription — §5.10 and §5.12, owned by the ticket that introduces usage-based
+charging (PRD §3 and §16 defer overage charging "with its own PRD") — was decided on 2026-09-28
+and moved to §6, with the resource-limit check of §5.15.*
 
 ### 🔴 5.13 `END_DATE` records what happened, never what will happen — and any value closes the row
 
 **Ticket:** owner ETP-5053 (the `END_DATE` guard or meaning change). Closing the row on cancel was
 settled in ETP-5047 (§3.7).
+
+**To raise with:** Sebastián Barrozo — not discussed on 2026-09-28 (§1.7).
 
 **What it means today.** `END_DATE` is past tense: the moment this row stopped being the tenant's
 current row. Its writers: a cancellation (ETP-5047 — Stripe's `ended_at`, else `canceled_at`, else
@@ -1104,6 +1163,8 @@ Option 1 is the default unless product asks for scheduled upgrades.
 **Ticket:** owner ETP-5049 (plan selection in the customer UI). Introduced by the ETP-5046 develop
 merge, which combined two independent designs of the same page.
 
+**To raise with:** Sebastián Barrozo — which two cards and where their price ids come from (§1.5).
+
 `UpgradePage.jsx` (schema_forge) is a three-step checkout — **Plan → Add-ons → Payment** — from
 develop (ETP-5396). Its **Plan** step is a fixed layout, not a view of the catalog:
 
@@ -1122,10 +1183,164 @@ of the first one). ETP-5046's catalog chooser, `PlanSelector` (`upgrade-plan-sin
 - while the catalog price equals the legacy fallback price, the Plan step looks identical before
   and after the cutover (§2.1), which reads as "the new plan does not show" during testing.
 
-Expected shape: build the Plan step from `GET /sws/go/plans` — one card per plan, "Elegir plan"
-selects its `planKey` — keeping the static card only while the catalog cannot be read, and let the
-Payment step show the chosen plan instead of a second chooser. Found in the ETP-5046 manual happy
-path test; not implemented.
+Found in the ETP-5046 manual happy path test.
+
+**Decided (Sebastián Barrozo, 2026-09-28): not a catalog view in the initial version.** The Plan
+step keeps **two cards**, each configured with a Stripe `price_id`, with prices retrieved directly
+from Stripe. Custom plans come later, through a commercial agreement; marketing defines the third
+tier and its requirements before it is added. That sets aside the shape this topic proposed before
+(one card per catalog plan, built from `GET /sws/go/plans`). Still open, and the consequences above
+stand until ETP-5049 lands: which two cards, where each card's `price_id` comes from, and whether
+the Payment step keeps its second `PlanSelector` — §1.5.
+
+---
+
+## 6. Clarified and solved
+
+Topics decided or fixed since 2026-09-28. Each keeps its original number and heading text; the
+`**Follow-up:**` line says what is still to build. The full analysis is in this file's git history.
+
+### ✅ 1.1 The stock resources (`activeUsers`, `productiveEnvironments`) have no history (ETP-5050)
+
+**Ticket:** owner ETP-5050; affects ETP-5051, which would quota it.
+
+**Status:** decided 2026-09-28 (Sebastián Barrozo)
+
+**Decision: record the current value each day from when measurement is enabled, and never
+backfill earlier dates** (option 2 of 3). A backfill would repeat today's value over every past day
+and give a misleading picture.
+
+Why it needed deciding: a **flow** happens *on* a day (three invoices dated 14 March count as 3 on
+14 March, forever); a **stock** *exists on* a day (12 active users is 12 every day until something
+changes). A stock has no history to recompute from — `AD_USER` answers only "how many are active
+*now*" — so a trial backfill over 2010–2027 wrote 74,520 rows of essentially one figure. Rejected:
+a dated history table (option 1, most faithful, most expensive) and redefining the resource as a
+flow such as "users created that day" (option 3, a different quantity). `AD_SESSION` was ruled
+out. `productiveEnvironments` is the second stock: the ETP-5050 design ("Seeded resources") made it
+a daily snapshot of the active clients (strategy `S`), not the ticket's `Client` by `creationDate`.
+
+**Follow-up:** no ticket.
+
+- **Implement both counters.** No class implements `UsageResourceCounter` yet — neither
+  `@Named("activeUsers")` nor `@Named("productiveEnvironments")` exists — so a catalog row for
+  either fails its run ("No UsageResourceCounter deployed", `UsageAggregationService`).
+- **Implementation trap: the scheduled run rewrites past days.** `runForSettlingWindow` recomputes
+  every day from `today − (window + 1)` to today (7 days at the default window of 5,
+  `UsageSettings`) and replaces the value of every day not yet final. A stock counter asked about
+  "yesterday" answers with today's value and overwrites the true one. Answering nothing is no way
+  out: a tenant absent from a day's counts has its stored row zeroed
+  (`zeroOutTenantsThatNoLongerCount`). So a stock resource needs support in the service, not just
+  a counter: write only the current day, leave past days untouched, and refuse a historical
+  backfill (`run(from, to)` rewrites even final days).
+- **`schema_forge/docs/usage-measurement.md` §4 is stale** — still titled "(open)", and its note
+  on `productiveEnvironments` describes the ticket's `creationDate` wording, not the snapshot.
+
+### ✅ 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
+
+**Ticket:** owner ETP-5051.
+
+**Status:** decided 2026-09-28 (Sebastián Barrozo)
+
+**Decision: ETP-5051's meaning wins.** `CONSUMPTION_SOURCE` represents the **data source** of a
+quota's consumption — the stored aggregate versus a live count at evaluation time — and
+aggregation is configured on the billing resource (§5.6), not on the quota.
+
+ETP-5046 shipped the other meaning: String, list reference `ETGO_QuotaConsumptionSource`, a single
+`AD_REF_LIST` value `sum`, check `ETGO_PLNQTA_SOURCE_CHK` (`CONSUMPTION_SOURCE IS NULL OR
+CONSUMPTION_SOURCE = 'sum'`) — an aggregation.
+
+**Follow-up:** ETP-5051 — define the values, then change the check constraint, the `AD_REF_LIST`
+values and the reference description together, before any quota row uses the column. Cheap now: no
+`ETGO_PLAN_QUOTA` row exists anywhere (no sourcedata, no data-fix creates one); a data migration
+once operators have filled it in.
+
+### ✅ 5.10 Per-period usage cannot be produced — the usage per period is not recorded, the periods only on the ledger
+
+**Ticket:** no ticket — the usage-based charging work (PRD §3 and §16 defer overage charging "with
+its own PRD").
+
+**Status:** decided 2026-09-28 (Sebastián Barrozo)
+
+**Decision:**
+
+- **Billing-period history is stored in a dedicated table**, so past periods stay available after
+  the current period is updated. The ledger summary alone is not enough.
+- **Period usage is calculated and stored ahead of time**, so the resource-limit check reads the
+  current total instead of recalculating it during the request (§5.15).
+
+What still holds from the analysis:
+
+- `ETGO_SUBSCRIPTION` has one period slot (`CURRENT_PERIOD_START/END`), overwritten at each renewal
+  (§5.5).
+- Since ETP-5047 every `invoice.paid` row of `ETGO_BILLING_EVENT` carries the period it paid for in
+  its summary (`WebhookPayloadSummary`: `service_period_start` / `service_period_end`, epoch
+  seconds — the invoice **line** period, extracted as `SubscriptionLifecycleApplier.invoiceServicePeriod`
+  does for the row, not the invoice's own `period_*`, which looks back one period). It is an
+  abbreviated JSON string, not a queryable column, and periods before the ETP-5047 deploy were never
+  recorded.
+- `ETGO_USAGE_DAILY` (`MEASURED_CLIENT_ID`, `ETGO_BILLING_RESOURCE_ID`, `USAGE_DAY`, `QTY`,
+  `IS_SETTLED`) has no link to a subscription; it joins one only by value
+  (`ETGO_SUBSCRIPTION.ENVIRONMENT_CLIENT_ID = MEASURED_CLIENT_ID`, `USAGE_DAY` inside the period).
+  ETP-5048's reconciliation covers payments and subscription status, not usage.
+
+**Follow-up:** no ticket — an owner ticket, then the table design. Open design points: whether
+period usage lives in the period table or in a separate period × resource table; who writes the
+period (e.g. the lifecycle webhooks on `invoice.paid` / `customer.subscription.updated`, which
+already extract it) and who writes the usage (the scheduled job of §5.15); how a stock combines
+over the period (§5.6).
+
+### ✅ 5.12 The would-have-billed report is scheduled in the PRD and excluded by its owner
+
+**Ticket:** no ticket — the script needs an owner.
+
+**Status:** decided 2026-09-28 (Sebastián Barrozo)
+
+**Decision:** a script that helps gather the information is enough; the full would-have-billed
+report is not built in this billing block.
+
+PRD §14 assigns "would-have-billed report. Shadow mode" to ETP-5050, whose design
+(`plans/2026-09-15-etp-5050-usage-measurement-design.md` §10) lists "the would-have-billed figure"
+as out of scope.
+
+**Follow-up:** no ticket — the script needs an owner. It still depends on §5.6 (how days combine)
+and on the period it reports (§5.5, §5.10). PRD §14
+(`schema_forge/docs/plans/2026-08-27-recurring-billing-and-resource-limits-prd.md`) still assigns
+the report to ETP-5050 and should be updated to the script.
+
+### ✅ 5.15 The resource-limit check reads stored usage; usage is recomputed on one two-hour cadence
+
+**Ticket:** related ETP-5051 (the check) and ETP-5050 (the usage job); no ticket for the
+scheduling.
+
+**Status:** decided 2026-09-28 (Sebastián Barrozo)
+
+**Decision:**
+
+- **The everyday check stays lightweight.** Identify the subscription currently in effect for the
+  client/environment and compare the requested consumption with that plan's limits, reading the
+  latest stored period usage (§5.10). No billing-date or plan-transition calculation per request;
+  the period calculation happens separately, ahead of time. Dates still matter for billing and for
+  when a scheduled downgrade takes effect (`PENDING_EFFECTIVE_DATE`, §5.13).
+- **Freshness: one globally configurable two-hour cadence for all billing resources.** Martin
+  proposed that some resources recompute more often than daily; Sebastián chose one cadence for
+  all, to keep the design simple.
+- **One scheduled job, with a separate transaction per client**, so the whole run need not be
+  atomic (§1.4).
+- **A warning is logged when calculations fall behind the configured cadence**, to spot volume
+  problems early.
+
+**Follow-up:** no ticket.
+
+- **Nothing schedules the usage job yet.** `UsageAggregationProcess` runs on demand from its menu
+  entry and the module ships no process request (`schema_forge/docs/usage-measurement.md` §9:
+  "nothing schedules it yet").
+- **The cadence setting does not exist.** The only usage setting today is the settling window
+  (`UsageSettings`). Each run recomputes the whole window plus a sealing day (7 days at the
+  default), so a two-hour cadence repeats that 12 times a day.
+- **There is no lag warning.** `ETGO_USAGE_RUN_LOG` (`RUN_ID`, `DATE_FROM`/`DATE_TO`,
+  `STARTED_AT`/`FINISHED_AT`, `STATUS`, written by `UsageRunLedger` at the end of each run) holds
+  what it needs.
+- **Per-client transactions conflict with the grouped all-tenant query** — §1.4.
 
 ---
 
