@@ -399,8 +399,8 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
   /**
    * The race the conditional {@code UPDATE} exists for: the row is periodless when the fill reads
    * it, and a lifecycle webhook commits a period on another connection while the provider is
-   * answering. The webhook's period wins, the fill reports nothing written, and the in-session row
-   * is refreshed to what the database holds.
+   * answering. The webhook's period wins, the fill reports nothing written, and a read after the
+   * fill gets what the database holds.
    */
   @Test
   public void testAWebhookPeriodCommittedWhileTheProviderAnswersIsNotOverwritten() {
@@ -420,7 +420,7 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
       assertFalse("The webhook wrote first: nothing to commit",
           filling.fillPeriodFromProvider(tenant));
       Subscription inSession = filling.findOpen(tenant).orElseThrow();
-      assertEquals("The in-session row is refreshed to the webhook's period",
+      assertEquals("A read after the fill gets the webhook's period",
           WEBHOOK_START, inSession.getCurrentPeriodStart().toInstant());
       OBDal.getInstance().commitAndClose();
     } finally {

@@ -2409,8 +2409,8 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.subscriptionService = subscriptions;
 
     try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
-      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-          () -> servlet.fillSubscriptionPeriodBestEffort("client-1"));
+      // The contract under test: nothing escapes. JUnit 4 fails the spec on any throw here.
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
 
       transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()), never());
       transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(PERIOD_STEP),
@@ -2429,8 +2429,8 @@ public class EtendoGoJwtServletCoverageTest {
       transactions.when(() -> EtendoGoDalHelper.commitDalChanges(eq(PERIOD_STEP), any()))
           .thenThrow(failure);
 
-      org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-          () -> servlet.fillSubscriptionPeriodBestEffort("client-1"));
+      // The contract under test: nothing escapes. JUnit 4 fails the spec on any throw here.
+      servlet.fillSubscriptionPeriodBestEffort("client-1");
 
       transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(PERIOD_STEP),
           eq(failure), any()));
@@ -2488,61 +2488,25 @@ public class EtendoGoJwtServletCoverageTest {
    */
   private String runCommittedPaidOnboarding(SubscriptionService subscriptions,
       List<String> steps) throws Exception {
-    ResponseCapture response = mockResponse();
-    HttpServletRequest request = jsonRequest("/onboarding",
-        "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\","
-            + "\"paymentToken\":\"purchase-1\"}");
-    when(request.getHeader("Authorization")).thenReturn("Bearer valid-token");
-    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
-    servlet.checkoutRequestStore = store;
-    when(store.claimForProvisioning("purchase-1", "account-1", "user@test.com")).thenReturn(true);
-    when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com")).thenReturn(1L);
-    doAnswer(invocation -> steps.add("recordProvisioned")).when(store)
+    PaidOnboardingStage stage = stagePaidOnboarding(true);
+    doAnswer(invocation -> steps.add("recordProvisioned")).when(stage.store)
         .recordProvisioned("purchase-1", "client-1", 1L);
-    TenantPaywallService paywall = new TenantPaywallService();
-    Field confirmation = TenantPaywallService.class.getDeclaredField("paymentConfirmation");
-    confirmation.setAccessible(true);
-    confirmation.set(paywall, (TenantPaywallService.PaymentConfirmation) (token, email, name) -> true);
-    servlet.tenantPaywallService = paywall;
-    servlet.pooledTenantClaimService = mock(PooledTenantClaimService.class);
-    when(servlet.pooledTenantClaimService.claim(any(), any(), anyString())).thenReturn("client-1");
-    servlet.devProvisioningFailureFixtureService = mock(DevProvisioningFailureFixtureService.class);
     servlet.subscriptionService = subscriptions;
-    servlet.tenantPlanService = mock(TenantPlanService.class);
     when(servlet.tenantPlanService.markProductive("client-1", "star-org")).thenReturn(true);
-    servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
     when(servlet.tenantEnvironmentLifecycleService.markProductive("client-1")).thenReturn(true);
-    servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
-    servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
     servlet.onboardingWarehouseAddressService =
         mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
     servlet.onboardingCostingScheduleService =
         mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
-    Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");
-    UserRoles admin = mock(UserRoles.class); Role role = mock(Role.class); User user = mock(User.class);
-    when(role.getId()).thenReturn("role-1"); when(user.getId()).thenReturn("user-1");
-    when(admin.getRole()).thenReturn(role); when(admin.getUserContact()).thenReturn(user);
-    Organization org = mock(Organization.class); when(org.getId()).thenReturn("org-1");
-    try (var context = mockStatic(OBContext.class);
-         var support = mockStatic(EtendoGoJwtSupport.class);
-         var dal = mockStatic(EtendoGoJwtDalHelper.class);
-         var transactions = mockStatic(EtendoGoDalHelper.class)) {
-      Account authenticated = stubAuthenticatedAccount(dal);
-      when(authenticated.getId()).thenReturn("account-1");
-      dal.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR")).thenReturn(currency);
-      dal.when(() -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com")).thenReturn(1);
-      dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com")).thenReturn(true);
-      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com")).thenReturn(true);
-      dal.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1")).thenReturn(admin);
-      support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
-      dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
+          .thenReturn(true);
       transactions.when(() -> EtendoGoDalHelper.commitDalChanges(anyString(), any()))
           .thenAnswer(invocation -> steps.add("commit:" + invocation.getArgument(0)));
       transactions.when(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()))
           .thenAnswer(invocation -> steps.add("rollback:" + invocation.getArgument(0)));
-      servlet.doPost(request, response.response);
-    }
-    return response.body();
+    }, (support, dal, transactions) -> { });
+    return stage.response.body();
   }
 
   /**
@@ -3130,6 +3094,54 @@ public class EtendoGoJwtServletCoverageTest {
    */
   private PaidOnboardingRun runPaidOnboarding(boolean pooled, boolean productiveNameTaken)
       throws Exception {
+    PaidOnboardingStage stage = stagePaidOnboarding(pooled);
+    doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
+        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+    when(servlet.tenantPlanService.resolvePlan("own-productive"))
+        .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+    runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
+      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
+          .thenReturn(productiveNameTaken ? List.of("other-account-acme", "own-productive")
+              : List.of());
+      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail(
+          "own-productive", "user@test.com")).thenReturn(true);
+      transactions.when(() -> EtendoGoDalHelper.rollbackDalChangesAndConfirm(eq("onboarding"), any(), any()))
+          .thenReturn(true);
+    }, (support, dal, transactions) ->
+        transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq("onboarding"), any()), never()));
+    return new PaidOnboardingRun(stage.response, stage.store);
+  }
+
+  /** What one staged paid onboarding sends and the checkout store it closes. */
+  private static final class PaidOnboardingStage {
+    final ResponseCapture response;
+    final HttpServletRequest request;
+    final CheckoutRequestStore store;
+
+    PaidOnboardingStage(ResponseCapture response, HttpServletRequest request,
+        CheckoutRequestStore store) {
+      this.response = response;
+      this.request = request;
+      this.store = store;
+    }
+  }
+
+  /** Per-spec stubs or verifications on the static mocks of a staged paid onboarding. */
+  @FunctionalInterface
+  private interface StagedStatics {
+    void apply(MockedStatic<EtendoGoJwtSupport> support, MockedStatic<EtendoGoJwtDalHelper> dal,
+        MockedStatic<EtendoGoDalHelper> transactions);
+  }
+
+  /**
+   * The setup every paid onboarding spec shares: a confirmed purchase {@code purchase-1} the
+   * account {@code account-1} has claimed, the tenant {@code client-1} (pooled or classic), and
+   * mocked plan, lifecycle, force-test-mode and org-info services. Spec-specific stubs go on the
+   * returned stage or on the servlet's mocks before {@link #runStagedPaidOnboarding}.
+   *
+   * @param pooled whether the pool hands out {@code client-1}
+   */
+  private PaidOnboardingStage stagePaidOnboarding(boolean pooled) throws Exception {
     ResponseCapture response = mockResponse();
     HttpServletRequest request = jsonRequest("/onboarding",
         "{\"clientName\":\"Acme\",\"currency\":\"EUR\",\"language\":\"en_US\","
@@ -3152,8 +3164,18 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.tenantEnvironmentLifecycleService = mock(TenantEnvironmentLifecycleService.class);
     servlet.onboardingForceTestModeService = mock(OnboardingForceTestModeService.class);
     servlet.onboardingOrgInfoService = mock(com.etendoerp.go.onboarding.OnboardingOrgInfoService.class);
-    doThrow(new OBException("Org info unavailable")).when(servlet.onboardingOrgInfoService)
-        .ensureOrgInfo(anyString(), anyString(), anyString(), anyString(), any(), any(), any());
+    return new PaidOnboardingStage(response, request, store);
+  }
+
+  /**
+   * Posts a staged paid onboarding with the authenticated account, its currency and the
+   * {@code client-1} admin role and organizations resolved, inside the static mocks.
+   *
+   * @param before spec stubs applied before the request
+   * @param after spec verifications run before the static mocks close
+   */
+  private void runStagedPaidOnboarding(PaidOnboardingStage stage, StagedStatics before,
+      StagedStatics after) throws Exception {
     Currency currency = mock(Currency.class); when(currency.getId()).thenReturn("currency-1");
     UserRoles admin = mock(UserRoles.class); Role role = mock(Role.class); User user = mock(User.class);
     when(role.getId()).thenReturn("role-1"); when(user.getId()).thenReturn("user-1");
@@ -3168,22 +3190,13 @@ public class EtendoGoJwtServletCoverageTest {
       dal.when(() -> EtendoGoJwtDalHelper.findCurrencyByIsoCode("EUR")).thenReturn(currency);
       dal.when(() -> EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail("user@test.com")).thenReturn(1);
       dal.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com")).thenReturn(true);
-      support.when(() -> EtendoGoJwtSupport.findClientIdsByName("Acme"))
-          .thenReturn(productiveNameTaken ? List.of("other-account-acme", "own-productive")
-              : List.of());
-      dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail(
-          "own-productive", "user@test.com")).thenReturn(true);
-      when(servlet.tenantPlanService.resolvePlan("own-productive"))
-          .thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
       dal.when(() -> EtendoGoJwtDalHelper.findClientAdminUserRole("client-1")).thenReturn(admin);
       support.when(() -> EtendoGoJwtSupport.findStarOrgId("client-1")).thenReturn("star-org");
       dal.when(() -> EtendoGoJwtDalHelper.findFirstOrganization("client-1")).thenReturn(org);
-      transactions.when(() -> EtendoGoDalHelper.rollbackDalChangesAndConfirm(eq("onboarding"), any(), any()))
-          .thenReturn(true);
-      servlet.doPost(request, response.response);
-      transactions.verify(() -> EtendoGoDalHelper.commitDalChanges(eq("onboarding"), any()), never());
+      before.apply(support, dal, transactions);
+      servlet.doPost(stage.request, stage.response.response);
+      after.apply(support, dal, transactions);
     }
-    return new PaidOnboardingRun(response, store);
   }
 
   private void assertProvisioningAlertOutcome(boolean pooled, boolean complete,

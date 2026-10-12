@@ -6,17 +6,24 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 
 /**
  * Specs for {@link StripeSubscriptionPeriodReader} (ETP-5047): the provider read that gives a
@@ -137,12 +144,33 @@ class StripeSubscriptionPeriodReaderTest {
     assertNull(reader().read(CLIENT_ID, SUBSCRIPTION_ID));
   }
 
+  /**
+   * The WARN names the tenant, the subscription and the provider's error code, and never repeats
+   * the provider's message: Stripe's messages can echo request details, an API key among them.
+   */
   @Test
-  void aRejectionAnswersNull() {
+  void aRejectionAnswersNullAndLogsTheCodeButNeverTheProvidersMessage() {
+    String echoedKey = "sk_test_51ShouldNeverBeLogged";
     stripe.answering(404, "{\"error\":{\"code\":\"resource_missing\","
-        + "\"message\":\"No such subscription\"}}");
+        + "\"message\":\"No such subscription: '" + SUBSCRIPTION_ID + "' (request made with key "
+        + echoedKey + ")\"}}");
+    TestLogCapture warnings =
+        TestLogCapture.attachTo(StripeSubscriptionPeriodReader.class, Level.WARN);
+    try {
+      assertNull(reader().read(CLIENT_ID, SUBSCRIPTION_ID));
+    } finally {
+      warnings.detach();
+    }
 
-    assertNull(reader().read(CLIENT_ID, SUBSCRIPTION_ID));
+    List<String> logged = warnings.messagesAt(Level.WARN);
+    assertEquals(1, logged.size(), logged.toString());
+    String warning = logged.get(0);
+    assertTrue(warning.contains("resource_missing"), warning);
+    assertTrue(warning.contains("404"), warning);
+    assertTrue(warning.contains(CLIENT_ID), warning);
+    assertTrue(warning.contains(SUBSCRIPTION_ID), warning);
+    assertFalse(warning.contains("No such subscription"), warning);
+    assertFalse(warning.contains(echoedKey), warning);
   }
 
   @Test
@@ -169,8 +197,34 @@ class StripeSubscriptionPeriodReaderTest {
     assertNull(reader().read(CLIENT_ID, SUBSCRIPTION_ID));
   }
 
+  /**
+   * The production reader reads through a provider client built with its own short timeouts, not
+   * the checkout ones, and only once a secret key is configured.
+   */
   @Test
-  void theProductionReaderUsesShortTimeouts() {
+  void theProductionReaderReadsThroughAClientBoundedByItsShortTimeouts() {
+    List<List<?>> constructorArguments = new ArrayList<>();
+    SubscriptionLifecycleApplier.BillingPeriod period;
+    try (MockedConstruction<HttpUrlConnectionStripeApiClient> clients = mockConstruction(
+            HttpUrlConnectionStripeApiClient.class, (client, context) -> {
+              constructorArguments.add(context.arguments());
+              when(client.get("/v1/subscriptions/" + SUBSCRIPTION_ID)).thenReturn(
+                  new StripeResponse(200, "{\"current_period_start\":" + START
+                      + ",\"current_period_end\":" + END + "}"));
+            });
+         MockedStatic<CheckoutConfiguration> configuration =
+             mockStatic(CheckoutConfiguration.class)) {
+      configuration.when(CheckoutConfiguration::secretKey).thenReturn("sk_test_configured");
+
+      period = new StripeSubscriptionPeriodReader().read(CLIENT_ID, SUBSCRIPTION_ID);
+
+      assertEquals(1, clients.constructed().size());
+    }
+
+    assertEquals(List.of(List.of(StripeSubscriptionPeriodReader.CONNECT_TIMEOUT_MS,
+        StripeSubscriptionPeriodReader.READ_TIMEOUT_MS)), constructorArguments);
+    assertEquals(Instant.ofEpochSecond(START), period.start());
+    assertEquals(Instant.ofEpochSecond(END), period.end());
     // Shorter than the checkout budget (10 s connect / 20 s read): this read only enriches a row.
     assertTrue(StripeSubscriptionPeriodReader.CONNECT_TIMEOUT_MS <= 5_000);
     assertTrue(StripeSubscriptionPeriodReader.READ_TIMEOUT_MS <= 10_000);

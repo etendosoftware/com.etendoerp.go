@@ -13,7 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -31,6 +33,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import org.hibernate.Session;
+import org.hibernate.query.Query;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -40,6 +43,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -50,6 +54,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -964,8 +969,8 @@ class SubscriptionServiceTest {
     private SubscriptionService filling;
     private Session session;
     @SuppressWarnings("rawtypes")
-    private org.hibernate.query.Query periodStatement;
-    private org.openbravo.model.ad.access.User systemUser;
+    private Query periodStatement;
+    private User systemUser;
 
     @BeforeEach
     void givenAReaderAndASession() {
@@ -974,11 +979,11 @@ class SubscriptionServiceTest {
           new SubscriptionLifecycleApplier.BillingPeriod(periodStart, periodEnd));
       filling = new SubscriptionService(reader);
       session = mock(Session.class);
-      periodStatement = mock(org.hibernate.query.Query.class, org.mockito.Mockito.RETURNS_SELF);
+      periodStatement = mock(Query.class, RETURNS_SELF);
       when(periodStatement.executeUpdate()).thenReturn(1);
       when(session.createQuery(anyString())).thenReturn(periodStatement);
       when(obDal.getSession()).thenReturn(session);
-      systemUser = mock(org.openbravo.model.ad.access.User.class);
+      systemUser = mock(User.class);
       OBContext context = mock(OBContext.class);
       when(context.getUser()).thenReturn(systemUser);
       obContextMock.when(OBContext::getOBContext).thenReturn(context);
@@ -1013,7 +1018,7 @@ class SubscriptionServiceTest {
 
       // No pooled connection may sit idle in a transaction while Stripe answers: the read
       // transaction ends before the call, the write comes after it in a fresh one.
-      org.mockito.InOrder order = org.mockito.Mockito.inOrder(obDal, reader, periodStatement);
+      InOrder order = inOrder(obDal, reader, periodStatement);
       order.verify(obDal).commitAndClose();
       order.verify(reader).read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID);
       order.verify(periodStatement).executeUpdate();
@@ -1048,9 +1053,9 @@ class SubscriptionServiceTest {
 
       ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
       verify(session).createQuery(hql.capture());
-      assertTrue(!hql.getValue().contains("subscriptionStatus")
-          && !hql.getValue().contains("graceAnchor") && !hql.getValue().contains("lastEventAt"),
-          hql.getValue());
+      assertFalse(hql.getValue().contains("subscriptionStatus"), hql.getValue());
+      assertFalse(hql.getValue().contains("graceAnchor"), hql.getValue());
+      assertFalse(hql.getValue().contains("lastEventAt"), hql.getValue());
       verify(row, never()).setSubscriptionStatus(any());
       verify(row, never()).setGraceAnchor(any());
       verify(row, never()).setLastEventAt(any());
