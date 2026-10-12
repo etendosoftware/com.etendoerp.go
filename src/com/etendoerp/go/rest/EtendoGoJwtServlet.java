@@ -1552,9 +1552,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     // The customer and subscription ids are read here and nowhere else: this is the only event
     // that carries them alongside the correlation id, and every later subscription or invoice
-    // event arrives keyed by the subscription rather than by the request.
-    boolean recorded = checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
-        object.optString("subscription", ""));
+    // event arrives keyed by the subscription rather than by the request. Both are read as
+    // nullable: a payment-mode checkout sends "subscription": null, which a bare optString would
+    // store as the text "null" (ETP-5047).
+    boolean recorded = checkoutRequestStore.recordPaid(requestId,
+        SubscriptionLifecycleApplier.optText(object, "customer"),
+        SubscriptionLifecycleApplier.optText(object, "subscription"));
     if (!recorded) {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
@@ -1654,7 +1657,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
     if (purchase == null) {
-      purchase = checkoutRequestStore.findByStripeCustomer(object.optString("customer", ""));
+      purchase = checkoutRequestStore.findByStripeCustomer(
+          SubscriptionLifecycleApplier.optText(object, "customer"));
     }
     if (purchase == null || purchase.getCreatedClient() == null) {
       return null;

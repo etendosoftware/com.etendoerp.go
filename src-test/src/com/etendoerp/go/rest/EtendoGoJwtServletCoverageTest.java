@@ -2361,6 +2361,34 @@ public class EtendoGoJwtServletCoverageTest {
     assertProvisioningAlertOutcome(false, false, true, false, false);
   }
 
+  // ===================== applyCheckoutPaid — nullable Stripe ids (ETP-5047) ================
+
+  /**
+   * A payment-mode checkout reports {@code subscription} (and may report {@code customer}) as
+   * JSON {@code null}. Jettison's {@code optString} turns that marker into the text "null", which
+   * used to be stored as the Stripe subscription id — and the post-onboarding period read then
+   * asked Stripe for {@code /v1/subscriptions/null}. A JSON null must reach the store as blank.
+   */
+  @Test
+  public void aCheckoutPaidWithNullProviderIdsRecordsThemBlankNeverAsTheWordNull()
+      throws Exception {
+    CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+    servlet.checkoutRequestStore = store;
+    servlet.billingEventStore = mock(com.etendoerp.go.payment.BillingEventStore.class);
+    when(store.recordPaid(anyString(), anyString(), anyString())).thenReturn(true);
+    JSONObject event = new JSONObject("{\"type\":\"checkout.session.completed\",\"data\":"
+        + "{\"object\":{\"id\":\"cs_1\",\"mode\":\"payment\",\"customer\":null,"
+        + "\"subscription\":null,\"metadata\":{\"request_id\":\"purchase-1\","
+        + "\"account_email\":\"user@test.com\"}}}}");
+    Method applyCheckoutPaid = EtendoGoJwtServlet.class.getDeclaredMethod("applyCheckoutPaid",
+        String.class, String.class, JSONObject.class);
+    applyCheckoutPaid.setAccessible(true);
+
+    applyCheckoutPaid.invoke(servlet, "evt_1", "checkout.session.completed", event);
+
+    verify(store).recordPaid("purchase-1", "", "");
+  }
+
   // ===================== fillSubscriptionPeriodBestEffort — the post-commit period read ========
   //
   // A paid onboarding opens the subscription row without a billing period: the purchase's first

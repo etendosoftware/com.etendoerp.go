@@ -35,7 +35,13 @@ import org.mockito.MockedStatic;
 
 import com.etendoerp.go.schemaforge.data.Plan;
 
-/** Contract tests for retrieving the exact recurring Stripe Price configured for checkout. */
+/**
+ * Contract tests for retrieving the exact recurring Stripe Price configured for checkout, and for
+ * the hosted checkout's reopening of an existing session.
+ *
+ * @covers com.etendoerp.go.payment.StripePriceService
+ * @covers com.etendoerp.go.payment.HostedCheckoutService
+ */
 class StripePriceServiceTest {
 
   @Test
@@ -285,6 +291,34 @@ class StripePriceServiceTest {
     }
   }
 
+  /**
+   * ETP-5047 — a completed payment-mode session reports {@code customer} and {@code subscription}
+   * as JSON {@code null}; jettison's {@code optString} would hand back the text "null", which the
+   * caller then stores as a provider id.
+   */
+  @Test
+  void reopeningACompletedSessionWithNullProviderIdsReturnsThemBlank() throws Exception {
+    try (ExistingSessionStripeServer stripe = new ExistingSessionStripeServer("complete",
+        "\"customer\":null,\"subscription\":null");
+        MockedStatic<CheckoutConfiguration> configuration = mockStatic(CheckoutConfiguration.class)) {
+      configuration.when(CheckoutConfiguration::isConfigured).thenReturn(true);
+      configuration.when(CheckoutConfiguration::priceId).thenReturn("price_default");
+      configuration.when(CheckoutConfiguration::secretKey).thenReturn("sk_test_server_only");
+      configuration.when(CheckoutConfiguration::apiBaseUrl).thenReturn(stripe.baseUrl());
+      configuration.when(CheckoutConfiguration::mode).thenReturn("payment");
+      CheckoutRequestStore store = mock(CheckoutRequestStore.class);
+      when(store.findStripeSessionId("purchase-complete")).thenReturn("cs_existing");
+      HostedCheckoutService checkout = new HostedCheckoutService();
+      checkout.checkoutRequestStore = store;
+
+      JSONObject result = checkout.reopenSession("purchase-complete", "owner@example.test",
+          "Acme", "https://app.example.test");
+
+      assertEquals("", result.getString("stripeCustomer"));
+      assertEquals("", result.getString("stripeSubscription"));
+    }
+  }
+
   private static void assertInvalidPrice(String body) throws JSONException {
     assertThrows(IOException.class,
         () -> StripePriceService.parsePrice(new JSONObject(body)));
@@ -340,6 +374,10 @@ class StripePriceServiceTest {
     }
 
     ExistingSessionStripeServer(String sessionStatus) throws IOException {
+      this(sessionStatus, "\"customer\":\"cus_paid\",\"subscription\":\"sub_paid\"");
+    }
+
+    ExistingSessionStripeServer(String sessionStatus, String providerIds) throws IOException {
       server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
       server.createContext("/v1/prices/price_saved", exchange -> respond(exchange, 200,
           "{\"id\":\"price_saved\",\"active\":true,\"unit_amount\":1000,"
@@ -351,8 +389,7 @@ class StripePriceServiceTest {
             "{\"id\":\"cs_existing\",\"status\":\"" + sessionStatus + "\","
                 + "\"mode\":\"subscription\","
                 + "\"url\":\"https://checkout.example.test/cs_existing\","
-                + "\"payment_status\":\"paid\",\"customer\":\"cus_paid\","
-                + "\"subscription\":\"sub_paid\"}");
+                + "\"payment_status\":\"paid\"," + providerIds + "}");
       });
       server.createContext("/v1/checkout/sessions", exchange -> {
         createSessionCalls.incrementAndGet();

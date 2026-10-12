@@ -344,8 +344,10 @@ public class HostedCheckoutService {
     result.put("paymentStatus", paymentStatus);
     result.put("paymentComplete", "paid".equals(paymentStatus)
         || "no_payment_required".equals(paymentStatus));
-    result.put("stripeCustomer", session.optString("customer", ""));
-    result.put("stripeSubscription", session.optString(SUBSCRIPTION_FIELD, ""));
+    // JSON null (a payment-mode session has no subscription) must not become the text "null".
+    result.put("stripeCustomer", SubscriptionLifecycleApplier.optText(session, "customer"));
+    result.put("stripeSubscription",
+        SubscriptionLifecycleApplier.optText(session, SUBSCRIPTION_FIELD));
     return result;
   }
 
