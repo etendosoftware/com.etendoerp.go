@@ -210,7 +210,8 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
 
     JSONObject price = response.json();
     JSONObject recurring = price.optJSONObject(TYPE_RECURRING);
-    String priceType = readableString(price, "type");
+    // Null when absent, so the log below reads "type 'null'" exactly as before.
+    String priceType = StringUtils.trimToNull(StripeJson.text(price, "type"));
     if (recurring == null || !TYPE_RECURRING.equals(priceType)) {
       log.warn("Plan '{}': price '{}' is not recurring (type '{}')", planKey, priceId, priceType);
       throw new OBException(message(MSG_NOT_RECURRING, priceId));
@@ -225,7 +226,7 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
     }
 
     int intervalCount = recurring.optInt("interval_count", 1);
-    String providerInterval = StringUtils.trimToEmpty(readableString(recurring, "interval"));
+    String providerInterval = StripeJson.text(recurring, "interval");
     if (intervalCount != 1) {
       log.warn("Plan '{}': price '{}' bills every {} {}", planKey, priceId, intervalCount,
           providerInterval);
@@ -243,7 +244,7 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
           .replace("@planInterval@", declared));
     }
 
-    String currency = StringUtils.trimToEmpty(readableString(price, "currency"))
+    String currency = StripeJson.text(price, "currency")
         .toUpperCase(Locale.ROOT);
     BigDecimal amount = readAmount(price, currency);
     if (currency.isEmpty() || amount == null) {
@@ -283,8 +284,8 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
    */
   private static BigDecimal readAmount(JSONObject price, String currency) {
     int exponent = StripeCurrencyScale.exponent(currency);
-    String decimal = readableString(price, "unit_amount_decimal");
-    if (decimal != null) {
+    String decimal = StripeJson.text(price, "unit_amount_decimal");
+    if (!decimal.isEmpty()) {
       try {
         return new BigDecimal(decimal).movePointLeft(exponent);
       } catch (NumberFormatException e) {
@@ -298,14 +299,6 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
       return null;
     }
     return BigDecimal.valueOf(price.optLong(FIELD_UNIT_AMOUNT, 0L)).movePointLeft(exponent);
-  }
-
-  /** Reads a string field, treating an absent field and a JSON null alike. */
-  private static String readableString(JSONObject json, String field) {
-    if (!json.has(field) || json.isNull(field)) {
-      return null;
-    }
-    return StringUtils.trimToNull(json.optString(field, ""));
   }
 
   private static String message(String messageValue, String priceId) {

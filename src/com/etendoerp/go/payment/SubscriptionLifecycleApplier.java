@@ -184,38 +184,15 @@ public class SubscriptionLifecycleApplier {
       return "";
     }
     if (StringUtils.trimToEmpty(type).startsWith(SUBSCRIPTION_EVENT_PREFIX)) {
-      return optText(object, "id");
+      return StripeJson.text(object, "id");
     }
-    String direct = optText(object, "subscription");
+    String direct = StripeJson.text(object, "subscription");
     if (StringUtils.isNotEmpty(direct)) {
       return direct;
     }
     JSONObject parent = object.optJSONObject("parent");
     JSONObject details = parent == null ? null : parent.optJSONObject("subscription_details");
-    return details == null ? "" : optText(details, "subscription");
-  }
-
-  /**
-   * Reads a String field the way Stripe actually sends it, never as the literal word "null".
-   *
-   * <p>An invoice not tied to a subscription reports {@code subscription} as JSON {@code null},
-   * and jettison's {@code JSONObject.optString} stringifies that null marker into the literal
-   * text {@code "null"} instead of falling back to the default. Left unguarded, {@link
-   * #subscriptionIdOf} would return "null" as if it were a real subscription id. Every nullable
-   * Stripe field must be read through here, not through a bare {@code optString} — in this class
-   * and outside it: since ETP-5047 the checkout's {@code customer} and {@code subscription} are
-   * read through here too, because a payment-mode checkout reports its {@code subscription} as
-   * JSON {@code null} and the text "null" used to be stored as the subscription id.
-   *
-   * @param json a provider object, may be null
-   * @param key the field to read
-   * @return the trimmed value, or an empty string when the field is absent or JSON {@code null}
-   */
-  public static String optText(JSONObject json, String key) {
-    if (json == null || !json.has(key) || json.isNull(key)) {
-      return "";
-    }
-    return StringUtils.trimToEmpty(json.optString(key, ""));
+    return details == null ? "" : StripeJson.text(details, "subscription");
   }
 
   /**

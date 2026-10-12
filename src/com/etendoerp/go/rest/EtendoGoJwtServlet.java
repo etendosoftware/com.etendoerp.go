@@ -89,6 +89,7 @@ import com.etendoerp.go.payment.PlanNotAvailableException;
 import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
+import com.etendoerp.go.payment.StripeJson;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.EnvironmentAccessGuard;
 import com.etendoerp.go.payment.SystemContext;
@@ -1556,8 +1557,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // nullable: a payment-mode checkout sends "subscription": null, which a bare optString would
     // store as the text "null" (ETP-5047).
     boolean recorded = checkoutRequestStore.recordPaid(requestId,
-        SubscriptionLifecycleApplier.optText(object, "customer"),
-        SubscriptionLifecycleApplier.optText(object, "subscription"));
+        StripeJson.text(object, "customer"),
+        StripeJson.text(object, "subscription"));
     if (!recorded) {
       billingEventStore.markIgnored(eventId, "unknown checkout request");
       return;
@@ -1658,7 +1659,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
     if (purchase == null) {
       purchase = checkoutRequestStore.findByStripeCustomer(
-          SubscriptionLifecycleApplier.optText(object, "customer"));
+          StripeJson.text(object, "customer"));
     }
     if (purchase == null || purchase.getCreatedClient() == null) {
       return null;
