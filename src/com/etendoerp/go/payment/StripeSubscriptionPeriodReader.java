@@ -51,8 +51,6 @@ class StripeSubscriptionPeriodReader {
   static final int CONNECT_TIMEOUT_MS = 3_000;
   static final int READ_TIMEOUT_MS = 5_000;
 
-  private static final String SUBSCRIPTIONS_PATH = "/v1/subscriptions/";
-
   private final StripeApiClient stripeApiClient;
   private final BooleanSupplier secretKeyConfigured;
 
@@ -106,7 +104,7 @@ class StripeSubscriptionPeriodReader {
       return null;
     }
     StripeResponse response = stripeApiClient.get(
-        SUBSCRIPTIONS_PATH + URLEncoder.encode(subscriptionId, StandardCharsets.UTF_8));
+        "/v1/subscriptions/" + URLEncoder.encode(subscriptionId, StandardCharsets.UTF_8));
     if (!response.isSuccess()) {
       warn(environmentClientId, subscriptionId, "the payment provider answered "
           + response.status() + " (" + Objects.toString(response.errorCode(), "no code")
