@@ -52,11 +52,14 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
@@ -77,6 +80,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
+ * @covers com.etendoerp.go.schemaforge.NeoProcessService
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -617,42 +622,76 @@ public class SalesOrderHeaderHandlerTest {
 
   // ── Reactivate (DocAction RE) refused on orders with linked documents ──────
 
+  /** Sentinel for the stored-DocAction column of the table below: reading it throws. */
+  private static final String STORED_READ_FAILS = "<stored read fails>";
+
   /**
-   * Reactivate ({@code DocAction} = {@code RE}) through {@code handle()}, one row per outcome of
-   * the linked-documents lookup: a linked shipment/invoice is refused with 400, no linked
-   * document lets the request fall through to the action router, and a lookup that cannot run
-   * is refused with 500 (fail closed). Every row also proves the lookup ran for this order.
-   * The button/body shapes (column vs field, root vs {@code fieldValues}) are guarded by
-   * {@code SalesQuotationHeaderHandlerTest#testIsRejectDocAction_table}; here they only vary to
-   * mirror the REST and MCP requests.
+   * Reactivate guard through {@code handle()}: it decides on the DocAction the DB procedure will
+   * actually run — root {@code docAction} when non-blank, else the record's stored
+   * {@code DocAction} — never on {@code fieldValues.documentAction}. A refusal is 400 and never
+   * reaches the action router; a lookup that cannot run is 500 (fail closed). The stored value is
+   * resolved as {@code NeoProcessService.storedDocAction} does: tab → table name → record →
+   * {@code documentAction}.
    */
   @Test
   public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
     final String orderId = "order-re-1";
-    // { label, button, body, linked docs (null = the query throws), expected status (null = falls through) }
+    final String tabId = "tab-order";
+    final String entityName = "Order";
+    // { label, body, stored DocAction (null = not stubbed), linked docs (null = the query throws),
+    //   expected status (null = falls through to the router) }
     Object[][] cases = {
-        { "linked shipment/invoice is refused", "DocAction",
-            "{\"docAction\":\"RE\"}", Boolean.TRUE, 400 },
-        { "no linked documents falls through", "documentAction",
-            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", Boolean.FALSE, null },
-        { "failed lookup fails closed", "DocAction",
-            "{\"docAction\":\"RE\"}", null, 500 },
+        { "root RE with linked docs is refused",
+            "{\"docAction\":\"RE\"}", null, Boolean.TRUE, 400 },
+        { "root RE wins over fieldValues CO",
+            "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}", null,
+            Boolean.TRUE, 400 },
+        { "root CO wins over fieldValues RE",
+            "{\"fieldValues\":{\"documentAction\":\"RE\"},\"docAction\":\"CO\"}", null,
+            Boolean.TRUE, null },
+        { "empty body runs the stored RE and is refused",
+            "{}", "RE", Boolean.TRUE, 400 },
+        { "fieldValues RE without root runs the stored CO",
+            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", Boolean.TRUE, null },
+        { "root RE without linked docs falls through",
+            "{\"docAction\":\"RE\"}", null, Boolean.FALSE, null },
+        { "unreadable stored DocAction fails closed",
+            "{}", STORED_READ_FAILS, Boolean.TRUE, 500 },
+        { "failed linked-docs lookup fails closed",
+            "{\"docAction\":\"RE\"}", null, null, 500 },
     };
     for (Object[] c : cases) {
       String label = (String) c[0];
+      String stored = (String) c[2];
       Boolean linked = (Boolean) c[3];
       Integer expectedStatus = (Integer) c[4];
 
       NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
       SalesOrderHeaderHandler handler = handlerWithMockClone(router);
+      Tab tab = mock(Tab.class);
+      when(tab.getId()).thenReturn(tabId);
       NeoContext ctx = NeoContext.builder()
           .specName("sales-order").entityName("header")
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName((String) c[1]).recordId(orderId)
-          .requestBody(new JSONObject((String) c[2]))
+          .fieldName("DocAction").recordId(orderId).adTab(tab)
+          .requestBody(new JSONObject((String) c[1]))
           .build();
 
       OBDal dal = mock(OBDal.class);
+      if (STORED_READ_FAILS.equals(stored)) {
+        when(dal.get(Tab.class, tabId)).thenThrow(new IllegalStateException("DAL down"));
+      } else if (stored != null) {
+        Table table = mock(Table.class);
+        when(table.getName()).thenReturn(entityName);
+        when(tab.getTable()).thenReturn(table);
+        Entity entity = mock(Entity.class);
+        when(entity.hasProperty("documentAction")).thenReturn(true);
+        BaseOBObject order = mock(BaseOBObject.class);
+        when(order.getEntity()).thenReturn(entity);
+        when(order.get("documentAction")).thenReturn(stored);
+        when(dal.get(Tab.class, tabId)).thenReturn(tab);
+        when(dal.get(entityName, orderId)).thenReturn(order);
+      }
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
       ResultSet rs = mock(ResultSet.class);
@@ -666,13 +705,13 @@ public class SalesOrderHeaderHandlerTest {
       }
 
       try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+          MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
           MockedStatic<OBMessageUtils> msgMock = Mockito.mockStatic(OBMessageUtils.class)) {
         obDalMock.when(OBDal::getInstance).thenReturn(dal);
         msgMock.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("refused");
 
         NeoResponse result = handler.handle(ctx);
 
-        verify(ps).setString(1, orderId);
         if (expectedStatus == null) {
           assertNull(label, result);
           verify(router).handle(ctx);
