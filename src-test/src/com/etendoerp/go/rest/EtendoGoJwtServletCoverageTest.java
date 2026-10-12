@@ -2374,7 +2374,7 @@ public class EtendoGoJwtServletCoverageTest {
   @Test
   public void aFilledPeriodIsCommittedInItsOwnTransaction() {
     SubscriptionService subscriptions = mock(SubscriptionService.class);
-    when(subscriptions.fillPeriodFromProvider("client-1")).thenReturn(true);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenReturn(true);
     servlet.subscriptionService = subscriptions;
 
     try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
@@ -2384,13 +2384,13 @@ public class EtendoGoJwtServletCoverageTest {
       transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(anyString(), any(), any()),
           never());
     }
-    verify(subscriptions).fillPeriodFromProvider("client-1");
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
   }
 
   @Test
   public void aFillThatWritesNothingCommitsNothing() {
     SubscriptionService subscriptions = mock(SubscriptionService.class);
-    when(subscriptions.fillPeriodFromProvider("client-1")).thenReturn(false);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenReturn(false);
     servlet.subscriptionService = subscriptions;
 
     try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
@@ -2398,14 +2398,14 @@ public class EtendoGoJwtServletCoverageTest {
 
       transactions.verifyNoInteractions();
     }
-    verify(subscriptions).fillPeriodFromProvider("client-1");
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
   }
 
   @Test
   public void aFailingFillIsRolledBackAndNeverEscapes() {
     SubscriptionService subscriptions = mock(SubscriptionService.class);
     IllegalStateException failure = new IllegalStateException("no session");
-    when(subscriptions.fillPeriodFromProvider("client-1")).thenThrow(failure);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenThrow(failure);
     servlet.subscriptionService = subscriptions;
 
     try (MockedStatic<EtendoGoDalHelper> transactions = mockStatic(EtendoGoDalHelper.class)) {
@@ -2421,7 +2421,7 @@ public class EtendoGoJwtServletCoverageTest {
   @Test
   public void aFailingPeriodCommitIsRolledBackAndNeverEscapes() {
     SubscriptionService subscriptions = mock(SubscriptionService.class);
-    when(subscriptions.fillPeriodFromProvider("client-1")).thenReturn(true);
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenReturn(true);
     servlet.subscriptionService = subscriptions;
     IllegalStateException failure = new IllegalStateException("commit refused");
 
@@ -2438,25 +2438,26 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   /**
-   * The step sits between the onboarding commit and the closing of the checkout: after the commit,
-   * so the provider call never holds the onboarding's locks and the row it reads exists; before
-   * {@code completeCommittedOnboarding}, so the environment is reported ready with its period.
+   * The step runs after the checkout is closed and before the costing schedule is activated:
+   * after the onboarding commit, so the row it reads exists; after {@code recordProvisioned}, so a
+   * slow provider call never widens the window in which the checkout is not {@code PROVISIONED}
+   * and names no created client — a crash there lets a retry provision a second tenant for the
+   * same payment.
    */
   @Test
-  public void aPaidOnboardingFillsThePeriodAfterItsCommitAndBeforeClosingTheCheckout()
-      throws Exception {
+  public void aPaidOnboardingFillsThePeriodAfterClosingTheCheckout() throws Exception {
     SubscriptionService subscriptions = mock(SubscriptionService.class);
     List<String> steps = new ArrayList<>();
-    when(subscriptions.fillPeriodFromProvider("client-1")).thenAnswer(invocation -> {
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenAnswer(invocation -> {
       steps.add("fill");
       return true;
     });
 
     String body = runCommittedPaidOnboarding(subscriptions, steps);
 
-    assertEquals(List.of("commit:onboarding", "fill", "commit:" + PERIOD_STEP,
-        "recordProvisioned"), steps);
-    verify(subscriptions).fillPeriodFromProvider("client-1");
+    assertEquals(List.of("commit:onboarding", "recordProvisioned", "fill",
+        "commit:" + PERIOD_STEP, "activateSchedule"), steps);
+    verify(subscriptions).fillPeriodFromProviderAfterCommit("client-1");
     assertTrue(body, body.contains("\"success\":true"));
   }
 
@@ -2465,15 +2466,15 @@ public class EtendoGoJwtServletCoverageTest {
   public void aPaidOnboardingStillSucceedsWhenThePeriodFillThrows() throws Exception {
     SubscriptionService subscriptions = mock(SubscriptionService.class);
     List<String> steps = new ArrayList<>();
-    when(subscriptions.fillPeriodFromProvider("client-1")).thenAnswer(invocation -> {
+    when(subscriptions.fillPeriodFromProviderAfterCommit("client-1")).thenAnswer(invocation -> {
       steps.add("fill");
       throw new IllegalStateException("provider read exploded");
     });
 
     String body = runCommittedPaidOnboarding(subscriptions, steps);
 
-    assertEquals(List.of("commit:onboarding", "fill", "rollback:" + PERIOD_STEP,
-        "recordProvisioned"), steps);
+    assertEquals(List.of("commit:onboarding", "recordProvisioned", "fill",
+        "rollback:" + PERIOD_STEP, "activateSchedule"), steps);
     assertTrue(body, body.contains("\"success\":true"));
     assertEquals("The client keeps exactly one result line", 1, countResultLines(body));
   }
@@ -2498,6 +2499,8 @@ public class EtendoGoJwtServletCoverageTest {
         mock(com.etendoerp.go.onboarding.OnboardingWarehouseAddressService.class);
     servlet.onboardingCostingScheduleService =
         mock(com.etendoerp.go.onboarding.OnboardingCostingScheduleService.class);
+    doAnswer(invocation -> steps.add("activateSchedule"))
+        .when(servlet.onboardingCostingScheduleService).activateSchedule("client-1");
     runStagedPaidOnboarding(stage, (support, dal, transactions) -> {
       dal.when(() -> EtendoGoJwtDalHelper.clientBelongsToAccountEmail("client-1", "user@test.com"))
           .thenReturn(true);

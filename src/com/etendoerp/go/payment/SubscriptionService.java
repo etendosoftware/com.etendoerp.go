@@ -340,7 +340,7 @@ public class SubscriptionService {
    * {@link #applyLifecycleOutcome}); this covers the case where that event never arrived.
    *
    * <p>The row opens without a billing period. The period is read from the provider afterwards, by
-   * {@link #fillPeriodFromProvider}, once the onboarding has committed (ETP-5047).
+   * {@link #fillPeriodFromProviderAfterCommit}, once the onboarding has committed (ETP-5047).
    *
    * @param environmentClientId {@code AD_CLIENT_ID} of the tenant the subscription is for
    * @param plan the purchased plan, whose price is snapshotted onto the row
@@ -456,10 +456,15 @@ public class SubscriptionService {
    * {@code true} and rolls it back on a throw. The early exits (no open row, no Stripe id, a period
    * already set) ask the provider nothing and leave the read transaction to the caller.
    *
-   * <p><b>So it must be called with nothing pending in the thread's DAL session</b>: closing the
-   * session commits whatever the caller had flushed or pending in it. The paid onboarding calls it
-   * right after its own commit, where the session is empty. The subscription row is already
-   * committed either way, so nothing here can undo it.
+   * <p><b>So it must be called with nothing pending in the thread's DAL session</b> — hence
+   * "AfterCommit" in the name: closing the session commits whatever the caller had flushed or
+   * pending in it. The paid onboarding calls it once its commit and the checkout bookkeeping that
+   * follows have each committed, where the session is empty. The precondition is not checked at
+   * runtime on purpose: Hibernate's {@code Session.isDirty()} runs the flush-time dirty check,
+   * which fires {@code OBInterceptor.onFlushDirty} (audit stamping and the DAL write-access check)
+   * on whatever is pending, and still cannot see work that was flushed but not committed — so it
+   * would be neither cheap nor reliable. The subscription row is already committed either way, so
+   * nothing here can undo it.
    *
    * <p><b>Never overwrites a period.</b> A lifecycle event that resolved once the row existed may
    * have written one, before this call or while the provider was answering, and the event's period
@@ -475,7 +480,7 @@ public class SubscriptionService {
    * @param environmentClientId {@code AD_CLIENT_ID} of the tenant whose row was just opened
    * @return true when a period was written and needs committing; false when nothing was written
    */
-  public boolean fillPeriodFromProvider(String environmentClientId) {
+  public boolean fillPeriodFromProviderAfterCommit(String environmentClientId) {
     Optional<Subscription> open = findOpen(environmentClientId);
     if (open.isEmpty()) {
       return false;
@@ -515,11 +520,12 @@ public class SubscriptionService {
   }
 
   /**
-   * ETP-5047 — the conditional write behind {@link #fillPeriodFromProvider}: one {@code UPDATE} of
-   * that row alone, applied only while both period boundaries are still null, stamping
-   * {@code UPDATED}/{@code UPDATEDBY} as the DAL interceptor would. Like {@link #closeInDatabase},
-   * an HQL bulk update bypasses the DAL entity events. It runs in a session that has not loaded the
-   * row, so there is no in-session copy to refresh; a later read gets what the database holds.
+   * ETP-5047 — the conditional write behind {@link #fillPeriodFromProviderAfterCommit}: one
+   * {@code UPDATE} of that row alone, applied only while both period boundaries are still null,
+   * stamping {@code UPDATED}/{@code UPDATEDBY} as the DAL interceptor would. Like
+   * {@link #closeInDatabase}, an HQL bulk update bypasses the DAL entity events. It runs in a
+   * session that has not loaded the row, so there is no in-session copy to refresh; a later read
+   * gets what the database holds.
    *
    * @param subscriptionRowId {@code ETGO_SUBSCRIPTION_ID} of the row to fill
    * @return true when the row was updated

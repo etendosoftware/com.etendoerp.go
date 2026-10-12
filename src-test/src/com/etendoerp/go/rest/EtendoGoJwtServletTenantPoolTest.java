@@ -160,7 +160,7 @@ public class EtendoGoJwtServletTenantPoolTest {
         eq("ADMIN-ROLE"), any(Instant.class), eq(15));
     order.verify(costing).activateSchedule("POOLED-CLIENT");
     // ETP-5047: a demo has no subscription, so it never asks the provider for a billing period.
-    verify(subscriptions, never()).fillPeriodFromProvider(anyString());
+    verify(subscriptions, never()).fillPeriodFromProviderAfterCommit(anyString());
   }
 
   @Test

@@ -4146,11 +4146,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         elapsedMillis(residualStartedAt));
     if (!paidUpgrade) {
       openDemoTrialPeriodsBestEffort(clientId, orgId, adminContext);
-    } else {
-      fillSubscriptionPeriodBestEffort(clientId);
     }
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
         preparation.provisioningClaim, demoSourceClientId);
+    if (paidUpgrade) {
+      // ETP-5047: after the checkout is closed, never before — see the method.
+      fillSubscriptionPeriodBestEffort(clientId);
+    }
     // ETP-5426: after the commit (a failure here can no longer undo the tenant) and before the
     // costing schedule is activated (so the background costing never races the import).
     importSampleDataBestEffort(writer, clientId, orgId, adminContext, onboardingRequest,
@@ -4252,19 +4254,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code customer.subscription.updated} arrived before the row existed and were ignored for
    * good, so without this the row stays periodless until its first renewal.
    *
-   * <p>Runs after the onboarding commit, so the session is empty — which the service relies on:
-   * it closes the session before the provider call, so neither the onboarding's locks nor a pooled
-   * connection are held while Stripe answers, and writes the period in a fresh transaction that is
-   * committed here. It never fails the onboarding: the row is already committed, and on any
-   * failure (the commit included, which is why it sits inside the try) only this step rolls back.
-   * Provider failures are WARNs from the reader; see
-   * {@link SubscriptionService#fillPeriodFromProvider}.
+   * <p><b>Runs after {@code completeCommittedOnboarding}, not right after the commit.</b> Until
+   * {@code recordProvisioned} closes the checkout request it is not {@code PROVISIONED} and names
+   * no created client; a retry after a crash in that window (once the provisioning lease expires)
+   * cannot find the tenant, which by then carries its requested name, and would provision a second
+   * one for the same payment. The provider call takes seconds at worst, so it must not widen that
+   * window. Nothing here needs the checkout open: the fill reads only the subscription row.
+   *
+   * <p>Every step of {@code completeCommittedOnboarding} commits or rolls back its own work, so the
+   * DAL session is empty here — which the service requires: it closes the session before the
+   * provider call, so neither a lock nor a pooled connection is held while Stripe answers, and
+   * writes the period in a fresh transaction that is committed here. It never fails the
+   * onboarding: the row is already committed, and on any failure (the commit included, which is
+   * why it sits inside the try) only this step rolls back. Provider failures are WARNs from the
+   * reader; see {@link SubscriptionService#fillPeriodFromProviderAfterCommit}.
    *
    * @param clientId the tenant just committed
    */
   void fillSubscriptionPeriodBestEffort(String clientId) {
     try {
-      if (subscriptionService.fillPeriodFromProvider(clientId)) {
+      if (subscriptionService.fillPeriodFromProviderAfterCommit(clientId)) {
         EtendoGoDalHelper.commitDalChanges("subscription billing period", log);
       }
     } catch (Exception e) { // NOSONAR - best effort: the committed tenant must survive any failure

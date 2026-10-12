@@ -104,8 +104,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * deleted. The {@code AD_CLIENT} insert trigger creates ~99 {@code AD_SEQUENCE} rows per client,
  * so cleanup removes those too.
  *
- * <p>Group 4 (ETP-5047) covers {@link SubscriptionService#fillPeriodFromProvider}: its conditional
- * HQL {@code UPDATE} is only meaningful against committed rows and a real concurrent writer, so it
+ * <p>Group 4 (ETP-5047) covers {@link SubscriptionService#fillPeriodFromProviderAfterCommit}: its
+ * conditional HQL {@code UPDATE} is only meaningful against committed rows and a real concurrent writer, so it
  * runs here with only the Stripe period reader mocked.
  *
  * @covers com.etendoerp.go.payment.SubscriptionService
@@ -418,7 +418,7 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       assertFalse("The webhook wrote first: nothing to commit",
-          filling.fillPeriodFromProvider(tenant));
+          filling.fillPeriodFromProviderAfterCommit(tenant));
       Subscription inSession = filling.findOpen(tenant).orElseThrow();
       assertEquals("A read after the fill gets the webhook's period",
           WEBHOOK_START, inSession.getCurrentPeriodStart().toInstant());
@@ -469,11 +469,11 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
    * Runs the fill the way the servlet does after the onboarding commit — as the test user, the
    * service switching to system for the write — and commits.
    *
-   * @return what {@link SubscriptionService#fillPeriodFromProvider} answered
+   * @return what {@link SubscriptionService#fillPeriodFromProviderAfterCommit} answered
    */
   private boolean fillCommitted(StripeSubscriptionPeriodReader reader, String tenant) {
     setTestUserContext();
-    boolean written = new SubscriptionService(reader).fillPeriodFromProvider(tenant);
+    boolean written = new SubscriptionService(reader).fillPeriodFromProviderAfterCommit(tenant);
     OBDal.getInstance().commitAndClose();
     return written;
   }

@@ -1001,7 +1001,7 @@ class SubscriptionServiceTest {
     void writesBothBoundariesReadFromTheProvider() {
       openRow(STRIPE_SUBSCRIPTION_ID);
 
-      assertTrue(filling.fillPeriodFromProvider(CLIENT_ID));
+      assertTrue(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
 
       verify(reader).read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID);
       verify(periodStatement).setParameter("periodStart", Date.from(periodStart));
@@ -1014,7 +1014,7 @@ class SubscriptionServiceTest {
     void releasesTheSessionBeforeTheProviderCallAndLeavesTheWriteUncommitted() {
       openRow(STRIPE_SUBSCRIPTION_ID);
 
-      filling.fillPeriodFromProvider(CLIENT_ID);
+      filling.fillPeriodFromProviderAfterCommit(CLIENT_ID);
 
       // No pooled connection may sit idle in a transaction while Stripe answers: the read
       // transaction ends before the call, the write comes after it in a fresh one.
@@ -1032,7 +1032,7 @@ class SubscriptionServiceTest {
     void theWriteIsConditionalSoAPeriodAWebhookWroteMeanwhileWins() {
       openRow(STRIPE_SUBSCRIPTION_ID);
 
-      filling.fillPeriodFromProvider(CLIENT_ID);
+      filling.fillPeriodFromProviderAfterCommit(CLIENT_ID);
 
       ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
       verify(session).createQuery(hql.capture());
@@ -1049,7 +1049,7 @@ class SubscriptionServiceTest {
     void touchesNeitherTheStatusNorTheGraceAnchorNorTheWatermark() {
       Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
 
-      filling.fillPeriodFromProvider(CLIENT_ID);
+      filling.fillPeriodFromProviderAfterCommit(CLIENT_ID);
 
       ArgumentCaptor<String> hql = ArgumentCaptor.forClass(String.class);
       verify(session).createQuery(hql.capture());
@@ -1067,7 +1067,7 @@ class SubscriptionServiceTest {
       Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
       when(periodStatement.executeUpdate()).thenReturn(0);
 
-      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+      assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
       verify(row, never()).setCurrentPeriodStart(any());
     }
 
@@ -1076,7 +1076,7 @@ class SubscriptionServiceTest {
       Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
       when(row.getCurrentPeriodEnd()).thenReturn(Date.from(periodEnd));
 
-      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+      assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
 
       verify(reader, never()).read(anyString(), anyString());
       verify(session, never()).createQuery(anyString());
@@ -1088,7 +1088,7 @@ class SubscriptionServiceTest {
     void aRowWithoutAStripeSubscriptionHasNothingToRead() {
       openRow("   ");
 
-      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+      assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
 
       verify(reader, never()).read(any(), any());
       verify(session, never()).createQuery(anyString());
@@ -1098,7 +1098,7 @@ class SubscriptionServiceTest {
     void aTenantWithoutAnOpenRowHasNothingToFill() {
       when(subscriptionQuery.uniqueResult()).thenReturn(null);
 
-      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+      assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
 
       verify(reader, never()).read(any(), any());
     }
@@ -1108,7 +1108,7 @@ class SubscriptionServiceTest {
       openRow(STRIPE_SUBSCRIPTION_ID);
       when(reader.read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID)).thenReturn(null);
 
-      assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
+      assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
 
       verify(session, never()).createQuery(anyString());
     }
