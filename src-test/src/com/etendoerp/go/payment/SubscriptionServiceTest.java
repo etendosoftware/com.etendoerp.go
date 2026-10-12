@@ -1064,11 +1064,14 @@ class SubscriptionServiceTest {
 
     @Test
     void reportsNothingWrittenWhenAWebhookFilledThePeriodFirst() {
-      Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
+      openRow(STRIPE_SUBSCRIPTION_ID);
       when(periodStatement.executeUpdate()).thenReturn(0);
 
       assertFalse(filling.fillPeriodFromProviderAfterCommit(CLIENT_ID));
-      verify(row, never()).setCurrentPeriodStart(any());
+      // Only the read transaction was closed, before the provider call; the write that matched
+      // nothing is left to the caller, which commits nothing on false.
+      verify(obDal, times(1)).commitAndClose();
+      verify(periodStatement).executeUpdate();
     }
 
     @Test

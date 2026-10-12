@@ -163,6 +163,48 @@ class DemoDataTransferServiceTest {
     contextStatic.verify(() -> OBContext.setOBContext(caller));
   }
 
+  /**
+   * ETP-5047 — the worker's failure path: the rollback and the recorded failure both run as
+   * system, and the worker gets its own context back afterwards rather than a system context left
+   * behind by chance.
+   */
+  @Test
+  void aFailedTransferIsRolledBackAndRecordedAsSystemAndHandsTheWorkerItsContextBack()
+      throws Exception {
+    OBContext worker = mock(OBContext.class);
+    String[] current = { "worker" };
+    contextStatic.when(OBContext::getOBContext).thenReturn(worker);
+    contextStatic.when(() -> OBContext.setOBContext(SYSTEM_ID, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID))
+        .thenAnswer(invocation -> current[0] = "system");
+    contextStatic.when(() -> OBContext.setOBContext(worker))
+        .thenAnswer(invocation -> current[0] = "worker");
+    List<String> seen = new java.util.ArrayList<>();
+    org.mockito.Mockito.doAnswer(invocation -> seen.add("rollback as " + current[0]))
+        .when(obDal).rollbackAndClose();
+    preferencesStatic.when(() -> Preferences.setPreferenceValue(
+        eq("ETGO_DemoDataTransferStatus"), eq(DemoDataTransferService.STATUS_FAILED), eq(false),
+        org.mockito.ArgumentMatchers.any(Client.class), eq(null), eq(null), eq(null), eq(null),
+        eq(null))).thenAnswer(invocation -> {
+          seen.add("failure recorded as " + current[0]);
+          return null;
+        });
+    Client target = mock(Client.class);
+    when(obDal.get(Client.class, TARGET_ID)).thenReturn(target);
+    // Running, with a source that no longer exists: the transfer throws.
+    givenPreferenceReads(preference(DemoDataTransferService.STATUS_RUNNING),
+        preference(SOURCE_ID));
+    Method run = DemoDataTransferService.class.getDeclaredMethod("run", String.class);
+    run.setAccessible(true);
+
+    run.invoke(service, TARGET_ID);
+
+    assertEquals(List.of("rollback as system", "failure recorded as system"), seen);
+    preferencesStatic.verify(() -> Preferences.setPreferenceValue(
+        "ETGO_DemoDataTransferFailure", "Transfer environment is unavailable", false,
+        target, null, null, null, null, null));
+    assertEquals("worker", current[0], "the worker must get its own context back");
+  }
+
   @Test
   void readsTheSelectionRecordedForThePurchase() throws Exception {
     givenPreferenceReads(preference("NY"));
