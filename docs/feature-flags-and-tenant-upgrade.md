@@ -346,6 +346,19 @@ rule/property (or setting `false`). Anything that is not a clean `true` keeps en
   Customer Portal) — the resulting `invoice.paid` sets the open row back to `active`; for a canceled
   subscription, a new purchase, which opens a fresh row (`open-and-notable-topics.md` §3.7). A hand edit of the row is overwritten by the next
   lifecycle event; the kill switch is for incidents, not for granting access.
+- **A new tenant whose row has no billing period** (`current_period_start/end` NULL in the query
+  above). A paid onboarding reads the period from Stripe right after it closes the checkout
+  request, because the purchase's first `invoice.paid` / `customer.subscription.updated` arrive
+  before the tenant exists and are ignored for good (`unresolved subscription`). When that read
+  fails the log has one WARN, `Could not read the billing period of Stripe subscription <sub_…>
+  for client <AD_Client_ID>: <reason>. The subscription row stays without a period until its next
+  lifecycle event` (preceded by the transport's own `Provider answered …` / `Payment provider
+  call … did not complete` WARN for a 5xx, 429, timeout or DNS/TLS failure); an unexpected
+  failure outside the read logs `The subscription of client <id> could not be given its billing
+  period` instead. Access is unaffected — the period is for the quotas and period usage
+  (ETP-5051), not the access decision — and the next lifecycle event (the first renewal at the
+  latest) fills it. A row with no `stripe_subscription_id` (payment-mode checkout) is skipped with
+  an INFO and stays periodless. See `open-and-notable-topics.md` §3.7 and §5.5.
 
 ### `onboarding-tenant-pool` (ETP-5389) — backend-only, off by default
 
@@ -827,7 +840,10 @@ enough: `setAdminMode(true)` keeps the DAL check that a row's client equals the 
 and a refusal from that check also marks the whole request for rollback, which no best-effort
 `catch` can undo. A refused subscription save is additionally evicted from the session, so it
 cannot resurface as a `StaleStateException` in the onboarding's next flush. Both are pinned from a
-real tenant context by `TenantContextSubscriptionWriteIntegrationTest`.
+real tenant context by `TenantContextSubscriptionWriteIntegrationTest`. The billing period the
+onboarding later reads from Stripe for that row (ETP-5047) is written the same way — under
+`SystemContext`, so its `UPDATEDBY` is `0` — but as one conditional HQL `UPDATE` in its own
+transaction, after the checkout request is closed (`open-and-notable-topics.md` §3.7).
 
 R37 does the same thing for tenants that predate the subscription model (statement 3 of its
 `@apply`, in the same transaction as the backfilled row) — and, more widely than the runtime path,
