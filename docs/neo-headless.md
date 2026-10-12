@@ -8202,6 +8202,7 @@ endpoints use (`checkAsSystem(clientId, "mcp")`; MCP has no `OBContext` of its o
 | `null` — a tenant without lifecycle metadata | served: the controlled legacy transition; the guard treats a null decision as "allow", exactly as for NEO |
 | `DEMO_TRIAL_EXPIRED` / `SUBSCRIPTION_REQUIRED` | HTTP **402** with the shared guard body (below) |
 | the same, while the backend-only kill switch `environment-access-enforcement-off` is on | served, with an INFO line: the switch turns a denial into a log line here as on every guarded surface |
+| no decision: the guard check itself throws (e.g. a DB error in `evaluateAccess`) | HTTP **503**, JSON `{"error":"The environment of this credential could not be verified; retry later"}`, a WARN naming the user and the client, nothing dispatched — fail closed, as for a failed role lookup |
 
 ```json
 { "error": { "message": "Environment access is not available: SUBSCRIPTION_REQUIRED",

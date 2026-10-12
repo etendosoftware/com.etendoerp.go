@@ -100,6 +100,12 @@ public class McpServlet extends HttpServlet {
   static final String META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
   /** The handshake method: the one request that carries no {@code MCP-Protocol-Version}. */
   private static final String INITIALIZE = "initialize";
+  /**
+   * The 503 answer when the tenant of a credential cannot be judged: its role lookup or the
+   * environment access check failed (ETP-5047). Retryable, so it says so.
+   */
+  private static final String ENVIRONMENT_UNVERIFIED =
+      "The environment of this credential could not be verified; retry later";
   /** The only JSON-RPC method that produces a telemetry row (B1). */
   private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
@@ -161,10 +167,23 @@ public class McpServlet extends HttpServlet {
     } catch (EffectiveClientResolver.ResolutionException e) {
       log.warn("Refusing MCP request of user {}: {}", authenticated.userId, e.getMessage(), e);
       sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
-          "The environment of this credential could not be verified; retry later");
+          ENVIRONMENT_UNVERIFIED);
       return;
     }
-    if (!isEnvironmentAccessAllowed(response, identity)) {
+    boolean accessAllowed;
+    try {
+      accessAllowed = isEnvironmentAccessAllowed(response, identity);
+    } catch (RuntimeException e) {
+      // ETP-5047 — the guard could not decide (e.g. its lifecycle lookup hit a DB error). Fail
+      // closed, with the same JSON 503 as a failed role lookup: an escaped exception would reach
+      // the client as Tomcat's HTML 500, and the request must not run unjudged.
+      log.warn("Refusing MCP request of user {} into client {}: the environment access check "
+          + "failed", identity.userId, identity.clientId, e);
+      sendJsonError(request, response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          ENVIRONMENT_UNVERIFIED);
+      return;
+    }
+    if (!accessAllowed) {
       return; // 402 already sent
     }
 

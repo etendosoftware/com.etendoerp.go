@@ -524,6 +524,38 @@ public class McpServletTest {
     verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
   }
 
+  /**
+   * A guard that cannot decide (its lifecycle lookup hit a DB error) must fail closed with the
+   * same JSON 503 a failed role lookup answers — never an escaped exception, which Tomcat turns
+   * into an HTML 500, and never a dispatch.
+   */
+  @Test
+  public void doPostWhoseAccessCheckFailsAnswers503AndDispatchesNothing() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject()
+        .put("jsonrpc", "2.0")
+        .put("id", 9)
+        .put("method", "tools/call")
+        .put("params", new JSONObject().put("name", "etendo_list")
+            .put("arguments", new JSONObject().put("spec", "product")))
+        .toString());
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp"))
+        .thenThrow(new IllegalStateException("lifecycle lookup failed"));
+
+    try (MockedConstruction<McpToolRouter> routerMock =
+        mockConstruction(McpToolRouter.class)) {
+      servlet.doPost(request, response);
+
+      assertTrue(routerMock.constructed().isEmpty());
+    }
+    verify(response).setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+    verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+    verify(request, never()).getReader();
+    String body = getResponseBody();
+    assertTrue(body, new JSONObject(body).getString("error").contains("could not be verified"));
+    assertFalse(body.contains("\"jsonrpc\""));
+  }
+
   /** Runs a wildcard-token {@code ping} whose role lookup answers {@code roleLookup}. */
   private void doPostWildcardPing(Object roleLookup) throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "0", "0", "neo:read");
