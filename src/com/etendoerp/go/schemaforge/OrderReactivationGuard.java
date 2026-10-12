@@ -39,9 +39,17 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * {@code C_Invoice} or {@code M_InOut} whose header {@code C_Order_ID} is the order, in any status.
  * </p>
  *
- * <p><b>Fails closed.</b> If the lookup cannot run, the reactivation is refused (and logged): the
- * order stays as it is, which a retry can fix, whereas letting it through could orphan a document.
- * </p>
+ * <p><b>Decides on the action that will actually run.</b> The value checked is
+ * {@link DocActionRequestSupport#effectiveDocAction}: the {@code docAction} the DB procedure is
+ * handed, or, when the body carries none, the record's stored {@code DocAction}, which the
+ * procedure then runs. Reading any other key (an earlier version took
+ * {@code fieldValues.documentAction} first) let {@code {"fieldValues":{"documentAction":"CO"},
+ * "docAction":"RE"}} pass as a CO and reactivate the order; ignoring the stored value let an empty
+ * body run a stored {@code RE} unchecked.</p>
+ *
+ * <p><b>Fails closed.</b> If the stored value or the linked documents cannot be read, the
+ * reactivation is refused (and logged): the order stays as it is, which a retry can fix, whereas
+ * letting it through could orphan a document.</p>
  *
  * <p><b>Called explicitly</b> by each order customization that opts in, from its pre-hook — today
  * only {@link SalesOrderHeaderHandler}. It names no entity, so it adds nothing entity-specific to
@@ -60,7 +68,7 @@ final class OrderReactivationGuard {
 
   /**
    * The refusal for a Reactivate on an order with linked documents, or {@code null} when the
-   * request may continue — it is not a Reactivate, it names no record, or the order has none.
+   * request may continue — it does not run {@code RE}, it names no record, or the order has none.
    *
    * <p>A refusal is a {@code 400}, the status every other document-action precondition of this
    * module answers with ({@code GoodsMovementProcessGuard}, {@code RejectQuotationHandler},
@@ -71,7 +79,7 @@ final class OrderReactivationGuard {
    * @return the error response, or {@code null}
    */
   static NeoResponse refuseIfLinkedDocuments(NeoContext context) {
-    if (!DocActionRequestSupport.requests(context, DOC_ACTION_REACTIVATE)) {
+    if (!DocActionRequestSupport.isDocActionButtonPost(context)) {
       return null;
     }
     String orderId = context.getRecordId();
@@ -79,11 +87,12 @@ final class OrderReactivationGuard {
       return null;
     }
     try {
-      if (!AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)) {
+      if (!DOC_ACTION_REACTIVATE.equals(DocActionRequestSupport.effectiveDocAction(context))
+          || !AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)) {
         return null;
       }
     } catch (Exception e) {
-      log.error("Reactivation of order {} refused: its linked documents could not be checked",
+      log.error("DocAction on order {} refused: its action or linked documents could not be read",
           orderId, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           OBMessageUtils.messageBD(MSG_CHECK_FAILED));

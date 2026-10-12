@@ -103,6 +103,8 @@ public class NeoProcessService {
   public static final String PROCESS_ID = "processId";
   /** Parameter carrying a list-backed button's chosen value (DocAction style). */
   private static final String PARAM_DOC_ACTION = "docAction";
+  /** DAL property a DocAction-style DB procedure reads the action to run from. */
+  private static final String PROPERTY_DOCUMENT_ACTION = "documentAction";
   /** Key Classic Java processes read the list-backed button value from. */
   private static final String PARAM_ACTION = "action";
   private static final String PROCESS_EXECUTION_FAILED_PREFIX = "Process execution failed: ";
@@ -851,8 +853,8 @@ public class NeoProcessService {
       }
 
       // For DocAction processes: set the action on the document before calling
-      String docAction = params.optString("docAction", null);
-      if (docAction != null && !docAction.isBlank()) {
+      String docAction = requestedDocAction(params);
+      if (docAction != null) {
         String tabId = params.optString(INP_TAB_ID, null);
         if (tabId != null) {
           setDocAction(tabId, recordId, docAction);
@@ -885,17 +887,59 @@ public class NeoProcessService {
     }
   }
 
+  /**
+   * The DocAction value {@link #executeDbProcedure} writes on the record before it calls a
+   * DocAction-style procedure: the {@code docAction} parameter, verbatim, when it is non-blank.
+   * Nothing else in the parameters is read for it — in particular not {@code fieldValues}.
+   *
+   * <p>Public so a customization that must decide on the action about to run (ETP-5704,
+   * {@code OrderReactivationGuard}) reads it from this one place instead of re-deriving it.</p>
+   *
+   * @param params the process parameters (the action request body); may be {@code null}
+   * @return the value that will be written, or {@code null} when the call carries none — the
+   *         procedure then runs the record's stored value, see {@link #storedDocAction}
+   */
+  public static String requestedDocAction(JSONObject params) {
+    if (params == null) {
+      return null;
+    }
+    String docAction = params.optString(PARAM_DOC_ACTION, null);
+    return docAction != null && !docAction.isBlank() ? docAction : null;
+  }
+
+  /**
+   * The DocAction value currently stored on the record — the one a DocAction-style procedure runs
+   * when {@link #requestedDocAction} is {@code null}. Resolved exactly as {@link #setDocAction}
+   * resolves the record it writes. Unlike that method it does not swallow failures: a caller
+   * deciding on this value has to know when it could not be read.
+   *
+   * @param tabId    the AD tab whose table holds the record
+   * @param recordId the record id
+   * @return the stored value, or {@code null} when the tab, the record or the property is absent
+   */
+  public static String storedDocAction(String tabId, String recordId) {
+    BaseOBObject rec = loadDocActionRecord(tabId, recordId);
+    Object value = rec != null ? rec.get(PROPERTY_DOCUMENT_ACTION) : null;
+    return value != null ? value.toString() : null;
+  }
+
+  private static BaseOBObject loadDocActionRecord(String tabId, String recordId) {
+    Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+    if (tab == null || tab.getTable() == null) {
+      return null;
+    }
+    String dalEntityName = tab.getTable().getName();
+    BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
+    return rec != null && rec.getEntity().hasProperty(PROPERTY_DOCUMENT_ACTION) ? rec : null;
+  }
+
   private static void setDocAction(String tabId, String recordId, String docAction) {
     try {
-      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-      if (tab != null && tab.getTable() != null) {
-        String dalEntityName = tab.getTable().getName();
-        BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
-        if (rec != null && rec.getEntity().hasProperty("documentAction")) {
-          rec.set("documentAction", docAction);
-          OBDal.getInstance().save(rec);
-          OBDal.getInstance().flush();
-        }
+      BaseOBObject rec = loadDocActionRecord(tabId, recordId);
+      if (rec != null) {
+        rec.set(PROPERTY_DOCUMENT_ACTION, docAction);
+        OBDal.getInstance().save(rec);
+        OBDal.getInstance().flush();
       }
     } catch (Exception e) {
       log.warn("Could not set docAction on record: {}", e.getMessage());

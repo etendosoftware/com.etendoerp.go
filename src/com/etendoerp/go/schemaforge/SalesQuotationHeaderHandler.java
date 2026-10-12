@@ -164,10 +164,13 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
    * uses, {@link RejectQuotationHandler#reject}, which takes the reason in the same body. Both the
    * MCP and the REST action reach this handler, so both channels get it.</p>
    *
-   * <p>Where the value and the button name are read from is {@link DocActionRequestSupport}'s
-   * contract (extracted from this class in ETP-5704, unchanged). A {@code DocAction} request
-   * without an explicit {@code RJ} — the SPA's {@code SendToEvaluationModal} sends
-   * {@code fieldValues: {}} — is not affected.</p>
+   * <p>Where the value and the button name are read from is {@link DocActionRequestSupport#requests}
+   * (extracted from this class in ETP-5704): root {@code docAction} first — the key the process
+   * itself runs — then {@code fieldValues.documentAction}, then root {@code documentAction}. Until
+   * ETP-5704 {@code fieldValues.documentAction} was read first, so a body naming RJ there and CO in
+   * {@code docAction} was rejected instead of completed. The record's stored DocAction never
+   * triggers the rejection. A {@code DocAction} request without an explicit {@code RJ} — the SPA's
+   * {@code SendToEvaluationModal} sends {@code fieldValues: {}} — is not affected.</p>
    *
    * @param context the request
    * @return {@code true} for a POST ACTION on the DocAction button asking for {@code RJ}
