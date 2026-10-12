@@ -483,6 +483,35 @@ public class McpServletTest {
     assertEquals(7, new JSONObject(getResponseBody()).getInt("id"));
   }
 
+  /**
+   * A notification ({@code notifications/initialized}, no {@code id}) is normally answered 202
+   * with no body (ETP-5639). Into a blocked tenant it must still get the structured 402: the
+   * access guard runs before the body is read, so a client that only sends notifications learns it
+   * is refused instead of seeing every message accepted, and nothing is dispatched.
+   */
+  @Test
+  public void aNotificationIntoABlockedTenantIsRefusedWith402NotAccepted() throws Exception {
+    setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
+    setRequestBody(new JSONObject().put("jsonrpc", "2.0")
+        .put("method", "notifications/initialized").toString());
+    EnvironmentAccessGuard.Denial denial =
+        denialFor(EnvironmentAccessPolicy.Decision.SUBSCRIPTION_REQUIRED);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(denial);
+
+    servlet.doPost(request, response);
+
+    verify(response).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_ACCEPTED);
+    // The body is never read, so the notification is never parsed nor dispatched.
+    verify(request, never()).getReader();
+    JSONObject error = new JSONObject(getResponseBody()).getJSONObject("error");
+    assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
+        error.getString("message"));
+    assertEquals(402, error.getInt("status"));
+    assertEquals("ENVIRONMENT_ACCESS_DENIED", error.getString("code"));
+    assertEquals("SUBSCRIPTION_REQUIRED", error.getString("decision"));
+  }
+
   @Test
   public void doPostThatFailsAuthenticationNeverAsksTheGuard() throws Exception {
     when(request.getAttribute(OAuth2Filter.ATTR_USER_ID)).thenReturn(null);
@@ -1072,6 +1101,10 @@ public class McpServletTest {
     verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
   }
 
+  /**
+   * Into an allowed tenant the notification keeps ETP-5639's 202 with no body; the guard is still
+   * asked first (see {@link #aNotificationIntoABlockedTenantIsRefusedWith402NotAccepted}).
+   */
   @Test
   public void doPostNotificationsInitializedReturns202() throws Exception {
     setOAuth2FilterAttributes("user1", "role1", "client1", "org1", "neo:read");
@@ -1080,10 +1113,14 @@ public class McpServletTest {
         .put("method", "notifications/initialized")
         .toString();
     setRequestBody(rpcBody);
+    when(environmentAccessGuard.checkAsSystem("client1", "mcp")).thenReturn(null);
 
     servlet.doPost(request, response);
 
+    verify(environmentAccessGuard).checkAsSystem("client1", "mcp");
     verify(response).setStatus(HttpServletResponse.SC_ACCEPTED);
+    verify(response, never()).setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+    assertEquals("", getResponseBody());
   }
 
   @Test
