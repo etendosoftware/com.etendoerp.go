@@ -485,9 +485,11 @@ calling user, whose role can read neither `AD_Preference` nor `ETGO_SUBSCRIPTION
     timeout, DNS/TLS failure, 5xx or 429 — and the row stays periodless until its next lifecycle event; the
     onboarding is never affected. A row with no Stripe id (payment-mode checkout) is skipped with
     an INFO, and a demo onboarding never calls it. (Before ETP-5047 a payment-mode checkout's JSON
-    `null` subscription was stored as the text `'null'`; the checkout and lifecycle paths now read
-    nullable Stripe ids through `SubscriptionLifecycleApplier.optText`. A row still holding
-    `'null'` gets a 404 and the WARN — none on the development database.)
+    `null` subscription was stored as the text `'null'`, because jettison's `optString` turns JSON
+    `null` into that text. Every nullable Stripe string is now read through `StripeJson.text`
+    (`com.etendoerp.go.payment`), which replaced three private copies; never use a bare
+    `optString` on a Stripe object. A row still holding `'null'` gets a 404 and the WARN — none
+    on the development database.)
   - `LAST_EVENT_AT` — the `created` instant of the last applied lifecycle event, forward-only.
     `ETGO_SubscriptionEventAt` is **written** only for a tenant with no row. On the row route it is
     still **read**, but only as a read-only fallback while the row's `LAST_EVENT_AT` is NULL — a row
