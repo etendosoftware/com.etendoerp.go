@@ -2510,6 +2510,68 @@ public class EtendoGoJwtServletCoverageTest {
     assertEquals("The client keeps exactly one result line", 1, countResultLines(body));
   }
 
+  // ===================== clearOnboardingDraftBestEffort — the account is a client-0 row ======
+
+  private static final String DRAFT_CLEAR_STEP = "onboarding draft clear";
+
+  /**
+   * The draft lives on {@code ETGO_ACCOUNT}, a client-0 row, and the clear runs after the
+   * onboarding commit with the thread still in the new tenant's context. The DAL write check
+   * refuses a client-0 row from there at flush, so the clear must run as system — and hand the
+   * tenant's context back afterwards.
+   */
+  @Test
+  public void theDraftClearWritesTheClientZeroAccountAsSystem() throws Exception {
+    Account account = mock(Account.class);
+    OBContext tenant = mock(OBContext.class);
+    List<String> steps = new ArrayList<>();
+    try (var context = mockStatic(OBContext.class);
+         var dal = mockStatic(EtendoGoJwtDalHelper.class);
+         var transactions = mockStatic(EtendoGoDalHelper.class)) {
+      context.when(OBContext::getOBContext).thenReturn(tenant);
+      context.when(() -> OBContext.setOBContext("0", "0", "0", "0"))
+          .thenAnswer(invocation -> steps.add("system"));
+      context.when(() -> OBContext.setOBContext(tenant))
+          .thenAnswer(invocation -> steps.add("tenant"));
+      dal.when(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null))
+          .thenAnswer(invocation -> steps.add("clear"));
+
+      invokeClearOnboardingDraft(account);
+
+      assertEquals(List.of("system", "clear", "tenant"), steps);
+      transactions.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A refused clear must not leave the dirty account in the session: the next commit on the
+   * thread — the period fill, the ready email — would flush it again, in whatever context it runs.
+   */
+  @Test
+  public void aFailedDraftClearRollsBackItsOwnWork() throws Exception {
+    Account account = mock(Account.class);
+    org.openbravo.base.exception.OBSecurityException refused =
+        new org.openbravo.base.exception.OBSecurityException("Client (0) is not present");
+    try (var context = mockStatic(OBContext.class);
+         var dal = mockStatic(EtendoGoJwtDalHelper.class);
+         var transactions = mockStatic(EtendoGoDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null)).thenThrow(refused);
+
+      // The contract under test: nothing escapes. JUnit 4 fails the spec on any throw here.
+      invokeClearOnboardingDraft(account);
+
+      transactions.verify(() -> EtendoGoDalHelper.rollbackDalChanges(eq(DRAFT_CLEAR_STEP),
+          eq(refused), any()));
+    }
+  }
+
+  private void invokeClearOnboardingDraft(Account account) throws Exception {
+    Method clear = EtendoGoJwtServlet.class.getDeclaredMethod("clearOnboardingDraftBestEffort",
+        Account.class);
+    clear.setAccessible(true);
+    clear.invoke(servlet, account);
+  }
+
   /**
    * The classic path (no pooled tenant: here a half-built client this purchase left behind, which
    * the attempt resumes) commits the tenant the same way, so it must fill the period at the same

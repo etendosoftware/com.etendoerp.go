@@ -3489,16 +3489,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
   }
 
+  /**
+   * Clears the account's saved onboarding draft once the environment is committed.
+   *
+   * <p><b>Written as system</b> (ETP-5047). The draft lives on {@code ETGO_ACCOUNT}, a client-0
+   * row, and this runs after the onboarding commit with the thread in the new tenant's context:
+   * the DAL write check refuses a client-0 row from there at flush ({@code OBSecurityException:
+   * Client (0) ... is not present in ClientList}). That went unnoticed because the dirty account
+   * stayed in the session and the ready email, which commits as system, persisted it by accident
+   * — and on the paid-from-demo path a system context leaked by the demo transfer made the clear
+   * itself succeed until that leak was fixed. {@link SystemContext} hands the tenant's context
+   * back afterwards.
+   *
+   * <p>A failure is rolled back, so a refused account write never stays pending for the next
+   * commit on this thread. {@code updateOnboardingDraft} commits its own work on success.
+   *
+   * @param account the account that drove the onboarding, may be null
+   */
   private void clearOnboardingDraftBestEffort(Account account) {
     if (account == null) {
       return;
     }
     try {
-      // updateOnboardingDraft flushes and commits internally
-      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
-      EtendoGoJwtDalHelper.updateOnboardingDraft(account, null);
+      SystemContext.run("clearing the onboarding draft",
+          () -> EtendoGoJwtDalHelper.updateOnboardingDraft(account, null));
     } catch (RuntimeException e) {
       log.warn("Clearing onboarding draft failed without blocking onboarding", e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding draft clear", e, log);
     }
   }
 
@@ -4270,8 +4287,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * so neither a lock nor a pooled connection is held while Stripe answers, and writes the period
    * in a fresh transaction that is committed here. Each step of
    * {@code completeCommittedOnboarding} commits its own work when it succeeds; a failed demo data
-   * transfer start and a failed ready email roll theirs back. A failed checkout close or draft
-   * clear only logs, so whatever such a failure left unflushed is still pending here; the
+   * transfer start, draft clear (which runs as system, the account being a client-0 row) or ready
+   * email rolls its own work back. Only a failed checkout close ({@code recordProvisioned}) just
+   * logs, by design: its pending fenced {@code PROVISIONED} update is meant to be persisted by a
+   * later commit, and a rollback could discard a correct close. When it is still pending here, the
    * service's session close before the provider call commits it, as the sample data and costing
    * steps after this one would otherwise. It never fails the
    * onboarding: the row is already committed, and on any failure (the commit included, which is
