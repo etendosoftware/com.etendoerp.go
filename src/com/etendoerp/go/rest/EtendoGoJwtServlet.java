@@ -3502,7 +3502,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * back afterwards.
    *
    * <p>A failure is rolled back, so a refused account write never stays pending for the next
-   * commit on this thread. {@code updateOnboardingDraft} commits its own work on success.
+   * commit on this thread. {@code updateOnboardingDraft} commits its own work on success. The
+   * rollback can also discard a checkout close left pending by a failed {@code recordProvisioned};
+   * see {@link #startDemoDataTransferBestEffort} for that edge.
    *
    * @param account the account that drove the onboarding, may be null
    */
@@ -4289,10 +4291,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code completeCommittedOnboarding} commits its own work when it succeeds; a failed demo data
    * transfer start, draft clear (which runs as system, the account being a client-0 row) or ready
    * email rolls its own work back. Only a failed checkout close ({@code recordProvisioned}) just
-   * logs, by design: its pending fenced {@code PROVISIONED} update is meant to be persisted by a
-   * later commit, and a rollback could discard a correct close. When it is still pending here, the
-   * service's session close before the provider call commits it, as the sample data and costing
-   * steps after this one would otherwise. It never fails the
+   * logs, by design: if its fenced {@code PROVISIONED} update ran and only the flush or commit
+   * after it failed, the update is still pending in the transaction and the next successful commit
+   * persists it, where a rollback would discard a correct close. When it is still pending here,
+   * the service's session close before the provider call commits it, as the sample data and
+   * costing steps after this one would otherwise. See {@link #startDemoDataTransferBestEffort} for
+   * the edge where a later step's rollback discards it instead. It never fails the
    * onboarding: the row is already committed, and on any failure (the commit included, which is
    * why it sits inside the try) only this step rolls back. Provider failures are WARNs from the
    * reader; see {@link SubscriptionService#fillPeriodFromProviderAfterCommit}.
@@ -4676,8 +4680,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * <p>A failure is also rolled back (ETP-5047). The service commits each of its writes, but one
    * that fails between writing a preference and its own commit leaves that preference pending, and
    * the next commit on this thread — the draft clear, the billing period fill — would persist a
-   * half-written transfer. Nothing earlier on the thread is lost: the tenant and the checkout close
-   * have committed by then, and so has a selection this call recorded before the start failed.
+   * half-written transfer. The tenant has committed by then, and so has a selection this call
+   * recorded before the start failed, so neither is lost.
+   *
+   * <p><b>One edge, accepted rather than handled.</b> The checkout close normally has committed by
+   * then too. Only when {@code recordProvisioned}'s fenced {@code PROVISIONED} update ran and the
+   * flush or commit right after it failed (it only logs, by design) is that update still pending,
+   * and this rollback — like the draft clear's and the ready email's — then discards it. The
+   * tenant stays committed, productive and subscribed, but its checkout request stays
+   * {@code PROVISIONING} with no created client. Nothing re-closes it: a retry once the lease
+   * expires is refused by {@code rejectDuplicateProductiveName}, because the account now owns a
+   * productive environment of that name, and the request records the non-retryable
+   * {@code CLIENT_NAME_IN_USE} failure — no second tenant is built, but the request needs a manual
+   * close. It takes two failures in a row on one thread, so it is not worth a different design.
    *
    * @param paymentToken the checkout request id the selection was recorded under
    * @param demoClientId exact source selected on the checkout request
