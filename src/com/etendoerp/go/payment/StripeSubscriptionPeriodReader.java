@@ -29,10 +29,12 @@ import org.codehaus.jettison.json.JSONObject;
  *
  * <p><b>Best-effort by contract: it never throws.</b> Every failure — no secret key, a transport
  * failure (timeout, DNS, TLS, 5xx, 429), a 4xx, a body without a whole and ordered period, or
- * anything unexpected — is logged as one WARN naming the tenant and the Stripe subscription id, and
- * answers {@code null}; the row then stays as it was opened, and the first lifecycle event fills
- * the period. The log carries no customer data and never the secret: the provider's error
- * <em>code</em> is logged, not its message.
+ * anything unexpected — answers {@code null}, and this reader logs one WARN for it naming the
+ * tenant and the Stripe subscription id; for a transport failure, a 5xx or a 429 the transport
+ * layer ({@link HttpUrlConnectionStripeApiClient}) may log its own WARN as well. The row then
+ * stays as it was opened, and the first lifecycle event fills the period. This reader's log
+ * carries no customer data and never the secret: the provider's error <em>code</em> is logged,
+ * not its message.
  *
  * <p>The period is read with {@link SubscriptionLifecycleApplier#subscriptionPeriodBoundary}, the
  * same parser the {@code customer.subscription.*} webhooks use, so both shapes are understood: the

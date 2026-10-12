@@ -447,10 +447,19 @@ public class SubscriptionService {
    * ("unresolved subscription") and Stripe never redelivers them, so without this read the row
    * would stay periodless until its first renewal, about a month later.
    *
-   * <p><b>Called after the onboarding commit, in its own transaction.</b> The provider call then
-   * runs while this transaction has only read, so no lock the onboarding took is held across the
-   * network; the caller commits on {@code true} and rolls back on a throw. The row is already
-   * committed either way, so nothing here can undo the subscription.
+   * <p><b>Two short transactions, and no connection held across the network.</b> The open row is
+   * read first; when the provider has to be asked, that read transaction is committed and the
+   * thread's DAL session closed <em>before</em> the call, so no pooled connection sits idle in a
+   * transaction while Stripe answers (up to the reader's connect and read timeouts, plus DNS).
+   * Only the row id and the Stripe subscription id cross the call. The write then runs in a fresh
+   * session that the DAL opens on demand, and is left uncommitted: the caller commits it on
+   * {@code true} and rolls it back on a throw. The early exits (no open row, no Stripe id, a period
+   * already set) ask the provider nothing and leave the read transaction to the caller.
+   *
+   * <p><b>So it must be called with nothing pending in the thread's DAL session</b>: closing the
+   * session commits whatever the caller had flushed or pending in it. The paid onboarding calls it
+   * right after its own commit, where the session is empty. The subscription row is already
+   * committed either way, so nothing here can undo it.
    *
    * <p><b>Never overwrites a period.</b> A lifecycle event that resolved once the row existed may
    * have written one, before this call or while the provider was answering, and the event's period
@@ -460,8 +469,8 @@ public class SubscriptionService {
    * written: never {@code STATUS}, {@code GRACE_ANCHOR} or the {@code LAST_EVENT_AT} watermark,
    * which belong to the lifecycle events.
    *
-   * <p>Best-effort on the provider side: every provider failure is a WARN from
-   * {@link StripeSubscriptionPeriodReader} and answers {@code false}. Does not commit.
+   * <p>Best-effort on the provider side: a provider failure is logged by
+   * {@link StripeSubscriptionPeriodReader} and answers {@code false}.
    *
    * @param environmentClientId {@code AD_CLIENT_ID} of the tenant whose row was just opened
    * @return true when a period was written and needs committing; false when nothing was written
@@ -472,31 +481,35 @@ public class SubscriptionService {
       return false;
     }
     Subscription subscription = open.get();
+    String subscriptionRowId = subscription.getId();
     String stripeSubscriptionId = StringUtils.trimToNull(subscription.getStripeSubscription());
     if (stripeSubscriptionId == null) {
       // A payment-mode checkout, or a provider subscription id that was never recorded: there is
       // nothing to read the period of.
       log.info("Subscription {} of tenant {} names no Stripe subscription; no billing period to "
-          + "read", subscription.getId(), environmentClientId);
+          + "read", subscriptionRowId, environmentClientId);
       return false;
     }
     if (subscription.getCurrentPeriodStart() != null
         || subscription.getCurrentPeriodEnd() != null) {
       return false;
     }
+    // Ends the read transaction and hands the connection back to the pool before the network
+    // call; the row entity is detached from here on, and only its two ids are used.
+    OBDal.getInstance().commitAndClose();
     SubscriptionLifecycleApplier.BillingPeriod period =
         periodReader.read(environmentClientId, stripeSubscriptionId);
     if (period == null) {
       return false;
     }
     boolean written = SystemContext.call("filling a subscription billing period",
-        () -> writePeriodIfMissing(subscription, period));
+        () -> writePeriodIfMissing(subscriptionRowId, period));
     if (written) {
       log.info("Subscription {} of tenant {} got its billing period from the provider",
-          subscription.getId(), environmentClientId);
+          subscriptionRowId, environmentClientId);
     } else {
       log.info("Subscription {} of tenant {} got a billing period from a lifecycle event first; "
-          + "the provider's was not written", subscription.getId(), environmentClientId);
+          + "the provider's was not written", subscriptionRowId, environmentClientId);
     }
     return written;
   }
@@ -505,12 +518,13 @@ public class SubscriptionService {
    * ETP-5047 — the conditional write behind {@link #fillPeriodFromProvider}: one {@code UPDATE} of
    * that row alone, applied only while both period boundaries are still null, stamping
    * {@code UPDATED}/{@code UPDATEDBY} as the DAL interceptor would. Like {@link #closeInDatabase},
-   * an HQL bulk update bypasses the DAL entity events, and the row is refreshed afterwards so the
-   * in-session entity reads what the database holds.
+   * an HQL bulk update bypasses the DAL entity events. It runs in a session that has not loaded the
+   * row, so there is no in-session copy to refresh; a later read gets what the database holds.
    *
+   * @param subscriptionRowId {@code ETGO_SUBSCRIPTION_ID} of the row to fill
    * @return true when the row was updated
    */
-  private static boolean writePeriodIfMissing(Subscription subscription,
+  private static boolean writePeriodIfMissing(String subscriptionRowId,
       SubscriptionLifecycleApplier.BillingPeriod period) {
     int updated = OBDal.getInstance().getSession()
         .createQuery("update " + Subscription.ENTITY_NAME
@@ -525,9 +539,8 @@ public class SubscriptionService {
         .setParameter("periodEnd", Date.from(period.end()))
         .setParameter("updated", new Date())
         .setParameter("updatedBy", OBContext.getOBContext().getUser())
-        .setParameter("id", subscription.getId())
+        .setParameter("id", subscriptionRowId)
         .executeUpdate();
-    OBDal.getInstance().getSession().refresh(subscription);
     return updated == 1;
   }
 

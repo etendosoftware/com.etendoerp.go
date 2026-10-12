@@ -994,7 +994,7 @@ class SubscriptionServiceTest {
 
     @Test
     void writesBothBoundariesReadFromTheProvider() {
-      Subscription row = openRow(STRIPE_SUBSCRIPTION_ID);
+      openRow(STRIPE_SUBSCRIPTION_ID);
 
       assertTrue(filling.fillPeriodFromProvider(CLIENT_ID));
 
@@ -1003,9 +1003,24 @@ class SubscriptionServiceTest {
       verify(periodStatement).setParameter("periodEnd", Date.from(periodEnd));
       verify(periodStatement).setParameter("id", ROW_ID);
       verify(periodStatement).setParameter("updatedBy", systemUser);
-      verify(session).refresh(row);
-      // Its own transaction is the caller's to commit, after the onboarding commit.
-      verify(obDal, never()).commitAndClose();
+    }
+
+    @Test
+    void releasesTheSessionBeforeTheProviderCallAndLeavesTheWriteUncommitted() {
+      openRow(STRIPE_SUBSCRIPTION_ID);
+
+      filling.fillPeriodFromProvider(CLIENT_ID);
+
+      // No pooled connection may sit idle in a transaction while Stripe answers: the read
+      // transaction ends before the call, the write comes after it in a fresh one.
+      org.mockito.InOrder order = org.mockito.Mockito.inOrder(obDal, reader, periodStatement);
+      order.verify(obDal).commitAndClose();
+      order.verify(reader).read(CLIENT_ID, STRIPE_SUBSCRIPTION_ID);
+      order.verify(periodStatement).executeUpdate();
+      // The write's own transaction is the caller's to commit: one close, the one before the call.
+      verify(obDal, times(1)).commitAndClose();
+      // A fresh session never loaded the row, so there is nothing in it to refresh.
+      verify(session, never()).refresh(any());
     }
 
     @Test
@@ -1048,7 +1063,7 @@ class SubscriptionServiceTest {
       when(periodStatement.executeUpdate()).thenReturn(0);
 
       assertFalse(filling.fillPeriodFromProvider(CLIENT_ID));
-      verify(session).refresh(row);
+      verify(row, never()).setCurrentPeriodStart(any());
     }
 
     @Test
@@ -1060,6 +1075,8 @@ class SubscriptionServiceTest {
 
       verify(reader, never()).read(anyString(), anyString());
       verify(session, never()).createQuery(anyString());
+      // No provider call, so the read transaction is the caller's and stays open.
+      verify(obDal, never()).commitAndClose();
     }
 
     @Test

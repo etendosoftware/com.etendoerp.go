@@ -4252,10 +4252,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * {@code customer.subscription.updated} arrived before the row existed and were ignored for
    * good, so without this the row stays periodless until its first renewal.
    *
-   * <p>Runs after the onboarding commit, in its own transaction, so the provider call never holds
-   * the onboarding's locks, and never fails the onboarding: the row is already committed, and on
-   * any failure (the commit included, which is why it sits inside the try) only this step rolls
-   * back. Provider failures are WARNs from the reader; see
+   * <p>Runs after the onboarding commit, so the session is empty — which the service relies on:
+   * it closes the session before the provider call, so neither the onboarding's locks nor a pooled
+   * connection are held while Stripe answers, and writes the period in a fresh transaction that is
+   * committed here. It never fails the onboarding: the row is already committed, and on any
+   * failure (the commit included, which is why it sits inside the try) only this step rolls back.
+   * Provider failures are WARNs from the reader; see
    * {@link SubscriptionService#fillPeriodFromProvider}.
    *
    * @param clientId the tenant just committed
