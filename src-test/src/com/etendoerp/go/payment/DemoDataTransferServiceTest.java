@@ -84,6 +84,8 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
  * They still exercise real DAL calls and entity setters through Mockito: an existing target row
  * must be reused, its lookup must stay tenant-scoped, and blank CIF/Tax ID must be copied instead
  * of being routed through the interactive import validator.
+ *
+ * @covers com.etendoerp.go.payment.DemoDataTransferService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -141,6 +143,24 @@ class DemoDataTransferServiceTest {
         system, null, null, null, null, null));
     verify(obDal).flush();
     verify(obDal).commitAndClose();
+  }
+
+  /**
+   * ETP-5047 — the selection is written as system, and the caller gets its own context back. The
+   * paid onboarding calls this from {@code completeCommittedOnboarding} and keeps working on that
+   * thread afterwards; a system context left behind makes every later step run as system.
+   */
+  @Test
+  void handsTheCallerItsOwnContextBackAfterWritingAsSystem() {
+    OBContext caller = mock(OBContext.class);
+    contextStatic.when(OBContext::getOBContext).thenReturn(caller);
+    when(obDal.get(Client.class, SYSTEM_ID)).thenReturn(mock(Client.class));
+    givenPreferenceReads((Preference) null);
+
+    service.recordSelection(REQUEST_ID, true, false);
+
+    contextStatic.verify(() -> OBContext.setOBContext(SYSTEM_ID, SYSTEM_ID, SYSTEM_ID, SYSTEM_ID));
+    contextStatic.verify(() -> OBContext.setOBContext(caller));
   }
 
   @Test
