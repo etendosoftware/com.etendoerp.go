@@ -590,12 +590,13 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * it must back both origins too. It therefore produces one row per key, each carrying only the
    * base of that key's tax lines (the per-key base from the same HQL the DAO uses: halved for a
    * purchase line with a non-zero tax amount, in the invoice currency).
-   * A single-key invoice keeps exactly the row it always had (one row, the invoice's
-   * {@code summedLineAmount}).
+   * A single-key invoice produces exactly one row too, but (ETP-5725) its base is now that same
+   * live per-key HQL sum — not the invoice's cached {@code summedLineAmount}, which could disagree
+   * in sign with it for a rectificativa invoice.
    *
    * <p>The rows are origin evidence, not a reconciliation: their bases are NOT guaranteed to add
-   * up to the operator's base (a single-key row shows {@code summedLineAmount}, which is neither
-   * halved nor converted, and no row is currency-converted).
+   * up to the operator's base (the operator's base is a per-business-partner aggregate across
+   * every invoice of that partner, not per-invoice; no row here is currency-converted).
    *
    * <p>Every row of a mixed invoice keeps {@code id} = invoice id; {@code (id, key)} is the
    * unique pair, and the frontend keys rows on it.
@@ -626,10 +627,16 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       arr.put(buildInvoiceRow(inv, type, sdf, null, null));
       return;
     }
-    // Only a mixed invoice needs the per-key base; a single-key one keeps its invoice-level base.
-    boolean mixed = bases.size() > 1;
+    // ETP-5725 — ALWAYS use the per-key live base (the same InvoiceTax-sourced HQL
+    // resolveInvoiceKeyBases/getTaxBaseAmountPerBusinessPartner use for the Operadores totals
+    // and the multi-key branch), even for a single-key invoice. The single-key case used to pass
+    // `null` here so buildInvoiceRow fell back to `inv.getSummedLineAmount()` — a cached header
+    // column that can disagree in SIGN with the live tax-line sum (confirmed for FVR
+    // rectificativa invoices, ETP-5725). That stale fallback is now unreachable from this loop;
+    // it only remains in buildInvoiceRow for the `bases == null/empty` branch above, where there
+    // is no live per-key source to use instead.
     for (Map.Entry<String, BigDecimal> e : bases.entrySet()) {
-      arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), mixed ? e.getValue() : null));
+      arr.put(buildInvoiceRow(inv, type, sdf, e.getKey(), e.getValue()));
     }
   }
 
@@ -639,8 +646,11 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * @param key
    *          AEAT349 key of the row ({@code ""} when unresolved)
    * @param keyBase
-   *          base of the row's key alone (mixed invoice), or {@code null} to use the invoice's
-   *          summed line amount (single-key invoice)
+   *          live per-key base (from {@code resolveInvoiceKeyBases}/
+   *          {@code getTaxBaseAmountPerBusinessPartner}'s HQL), or {@code null} only when no
+   *          live base could be resolved for this invoice at all — then falls back to the
+   *          invoice's cached {@code summedLineAmount} (ETP-5725: this fallback is no longer
+   *          used for the ordinary single-key case, only the "no resolvable key" one)
    */
   JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf, String key,
       BigDecimal keyBase) throws Exception {
