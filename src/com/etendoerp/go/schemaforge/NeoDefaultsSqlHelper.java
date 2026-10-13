@@ -21,6 +21,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
@@ -105,9 +106,15 @@ final class NeoDefaultsSqlHelper {
         missingParentToken = bindSqlDefaultParams(ps, params, vars, conn, windowId, parentValues,
             parentIdProvided);
 
+        // ETP-5682: an FK default must not resolve to another tenant's row. When the guard
+        // applies, read the candidate rows and keep the first one of this client (or of
+        // client 0); when every row is foreign, report it as zero rows.
+        NeoDefaultTenantGuard guard = NeoDefaultTenantGuard.forColumn(adColumn,
+            vars != null ? vars.getClient() : null);
         try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            return SqlDefaultOutcome.resolved(rs.getString(1));
+          SqlDefaultOutcome fromRows = outcomeFromRows(rs, guard);
+          if (fromRows != null) {
+            return fromRows;
           }
         }
       }
@@ -121,6 +128,28 @@ final class NeoDefaultsSqlHelper {
           adColumn != null ? adColumn.getDBColumnName() : "<auxiliary-input>", e.getMessage());
       return SqlDefaultOutcome.unresolved();
     }
+  }
+
+  /**
+   * The outcome carried by the query's rows, or {@code null} when it returned none. Without a
+   * tenant guard only the first row counts, as before; with one, up to
+   * {@link NeoDefaultTenantGuard#MAX_CANDIDATES} rows are read and the first row of this client
+   * (or of client 0) wins, and rows that all belong to other tenants count as zero rows.
+   */
+  private static SqlDefaultOutcome outcomeFromRows(ResultSet rs, NeoDefaultTenantGuard guard)
+      throws SQLException {
+    if (guard == null) {
+      return rs.next() ? SqlDefaultOutcome.resolved(rs.getString(1)) : null;
+    }
+    List<String> candidates = new ArrayList<>();
+    while (candidates.size() < NeoDefaultTenantGuard.MAX_CANDIDATES && rs.next()) {
+      candidates.add(rs.getString(1));
+    }
+    if (candidates.isEmpty()) {
+      return null;
+    }
+    String chosen = guard.firstSameTenant(candidates);
+    return chosen != null ? SqlDefaultOutcome.resolved(chosen) : SqlDefaultOutcome.zeroRows();
   }
 
   /**
