@@ -627,6 +627,10 @@ public class SalesOrderHeaderHandlerTest {
 
   /** Sentinel for the stored-DocAction column of the table below: loading the record throws. */
   private static final String STORED_READ_FAILS = "<stored read fails>";
+  /** Sentinel for the stored-DocAction column: the context carries no tab to resolve. */
+  private static final String NO_TAB = "<no tab>";
+  /** Sentinel for the stored-DocAction column: the tab resolves, the record does not exist. */
+  private static final String RECORD_NOT_FOUND = "<record not found>";
   /** Property-check column of the table below: the requested value is not a member of the list. */
   private static final String NOT_IN_LIST = "not in list";
   /** Property-check column of the table below: the property refuses any write. */
@@ -640,7 +644,8 @@ public class SalesOrderHeaderHandlerTest {
    * {@code fieldValues.documentAction}. A refusal is 400 and never reaches the action router; a
    * lookup that cannot run is 500 (fail closed). The record is resolved as
    * {@code NeoProcessService.docActionToRun} does: tab → table name → record →
-   * {@code documentAction}.
+   * {@code documentAction}; a tab or record that cannot be resolved leaves the action unknown and
+   * is refused with 500, while a record with nothing stored is not an error.
    */
   @Test
   public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
@@ -672,6 +677,12 @@ public class SalesOrderHeaderHandlerTest {
             "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400 },
         { "root CO on a non-writable property is not written, the stored RE runs and is refused",
             "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400 },
+        { "root RE with no resolvable tab fails closed",
+            "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500 },
+        { "root RE on a record that cannot be found fails closed",
+            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 500 },
+        { "empty body on a record with nothing stored falls through",
+            "{}", null, null, Boolean.TRUE, null },
     };
     for (Object[] c : cases) {
       String label = (String) c[0];
@@ -680,6 +691,7 @@ public class SalesOrderHeaderHandlerTest {
       String propertyCheck = (String) c[3];
       Boolean linked = (Boolean) c[4];
       Integer expectedStatus = (Integer) c[5];
+      boolean noTab = NO_TAB.equals(stored);
 
       NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
       SalesOrderHeaderHandler handler = handlerWithMockClone(router);
@@ -688,14 +700,14 @@ public class SalesOrderHeaderHandlerTest {
       NeoContext ctx = NeoContext.builder()
           .specName("sales-order").entityName("header")
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("DocAction").recordId(orderId).adTab(tab)
+          .fieldName("DocAction").recordId(orderId).adTab(noTab ? null : tab)
           .requestBody(body)
           .build();
 
       OBDal dal = mock(OBDal.class);
       if (STORED_READ_FAILS.equals(stored)) {
         when(dal.get(Tab.class, tabId)).thenThrow(new IllegalStateException("DAL down"));
-      } else {
+      } else if (!noTab) {
         Table table = mock(Table.class);
         when(table.getName()).thenReturn(entityName);
         when(tab.getTable()).thenReturn(table);
@@ -713,7 +725,8 @@ public class SalesOrderHeaderHandlerTest {
         when(order.getEntity()).thenReturn(entity);
         when(order.get("documentAction")).thenReturn(stored);
         when(dal.get(Tab.class, tabId)).thenReturn(tab);
-        when(dal.get(entityName, orderId)).thenReturn(order);
+        when(dal.get(entityName, orderId))
+            .thenReturn(RECORD_NOT_FOUND.equals(stored) ? null : order);
       }
       Connection conn = mock(Connection.class);
       PreparedStatement ps = mock(PreparedStatement.class);
