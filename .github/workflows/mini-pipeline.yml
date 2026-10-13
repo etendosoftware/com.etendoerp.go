@@ -80,8 +80,15 @@ jobs:
             exit 1
           fi
           mkdir -p ~/.ssh
-          printf '%s\n' "$BITBUCKET_SSH_KEY" > ~/.ssh/bitbucket
+          # A key saved with Windows line endings fails to load ("error in libcrypto"): drop the CRs.
+          printf '%s\n' "$BITBUCKET_SSH_KEY" | tr -d '\r' > ~/.ssh/bitbucket
           chmod 600 ~/.ssh/bitbucket
+          if ! ssh-keygen -y -P '' -f ~/.ssh/bitbucket >/dev/null 2>&1; then
+            crlf=no; case "$BITBUCKET_SSH_KEY" in *$'\r'*) crlf=yes ;; esac
+            echo "::error::BITBUCKET_SSH_KEY is not a usable private key ($(wc -l < ~/.ssh/bitbucket) lines, CRLF: $crlf)." \
+              "Store the whole key, BEGIN and END lines included, with its line breaks and no passphrase."
+            exit 1
+          fi
           export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/bitbucket -o StrictHostKeyChecking=no"
           case "$MODULE_BRANCH" in
             develop|main|hotfix/*|mergeblock/*) try_branch="" ;;
