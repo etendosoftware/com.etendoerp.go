@@ -109,6 +109,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private static final String FIELD_SUSPENSE_BALANCING_USE = "suspenseBalancingUse";
   private static final String FIELD_SUSPENSE_BALANCING = "suspenseBalancing";
   private static final String FIELD_SUSPENSE_ERROR_USE = "suspenseErrorUse";
+  private static final String FIELD_SUSPENSE_ERROR = "suspenseError";
   private static final String FIELD_CURRENCY_BALANCING_USE = "currencyBalancingUse";
   // These four mirror the raw AD property name (see AcctSchemaGL / schema-raw.json) rather than a
   // cosmetic apiKey, matching the convention already used by DEFAULT_FIELD_MAPPINGS.
@@ -368,6 +369,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     out.put(FIELD_SUSPENSE_BALANCING_USE, bool(generalAccounts.isSuspenseBalancingUse()));
     out.put(FIELD_SUSPENSE_BALANCING, toCombinationId(generalAccounts.getSuspenseBalancing()));
     out.put(FIELD_SUSPENSE_ERROR_USE, bool(generalAccounts.isSuspenseErrorUse()));
+    out.put(FIELD_SUSPENSE_ERROR, toCombinationId(generalAccounts.getSuspenseError()));
     out.put(FIELD_CURRENCY_BALANCING_USE, bool(generalAccounts.isCurrencyBalancingUse()));
     out.put(FIELD_CURRENCY_BALANCING_ACCOUNT, toCombinationId(generalAccounts.getCurrencyBalancingAcct()));
     out.put(FIELD_RETAINED_EARNING, toCombinationId(generalAccounts.getRetainedEarning()));
@@ -514,6 +516,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     }
     if (generalAccounts.has(FIELD_SUSPENSE_ERROR_USE)) {
       ga.setSuspenseErrorUse(generalAccounts.optBoolean(FIELD_SUSPENSE_ERROR_USE));
+    }
+    if (generalAccounts.has(FIELD_SUSPENSE_ERROR)) {
+      ga.setSuspenseError(resolveAccountingCombination(generalAccounts, FIELD_SUSPENSE_ERROR));
     }
     if (generalAccounts.has(FIELD_CURRENCY_BALANCING_USE)) {
       ga.setCurrencyBalancingUse(generalAccounts.optBoolean(FIELD_CURRENCY_BALANCING_USE));

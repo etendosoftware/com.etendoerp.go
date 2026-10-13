@@ -1013,6 +1013,10 @@ class GeneralLedgerConfigurationHandlerTest {
     AccountingCombination retainedEarning = mock(AccountingCombination.class);
     when(retainedEarning.getId()).thenReturn("combo-retained");
     when(generalAccounts.getRetainedEarning()).thenReturn(retainedEarning);
+    // ETP-5682: the suspense error account is exposed next to its toggle.
+    AccountingCombination suspenseError = mock(AccountingCombination.class);
+    when(suspenseError.getId()).thenReturn("combo-suspense-error");
+    when(generalAccounts.getSuspenseError()).thenReturn(suspenseError);
 
     JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
     JSONObject ga = row.getJSONObject("generalAccounts");
@@ -1024,6 +1028,7 @@ class GeneralLedgerConfigurationHandlerTest {
     assertTrue(ga.getBoolean("active"));
     assertTrue(ga.getBoolean("createClosing"));
     assertEquals("combo-retained", ga.getString("retainedEarning"));
+    assertEquals("combo-suspense-error", ga.getString("suspenseError"));
   }
 
   @Test
@@ -1035,9 +1040,12 @@ class GeneralLedgerConfigurationHandlerTest {
     AccountingCombination combo = mock(AccountingCombination.class);
     when(combo.getId()).thenReturn("combo-income");
     when(obDal.get(AccountingCombination.class, "combo-income")).thenReturn(combo);
+    AccountingCombination suspenseError = mock(AccountingCombination.class);
+    when(obDal.get(AccountingCombination.class, "combo-suspense-error")).thenReturn(suspenseError);
 
     JSONObject body = new JSONObject().put("generalAccounts", new JSONObject()
         .put("suspenseBalancingUse", true)
+        .put("suspenseError", "combo-suspense-error")
         .put("incomeSummary", "combo-income")
         .put("createClosing", false));
 
@@ -1046,6 +1054,7 @@ class GeneralLedgerConfigurationHandlerTest {
     assertEquals(200, response.getHttpStatus());
     verify(generalAccounts).setSuspenseBalancingUse(true);
     verify(generalAccounts).setIncomeSummary(combo);
+    verify(generalAccounts).setSuspenseError(suspenseError);
     verify(generalAccounts).setCreateClosing(false);
     verify(obDal).save(generalAccounts);
   }
