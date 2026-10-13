@@ -4546,13 +4546,12 @@ public class NeoDefaultsServiceTest {
     Column adColumn = mock(Column.class);
     when(adColumn.getDBColumnName()).thenReturn("C_DocType_ID");
     NeoDefaultTenantGuard guard = mock(NeoDefaultTenantGuard.class);
-    when(guard.firstSameTenant(Arrays.asList("DT-FOREIGN", "DT-OWN"))).thenReturn(guardPick);
+    when(guard.scan(any(ResultSet.class)))
+        .thenReturn(new NeoDefaultTenantGuard.Scan(true, guardPick));
 
     when(dal.getConnection(false)).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenReturn(ps);
     when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(true, true, false);
-    when(rs.getString(1)).thenReturn("DT-FOREIGN", "DT-OWN");
 
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
          MockedStatic<Utility> utilityMock = mockStatic(Utility.class);

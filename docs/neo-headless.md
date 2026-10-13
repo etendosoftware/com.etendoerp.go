@@ -857,8 +857,11 @@ choke point for `GET /defaults`, the create-time mandatory-default injection and
 applies when the column is a foreign key (by primary key) to a **client-enabled** table and the
 context client is not `0`:
 
-- up to 200 rows of the query are read, in the query's own order;
-- one `SELECT <pk>, AD_Client_ID FROM <table> WHERE <pk> IN (…)` resolves their owners;
+- the query's rows are read in its own order, 200 at a time, and one
+  `SELECT <pk>, AD_Client_ID FROM <table> WHERE <pk> IN (…)` per batch resolves their owners;
+  the scan stops at the first acceptable row, so the usual case is one batch and one lookup.
+  There is no cap: an unscoped document-type default spans every tenant (production has more than
+  800 sales-order document types), and a cap would hide the tenant's own row past it;
 - the first row owned by the context client **or by client `0`** wins;
 - if every row belongs to another tenant, the outcome is "zero rows" (no default, the existing
   `metadata.notes` explanation applies) and a WARN names the column, table and count — never the
@@ -870,7 +873,11 @@ context client is not `0`:
 
 The rule is structural (a default may never point at another tenant's row) and names no entity.
 A window can still pin the exact value with a client-scoped `defaultExpr` in its `decisions.json`
-(`simple-g-l-journal` does, for a deterministic order and no 200-row scan).
+(`simple-g-l-journal` does, for a deterministic order and no cross-tenant scan).
+
+**A row limit in the default defeats the guard.** `ORDER BY … LIMIT 1` on an unscoped query hands
+the guard a single row, usually another tenant's, so the outcome is "zero rows" instead of the
+tenant's own value. Scope such a default by `AD_Client_ID=@#AD_Client_ID@` instead of limiting it.
 
 ### 4.4 Selectors (FK Dropdowns)
 

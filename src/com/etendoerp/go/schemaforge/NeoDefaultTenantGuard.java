@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,8 +62,27 @@ final class NeoDefaultTenantGuard {
   /** Client {@code 0} (System) rows are shared by every tenant. */
   static final String SYSTEM_CLIENT_ID = "0";
 
-  /** Upper bound on rows read from an {@code @SQL=} default when the guard is active. */
-  static final int MAX_CANDIDATES = 200;
+  /**
+   * Rows of an {@code @SQL=} default checked per ownership lookup. Every row is read until an
+   * acceptable one appears, a batch at a time, so an unscoped default over many tenants (more
+   * than 800 sales-order document types in production) still finds the tenant's own row.
+   */
+  static final int BATCH_SIZE = 200;
+
+  /** What a scan of an {@code @SQL=} default's rows found. */
+  static final class Scan {
+    static final Scan NO_ROWS = new Scan(false, null);
+
+    /** Whether the default query returned any row at all. */
+    final boolean anyRow;
+    /** The chosen value, or {@code null} when no row was acceptable. */
+    final String value;
+
+    Scan(boolean anyRow, String value) {
+      this.anyRow = anyRow;
+      this.value = value;
+    }
+  }
 
   private final String columnName;
   private final String tableName;
@@ -114,32 +134,63 @@ final class NeoDefaultTenantGuard {
   }
 
   /**
-   * The first candidate, in query order, that belongs to the current client or to client
-   * {@code 0}; {@code null} when every candidate belongs to another tenant (or there are none).
+   * Reads the default's rows in query order, {@link #BATCH_SIZE} at a time, and picks the first
+   * one that belongs to the current client or to client {@code 0}; a row whose primary key is
+   * not found is accepted too. Stops at the first acceptable row, so the usual case is one batch
+   * and one lookup. {@code null} values are never chosen. When a lookup fails, the very first
+   * row is returned, as without the guard. Logs one WARN with the total rejected.
    */
-  String firstSameTenant(List<String> candidates) {
-    if (candidates == null || candidates.isEmpty()) {
-      return null;
-    }
-    Optional<Map<String, String>> lookup = loadClients(candidates);
-    if (lookup.isEmpty()) {
-      return candidates.get(0);
-    }
-    Map<String, String> clientById = lookup.get();
+  Scan scan(ResultSet rows) throws SQLException {
+    String firstRow = null;
+    boolean anyRow = false;
     int rejected = 0;
-    for (String candidate : candidates) {
-      if (candidate == null) {
+    List<String> batch = new ArrayList<>(BATCH_SIZE);
+    boolean exhausted = false;
+    while (!exhausted) {
+      batch.clear();
+      while (batch.size() < BATCH_SIZE && !exhausted) {
+        if (rows.next()) {
+          batch.add(rows.getString(1));
+        } else {
+          exhausted = true;
+        }
+      }
+      if (batch.isEmpty()) {
+        break;
+      }
+      if (!anyRow) {
+        anyRow = true;
+        firstRow = batch.get(0);
+      }
+      List<String> ids = new ArrayList<>(batch.size());
+      for (String candidate : batch) {
+        if (candidate != null) {
+          ids.add(candidate);
+        }
+      }
+      if (ids.isEmpty()) {
         continue;
       }
-      String owner = clientById.get(candidate);
-      if (owner == null || currentClientId.equals(owner) || SYSTEM_CLIENT_ID.equals(owner)) {
+      Optional<Map<String, String>> lookup = loadClients(ids);
+      if (lookup.isEmpty()) {
         logRejected(rejected);
-        return candidate;
+        return new Scan(true, firstRow);
       }
-      rejected++;
+      for (String candidate : ids) {
+        if (isAcceptable(lookup.get().get(candidate))) {
+          logRejected(rejected);
+          return new Scan(true, candidate);
+        }
+        rejected++;
+      }
     }
     logRejected(rejected);
-    return null;
+    return anyRow ? new Scan(true, null) : Scan.NO_ROWS;
+  }
+
+  /** A row is acceptable when it is unknown, the current client's, or client 0's. */
+  private boolean isAcceptable(String owner) {
+    return owner == null || currentClientId.equals(owner) || SYSTEM_CLIENT_ID.equals(owner);
   }
 
   private void logRejected(int rejected) {
