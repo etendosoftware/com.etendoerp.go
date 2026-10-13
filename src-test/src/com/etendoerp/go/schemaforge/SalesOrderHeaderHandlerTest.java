@@ -656,8 +656,9 @@ public class SalesOrderHeaderHandlerTest {
     final String orderId = "order-re-1";
     final String tabId = "tab-order";
     final String entityName = "Order";
-    // { label, body, stored DocAction, property check on the requested value (null = accepted),
-    //   linked docs (null = the query throws), expected status (null = falls through to the router) }
+    // Columns: the label, the body sent, the stored DocAction, the property check on the requested
+    // value (null when it is accepted), whether linked documents exist (null when the query
+    // throws) and the expected status (null when the request falls through to the router).
     Object[][] cases = {
         { "root RE with linked docs is refused",
             "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400 },

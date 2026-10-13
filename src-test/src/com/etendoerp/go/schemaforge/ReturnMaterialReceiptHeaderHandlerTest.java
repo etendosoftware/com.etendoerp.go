@@ -265,7 +265,8 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
    */
   @Test
   public void testActionContractsJudgeAgentCalls_table() throws Exception {
-    // { action, body, error key expected in error (null = accepted), value it must mention }
+    // Columns: the action, the body sent, the key expected inside the error (null when the call
+    // is accepted) and the value that key must mention.
     Object[][] cases = {
         { "availableShipments", "{}", "missingParameters", "businessPartner" },
         { "importShipmentLines", "{\"lines\":\"x\"}", "field", "lines" },
