@@ -864,8 +864,14 @@ context client is not `0`:
   800 sales-order document types), and a cap would hide the tenant's own row past it;
 - the first row owned by the context client **or by client `0`** wins;
 - if every row belongs to another tenant, the outcome is "zero rows" (no default, the existing
-  `metadata.notes` explanation applies) and a WARN names the column, table and count — never the
-  ids;
+  `metadata.notes` explanation applies);
+- whenever at least one foreign row was skipped — also when the tenant's own row turns up later —
+  one WARN per resolution names the column, the table and the number of skipped rows, never the
+  ids. A recurring WARN for a column is the signal that its default needs a client-scoped
+  `defaultExpr`;
+- a row whose value is `null` is never chosen; if no non-null row is acceptable the outcome is
+  "zero rows" (without the guard a `null` first row resolves to `null` — the default is empty
+  either way, only `metadata.notes` differs);
 - a row it cannot find by primary key is accepted, and a failed lookup falls back to the first
   row. On PostgreSQL a lookup that fails with an SQL error also aborts the transaction, exactly as
   a failure of the default query itself would; the lookup reads only the primary key and
@@ -878,6 +884,11 @@ A window can still pin the exact value with a client-scoped `defaultExpr` in its
 **A row limit in the default defeats the guard.** `ORDER BY … LIMIT 1` on an unscoped query hands
 the guard a single row, usually another tenant's, so the outcome is "zero rows" instead of the
 tenant's own value. Scope such a default by `AD_Client_ID=@#AD_Client_ID@` instead of limiting it.
+
+Tests: `NeoDefaultTenantGuardTest` (applicability, ordering, batching across the 200-row boundary,
+unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTenantGuard*` cases in
+`NeoDefaultsServiceTest`. Background and the list of known unscoped defaults:
+`etendo_schema_forge` `docs/etendo-ad/unscoped-sql-defaults.md`.
 
 ### 4.4 Selectors (FK Dropdowns)
 
