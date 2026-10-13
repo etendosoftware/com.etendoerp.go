@@ -16,6 +16,10 @@ on:
     types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
 
+# The checkouts of other repos use ETENDOBOT_TOKEN; the workflow's own token only reads this one.
+permissions:
+  contents: read
+
 concurrency:
   group: mini-pipeline-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
