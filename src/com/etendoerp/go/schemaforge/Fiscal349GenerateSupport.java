@@ -82,16 +82,65 @@ class Fiscal349GenerateSupport {
   // current user so generation works even without TaxReport pre-configuration.
   void applyContactParams(HttpServletRequest request, String orgId,
       Map<String, String> inputParams) {
-    String phone   = request.getParameter("phone");
-    String contact = request.getParameter("contact");
+    String phone   = fitAeatPhone(request.getParameter("phone"));
+    String contact = fitAeatContact(request.getParameter("contact"));
     if (phone == null || phone.isEmpty()) {
-      phone = resolveOrgPhone(orgId);
+      phone = fitAeatPhone(resolveOrgPhone(orgId));
     }
     if (contact == null || contact.isEmpty()) {
-      contact = resolveCurrentUserContactName();
+      contact = fitAeatContact(resolveCurrentUserContactName());
     }
     if (phone   != null && !phone.isEmpty())   inputParams.put("Phone",   phone);
     if (contact != null && !contact.isEmpty()) inputParams.put("Contact", contact);
+  }
+
+  /**
+   * Width of the "Teléfono de contacto" slot (positions 59-67) of the AEAT 349 type-1 record.
+   */
+  static final int AEAT_PHONE_WIDTH = 9;
+
+  /**
+   * ETP-5597 — fits the phone into the AEAT type-1 record's 9-digit numeric slot. Same trap as
+   * {@link #fitAeatContact}: {@code generateLine1} formats it with
+   * {@code OBTL_Utility.format(phone, 9, '0', ...)} without truncating, so anything longer than 9
+   * characters aborted generation with "longitud esperada 9". The modal limits typed input to 9
+   * digits, but the blank-field fallback ({@link #resolveOrgPhone}) is free text such as
+   * {@code "+34 600 123 123"}. Keeps the digits only and, when more than 9 remain, the LAST 9 —
+   * the subscriber number, dropping an international prefix ({@code 34}/{@code 0034}).
+   */
+  static String fitAeatPhone(String phone) {
+    if (phone == null) {
+      return null;
+    }
+    String digits = phone.replaceAll("\\D", "");
+    return digits.length() > AEAT_PHONE_WIDTH
+        ? digits.substring(digits.length() - AEAT_PHONE_WIDTH)
+        : digits;
+  }
+
+  /**
+   * Width of the "Persona de contacto" slot (positions 68-107) of the AEAT 349 type-1 record.
+   */
+  static final int AEAT_CONTACT_WIDTH = 40;
+
+  /**
+   * ETP-5597 (CP-19) — fits the contact into the AEAT type-1 record's 40-character slot.
+   * {@code AEAT3492010Report#generateLine1} formats the contact with
+   * {@code OBTL_Utility.format(contact, 40, ...)} without truncating it first (unlike the BP name
+   * of the type-2 records, which goes through its {@code trunk(..., 40)}), so any longer value
+   * aborted the whole generation with "longitud esperada 40" and no file. The usual trigger is
+   * the blank-field fallback — the logged-in AD_User's name, which on Etendo GO tenants is often
+   * the e-mail-based username — but a long typed value hits it too. Surrounding blanks are
+   * trimmed first so they never consume the 40 characters.
+   */
+  static String fitAeatContact(String contact) {
+    if (contact == null) {
+      return null;
+    }
+    String trimmed = contact.trim();
+    return trimmed.length() > AEAT_CONTACT_WIDTH
+        ? trimmed.substring(0, AEAT_CONTACT_WIDTH).trim()
+        : trimmed;
   }
 
   /**

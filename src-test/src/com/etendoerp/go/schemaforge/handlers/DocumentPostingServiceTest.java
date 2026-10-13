@@ -368,6 +368,119 @@ public class DocumentPostingServiceTest {
   }
 
   /**
+   * Stubs the non-transaction connection {@code notPostableFailure} reads the row through: one row
+   * with the given {@code Processed} / {@code Posted} values.
+   *
+   * @return the statement, to assert the SQL binding
+   */
+  private static java.sql.PreparedStatement stubPostingStateRow(ConnectionProvider conn,
+      String processed, String posted) throws Exception {
+    Connection read = mock(Connection.class);
+    java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+    java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+    when(conn.getConnection()).thenReturn(read);
+    when(read.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getString(1)).thenReturn(processed);
+    when(rs.getString(2)).thenReturn(posted);
+    return ps;
+  }
+
+  /** Runs {@code post} on a locked-status {@code AcctServer} of {@code C_Invoice} in Spanish. */
+  private static DocumentPostingService.PostResult postLockedInvoice(ConnectionProvider conn,
+      String messageKey, String localized) throws Exception {
+    AcctServer acct = stubLockedAcctServer();
+    acct.tableName = "C_Invoice";
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic
+          .when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("OtherPostingProcessActive"))
+          .thenReturn("Este registro está siendo contabilizado por otro proceso");
+      if (messageKey != null) {
+        msgMock.when(() -> OBMessageUtils.messageBD(messageKey)).thenReturn(localized);
+      }
+      return new DocumentPostingService().post("318", "rec-1", conn);
+    }
+  }
+
+  /**
+   * ETP-5692 (BUG-5 repro): {@code AcctServer} takes its lock with {@code ... AND Processed='Y'
+   * AND Posted<>'Y'} and reports every miss as {@code STATUS_DocumentLocked}, so posting a DRAFT
+   * answered "This record is being posted by another process" although nothing held it. The
+   * service re-reads the row and names the real cause.
+   */
+  @Test
+  public void postOfUnprocessedDocumentNamesNotProcessedInsteadOfTheLock() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    java.sql.PreparedStatement ps = stubPostingStateRow(conn, "N", "N");
+
+    DocumentPostingService.PostResult r = postLockedInvoice(conn, null, null);
+
+    assertFalse(r.ok());
+    // Plain English, no AD_MESSAGE behind it (ETP-5692 decision); the key is a stable identity.
+    assertEquals("Only processed (completed) documents can be posted. Complete the document first.",
+        r.message());
+    assertEquals(List.of("ETGO_PostingDocumentNotProcessed"), r.messageKeys());
+    verify(conn).releaseRollbackConnection(con);
+    verify(conn.getConnection())
+        .prepareStatement("SELECT Processed, Posted FROM C_Invoice WHERE C_Invoice_ID = ?");
+    verify(ps).setString(1, "rec-1");
+  }
+
+  /** ETP-5692: an already posted document names core's {@code PostedDocument}, not the lock. */
+  @Test
+  public void postOfAlreadyPostedDocumentNamesPostedDocumentInsteadOfTheLock() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    when(conn.getTransactionConnection()).thenReturn(mock(Connection.class));
+    stubPostingStateRow(conn, "Y", "Y");
+
+    DocumentPostingService.PostResult r = postLockedInvoice(conn, "PostedDocument",
+        "El documento ya está contabilizado.");
+
+    assertFalse(r.ok());
+    assertEquals("El documento ya está contabilizado.", r.message());
+    assertEquals(List.of("PostedDocument"), r.messageKeys());
+  }
+
+  /**
+   * ETP-5692: a processed, not posted document whose lock still failed really is held by another
+   * posting process — the ETP-5529 answer is kept.
+   */
+  @Test
+  public void postOfProcessedUnpostedLockedDocumentKeepsOtherPostingProcessActive() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    when(conn.getTransactionConnection()).thenReturn(mock(Connection.class));
+    stubPostingStateRow(conn, "Y", "N");
+
+    DocumentPostingService.PostResult r = postLockedInvoice(conn, null, null);
+
+    assertEquals(List.of("OtherPostingProcessActive"), r.messageKeys());
+    assertEquals("Este registro está siendo contabilizado por otro proceso", r.message());
+  }
+
+  /**
+   * ETP-5692: the diagnosis fails open — a read failure keeps the lock answer, and the English
+   * fallback is used when the GO-locale lookup yields nothing.
+   */
+  @Test
+  public void postKeepsLockAnswerWhenPostingStateCannotBeRead() throws Exception {
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    when(conn.getTransactionConnection()).thenReturn(mock(Connection.class));
+    when(conn.getConnection()).thenThrow(new RuntimeException("no connection"));
+
+    DocumentPostingService.PostResult r = postLockedInvoice(conn, null, null);
+
+    assertEquals(List.of("OtherPostingProcessActive"), r.messageKeys());
+  }
+
+  /**
    * ETP-4706: when {@code AcctServer} fails with {@code STATUS_InvalidAccount} and no entity
    * detail (core Etendo's own generic fallback — see {@link DocumentPostingService}'s
    * {@code failureOf} javadoc), the message must be enriched with the Business
