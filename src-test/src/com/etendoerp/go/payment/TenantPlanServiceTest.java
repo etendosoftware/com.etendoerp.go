@@ -60,6 +60,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -101,6 +102,8 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  *       must never recur: the preference is scoped by {@code VISIBLEAT_CLIENT_ID}, never by
  *       {@code AD_CLIENT_ID}. Delete that nested class in Phase F with the fallback itself.</li>
  * </ul>
+ *
+ * @covers com.etendoerp.go.payment.TenantPlanService
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -116,6 +119,7 @@ class TenantPlanServiceTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<Preferences> preferencesMock;
+  private MockedStatic<OBContext> obContextMock;
 
   private final TenantPlanService service = new TenantPlanService();
 
@@ -123,6 +127,7 @@ class TenantPlanServiceTest {
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
     preferencesMock = mockStatic(Preferences.class);
+    obContextMock = mockStatic(OBContext.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     service.subscriptionService = subscriptionService;
     // ETP-5046-TRANSITIONAL-FALLBACK — substituted so the subscription specs below stay pure unit
@@ -137,6 +142,9 @@ class TenantPlanServiceTest {
     }
     if (preferencesMock != null) {
       preferencesMock.close();
+    }
+    if (obContextMock != null) {
+      obContextMock.close();
     }
   }
 
@@ -237,21 +245,8 @@ class TenantPlanServiceTest {
 
     @Mock private OBQuery<Preference> preferenceQuery;
 
-    private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
-
-    @BeforeEach
-    void stubTheSystemContextSwitch() {
-      // The lookup and the removal run through SystemContext, which swaps the thread's context.
-      // A unit test has no real session for that, so the static is stubbed.
-      contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
-    }
-
-    @AfterEach
-    void releaseTheContextStub() {
-      if (contextMock != null) {
-        contextMock.close();
-      }
-    }
+    // The lookup and the removal run through SystemContext, which swaps the thread's context.
+    // A unit test has no real session for that: the outer obContextMock stubs the static.
 
     private Preference storedPreference() {
       return mock(Preference.class);
@@ -319,10 +314,10 @@ class TenantPlanServiceTest {
       // check). The flush must NOT run as system: it flushes everything pending in the caller's
       // session, and the onboarding's own rows would then be audited as written by System.
       List<String> calls = new ArrayList<>();
-      contextMock.when(() -> org.openbravo.dal.core.OBContext.setOBContext("0", "0", "0", "0"))
+      obContextMock.when(() -> OBContext.setOBContext("0", "0", "0", "0"))
           .thenAnswer(invocation -> calls.add("enter system"));
-      contextMock.when(() -> org.openbravo.dal.core.OBContext.setOBContext(
-              (org.openbravo.dal.core.OBContext) any()))
+      obContextMock.when(() -> OBContext.setOBContext(
+              (OBContext) any()))
           .thenAnswer(invocation -> calls.add("restore caller"));
       Preference stored = storedPreference();
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
@@ -461,6 +456,21 @@ class TenantPlanServiceTest {
           .thenThrow(new IllegalStateException("no session"));
 
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+
+    /**
+     * ETP-5640 (bug from ETP-5642): the MCP access check resolves the plan before any OBContext
+     * exists, so the lookup must run in admin mode or every tenant reads back as free.
+     */
+    @Test
+    void readsThePlanInAdminMode() {
+      givenOpenSubscription(SubscriptionService.STATUS_ACTIVE);
+
+      service.resolvePlan(CLIENT_ID);
+
+      obContextMock.verify(OBContext::setAdminMode);
+      obContextMock.verify(OBContext::restorePreviousMode);
     }
 
     @Test
@@ -551,23 +561,18 @@ class TenantPlanServiceTest {
     private final TenantPlanPreferenceFallback fallback = new TenantPlanPreferenceFallback();
 
     private CapturingAppender warnings;
-    private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
 
     @BeforeEach
     void captureWarnings() {
-      warnings = CapturingAppender.attachTo(TenantPlanPreferenceFallback.class);
       // The fallback reads in admin mode (a non-admin role cannot read AD_Preference), which
-      // needs no real session in a unit test.
-      contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
+      // needs no real session in a unit test: the outer obContextMock stubs the static.
+      warnings = CapturingAppender.attachTo(TenantPlanPreferenceFallback.class);
     }
 
     @AfterEach
     void releaseWarnings() {
       if (warnings != null) {
         warnings.detach();
-      }
-      if (contextMock != null) {
-        contextMock.close();
       }
     }
 
