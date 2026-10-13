@@ -43,6 +43,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.model.ad.process.ProcessInstance;
@@ -896,8 +897,9 @@ public class NeoProcessService {
    * {@code OrderReactivationGuard}) reads it from this one place instead of re-deriving it.</p>
    *
    * @param params the process parameters (the action request body); may be {@code null}
-   * @return the value that will be written, or {@code null} when the call carries none — the
-   *         procedure then runs the record's stored value, see {@link #storedDocAction}
+   * @return the value {@link #executeDbProcedure} tries to write, or {@code null} when the call
+   *         carries none. Trying is not writing: see {@link #docActionToRun} for the value the
+   *         procedure actually runs
    */
   public static String requestedDocAction(JSONObject params) {
     if (params == null) {
@@ -908,19 +910,57 @@ public class NeoProcessService {
   }
 
   /**
-   * The DocAction value currently stored on the record — the one a DocAction-style procedure runs
-   * when {@link #requestedDocAction} is {@code null}. Resolved exactly as {@link #setDocAction}
-   * resolves the record it writes. Unlike that method it does not swallow failures: a caller
-   * deciding on this value has to know when it could not be read.
+   * The DocAction value a DocAction-style DB procedure will actually run for this call — what
+   * {@link #executeDbProcedure} leaves on the record before calling it.
    *
-   * @param tabId    the AD tab whose table holds the record
+   * <p>That is the {@link #requestedDocAction requested} value only when {@link #setDocAction}
+   * manages to write it. {@code BaseOBObject.set} validates the value first
+   * ({@code Property.checkIsValidValue}: for a list property, membership in the list, exact and
+   * case-sensitive — {@code BaseEnumerateDomainType} throws a {@code ValidationException}
+   * otherwise) and then checks the property is writable; {@code setDocAction} swallows any failure,
+   * and the procedure runs the record's <em>stored</em> value instead. So {@code "re"},
+   * {@code " RE"} or {@code "XX"} run the stored action, not nothing (ETP-5704 review: a guard that
+   * took the requested value verbatim let those run a stored {@code RE} unchecked).</p>
+   *
+   * <p>Mirrors exactly the two checks {@code set} performs before writing; it never writes.
+   * Public so a customization guarding on the action about to run (ETP-5704,
+   * {@code OrderReactivationGuard}) reads it from the same place the process does.</p>
+   *
+   * @param tabId    the AD tab whose table holds the record (the process's {@code inpTabId})
    * @param recordId the record id
-   * @return the stored value, or {@code null} when the tab, the record or the property is absent
+   * @param params   the process parameters; may be {@code null}
+   * @return the value that will run, or {@code null} when the tab, the record or the property is
+   *         absent, or nothing is stored
+   * @throws RuntimeException when the record cannot be loaded — unlike {@code setDocAction}, a
+   *                          caller deciding on this value has to know it could not be read
    */
-  public static String storedDocAction(String tabId, String recordId) {
+  public static String docActionToRun(String tabId, String recordId, JSONObject params) {
     BaseOBObject rec = loadDocActionRecord(tabId, recordId);
-    Object value = rec != null ? rec.get(PROPERTY_DOCUMENT_ACTION) : null;
-    return value != null ? value.toString() : null;
+    if (rec == null) {
+      return null;
+    }
+    String requested = requestedDocAction(params);
+    if (requested != null && isWritableDocAction(rec, requested)) {
+      return requested;
+    }
+    Object stored = rec.get(PROPERTY_DOCUMENT_ACTION);
+    return stored != null ? stored.toString() : null;
+  }
+
+  /**
+   * Whether {@code rec.set(documentAction, value)} would accept the value: the validation and the
+   * writability check {@code BaseOBObject.set} runs before it stores anything. Any failure counts
+   * as "not written", exactly as {@link #setDocAction} treats it.
+   */
+  private static boolean isWritableDocAction(BaseOBObject rec, String value) {
+    try {
+      Property property = rec.getEntity().getProperty(PROPERTY_DOCUMENT_ACTION);
+      property.checkIsValidValue(value);
+      property.checkIsWritable();
+      return true;
+    } catch (RuntimeException e) {
+      return false;
+    }
   }
 
   private static BaseOBObject loadDocActionRecord(String tabId, String recordId) {

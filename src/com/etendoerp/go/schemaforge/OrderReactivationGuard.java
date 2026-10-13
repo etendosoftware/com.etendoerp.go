@@ -40,12 +40,13 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * </p>
  *
  * <p><b>Decides on the action that will actually run.</b> The value checked is
- * {@link DocActionRequestSupport#effectiveDocAction}: the {@code docAction} the DB procedure is
- * handed, or, when the body carries none, the record's stored {@code DocAction}, which the
- * procedure then runs. Reading any other key (an earlier version took
- * {@code fieldValues.documentAction} first) let {@code {"fieldValues":{"documentAction":"CO"},
- * "docAction":"RE"}} pass as a CO and reactivate the order; ignoring the stored value let an empty
- * body run a stored {@code RE} unchecked.</p>
+ * {@link DocActionRequestSupport#effectiveDocAction}: the root {@code docAction} when the process
+ * can actually write it on the record (the DAL accepts only an exact member of the list), otherwise
+ * the record's stored {@code DocAction}, which the procedure then runs. Each narrower reading had a
+ * bypass: taking {@code fieldValues.documentAction} first let {@code {"fieldValues":
+ * {"documentAction":"CO"},"docAction":"RE"}} reactivate; ignoring the stored value let an empty
+ * body run a stored {@code RE}; and taking {@code docAction} verbatim let {@code "re"},
+ * {@code " RE"} or {@code "XX"} — which the DAL refuses to write — run a stored {@code RE}.</p>
  *
  * <p><b>Fails closed.</b> If the stored value or the linked documents cannot be read, the
  * reactivation is refused (and logged): the order stays as it is, which a retry can fix, whereas
