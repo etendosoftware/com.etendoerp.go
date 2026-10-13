@@ -108,10 +108,13 @@ jobs:
             fi
           done
 
+      # The Gradle cache keys on the build files of the core and the cloned modules, so it runs after
+      # the checkouts. Without it prepareConfig spends ~3.5 min downloading dependencies.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - name: Configure gradle.properties
         working-directory: etendo_core
