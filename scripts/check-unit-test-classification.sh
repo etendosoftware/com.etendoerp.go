@@ -72,6 +72,12 @@ if [ -n "$offenders" ]; then
   echo "These test classes reach a DAL base class but are not excluded from the unit suite:" >&2
   for cls in $offenders; do
     echo "  - $cls  → rename to ${cls%Test}IntegrationTest" >&2
+    # In GitHub Actions, also annotate the class file so the error shows on the PR diff.
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+      file=$(grep -rlE --include='*.java' "class +${cls}([^A-Za-z0-9_]|$)" "$TEST_ROOT" | head -1 || true)
+      echo "::error ${file:+file=$file,}title=unit-test-classification::$cls reaches a DAL base class but" \
+        "would run in goTestUnit, which has no database. Rename it to ${cls%Test}IntegrationTest."
+    fi
   done
   echo >&2
   echo "They would run in 'goTestUnit', which has no database. Rename them, or add them to" >&2
