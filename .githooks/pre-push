@@ -403,47 +403,75 @@ else
   skip_step "1b" "Checking Sonar issues (branch-mode, real parse)"
 fi
 
-# 2. Run the Etendo Go test suite (com.etendoerp.go.*) — mirrors CI's "Etendo Go
-# Tests" stage. Step 2 is deliberately NOT keyed: it runs `./gradlew test` in
-# $CORE_DIR, so its real input set is the whole etendo_core build, not just this
-# module's sources. A key built from the module alone would miss a core change and
-# produce a false pass. Gradle already maintains its own up-to-date checks.
+# 2. Run the database-free half of the Etendo Go suite (goTestUnit, ETP-5695): no
+# Postgres, no Tomcat. The DB-backed *IntegrationTest classes run in CI's full
+# suite, not here. goTestUnitCoverageReport turns this run's goTestUnit.exec into
+# the XML that step 3 reads. The previous run's exec, XML and results are deleted
+# first: when this step fails, Gradle stops before the report, and step 3 must find
+# no XML rather than measure coverage from an older run.
+# Step 2 is deliberately NOT keyed: it runs Gradle in $CORE_DIR, so its real input
+# set is the whole etendo_core build, not just this module's sources. A key built
+# from the module alone would miss a core change and produce a false pass.
+GO_UNIT_XML="$CORE_DIR/build/reports/jacoco/goTestUnit/goTestUnit.xml"
+GO_UNIT_RESULTS="$CORE_DIR/build/test-results/goTestUnit"
 if [ "$RUN_STEP2" = "1" ]; then
-  run_step "2" "Running Etendo Go Tests (com.etendoerp.go.*)" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
+  rm -rf "$GO_UNIT_RESULTS" "$GO_UNIT_XML" "$CORE_DIR/build/jacoco/goTestUnit.exec"
+  run_step "2" "Running Etendo Go unit tests (goTestUnit, no database)" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew goTestUnit goTestUnitCoverageReport"
 
   # run_step already recorded this row (duration + OK/FAILED) — patch in the
   # real pass/fail/skip counts aggregated from Gradle's per-class JUnit XML.
-  JUNIT_COUNTS="$(junit_test_counts "$CORE_DIR/build/test-results/test" "com.etendoerp.go.")"
+  JUNIT_COUNTS="$(junit_test_counts "$GO_UNIT_RESULTS" "com.etendoerp.go.")"
   if [ -n "$JUNIT_COUNTS" ] && [ "${#SUMMARY_ROWS[@]}" -gt 0 ]; then
     SUMMARY_LAST_IDX=$(( ${#SUMMARY_ROWS[@]} - 1 ))
     IFS='|' read -r SUMMARY_ROW_NAME SUMMARY_ROW_DUR SUMMARY_ROW_STATUS _ <<< "${SUMMARY_ROWS[$SUMMARY_LAST_IDX]}"
     SUMMARY_ROWS[$SUMMARY_LAST_IDX]="${SUMMARY_ROW_NAME}|${SUMMARY_ROW_DUR}|${SUMMARY_ROW_STATUS}|${JUNIT_COUNTS}"
   fi
 else
-  skip_step "2" "Running Etendo Go Tests (com.etendoerp.go.*)"
+  skip_step "2" "Running Etendo Go unit tests (goTestUnit, no database)"
 fi
 
-# 3. Coverage report + SonarQube analysis + Compare Coverage Results.
-# Mirrors CI's two chained stages: "Generate Coverage Report" runs
-# `./gradlew jacocoRootReport` in $CORE_DIR to aggregate the .exec data step 2
-# produced into jacocoRootReport.xml (the task reads $buildDir/jacoco/*.exec and
-# does NOT depend on `test`, so it never re-runs the suite); then the scanner is
-# handed that XML via --jacoco-xml. WITHOUT this, Sonar imports NO coverage and
-# the --compare-coverage gate would compare against 0. --fail-on-gate exits
-# non-zero when the Quality Gate is in ERROR; --compare-coverage additionally
-# blocks when coverage drops vs the base beyond tolerance (or below the minimum).
+# 3. SonarQube analysis, with goTestUnit's coverage imported when step 2 produced
+# it. --fail-on-gate exits non-zero when the Quality Gate is in ERROR. The overall
+# coverage comparison against the base (--compare-coverage) is gone from the
+# pre-push: without the DB-backed tests the overall figure always drops, so it
+# stays where the full suite runs (CI). Step 3b measures the changed lines instead.
 if [ "$RUN_STEP3" = "1" ]; then
-  JACOCO_XML="$CORE_DIR/build/reports/jacoco/jacocoRootReport/jacocoRootReport.xml"
   if [ -n "$BASE_REF" ]; then
-    SONAR_ARGS="--base-ref \"$BASE_REF\" --fail-on-gate --compare-coverage"
+    SONAR_ARGS="--base-ref \"$BASE_REF\" --fail-on-gate"
   else
     SONAR_ARGS="--all-issues --fail-on-gate"
   fi
-  # jacocoRootReport in $CORE_DIR, then the scanner in $MODULE_DIR with the XML.
-  SONAR_CMD="( cd \"$CORE_DIR\" && ./gradlew jacocoRootReport ) && ./run-sonar.sh $SONAR_ARGS --jacoco-xml \"$JACOCO_XML\""
-  run_step "3" "Generating JaCoCo coverage + SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+  if [ -f "$GO_UNIT_XML" ]; then
+    SONAR_ARGS="$SONAR_ARGS --jacoco-xml \"$GO_UNIT_XML\""
+  fi
+  run_step "3" "SonarQube analysis (Quality Gate)" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "./run-sonar.sh $SONAR_ARGS"
+
+  # 3b. Coverage of the changed lines (scripts/check-diff-coverage.py), printed to
+  # the console: in annotate mode it never fails, so inside run_step its output
+  # would only reach the log. DIFF_COVERAGE_MODE=block makes it blocking.
+  COVERAGE_STEP="Changed-lines coverage (goTestUnit, ${DIFF_COVERAGE_THRESHOLD:-80}% threshold)"
+  if [ ! -f "$GO_UNIT_XML" ]; then
+    echo "==> [3b/4] $COVERAGE_STEP... SKIPPED ⏭️  (no goTestUnit coverage: step 2 failed or did not run)"
+    record_summary_row "$COVERAGE_STEP" "-" "SKIPPED" "no coverage report"
+  elif [ -z "$BASE_REF" ]; then
+    echo "==> [3b/4] $COVERAGE_STEP... SKIPPED ⏭️  (no base branch to diff against)"
+    record_summary_row "$COVERAGE_STEP" "-" "SKIPPED" "no base branch"
+  else
+    echo "==> [3b/4] $COVERAGE_STEP..."
+    COVERAGE_STATUS=0
+    COVERAGE_OUT="$(python3 "$MODULE_DIR/scripts/check-diff-coverage.py" --base "$BASE_REF" \
+      --jacoco-xml "$GO_UNIT_XML" --threshold "${DIFF_COVERAGE_THRESHOLD:-80}" 2>&1)" || COVERAGE_STATUS=$?
+    echo "$COVERAGE_OUT" | sed 's/^/    /'
+    COVERAGE_SUMMARY="$(echo "$COVERAGE_OUT" | grep '^diff-coverage:' | tail -1 | sed 's/^diff-coverage: //')"
+    if [ "$COVERAGE_STATUS" -eq 0 ]; then
+      record_summary_row "$COVERAGE_STEP" "-" "OK" "$COVERAGE_SUMMARY"
+    else
+      record_summary_row "$COVERAGE_STEP" "-" "FAILED" "$COVERAGE_SUMMARY"
+      record_failure "$COVERAGE_STEP"
+    fi
+  fi
 else
-  skip_step "3" "Generating JaCoCo coverage + SonarQube analysis"
+  skip_step "3" "SonarQube analysis (Quality Gate)"
 fi
 
 # One line per check that had a turn this run (skipped ones included) — real
