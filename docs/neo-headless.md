@@ -864,7 +864,9 @@ context client is not `0`:
   `metadata.notes` explanation applies) and a WARN names the column, table and count — never the
   ids;
 - a row it cannot find by primary key is accepted, and a failed lookup falls back to the first
-  row, so the guard can never make a default worse than it was.
+  row. On PostgreSQL a lookup that fails with an SQL error also aborts the transaction, exactly as
+  a failure of the default query itself would; the lookup reads only the primary key and
+  `AD_Client_ID` with names from the DAL model, so this is not expected in practice.
 
 The rule is structural (a default may never point at another tenant's row) and names no entity.
 A window can still pin the exact value with a client-scoped `defaultExpr` in its `decisions.json`

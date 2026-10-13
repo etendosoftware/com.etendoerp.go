@@ -48,8 +48,11 @@ import org.openbravo.model.ad.datamodel.Column;
  * client-enabled table, a candidate row is acceptable only if it belongs to the current client
  * or to client {@code 0}. The query's own order is kept, so the first acceptable row wins. A
  * candidate that cannot be found by its primary key is accepted as before (the guard only
- * rejects rows it can prove are foreign), and any failure here falls back to the first row, so
- * the guard can never make a default worse than it was.</p>
+ * rejects rows it can prove are foreign), and a lookup that fails falls back to the first row.
+ * One limit on that fallback: on PostgreSQL a lookup SELECT that fails with an SQL error also
+ * aborts the surrounding transaction, exactly as a failure of the default query itself would. The
+ * lookup only reads the target's primary key and {@code AD_Client_ID}, with names taken from the
+ * DAL model, so this is not expected in practice.</p>
  */
 final class NeoDefaultTenantGuard {
 
@@ -143,7 +146,7 @@ final class NeoDefaultTenantGuard {
     if (rejected > 0) {
       // Never log the values themselves: they are another tenant's ids.
       log.warn("@SQL= default of column {} matched {} row(s) of {} owned by another client;"
-          + " skipped them (ETP-5682)", columnName, rejected, tableName);
+          + " skipped them", columnName, rejected, tableName);
     }
   }
 

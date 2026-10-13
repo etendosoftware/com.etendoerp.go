@@ -134,7 +134,9 @@ final class NeoDefaultsSqlHelper {
    * The outcome carried by the query's rows, or {@code null} when it returned none. Without a
    * tenant guard only the first row counts, as before; with one, up to
    * {@link NeoDefaultTenantGuard#MAX_CANDIDATES} rows are read and the first row of this client
-   * (or of client 0) wins, and rows that all belong to other tenants count as zero rows.
+   * (or of client 0) wins, and rows that all belong to other tenants count as zero rows. With a
+   * guard, rows whose value is {@code null} also count as zero rows (no guard: a resolved
+   * {@code null}); the default is empty either way, only the {@code metadata.notes} differ.
    */
   private static SqlDefaultOutcome outcomeFromRows(ResultSet rs, NeoDefaultTenantGuard guard)
       throws SQLException {
