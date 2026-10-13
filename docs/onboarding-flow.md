@@ -600,7 +600,10 @@ skipped, not waited for), and a failure anywhere later rolls the claim back and 
   description), the client's 17 `AD_Tree` names/descriptions, the ledger (`C_AcctSchema`), the
   chart of accounts (`C_Element` name/description) and the fiscal calendar — with `POOL-<id>`
   replaced by the company name (`PooledTenantClaimService.renamePlaceholderDerivedNames`, ETP-5548;
-  native SQL scoped by `AD_Client_ID`, inside the claim transaction);
+  native SQL scoped by `AD_Client_ID`, inside the claim transaction). Every rewritten name is
+  truncated to its AD length (60): a company name over 37 characters would make the tree
+  "… Product Characteristic" overflow `AD_TREE.NAME`, so that one tree name loses its tail
+  (ETP-5638). The other derived names fit the 40-character company name whole;
 - admin `AD_User`: username (`buildClientUsername`), name (full name, else username),
   description, email, password hash, **active**;
 - the signup address onto the pooled fiscal location's street line.

@@ -70,12 +70,15 @@ public class PooledTenantClaimService {
    * organization and admin user (which {@link #personalize} sets directly), with the column
    * lengths the rewrite is truncated to. The classic path reuses it for its provisioning name
    * ({@code EtendoGoJwtServlet.applyRequestedClientName}), since both builds run the same chain.
-   * {@code CLIENT_NAME} is capped at 40 characters, so the longest derived name
-   * ("Arbol de cuentas " + name) fits; the truncation is only a guard.
+   * Every name is truncated to its AD column length. {@code CLIENT_NAME} is capped at 40, which
+   * fits every derived name except the trees: {@code InitialClientSetup} names them
+   * {@code client + " " + tableTreeName}, and " Product Characteristic" overflows
+   * {@code AD_TREE.NAME} (60) for names over 37 characters. The physical column is wider than
+   * the AD declares, so only this truncation keeps the tree storable by DAL (ETP-5638).
    */
   static final List<String> PLACEHOLDER_DERIVED_NAME_UPDATES = List.of(
       placeholderRewrite("ad_role", COLUMN_NAME, 60, COLUMN_DESCRIPTION, 255),
-      placeholderRewrite("ad_tree", COLUMN_NAME, 255, COLUMN_DESCRIPTION, 255),
+      placeholderRewrite("ad_tree", COLUMN_NAME, 60, COLUMN_DESCRIPTION, 255),
       placeholderRewrite("c_acctschema", COLUMN_NAME, 60, null, 0),
       placeholderRewrite("c_element", COLUMN_NAME, 60, COLUMN_DESCRIPTION, 255),
       placeholderRewrite("c_calendar", COLUMN_NAME, 60, null, 0));
