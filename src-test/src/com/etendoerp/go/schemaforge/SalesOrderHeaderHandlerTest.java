@@ -631,6 +631,8 @@ public class SalesOrderHeaderHandlerTest {
   private static final String NO_TAB = "<no tab>";
   /** Sentinel for the stored-DocAction column: the tab resolves, the record does not exist. */
   private static final String RECORD_NOT_FOUND = "<record not found>";
+  /** Sentinel for the stored-DocAction column: the record exists, its entity has no DocAction. */
+  private static final String NO_DOC_ACTION_PROPERTY = "<no documentAction property>";
   /** Property-check column of the table below: the requested value is not a member of the list. */
   private static final String NOT_IN_LIST = "not in list";
   /** Property-check column of the table below: the property refuses any write. */
@@ -645,7 +647,9 @@ public class SalesOrderHeaderHandlerTest {
    * lookup that cannot run is 500 (fail closed). The record is resolved as
    * {@code NeoProcessService.docActionToRun} does: tab → table name → record →
    * {@code documentAction}; a tab or record that cannot be resolved leaves the action unknown and
-   * is refused with 500, while a record with nothing stored is not an error.
+   * is refused with 500, while a record with nothing stored is not an error. An order id that
+   * does not exist answers 404 {@code Record not found} whatever DocAction is sent — the same
+   * answer {@code NeoActionRecordGuard} gives an unknown id.
    */
   @Test
   public void testHandleReactivateIsGuardedByLinkedDocuments_table() throws Exception {
@@ -679,8 +683,12 @@ public class SalesOrderHeaderHandlerTest {
             "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400 },
         { "root RE with no resolvable tab fails closed",
             "{\"docAction\":\"RE\"}", NO_TAB, null, Boolean.TRUE, 500 },
-        { "root RE on a record that cannot be found fails closed",
-            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 500 },
+        { "root RE on an unknown order id answers 404",
+            "{\"docAction\":\"RE\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+        { "root CO on an unknown order id answers 404, not the router",
+            "{\"docAction\":\"CO\"}", RECORD_NOT_FOUND, null, Boolean.TRUE, 404 },
+        { "root RE on a record whose entity has no DocAction fails closed",
+            "{\"docAction\":\"RE\"}", NO_DOC_ACTION_PROPERTY, null, Boolean.TRUE, 500 },
         { "empty body on a record with nothing stored falls through",
             "{}", null, null, Boolean.TRUE, null },
     };
@@ -719,7 +727,8 @@ public class SalesOrderHeaderHandlerTest {
           doThrow(new ValidationException()).when(property).checkIsWritable();
         }
         Entity entity = mock(Entity.class);
-        when(entity.hasProperty("documentAction")).thenReturn(true);
+        when(entity.hasProperty("documentAction"))
+            .thenReturn(!NO_DOC_ACTION_PROPERTY.equals(stored));
         when(entity.getProperty("documentAction")).thenReturn(property);
         BaseOBObject order = mock(BaseOBObject.class);
         when(order.getEntity()).thenReturn(entity);
@@ -754,6 +763,10 @@ public class SalesOrderHeaderHandlerTest {
         } else {
           assertNotNull(label, result);
           assertEquals(label, expectedStatus.intValue(), result.getHttpStatus());
+          if (expectedStatus == 404) {
+            assertEquals(label, NeoActionRecordGuard.MSG_RECORD_NOT_FOUND,
+                result.getBody().getJSONObject("error").getString("message"));
+          }
           verify(router, never()).handle(any());
         }
       }
