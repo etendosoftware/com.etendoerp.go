@@ -170,7 +170,7 @@ public class McpResourceProvider {
       return readProcess(specName);
     }
 
-    throw new IllegalArgumentException("Unknown resource URI: " + requestedUri);
+    throw new McpResourceNotFoundException(requestedUri, null);
   }
 
   /**

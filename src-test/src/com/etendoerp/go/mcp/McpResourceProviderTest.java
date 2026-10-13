@@ -417,14 +417,18 @@ class McpResourceProviderTest {
     }
 
     /**
-     * An unknown URI prefix should throw IllegalArgumentException.
+     * An unknown URI prefix is a missing resource (ETP-5640), which the servlet answers as a client
+     * error rather than a server failure. Still an IllegalArgumentException, as it always was.
      */
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = { "etendo://unknown/something", "neo://unknown/something",
         "other://specs" })
-    @DisplayName("unknown URI throws IllegalArgumentException")
+    @DisplayName("unknown URI throws McpResourceNotFoundException")
     void unknownUriThrowsException(String uri) {
-      assertThrows(IllegalArgumentException.class, () -> provider.readResource(uri));
+      McpResourceNotFoundException ex = assertThrows(McpResourceNotFoundException.class,
+          () -> provider.readResource(uri));
+      assertTrue(ex.getMessage().contains(uri));
+      assertTrue(ex instanceof IllegalArgumentException);
     }
 
     @Test
