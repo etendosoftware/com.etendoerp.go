@@ -20,43 +20,34 @@ package com.etendoerp.go.mcp;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
-import javax.servlet.http.HttpServletRequest;
-
-import org.apache.commons.lang3.StringUtils;
-
 /**
  * What was observed about one MCP HTTP exchange, as the telemetry path needs it.
  *
  * <p>These four values travel together and are read together: they are the exchange itself — the
- * request it came in on, the bytes in, the bytes out, and when the clock started. Splitting them
+ * session it belongs to, the bytes in, the bytes out, and when the clock started. Splitting them
  * across a parameter list said nothing that this type does not say better, and it is what pushed
  * {@code McpServlet#recordToolCall} past the parameter limit (java:S107).</p>
  *
  * <p>Not a parameter bag: every derived value the row needs is computed here —
- * {@link #sessionKey()}, {@link #reqBytes()}, {@link #respBytes()}, {@link #durationMs()} — so the
- * servlet no longer carries byte-counting or header-reading of its own. {@link #durationMs()} reads
- * the clock when it is called, which is correct because it is called once, after the response has
- * been written.</p>
+ * {@link #reqBytes()}, {@link #respBytes()}, {@link #durationMs()} — so the servlet no longer
+ * carries byte-counting of its own. {@link #durationMs()} reads the clock when it is called, which
+ * is correct because it is called once, after the response has been written.</p>
  *
  * <p>Built positionally, unlike {@link McpUsageRow}, and deliberately so. That record needs a
  * builder because 17 mostly-{@code String} components make a silent argument swap likely; four
- * components of three distinct types, constructed at the two call sites that produced them and from
- * locals already named {@code body} and {@code rendered}, do not. The two {@code String} components
- * are the one place to be careful: <b>request body first, response body second</b>.</p>
+ * components, constructed at the two call sites that produced them and from locals already named
+ * {@code body} and {@code rendered}, do not. The three {@code String} components are the one place
+ * to be careful: <b>session key, then request body, then response body</b>.</p>
  *
- * @param request        the servlet request, read only for its MCP session header
+ * @param sessionKey     the session the exchange belongs to, as the servlet resolved it: the
+ *                       echoed {@code Mcp-Session-Id} (legacy) or the derived key (modern,
+ *                       ETP-5640); {@code null} when there is none
  * @param requestBody    the raw JSON-RPC request body, measured but never stored
  * @param responseBody   the rendered JSON-RPC response body, measured but never stored
  * @param startedAtNanos {@code System.nanoTime()} taken before dispatch
  */
-record McpCallObservation(HttpServletRequest request, String requestBody, String responseBody,
+record McpCallObservation(String sessionKey, String requestBody, String responseBody,
     long startedAtNanos) {
-
-  /** @return the MCP session this exchange belongs to, or null when the client echoes no header */
-  String sessionKey() {
-    return request == null ? null
-        : StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID));
-  }
 
   /** @return size of the request payload in bytes, or null when there was none */
   Long reqBytes() {

@@ -30,7 +30,7 @@ Selector code is intentionally split by responsibility. `NeoSelectorService` rem
 |---|---|---|
 | `com.etendoerp.go.schemaforge` selector execution | Request orchestration, selector query execution, response shaping, and legacy package-private execution helpers. | `NeoSelectorService`, `SelectorQueryBuilder`, `SelectorQueryExecutor`, `ComboReferenceSelectorExecutor`, `ListReferenceSelectorExecutor`, `SelectorAuxResolver`, `NeoSelectorExecutionHelper`, `SelectorResponseSupport` |
 | `com.etendoerp.go.schemaforge.selector.meta` | AD/OBUISEL metadata discovery and normalized selector descriptors. This package should not perform query execution. | `SelectorMeta`, `RichFieldMeta`, `AuxFieldMeta`, `ObuiselFieldLists`, `SelectorContextResolver`, `SelectorDescriptorBuilder`, `SelectorDescriptorResolver` |
-| `com.etendoerp.go.schemaforge.selector.policy` | Selector-specific policy SPI, policy registry, reference overrides, context-derived filters, virtual-column policies, and response enrichments. | `SelectorContextPolicy`, `SelectorEnrichmentPolicy`, `SelectorPolicyRegistry`, `NeoSelectorPolicy`, `ContextParamSelectorPolicy`, `ProductPriceSelectorPolicy`, `ReferenceOverrideSelectorPolicy`, `AddressVirtualSelectorPolicy` |
+| `com.etendoerp.go.schemaforge.selector.policy` | Selector-specific policy SPI, policy registry, reference overrides, context-derived filters, virtual-column policies, and response enrichments. | `SelectorContextPolicy`, `SelectorEnrichmentPolicy`, `SelectorPolicyRegistry`, `NeoSelectorPolicy`, `ContextParamSelectorPolicy`, `ProductPriceSelectorPolicy`, `ReferenceOverrideSelectorPolicy`, `AddressVirtualSelectorPolicy`, `PostingAccountCombinationSelectorPolicy` |
 
 ### Selector call flow
 

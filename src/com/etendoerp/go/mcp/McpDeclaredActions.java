@@ -193,12 +193,12 @@ final class McpDeclaredActions {
           "its customization keeps it for people only");
     }
     if (config.isHidden(name)) {
-      throw McpRoutingException.actionHidden(specName, entityName, action, config.getReason());
+      throw McpRoutingException.actionHidden(specName, entityName, action, config.reasonOf(name));
     }
     String redirect = config.redirectOf(name);
     if (redirect != null) {
       throw McpRoutingException.actionRedirected(specName, entityName, action, redirect,
-          config.getRedirectReason());
+          config.redirectReasonOf(name));
     }
     requireAllowedValue(specName, entityName, action, config.allowedValuesOf(name), parameters);
   }

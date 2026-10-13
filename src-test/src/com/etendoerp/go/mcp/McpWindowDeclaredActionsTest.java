@@ -85,6 +85,7 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  *
  * @covers com.etendoerp.go.mcp.McpDeclaredActions
  * @covers com.etendoerp.go.mcp.McpActionsSection
+ * @covers com.etendoerp.go.mcp.McpActionsView
  */
 // Test methods live in the @Nested inner classes below; S2187 only inspects the outer class.
 @SuppressWarnings("java:S2187")
@@ -521,6 +522,40 @@ class McpWindowDeclaredActionsTest {
           + "\"reason\":\"PIS needs a person to authorize at the bank\"}}";
       assertEquals(405, refused(byColumn, "psd2GenerateBankPayment").toEnvelope()
           .getInt(McpConstants.KEY_STATUS));
+    }
+
+    /**
+     * The PIS actions are excluded in code by the invoice header customization (and hidden by the
+     * shipped MCP_CONFIG row too). The code check runs first, so they answer the generic reason —
+     * the HEAD behaviour, kept on purpose (ETP-5692 does not change it). Pinned with the PRODUCTION
+     * exclusion set and the SHIPPED row, through handleAction; {@code refused} also checks nothing ran.
+     */
+    @Test
+    @DisplayName("a PIS action excluded in code is refused 405 with the generic reason, nothing run")
+    void pisActionsAreRefusedInCodeThroughTheRealPath() throws Exception {
+      when(handler.agentExcludedActions())
+          .thenReturn(new SalesInvoiceHeaderHandler().agentExcludedActions());
+      String shipped = McpConfigSourcedataTest.payloadOf("7240CAF07810439B85DE61E70BE8DC0B")
+          .toString();
+      for (String pis : List.of("pisTemplates", "pisSupplierAccounts", "cancelPisPayment")) {
+        JSONObject env = refused(shipped, pis).toEnvelope();
+        assertEquals(405, env.getInt(McpConstants.KEY_STATUS), pis);
+        assertTrue(env.getString(McpConstants.KEY_DETAIL)
+            .contains("its customization keeps it for people only"), pis);
+      }
+    }
+
+    /** ETP-5692: on the same shipped row, posted gives its own reason and never the SCA one. */
+    @Test
+    @DisplayName("posted gives its own reason through the real path, not the SCA one")
+    void postedGivesItsOwnReasonThroughTheRealPath() throws Exception {
+      when(handler.agentExcludedActions())
+          .thenReturn(new SalesInvoiceHeaderHandler().agentExcludedActions());
+      String shipped = McpConfigSourcedataTest.payloadOf("7240CAF07810439B85DE61E70BE8DC0B")
+          .toString();
+      String detail = refused(shipped, "posted").toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("post action") && detail.contains("unpost action"), detail);
+      assertFalse(detail.contains("SCA"), detail);
     }
 
     @Test
@@ -1167,6 +1202,140 @@ class McpWindowDeclaredActionsTest {
         out.add(arr.getString(i));
       }
       return out;
+    }
+  }
+
+  // ── ETP-5692: a per-action reason, and a withheld button that is also a displayed value ──
+
+  @Nested
+  @DisplayName("ETP-5692 — reasons per action, and the posted value kept readable")
+  class PerActionReasonsAndDisplayedValues {
+
+    private static final String HIDE_PIS_AND_POSTED = "{\"actions\":{\"hidden\":[\"pisTemplates\","
+        + "\"psd2GenerateBankPayment\",\"posted\"],\"redirect\":{\"aPRMAddpayment\":"
+        + "\"registerPayment\"},\"reason\":\"PIS needs a person to authorize at the bank\","
+        + "\"redirectReason\":\"the classic Add Payment button is not the Etendo payment flow\","
+        + "\"reasons\":{\"posted\":\"a blind toggle; use the post and unpost actions\"}}}";
+
+    /** The schema's buttons plus {@code posted}: a button column curated readOnly. */
+    private JSONArray buttonsWithPosted() throws Exception {
+      JSONArray fields = buttons();
+      fields.put(new JSONObject("{\"name\":\"posted\",\"column\":\"Posted\",\"type\":\"button\","
+          + "\"visibility\":\"readOnly\",\"label\":\"Posted\",\"action\":\"Posted\","
+          + "\"triggerValue\":\"Y\",\"processId\":\"P1\",\"invokeVia\":\"etendo_action\","
+          + "\"actionValues\":[{\"value\":\"Y\",\"label\":\"Unpost\"}],"
+          + "\"actionParameter\":\"docAction\"}"));
+      return fields;
+    }
+
+    private JSONObject named(JSONArray fields, String name) throws Exception {
+      for (int i = 0; i < fields.length(); i++) {
+        if (name.equals(fields.getJSONObject(i).optString("name"))) {
+          return fields.getJSONObject(i);
+        }
+      }
+      return null;
+    }
+
+    @Test
+    @DisplayName("a hidden action with its own reason is refused with that reason, not the section's")
+    void hiddenActionGivesItsOwnReason() throws Exception {
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", HIDE_PIS_AND_POSTED), "posted",
+              new JSONObject()));
+      String detail = e.toEnvelope().getString(McpConstants.KEY_DETAIL);
+      assertTrue(detail.contains("use the post and unpost actions"), detail);
+      assertFalse(detail.contains("authorize at the bank"), "not the PIS reason: " + detail);
+    }
+
+    @Test
+    @DisplayName("the other hidden actions keep the section-wide reason")
+    void otherHiddenActionsKeepTheSectionReason() throws Exception {
+      McpRoutingException e = assertThrows(McpRoutingException.class,
+          () -> McpDeclaredActions.precheck(entity("W", HIDE_PIS_AND_POSTED), "pisTemplates",
+              new JSONObject()));
+      assertTrue(e.toEnvelope().getString(McpConstants.KEY_DETAIL).contains("authorize at the bank"));
+    }
+
+    @Test
+    @DisplayName("a redirected button with its own reason shows it in the catalogue")
+    void redirectedButtonGivesItsOwnReason() throws Exception {
+      SFEntity e = entity("W", "{\"actions\":{\"redirect\":{\"aPRMAddpayment\":"
+          + "\"registerPayment\"},\"reason\":\"section reason\","
+          + "\"reasons\":{\"aPRMAddpayment\":\"its own reason\"}}}");
+      JSONArray shaped = McpActionsView.applyConfig(buttons(), McpActionsSection.forEntity(e),
+          Set.of());
+      String reason = named(shaped, "aPRMAddpayment").getString("notInvokableReason");
+      assertTrue(reason.contains("its own reason"), reason);
+      assertFalse(reason.contains("section reason"), reason);
+    }
+
+    @Test
+    @DisplayName("a hidden button curated readOnly stays in the full view as a plain read-only value")
+    void hiddenDisplayedButtonStaysAsValue() throws Exception {
+      SFEntity e = entity("W", HIDE_PIS_AND_POSTED);
+      JSONArray shaped = McpActionsView.applyConfig(buttonsWithPosted(),
+          McpActionsSection.forEntity(e), Set.of());
+
+      JSONObject posted = named(shaped, "posted");
+      assertNotNull(posted, "the posted value must stay described: " + shaped);
+      assertEquals("string", posted.getString("type"));
+      assertTrue(posted.getBoolean("readOnly"));
+      assertEquals("Posted", posted.getString("label"));
+      for (String key : List.of("action", "triggerValue", "processId", "invokeVia", "actionValues",
+          "actionParameter", "invokable", "notInvokableReason")) {
+        assertFalse(posted.has(key), "no action decoration left: " + key + " in " + posted);
+      }
+      assertNull(named(shaped, "psd2GenerateBankPayment"),
+          "a hidden button that is not a displayed value is still left out");
+    }
+
+    @Test
+    @DisplayName("a hidden button curated editable or system is still dropped from the full view")
+    void hiddenNonDisplayedButtonsAreStillDropped() throws Exception {
+      SFEntity e = entity("W", HIDE_PIS_AND_POSTED);
+      for (String visibility : List.of("editable", "system")) {
+        JSONArray fields = buttons();
+        fields.put(new JSONObject("{\"name\":\"posted\",\"column\":\"Posted\","
+            + "\"type\":\"button\",\"visibility\":\"" + visibility + "\","
+            + "\"invokeVia\":\"etendo_action\"}"));
+        JSONArray shaped = McpActionsView.applyConfig(fields, McpActionsSection.forEntity(e),
+            Set.of());
+        assertNull(named(shaped, "posted"), visibility + ": " + shaped);
+      }
+    }
+
+    @Test
+    @DisplayName("view:\"actions\" still leaves the hidden posted button out")
+    void actionsViewStillOmitsPosted() throws Exception {
+      SFEntity e = entity("W", HIDE_PIS_AND_POSTED);
+      JSONArray actions = McpActionsView.buildResponse(SPEC, ENTITY,
+          McpActionsView.applyConfig(buttonsWithPosted(), McpActionsSection.forEntity(e), Set.of()),
+          McpDeclaredActions.of(e), McpActionsSection.forEntity(e)).getJSONArray("actions");
+      assertFalse(namesOf(actions).contains("posted"), actions.toString());
+    }
+
+    @Test
+    @DisplayName("an excluded button curated readOnly is kept as a value too")
+    void excludedDisplayedButtonStaysAsValue() throws Exception {
+      JSONArray shaped = McpActionsView.applyConfig(buttonsWithPosted(), null, Set.of("posted"));
+      assertEquals("string", named(shaped, "posted").getString("type"));
+    }
+
+    @Test
+    @DisplayName("reasons must name a hidden or redirected action, with a non-blank reason")
+    void reasonsAreValidated() throws Exception {
+      JSONObject unknown = new JSONObject("{\"hidden\":[\"a\"],\"reason\":\"r\","
+          + "\"reasons\":{\"b\":\"x\"}}");
+      assertTrue(McpActionsSection.validate(unknown).toString().contains("reasons.b"));
+      JSONObject blank = new JSONObject("{\"hidden\":[\"a\"],\"reason\":\"r\","
+          + "\"reasons\":{\"a\":\" \"}}");
+      assertTrue(McpActionsSection.validate(blank).toString().contains("reasons.a"));
+      JSONObject empty = new JSONObject("{\"hidden\":[\"a\"],\"reason\":\"r\",\"reasons\":{}}");
+      assertFalse(McpActionsSection.validate(empty).isEmpty());
+      JSONObject valid = new JSONObject("{\"hidden\":[\"a\"],\"redirect\":{\"c\":\"d\"},"
+          + "\"reason\":\"r\",\"reasons\":{\"a\":\"x\",\"c\":\"y\"}}");
+      assertTrue(McpActionsSection.validate(valid).isEmpty(), McpActionsSection.validate(valid).toString());
     }
   }
 }
