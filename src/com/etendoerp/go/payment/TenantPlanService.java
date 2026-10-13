@@ -24,6 +24,7 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
@@ -261,6 +262,12 @@ public class TenantPlanService {
    * the normal case costs no extra query. Delete the fallback in Phase F together with
    * {@link #markProductive} and {@link #PREFERENCE_ATTRIBUTE}.
    *
+   * <p>The plan is system state about the tenant, not the caller's data, so it is read in admin
+   * mode. The access checks call this before any OBContext exists (the MCP commercial block runs
+   * right after authentication) and as roles that cannot read {@code ETGO_SUBSCRIPTION} or
+   * {@code AD_Preference}; without admin mode the DAL fails there and every tenant silently reads
+   * back as free.
+   *
    * @param clientId the AD_Client to inspect
    * @return {@value #PLAN_PRODUCTIVE} when the tenant has an open subscription in a paying status
    *     or (transitionally) still carries the retired productive preference, otherwise
@@ -270,6 +277,7 @@ public class TenantPlanService {
     if (StringUtils.isBlank(clientId)) {
       return PLAN_FREE;
     }
+    OBContext.setAdminMode();
     try {
       // ETP-5047 — the open row, else the latest closed one: a canceled subscription is closed,
       // and must read as free from its own status, not from the retired preference below.
@@ -282,6 +290,8 @@ public class TenantPlanService {
     } catch (RuntimeException e) {
       log.warn("Could not resolve plan for tenant {}, assuming '{}'", clientId, PLAN_FREE, e);
       return PLAN_FREE;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 

@@ -442,6 +442,20 @@ class EtendoGoJwtDalHelperTest {
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
 
+    // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
+    // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
+    private MockedStatic<OBContext> obContextMock;
+
+    @BeforeEach
+    void mockAdminMode() {
+      obContextMock = mockStatic(OBContext.class);
+    }
+
+    @AfterEach
+    void restoreAdminMode() {
+      obContextMock.close();
+    }
+
     @Test
     @DisplayName("returns an empty set when the account has no environments")
     void returnsEmptyWhenNoEnvironmentExists() {
@@ -501,6 +515,20 @@ class EtendoGoJwtDalHelperTest {
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
     @Mock private OBQuery<Subscription> subscriptionQuery;
+
+    // ETP-5640 reads the tenant plan in OBContext admin mode; with no live session the real
+    // static methods NPE, so they are no-ops here — the plan lookup is stubbed through obDal.
+    private MockedStatic<OBContext> obContextMock;
+
+    @BeforeEach
+    void mockAdminMode() {
+      obContextMock = mockStatic(OBContext.class);
+    }
+
+    @AfterEach
+    void restoreAdminMode() {
+      obContextMock.close();
+    }
 
     @Test
     @DisplayName("excludes the new destination when resolving the only free source tenant")

@@ -60,6 +60,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 /**
  * Unit tests for {@link FinancialAccountAccountingHandler}.
  *
+ * @covers com.etendoerp.go.schemaforge.FinancialAccountAccountingHandler
+ *
  * <p>ETP-4872 rewrite: the handler now exposes 9 fields (replacing the old
  * {@code fINAssetAcct}/{@code fINTransitoryAcct} pair) with PATCH-like semantics — a field key
  * omitted from the request body leaves the stored value untouched; a field present with a
@@ -341,7 +343,8 @@ class FinancialAccountAccountingHandlerTest {
     assertEquals("row-1", row.getString("id"));
     assertEquals(ACCOUNT_ID, row.getString("financialAccountId"));
     assertEquals("id-1", row.getString(F_BANK_REVAL_GAIN));
-    assertTrue(row.getString(F_BANK_REVAL_GAIN + "$_identifier").contains("76800000"));
+    // ETP-5681 — the same "<code> - <name>" label every other account selector shows.
+    assertEquals("76800000 - Diferencias positivas de cambio", row.getString(F_BANK_REVAL_GAIN + "$_identifier"));
     assertEquals("id-2", row.getString(F_BANK_REVAL_LOSS));
     assertEquals("id-3", row.getString(F_BANK_FEE));
     assertEquals("id-4", row.getString(F_IN_TRANSIT_IN));
@@ -849,13 +852,13 @@ class FinancialAccountAccountingHandlerTest {
     JSONObject item0 = accounts.getJSONObject(0);
     assertEquals("combo-1", item0.getString("id"));
     assertEquals("572", item0.getString("code"));
-    // resolveCombinationLabel formats "code — name" when both are present.
-    assertEquals("572 — Bancos", item0.getString("name"));
+    // resolveCombinationLabel formats "code - name" when both are present (ETP-5681: was an em dash).
+    assertEquals("572 - Bancos", item0.getString("name"));
 
     JSONObject item1 = accounts.getJSONObject(1);
     assertEquals("combo-2", item1.getString("id"));
     assertEquals("430000", item1.getString("code"));
-    assertEquals("430000 — Clientes", item1.getString("name"));
+    assertEquals("430000 - Clientes", item1.getString("name"));
   }
 
   // ── @Named qualifier sanity ──────────────────────────────────────────────────
