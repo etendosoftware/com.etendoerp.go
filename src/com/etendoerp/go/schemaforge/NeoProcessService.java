@@ -43,7 +43,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.model.ad.process.ProcessInstance;
@@ -104,8 +103,6 @@ public class NeoProcessService {
   public static final String PROCESS_ID = "processId";
   /** Parameter carrying a list-backed button's chosen value (DocAction style). */
   private static final String PARAM_DOC_ACTION = "docAction";
-  /** DAL property a DocAction-style DB procedure reads the action to run from. */
-  private static final String PROPERTY_DOCUMENT_ACTION = "documentAction";
   /** Key Classic Java processes read the list-backed button value from. */
   private static final String PARAM_ACTION = "action";
   private static final String PROCESS_EXECUTION_FAILED_PREFIX = "Process execution failed: ";
@@ -854,7 +851,7 @@ public class NeoProcessService {
       }
 
       // For DocAction processes: set the action on the document before calling
-      String docAction = requestedDocAction(params);
+      String docAction = DocActionResolution.requestedDocAction(params);
       if (docAction != null) {
         String tabId = params.optString(INP_TAB_ID, null);
         if (tabId != null) {
@@ -888,124 +885,11 @@ public class NeoProcessService {
     }
   }
 
-  /**
-   * The DocAction value {@link #executeDbProcedure} writes on the record before it calls a
-   * DocAction-style procedure: the {@code docAction} parameter, verbatim, when it is non-blank.
-   * Nothing else in the parameters is read for it — in particular not {@code fieldValues}.
-   *
-   * <p>Public so a customization that must decide on the action about to run (ETP-5704,
-   * {@code OrderReactivationGuard}) reads it from this one place instead of re-deriving it.</p>
-   *
-   * @param params the process parameters (the action request body); may be {@code null}
-   * @return the value {@link #executeDbProcedure} tries to write, or {@code null} when the call
-   *         carries none. Trying is not writing: see {@link #docActionToRun} for the value the
-   *         procedure actually runs
-   */
-  public static String requestedDocAction(JSONObject params) {
-    if (params == null) {
-      return null;
-    }
-    String docAction = params.optString(PARAM_DOC_ACTION, null);
-    return docAction != null && !docAction.isBlank() ? docAction : null;
-  }
-
-  /**
-   * The DocAction value a DocAction-style DB procedure will actually run for this call — what
-   * {@link #executeDbProcedure} leaves on the record before calling it.
-   *
-   * <p>That is the {@link #requestedDocAction requested} value only when {@link #setDocAction}
-   * manages to write it. {@code BaseOBObject.set} validates the value first
-   * ({@code Property.checkIsValidValue}: for a list property, membership in the list, exact and
-   * case-sensitive — {@code BaseEnumerateDomainType} throws a {@code ValidationException}
-   * otherwise) and then checks the property is writable; {@code setDocAction} swallows any failure,
-   * and the procedure runs the record's <em>stored</em> value instead. So {@code "re"},
-   * {@code " RE"} or {@code "XX"} run the stored action, not nothing (ETP-5704 review: a guard that
-   * took the requested value verbatim let those run a stored {@code RE} unchecked).</p>
-   *
-   * <p>{@code set} runs three checks before writing: {@code checkIsValidValue},
-   * {@code checkDerivedReadable} and {@code checkIsWritable}. This mirrors the first and the last;
-   * {@code checkDerivedReadable} is deliberately left out because it is a no-op in admin mode,
-   * where both the process and its callers run. It never writes. Public so a customization
-   * guarding on the action about to run (ETP-5704, {@code OrderReactivationGuard}) reads it from
-   * the same place the process does.</p>
-   *
-   * @param tabId    the AD tab whose table holds the record (the process's {@code inpTabId})
-   * @param recordId the record id
-   * @param params   the process parameters; may be {@code null}
-   * @return the value that will run, or {@code null} when nothing is stored
-   * @throws DocActionRecordNotFoundException when the tab resolves but no record has this id — the
-   *                               request names a record that does not exist, so nothing will run
-   * @throws IllegalStateException when the tab, its table or the record's {@code documentAction}
-   *                               property cannot be resolved — the action that will run is then
-   *                               unknown
-   * @throws RuntimeException      when the record cannot be loaded — unlike {@code setDocAction},
-   *                               a caller deciding on this value has to know it could not be read
-   */
-  public static String docActionToRun(String tabId, String recordId, JSONObject params) {
-    Tab tab = tabId != null ? OBDal.getInstance().get(Tab.class, tabId) : null;
-    if (tab == null || tab.getTable() == null || recordId == null) {
-      throw new IllegalStateException("Cannot resolve the DocAction record " + recordId
-          + " through tab " + tabId);
-    }
-    BaseOBObject rec = OBDal.getInstance().get(tab.getTable().getName(), recordId);
-    if (rec == null) {
-      throw new DocActionRecordNotFoundException(recordId);
-    }
-    if (!rec.getEntity().hasProperty(PROPERTY_DOCUMENT_ACTION)) {
-      throw new IllegalStateException("Record " + recordId + " of " + rec.getEntity().getName()
-          + " has no DocAction");
-    }
-    String requested = requestedDocAction(params);
-    if (requested != null && isWritableDocAction(rec, requested)) {
-      return requested;
-    }
-    Object stored = rec.get(PROPERTY_DOCUMENT_ACTION);
-    return stored != null ? stored.toString() : null;
-  }
-
-  /**
-   * Whether {@code rec.set(documentAction, value)} would accept the value: the validation and the
-   * writability check {@code BaseOBObject.set} runs before it stores anything. Any failure counts
-   * as "not written", exactly as {@link #setDocAction} treats it.
-   */
-  private static boolean isWritableDocAction(BaseOBObject rec, String value) {
-    try {
-      Property property = rec.getEntity().getProperty(PROPERTY_DOCUMENT_ACTION);
-      property.checkIsValidValue(value);
-      property.checkIsWritable();
-      return true;
-    } catch (RuntimeException e) {
-      return false;
-    }
-  }
-
-  /**
-   * Raised by {@link #docActionToRun} when the tab resolves but the record does not exist — a
-   * caller's "not found", distinct from a lookup it cannot trust.
-   */
-  public static final class DocActionRecordNotFoundException extends RuntimeException {
-    private static final long serialVersionUID = 1L;
-
-    DocActionRecordNotFoundException(String recordId) {
-      super("No record " + recordId + " to run a DocAction on");
-    }
-  }
-
-  private static BaseOBObject loadDocActionRecord(String tabId, String recordId) {
-    Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-    if (tab == null || tab.getTable() == null) {
-      return null;
-    }
-    String dalEntityName = tab.getTable().getName();
-    BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
-    return rec != null && rec.getEntity().hasProperty(PROPERTY_DOCUMENT_ACTION) ? rec : null;
-  }
-
   private static void setDocAction(String tabId, String recordId, String docAction) {
     try {
-      BaseOBObject rec = loadDocActionRecord(tabId, recordId);
+      BaseOBObject rec = DocActionResolution.loadDocActionRecord(tabId, recordId);
       if (rec != null) {
-        rec.set(PROPERTY_DOCUMENT_ACTION, docAction);
+        rec.set(DocActionResolution.PROPERTY_DOCUMENT_ACTION, docAction);
         OBDal.getInstance().save(rec);
         OBDal.getInstance().flush();
       }

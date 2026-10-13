@@ -84,7 +84,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * @covers com.etendoerp.go.schemaforge.OrderReactivationGuard
  * @covers com.etendoerp.go.schemaforge.AbstractOrderHeaderHandler
  * @covers com.etendoerp.go.schemaforge.DocActionRequestSupport
- * @covers com.etendoerp.go.schemaforge.NeoProcessService
+ * @covers com.etendoerp.go.schemaforge.DocActionResolution
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -645,7 +645,7 @@ public class SalesOrderHeaderHandlerTest {
    * checks {@code BaseOBObject.set} runs), else the record's stored {@code DocAction} — never on
    * {@code fieldValues.documentAction}. A refusal is 400 and never reaches the action router; a
    * lookup that cannot run is 500 (fail closed). The record is resolved as
-   * {@code NeoProcessService.docActionToRun} does: tab → table name → record →
+   * {@code DocActionResolution.docActionToRun} does: tab → table name → record →
    * {@code documentAction}; a tab or record that cannot be resolved leaves the action unknown and
    * is refused with 500, while a record with nothing stored is not an error. An order id that
    * does not exist answers 404 {@code Record not found} whatever DocAction is sent — the same

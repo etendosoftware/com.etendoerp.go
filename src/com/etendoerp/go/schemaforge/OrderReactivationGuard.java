@@ -96,7 +96,7 @@ final class OrderReactivationGuard {
           || !AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)) {
         return null;
       }
-    } catch (NeoProcessService.DocActionRecordNotFoundException e) {
+    } catch (DocActionResolution.DocActionRecordNotFoundException e) {
       // No such order: nothing can run, let alone be reactivated. Reuses NeoActionRecordGuard's
       // not-found status and message — not the fail-closed "could not be checked".
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,

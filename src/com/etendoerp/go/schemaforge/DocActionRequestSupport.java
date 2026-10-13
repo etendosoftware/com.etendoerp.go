@@ -31,11 +31,11 @@ import org.openbravo.model.ad.ui.Tab;
  *   <li>{@link #effectiveDocAction} — the value the process will <em>execute</em>. A guard that
  *       refuses an action must decide on this and nothing else, or a body that says one thing in
  *       one key and another in the key the process reads gets past it. It delegates to
- *       {@link NeoProcessService#docActionToRun}: root {@code docAction} when the DAL would accept
- *       writing it on the record (non-blank, a member of the list, exact case), otherwise the
- *       record's stored {@code DocAction}, which the DB procedure then runs. It lives in
- *       {@link NeoProcessService}, next to the code that writes the value, so the guard and the
- *       process cannot drift apart.</li>
+ *       {@link DocActionResolution#docActionToRun}: root {@code docAction} when the DAL would
+ *       accept writing it on the record (non-blank, a member of the list, exact case), otherwise
+ *       the record's stored {@code DocAction}, which the DB procedure then runs.
+ *       {@link NeoProcessService} resolves the value and the record through that same class when
+ *       it writes it, so the guard and the process cannot drift apart.</li>
  *   <li>{@link #requests} — the value the caller <em>asked for</em>, used to re-route a request to
  *       a different flow (Reject on a quotation). Root {@code docAction} wins, because it is what
  *       the process would run; the older spellings {@code fieldValues.documentAction} and root
@@ -76,11 +76,11 @@ final class DocActionRequestSupport {
   /**
    * The DocAction value the button's process will execute for this request: the request's own
    * root {@code docAction} when the process can write it on the record, otherwise the record's
-   * stored value — see {@link NeoProcessService#docActionToRun}.
+   * stored value — see {@link DocActionResolution#docActionToRun}.
    *
    * @param context the request; its record and tab identify the stored value
    * @return the value, or {@code null} when nothing is stored
-   * @throws NeoProcessService.DocActionRecordNotFoundException when no record has this id
+   * @throws DocActionResolution.DocActionRecordNotFoundException when no record has this id
    * @throws RuntimeException when the record cannot be loaded, or when the tab or the record's
    *                          DocAction cannot be resolved — the action that will run is then
    *                          unknown, and a caller that guards on it must fail closed
@@ -88,7 +88,7 @@ final class DocActionRequestSupport {
   static String effectiveDocAction(NeoContext context) {
     OBContext.setAdminMode(true);
     try {
-      return NeoProcessService.docActionToRun(tabIdOf(context), context.getRecordId(),
+      return DocActionResolution.docActionToRun(tabIdOf(context), context.getRecordId(),
           context.getRequestBody());
     } finally {
       OBContext.restorePreviousMode();
@@ -119,7 +119,7 @@ final class DocActionRequestSupport {
     if (body == null) {
       return null;
     }
-    String executed = StringUtils.trimToNull(NeoProcessService.requestedDocAction(body));
+    String executed = StringUtils.trimToNull(DocActionResolution.requestedDocAction(body));
     if (executed != null) {
       return executed;
     }
