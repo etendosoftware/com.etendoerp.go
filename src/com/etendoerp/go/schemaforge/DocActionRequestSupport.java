@@ -80,7 +80,8 @@ final class DocActionRequestSupport {
    *
    * @param context the request; its record and tab identify the stored value
    * @return the value, or {@code null} when nothing is stored
-   * @throws RuntimeException when the record cannot be loaded, or when the tab, the record or its
+   * @throws NeoProcessService.DocActionRecordNotFoundException when no record has this id
+   * @throws RuntimeException when the record cannot be loaded, or when the tab or the record's
    *                          DocAction cannot be resolved — the action that will run is then
    *                          unknown, and a caller that guards on it must fail closed
    */

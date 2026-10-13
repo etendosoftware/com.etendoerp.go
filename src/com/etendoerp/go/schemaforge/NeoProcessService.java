@@ -933,17 +933,27 @@ public class NeoProcessService {
    * @param recordId the record id
    * @param params   the process parameters; may be {@code null}
    * @return the value that will run, or {@code null} when nothing is stored
-   * @throws IllegalStateException when the tab, the record or its {@code documentAction} property
-   *                               cannot be resolved — the action that will run is then unknown
+   * @throws DocActionRecordNotFoundException when the tab resolves but no record has this id — the
+   *                               request names a record that does not exist, so nothing will run
+   * @throws IllegalStateException when the tab, its table or the record's {@code documentAction}
+   *                               property cannot be resolved — the action that will run is then
+   *                               unknown
    * @throws RuntimeException      when the record cannot be loaded — unlike {@code setDocAction},
    *                               a caller deciding on this value has to know it could not be read
    */
   public static String docActionToRun(String tabId, String recordId, JSONObject params) {
-    BaseOBObject rec = tabId != null && recordId != null
-        ? loadDocActionRecord(tabId, recordId) : null;
-    if (rec == null) {
+    Tab tab = tabId != null ? OBDal.getInstance().get(Tab.class, tabId) : null;
+    if (tab == null || tab.getTable() == null || recordId == null) {
       throw new IllegalStateException("Cannot resolve the DocAction record " + recordId
           + " through tab " + tabId);
+    }
+    BaseOBObject rec = OBDal.getInstance().get(tab.getTable().getName(), recordId);
+    if (rec == null) {
+      throw new DocActionRecordNotFoundException(recordId);
+    }
+    if (!rec.getEntity().hasProperty(PROPERTY_DOCUMENT_ACTION)) {
+      throw new IllegalStateException("Record " + recordId + " of " + rec.getEntity().getName()
+          + " has no DocAction");
     }
     String requested = requestedDocAction(params);
     if (requested != null && isWritableDocAction(rec, requested)) {
@@ -966,6 +976,18 @@ public class NeoProcessService {
       return true;
     } catch (RuntimeException e) {
       return false;
+    }
+  }
+
+  /**
+   * Raised by {@link #docActionToRun} when the tab resolves but the record does not exist — a
+   * caller's "not found", distinct from a lookup it cannot trust.
+   */
+  public static final class DocActionRecordNotFoundException extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    DocActionRecordNotFoundException(String recordId) {
+      super("No record " + recordId + " to run a DocAction on");
     }
   }
 

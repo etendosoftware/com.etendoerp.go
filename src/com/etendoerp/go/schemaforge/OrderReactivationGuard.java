@@ -48,10 +48,12 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * body run a stored {@code RE}; and taking {@code docAction} verbatim let {@code "re"},
  * {@code " RE"} or {@code "XX"} — which the DAL refuses to write — run a stored {@code RE}.</p>
  *
- * <p><b>Fails closed.</b> If the order cannot be loaded — or its tab, the record or its DocAction
- * cannot be resolved, so the action that will run is unknown — or the linked documents cannot be
- * read, the request is refused (and logged): the order stays as it is, which a retry or a
- * configuration fix can repair, whereas letting it through could orphan a document.</p>
+ * <p><b>Fails closed.</b> If the order cannot be loaded — or its tab or its DocAction cannot be
+ * resolved, so the action that will run is unknown — or the linked documents cannot be read, the
+ * request is refused with a 500 (and logged): the order stays as it is, which a retry or a
+ * configuration fix can repair, whereas letting it through could orphan a document. An order id
+ * that does not exist is not such a failure: it answers 404 {@code Record not found}, as
+ * {@link NeoActionRecordGuard} does for an unknown id.</p>
  *
  * <p><b>Called explicitly</b> by each order customization that opts in, from its pre-hook — today
  * only {@link SalesOrderHeaderHandler}. It names no entity, so it adds nothing entity-specific to
@@ -93,6 +95,11 @@ final class OrderReactivationGuard {
           || !AbstractOrderHeaderHandler.hasLinkedDocuments(orderId)) {
         return null;
       }
+    } catch (NeoProcessService.DocActionRecordNotFoundException e) {
+      // No such order: nothing can run, let alone be reactivated. Same answer, same text, as an
+      // unknown id gets from NeoActionRecordGuard — not the fail-closed "could not be checked".
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          NeoActionRecordGuard.MSG_RECORD_NOT_FOUND);
     } catch (Exception e) {
       log.error("DocAction on order {} refused: its action or linked documents could not be read",
           orderId, e);
