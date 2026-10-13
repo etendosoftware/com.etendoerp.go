@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -53,7 +54,9 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.validation.ValidationException;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -622,15 +625,21 @@ public class SalesOrderHeaderHandlerTest {
 
   // ── Reactivate (DocAction RE) refused on orders with linked documents ──────
 
-  /** Sentinel for the stored-DocAction column of the table below: reading it throws. */
+  /** Sentinel for the stored-DocAction column of the table below: loading the record throws. */
   private static final String STORED_READ_FAILS = "<stored read fails>";
+  /** Property-check column of the table below: the requested value is not a member of the list. */
+  private static final String NOT_IN_LIST = "not in list";
+  /** Property-check column of the table below: the property refuses any write. */
+  private static final String NOT_WRITABLE = "not writable";
 
   /**
-   * Reactivate guard through {@code handle()}: it decides on the DocAction the DB procedure will
-   * actually run — root {@code docAction} when non-blank, else the record's stored
-   * {@code DocAction} — never on {@code fieldValues.documentAction}. A refusal is 400 and never
-   * reaches the action router; a lookup that cannot run is 500 (fail closed). The stored value is
-   * resolved as {@code NeoProcessService.storedDocAction} does: tab → table name → record →
+   * Reactivate guard through {@code handle()}: it decides on the DocAction the DAL will actually
+   * write and the DB procedure run — root {@code docAction} when non-blank and accepted by the
+   * {@code documentAction} property ({@code checkIsValidValue} + {@code checkIsWritable}, the
+   * checks {@code BaseOBObject.set} runs), else the record's stored {@code DocAction} — never on
+   * {@code fieldValues.documentAction}. A refusal is 400 and never reaches the action router; a
+   * lookup that cannot run is 500 (fail closed). The record is resolved as
+   * {@code NeoProcessService.docActionToRun} does: tab → table name → record →
    * {@code documentAction}.
    */
   @Test
@@ -638,33 +647,39 @@ public class SalesOrderHeaderHandlerTest {
     final String orderId = "order-re-1";
     final String tabId = "tab-order";
     final String entityName = "Order";
-    // { label, body, stored DocAction (null = not stubbed), linked docs (null = the query throws),
-    //   expected status (null = falls through to the router) }
+    // { label, body, stored DocAction, property check on the requested value (null = accepted),
+    //   linked docs (null = the query throws), expected status (null = falls through to the router) }
     Object[][] cases = {
         { "root RE with linked docs is refused",
-            "{\"docAction\":\"RE\"}", null, Boolean.TRUE, 400 },
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.TRUE, 400 },
         { "root RE wins over fieldValues CO",
-            "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}", null,
+            "{\"fieldValues\":{\"documentAction\":\"CO\"},\"docAction\":\"RE\"}", "CO", null,
             Boolean.TRUE, 400 },
-        { "root CO wins over fieldValues RE",
-            "{\"fieldValues\":{\"documentAction\":\"RE\"},\"docAction\":\"CO\"}", null,
+        { "written root CO wins over fieldValues RE and the stored RE",
+            "{\"fieldValues\":{\"documentAction\":\"RE\"},\"docAction\":\"CO\"}", "RE", null,
             Boolean.TRUE, null },
         { "empty body runs the stored RE and is refused",
-            "{}", "RE", Boolean.TRUE, 400 },
+            "{}", "RE", null, Boolean.TRUE, 400 },
         { "fieldValues RE without root runs the stored CO",
-            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", Boolean.TRUE, null },
+            "{\"fieldValues\":{\"documentAction\":\"RE\"}}", "CO", null, Boolean.TRUE, null },
         { "root RE without linked docs falls through",
-            "{\"docAction\":\"RE\"}", null, Boolean.FALSE, null },
-        { "unreadable stored DocAction fails closed",
-            "{}", STORED_READ_FAILS, Boolean.TRUE, 500 },
+            "{\"docAction\":\"RE\"}", "CO", null, Boolean.FALSE, null },
+        { "unreadable record fails closed even when docAction is sent",
+            "{\"docAction\":\"RE\"}", STORED_READ_FAILS, null, Boolean.TRUE, 500 },
         { "failed linked-docs lookup fails closed",
-            "{\"docAction\":\"RE\"}", null, null, 500 },
+            "{\"docAction\":\"RE\"}", "CO", null, null, 500 },
+        { "root re outside the list is not written, the stored RE runs and is refused",
+            "{\"docAction\":\"re\"}", "RE", NOT_IN_LIST, Boolean.TRUE, 400 },
+        { "root CO on a non-writable property is not written, the stored RE runs and is refused",
+            "{\"docAction\":\"CO\"}", "RE", NOT_WRITABLE, Boolean.TRUE, 400 },
     };
     for (Object[] c : cases) {
       String label = (String) c[0];
+      JSONObject body = new JSONObject((String) c[1]);
       String stored = (String) c[2];
-      Boolean linked = (Boolean) c[3];
-      Integer expectedStatus = (Integer) c[4];
+      String propertyCheck = (String) c[3];
+      Boolean linked = (Boolean) c[4];
+      Integer expectedStatus = (Integer) c[5];
 
       NeoCloneRecordHandler router = mock(NeoCloneRecordHandler.class);
       SalesOrderHeaderHandler handler = handlerWithMockClone(router);
@@ -674,18 +689,26 @@ public class SalesOrderHeaderHandlerTest {
           .specName("sales-order").entityName("header")
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
           .fieldName("DocAction").recordId(orderId).adTab(tab)
-          .requestBody(new JSONObject((String) c[1]))
+          .requestBody(body)
           .build();
 
       OBDal dal = mock(OBDal.class);
       if (STORED_READ_FAILS.equals(stored)) {
         when(dal.get(Tab.class, tabId)).thenThrow(new IllegalStateException("DAL down"));
-      } else if (stored != null) {
+      } else {
         Table table = mock(Table.class);
         when(table.getName()).thenReturn(entityName);
         when(tab.getTable()).thenReturn(table);
+        Property property = mock(Property.class);
+        String requested = body.optString("docAction", null);
+        if (NOT_IN_LIST.equals(propertyCheck)) {
+          doThrow(new ValidationException()).when(property).checkIsValidValue(requested);
+        } else if (NOT_WRITABLE.equals(propertyCheck)) {
+          doThrow(new ValidationException()).when(property).checkIsWritable();
+        }
         Entity entity = mock(Entity.class);
         when(entity.hasProperty("documentAction")).thenReturn(true);
+        when(entity.getProperty("documentAction")).thenReturn(property);
         BaseOBObject order = mock(BaseOBObject.class);
         when(order.getEntity()).thenReturn(entity);
         when(order.get("documentAction")).thenReturn(stored);
