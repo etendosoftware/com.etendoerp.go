@@ -89,7 +89,8 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
   private static final String ID_NOT_USED = "Not used — the list is not tied to a return receipt. "
       + "Pass \"_\".";
   private static final String FLOW = " Flow to create a customer return (the UI's): create the "
-      + "returnMaterialReceipt header with etendo_create (businessPartner, warehouse, movementDate); "
+      + "returnMaterialReceipt header with etendo_create (businessPartner and partnerAddress; the "
+      + "rest is defaulted — etendo_schema view:\"create\" is the authority on what it needs); "
       + "availableShipments -> availableShipmentLines -> importShipmentLines on the new header; "
       + "confirm it with the DocAction button (docAction CO); then rectifiableInvoices -> "
       + "createReturnInvoice to refund it with a rectificative invoice.";
@@ -139,7 +140,7 @@ public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHe
         NeoActionContract.Param.optional("startRow", NeoActionContract.TYPE_NUMBER,
             "Offset of the first invoice of the page. Default 0."),
         NeoActionContract.Param.optional("pageSize", NeoActionContract.TYPE_NUMBER,
-            "Invoices per page. Default 80."),
+            "Invoices per page. Default 80; the server clamps it to 1..500."),
         NeoActionContract.Param.optional("search", NeoActionContract.TYPE_STRING,
             "Case-insensitive fragment of the invoice document number or customer name."))
         .withIdDescription("The id of the completed return receipt."));

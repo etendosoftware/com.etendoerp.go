@@ -52,8 +52,9 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * resolved, so the action that will run is unknown — or the linked documents cannot be read, the
  * request is refused with a 500 (and logged): the order stays as it is, which a retry or a
  * configuration fix can repair, whereas letting it through could orphan a document. An order id
- * that does not exist is not such a failure: it answers 404 {@code Record not found}, as
- * {@link NeoActionRecordGuard} does for an unknown id.</p>
+ * that does not exist is not such a failure: it answers 404 {@code Record not found}, reusing
+ * {@link NeoActionRecordGuard}'s not-found status and message (that guard itself only refuses
+ * another tenant's record; an unknown id passes it).</p>
  *
  * <p><b>Called explicitly</b> by each order customization that opts in, from its pre-hook — today
  * only {@link SalesOrderHeaderHandler}. It names no entity, so it adds nothing entity-specific to
@@ -96,8 +97,8 @@ final class OrderReactivationGuard {
         return null;
       }
     } catch (NeoProcessService.DocActionRecordNotFoundException e) {
-      // No such order: nothing can run, let alone be reactivated. Same answer, same text, as an
-      // unknown id gets from NeoActionRecordGuard — not the fail-closed "could not be checked".
+      // No such order: nothing can run, let alone be reactivated. Reuses NeoActionRecordGuard's
+      // not-found status and message — not the fail-closed "could not be checked".
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           NeoActionRecordGuard.MSG_RECORD_NOT_FOUND);
     } catch (Exception e) {
