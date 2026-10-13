@@ -9,6 +9,13 @@ CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
 
 echo "==> Running pre-push checks..."
 
+# The push's ref lines (stdin), read once: the trailer check and the target branch both use them.
+# A manual run from a terminal has none.
+PUSH_REFS=""
+[ -t 0 ] || PUSH_REFS="$(cat)"
+# shellcheck source=lib/target-branch.sh
+. "$SCRIPT_DIR/lib/target-branch.sh"
+
 # ----------------------------------------------------------------------------
 # Hooks-Verified: every commit being pushed must carry a valid trailer, proving
 # the pre-commit hooks were installed and ran for that exact tree.
@@ -18,6 +25,7 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
   . "$SCRIPT_DIR/lib/hooks-proof.sh"
   UNVERIFIED=""
   while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -n "$local_sha" ] || continue
     [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
     if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
       RANGE="$(git rev-list "$local_sha" --not --remotes)"
@@ -32,7 +40,7 @@ if [ "$HOOKS_VERIFY_SKIP" != "1" ]; then
     for sha in $RANGE; do
       hooks_verify_commit "$sha" || UNVERIFIED="$UNVERIFIED $sha"
     done
-  done
+  done <<< "$PUSH_REFS"
 
   if [ -n "$UNVERIFIED" ]; then
     echo "❌ ERROR: commits without a valid '${HOOKS_TRAILER_KEY}' trailer:"
@@ -66,14 +74,19 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-# Resolve base branch dynamically
+# Measure everything against the branch this push will merge into (lib/target-branch.sh): the
+# conflict check, the relevance diff, Sonar's base ref and the changed-lines coverage.
+TARGET_BRANCH="$(target_branch "$(pushed_branch "$PUSH_REFS")")"
+git rev-parse --verify --quiet "origin/$TARGET_BRANCH" >/dev/null \
+  || git fetch --quiet origin "$TARGET_BRANCH" 2>/dev/null || true
 BASE_REF=""
-for branch in "origin/develop" "origin/main"; do
+for branch in "origin/$TARGET_BRANCH" "origin/develop" "origin/main"; do
   if git rev-parse --verify --quiet "$branch" >/dev/null; then
     BASE_REF="$branch"
     break
   fi
 done
+echo "==> Target branch: ${BASE_REF:-none} (PRE_PUSH_TARGET=<branch> overrides it)"
 
 # ----------------------------------------------------------------------------
 # Live progress helpers
@@ -287,58 +300,8 @@ junit_test_counts() {
   echo "$(( tests - failures - skipped )) passed, ${failures} failed, ${skipped} skipped (${tests} total)"
 }
 
-# 0. Fetch the base branch and fail fast if this branch conflicts with it.
-# Runs BEFORE the expensive tests/sonar so a conflicting branch is rejected quickly.
-check_base_conflicts() {
-  echo "==> Checking for conflicts with base branch (fetch + merge-tree)..."
-
-  # Fetch the latest base branch (prefer develop, then main).
-  local base_branch=""
-  for b in "develop" "main"; do
-    if git fetch --quiet origin "$b" 2>/dev/null; then
-      base_branch="$b"
-      break
-    fi
-  done
-
-  if [ -z "$base_branch" ]; then
-    echo "    SKIPPED ⚠️ (could not fetch any base branch from origin — offline?)"
-    return 0
-  fi
-
-  local base_ref="origin/$base_branch"
-
-  # Tree-level merge check — no working-tree changes (git >= 2.38).
-  local out rc
-  out="$(git merge-tree --write-tree --name-only "$base_ref" HEAD 2>/dev/null)"
-  rc=$?
-
-  if [ "$rc" -eq 0 ]; then
-    echo "    SUCCESS ✅ (merges cleanly into $base_ref)"
-    return 0
-  elif [ "$rc" -eq 1 ]; then
-    # Conflicts. Output is: <tree-oid> on line 1, then conflicted file paths.
-    echo "    FAILED ❌ (conflicts with $base_ref)"
-    echo ""
-    echo "========================================================================="
-    echo "❌ ERROR: This branch has merge conflicts with $base_ref."
-    echo "========================================================================="
-    echo "Conflicting file(s):"
-    echo "$out" | tail -n +2 | sed 's/^/  - /'
-    echo ""
-    echo "👉 Update your branch and resolve the conflicts before pushing:"
-    echo "     git merge $base_ref        # or: git rebase $base_branch"
-    echo "   Then re-run the push (or bypass with 'git push --no-verify')."
-    echo "========================================================================="
-    exit 1
-  else
-    # rc > 1: merge-tree errored or unsupported — warn but don't hard-block.
-    echo "    SKIPPED ⚠️ (merge-tree unavailable or errored, rc=$rc)"
-    return 0
-  fi
-}
-
-check_base_conflicts
+# Fail fast when the branch no longer merges cleanly into its target (lib/target-branch.sh).
+check_target_conflicts "$TARGET_BRANCH"
 
 # ----------------------------------------------------------------------------
 # Relevance detection — run only the steps a change actually requires.

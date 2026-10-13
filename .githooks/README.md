@@ -35,6 +35,11 @@ git config --get core.hooksPath     # debe imprimir: .githooks
 | 3 | Sonar (gate), **modo PR**, con la cobertura de `goTestUnit` | `run-sonar.sh --fail-on-gate` | Espeja el Quality Gate de CI. Ya no compara la cobertura global contra la base: sin los tests con base siempre baja; esa comparación queda en CI |
 | 3b | Cobertura de las líneas cambiadas | `scripts/check-diff-coverage.py` | Mide qué parte de las líneas que agrega o modifica el push cubre `goTestUnit` (umbral 80%, `DIFF_COVERAGE_THRESHOLD`). Por ahora solo avisa; `DIFF_COVERAGE_MODE=block` lo hace bloqueante. Se saltea si el paso 2 falló |
 
+Antes del paso 1, el hook resuelve la **rama destino** del push (`lib/target-branch.sh`, igual que
+en etendo_schema_forge): `PRE_PUSH_TARGET` si está definida, si no la base del PR abierto de la rama
+(vía `gh`), si no `main` para `main` y `hotfix/*`, y `develop` para el resto. Contra esa rama chequea
+conflictos (`git merge-tree`) y mide el diff de relevancia, Sonar y la cobertura de líneas cambiadas.
+
 El paso 1b nunca reemplaza al 3: el 3 sigue siendo la fuente de verdad para el
 Quality Gate (server-side, modo PR); el 1b solo tapa el agujero
 estructural del modo PR para issues (0 siempre) corriendo un análisis paralelo
