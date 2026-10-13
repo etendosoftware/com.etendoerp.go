@@ -38,7 +38,7 @@ import org.openbravo.model.ad.ui.Tab;
 final class DocActionResolution {
 
   /** Parameter carrying a list-backed button's chosen value (DocAction style). */
-  static final String PARAM_DOC_ACTION = "docAction";
+  private static final String PARAM_DOC_ACTION = "docAction";
   /** DAL property a DocAction-style DB procedure reads the action to run from. */
   static final String PROPERTY_DOCUMENT_ACTION = "documentAction";
 

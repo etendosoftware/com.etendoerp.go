@@ -866,7 +866,7 @@ public class NeoProcessService {
       while (keys.hasNext()) {
         String key = keys.next();
         if (RECORD_ID.equals(key) || INP_RECORD_ID.equals(key)
-            || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
+            || INP_TAB_ID.equals(key) || PARAM_DOC_ACTION.equals(key)) {
           continue;
         }
         if (procParams == null) {
