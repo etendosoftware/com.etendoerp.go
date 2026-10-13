@@ -36,6 +36,7 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Attachment;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Authorization for NEO attachment operations — first slice of ADR-0003's centralized
@@ -62,8 +63,9 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * access the feature already has. Today: {@code ETGO_Fiscal_Decl} (fiscal models 303/349 — the
  * justificante / acuse de recibo upload) is shown only by "Fiscal Declarations NEO Support", while
  * Finance reaches "Modelos fiscales" through its Tax Report grant (ETP-5116, {@code
- * TemplateRoleWindowAccess#financeGrants()}). Hardcoded on purpose, mirroring that same proxy;
- * a data-driven replacement is ETP-5540.</p>
+ * TemplateRoleWindowAccess#financeGrants()}). The proxy window id is the shared {@link
+ * RoleAccessMatrix#TAX_MODELS_PROXY_WINDOW_ID} (ETP-5540); the table-to-feature link stays
+ * hardcoded here until ETP-4802 lets a GO feature declare its support tables.</p>
  *
  * <p><b>Known residual.</b> The rule is per table, not per record: a role with full access to
  * sales-order but read-only on purchase-order can still write attachments of a purchase order,
@@ -80,12 +82,10 @@ public final class NeoAttachmentAuthorizer {
 
   /** {@code ETGO_Fiscal_Decl} — fiscal model declarations (303/349). */
   static final String FISCAL_DECL_TABLE_ID = "F8B5925363A64980B7522FFD98A1628B";
-  /** Tax Report — the window that proxies "Modelos fiscales" in the role templates (ETP-5116). */
-  static final String TAX_REPORT_WINDOW_ID = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
 
   /** Extra windows whose editable access also authorizes writes on a table; see class comment. */
   static final Map<String, List<String>> PROXY_WINDOWS_BY_TABLE =
-      Map.of(FISCAL_DECL_TABLE_ID, List.of(TAX_REPORT_WINDOW_ID));
+      Map.of(FISCAL_DECL_TABLE_ID, List.of(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID));
 
   private NeoAttachmentAuthorizer() {
   }

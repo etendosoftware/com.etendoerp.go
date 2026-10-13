@@ -40,11 +40,14 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Attachment;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * ETP-5205 — write-tier slice of {@link NeoAttachmentAuthorizer} (ADR-0003 D2). The rule: the
  * current role needs editable access to at least one active window showing the attachment's
  * table; a table no window shows is allowed; the table comes from the stored attachment row.
+ *
+ * @covers com.etendoerp.go.schemaforge.NeoAttachmentAuthorizer
  */
 public class NeoAttachmentAuthorizerTest {
 
@@ -187,7 +190,7 @@ public class NeoAttachmentAuthorizerTest {
       env.access.when(() -> NeoAccessHelper.hasWindowAccess(FISCAL_SUPPORT_WINDOW, "POST"))
           .thenReturn(false);
       env.access.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "POST")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "POST")).thenReturn(true);
 
       assertNull(NeoAttachmentAuthorizer.checkWrite(NeoAttachmentAuthorizer.FISCAL_DECL_TABLE_ID));
     }
@@ -207,13 +210,22 @@ public class NeoAttachmentAuthorizerTest {
     }
   }
 
+  // ETP-5540 — the proxy id is now the shared RoleAccessMatrix constant; pin its literal value so
+  // an accidental change of that constant (which also moves the ETP-5546 fiscal gates) fails here.
+  @Test
+  public void fiscalDeclarationProxyIsTheTaxReportWindow() {
+    assertEquals(List.of("3E8FEA1EA7404D979306C9EE7FD2E7E8"),
+        NeoAttachmentAuthorizer.PROXY_WINDOWS_BY_TABLE.get(
+            NeoAttachmentAuthorizer.FISCAL_DECL_TABLE_ID));
+  }
+
   @Test
   public void theProxyDoesNotLeakToOtherTables() {
     try (Env env = new Env(window(SALES_ORDER_WINDOW, true))) {
       env.access.when(() -> NeoAccessHelper.hasWindowAccess(SALES_ORDER_WINDOW, "POST"))
           .thenReturn(false);
       env.access.when(() -> NeoAccessHelper.hasWindowAccess(
-          NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID, "POST")).thenReturn(true);
+          RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID, "POST")).thenReturn(true);
 
       assertNotNull(NeoAttachmentAuthorizer.checkWrite(TABLE_ID));
     }

@@ -84,6 +84,7 @@ import org.openbravo.module.aeat349.es.AEAT3492010ReportDao;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.RoleAccessMatrix;
 
 /**
  * Unit tests for {@link Fiscal349BoxesHandler}.
@@ -114,7 +115,7 @@ public class Fiscal349BoxesHandlerTest {
     handler = new Fiscal349BoxesHandler(servlet);
     accessMock = mockStatic(NeoAccessHelper.class);
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), anyString())).thenReturn(true);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), anyString())).thenReturn(true);
   }
 
   @After
@@ -161,7 +162,7 @@ public class Fiscal349BoxesHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
-        eq(NeoAttachmentAuthorizer.TAX_REPORT_WINDOW_ID), eq("GET"))).thenReturn(false);
+        eq(RoleAccessMatrix.TAX_MODELS_PROXY_WINDOW_ID), eq("GET"))).thenReturn(false);
 
     handler.handle("operators", "GET", req, resp);
 
