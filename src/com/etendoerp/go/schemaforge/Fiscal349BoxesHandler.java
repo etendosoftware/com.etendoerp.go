@@ -185,6 +185,17 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     List<TaxRate> taxesPurchase = dao349.get349Taxes(taxReport.getId(), "Purchase");
     List<TaxRate> taxesSales    = dao349.get349Taxes(taxReport.getId(), "Sales");
 
+    // ETP-5725 — dependency worth knowing when debugging a misclassified invoice (by design, not
+    // a defect): this split (corrPurch/corrSales → "Rectificaciones" vs. purch/sales → "Facturas
+    // origen") is decided entirely by getCorrectiveInvoices, which queries C_Invoice_Reverse for
+    // em_aeat349_iscorrective = 'Y' — a flag the USER sets manually in the invoice's "Facturas
+    // revertidas" panel to flag that invoice as a 349 correction (defaults to 'N' otherwise).
+    // Deliberately manual, not structurally derived — not every reversed/linked invoice is a 349
+    // correction, so this is a judgment call left to the user. Practical consequence: an invoice
+    // only reaches "Rectificaciones" if that flag was checked; otherwise it is, correctly, treated
+    // as regular and goes through "Facturas origen" below — the exact path the base-sign fix
+    // further down covers. See docs/generated-custom-windows/fiscal-models.md, "Single-key
+    // 'Facturas origen' rows now use the live per-key base" (ETP-5725) for the full writeup.
     Set<Invoice> allPurch  = dao349.get349Invoices(org, taxesPurchase, periods, acctSchema, true,  null);
     Set<Invoice> corrPurch = dao349.getCorrectiveInvoices(allPurch);
     Set<Invoice> purch     = dao349.removeCorrectiveInvoices(allPurch, corrPurch);
