@@ -922,22 +922,28 @@ public class NeoProcessService {
    * {@code " RE"} or {@code "XX"} run the stored action, not nothing (ETP-5704 review: a guard that
    * took the requested value verbatim let those run a stored {@code RE} unchecked).</p>
    *
-   * <p>Mirrors exactly the two checks {@code set} performs before writing; it never writes.
-   * Public so a customization guarding on the action about to run (ETP-5704,
-   * {@code OrderReactivationGuard}) reads it from the same place the process does.</p>
+   * <p>{@code set} runs three checks before writing: {@code checkIsValidValue},
+   * {@code checkDerivedReadable} and {@code checkIsWritable}. This mirrors the first and the last;
+   * {@code checkDerivedReadable} is deliberately left out because it is a no-op in admin mode,
+   * where both the process and its callers run. It never writes. Public so a customization
+   * guarding on the action about to run (ETP-5704, {@code OrderReactivationGuard}) reads it from
+   * the same place the process does.</p>
    *
    * @param tabId    the AD tab whose table holds the record (the process's {@code inpTabId})
    * @param recordId the record id
    * @param params   the process parameters; may be {@code null}
-   * @return the value that will run, or {@code null} when the tab, the record or the property is
-   *         absent, or nothing is stored
-   * @throws RuntimeException when the record cannot be loaded — unlike {@code setDocAction}, a
-   *                          caller deciding on this value has to know it could not be read
+   * @return the value that will run, or {@code null} when nothing is stored
+   * @throws IllegalStateException when the tab, the record or its {@code documentAction} property
+   *                               cannot be resolved — the action that will run is then unknown
+   * @throws RuntimeException      when the record cannot be loaded — unlike {@code setDocAction},
+   *                               a caller deciding on this value has to know it could not be read
    */
   public static String docActionToRun(String tabId, String recordId, JSONObject params) {
-    BaseOBObject rec = loadDocActionRecord(tabId, recordId);
+    BaseOBObject rec = tabId != null && recordId != null
+        ? loadDocActionRecord(tabId, recordId) : null;
     if (rec == null) {
-      return null;
+      throw new IllegalStateException("Cannot resolve the DocAction record " + recordId
+          + " through tab " + tabId);
     }
     String requested = requestedDocAction(params);
     if (requested != null && isWritableDocAction(rec, requested)) {

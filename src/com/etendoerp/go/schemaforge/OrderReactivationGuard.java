@@ -48,9 +48,10 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * body run a stored {@code RE}; and taking {@code docAction} verbatim let {@code "re"},
  * {@code " RE"} or {@code "XX"} — which the DAL refuses to write — run a stored {@code RE}.</p>
  *
- * <p><b>Fails closed.</b> If the stored value or the linked documents cannot be read, the
- * reactivation is refused (and logged): the order stays as it is, which a retry can fix, whereas
- * letting it through could orphan a document.</p>
+ * <p><b>Fails closed.</b> If the order cannot be loaded — or its tab, the record or its DocAction
+ * cannot be resolved, so the action that will run is unknown — or the linked documents cannot be
+ * read, the request is refused (and logged): the order stays as it is, which a retry or a
+ * configuration fix can repair, whereas letting it through could orphan a document.</p>
  *
  * <p><b>Called explicitly</b> by each order customization that opts in, from its pre-hook — today
  * only {@link SalesOrderHeaderHandler}. It names no entity, so it adds nothing entity-specific to

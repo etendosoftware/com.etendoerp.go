@@ -79,19 +79,16 @@ final class DocActionRequestSupport {
    * stored value — see {@link NeoProcessService#docActionToRun}.
    *
    * @param context the request; its record and tab identify the stored value
-   * @return the value, or {@code null} when there is none (no record, no tab, nothing stored)
-   * @throws RuntimeException when the stored value cannot be read — a caller that guards on it
-   *                          must fail closed
+   * @return the value, or {@code null} when nothing is stored
+   * @throws RuntimeException when the record cannot be loaded, or when the tab, the record or its
+   *                          DocAction cannot be resolved — the action that will run is then
+   *                          unknown, and a caller that guards on it must fail closed
    */
   static String effectiveDocAction(NeoContext context) {
-    String recordId = context.getRecordId();
-    String tabId = tabIdOf(context);
-    if (StringUtils.isBlank(recordId) || tabId == null) {
-      return null;
-    }
     OBContext.setAdminMode(true);
     try {
-      return NeoProcessService.docActionToRun(tabId, recordId, context.getRequestBody());
+      return NeoProcessService.docActionToRun(tabIdOf(context), context.getRecordId(),
+          context.getRequestBody());
     } finally {
       OBContext.restorePreviousMode();
     }
