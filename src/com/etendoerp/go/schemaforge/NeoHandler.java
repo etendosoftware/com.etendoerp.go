@@ -168,14 +168,14 @@ public interface NeoHandler {
    *
    * <p>Reader: {@code etendo_schema(view:"create")} moves the names to {@code optional} with
    * {@code serverDefaulted:true}. The {@code etendo_create} mandatory pre-check does not skip them: it
-   * runs after the create callout cascade and after this customization's pre-hook (ETP-5703), so a
-   * field either of them derived is not missing there, and one neither could derive is reported
-   * with a precise 422 rather than left to the DAL's NOT NULL check. A caller may still send a
-   * value; it is honoured as on any other field.</p>
+   * runs after the create callout cascade and before this customization's pre-hook, so a field the
+   * cascade derived is not missing there, and one it could not derive is reported with a precise
+   * 422 rather than left to the DAL's NOT NULL check. A caller may still send a value; it is
+   * honoured as on any other field.</p>
    *
-   * <p>Declare only fields that are derived on <b>every</b> create — by the create callout cascade
-   * or by this customization's own {@code handle()}. A field derived only sometimes (e.g. only
-   * when the partner has exactly one address) must stay {@code required} in the schema.</p>
+   * <p>Consequently, declare only fields the <b>create callout cascade</b> derives. A field filled
+   * only by this customization's own {@code handle()} would still be refused by the pre-check on
+   * {@code etendo_create}, which runs first.</p>
    *
    * @return the property names resolved server-side on create; empty by default
    */

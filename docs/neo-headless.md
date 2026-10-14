@@ -3633,15 +3633,21 @@ that is already correctly rounded is unchanged.
 Both invoice headers (`SalesInvoiceHeaderHandler`, `PurchaseInvoiceHeaderHandler`, shared code in
 `AbstractInvoiceHeaderHandler`) fill two fields the SPA always sends and an agent may omit. Each
 applies only when the request does not carry the field (absent, null, blank or `"0"`), so the SPA's
-behaviour is unchanged. Same on REST single, REST batch / `etendo_batch` and `etendo_create`:
+behaviour is unchanged. Channels as noted per field:
 
 - **`partnerAddress`** (`C_BPartner_Location_ID`, mandatory) — on a create with a `businessPartner`
-  and no address, the pre-hook sets the partner's active bill-to location **when it has exactly
-  one**. With none or several it abstains and the create keeps its 422 naming `partnerAddress`: the
-  invoicing address is the caller's choice when there is one to make. Read in the caller's DAL scope.
-  For this to reach `etendo_create`, `McpToolRouter.handleCreate` now runs the customization's
-  pre-hook **before** its mandatory pre-check (it ran after it), as REST single and batch already
-  did — see `NeoHandler#serverResolvedCreateFields`.
+  and no address, the customization pre-hook (`injectPartnerAddressIfMissing`) sets the partner's
+  active bill-to location **when it has exactly one**. With none or several it abstains: the invoicing
+  address is the caller's choice when there is one to make. Read in the caller's DAL scope.
+  **Declared channel divergence:** this fills the address on **REST single** and on **REST
+  `/batch` / MCP `etendo_batch`** (`handleWithHooks` runs the pre-hook before the create). On **MCP
+  `etendo_create`** it does not: `McpToolRouter.handleCreate` runs its mandatory pre-check
+  (`validateMandatoryFields`) **before** the customization pre-hook, by design (ETP-5535, see
+  `NeoHandler#serverResolvedCreateFields`), so an invoice header created there without
+  `partnerAddress` still answers the precise `missingFields` 422 naming it, even when the partner has
+  a single bill-to location. The agent sends the address (one `etendo_selectors` call) or uses
+  `etendo_batch`. Running the pre-hook before that check is a platform decision, pending and outside
+  ETP-5703.
 - **`eTGOCurrencyRate`** (`EM_ETGO_Currency_Rate`) — on a create, or an update that changes the
   currency, without a rate, the post-hook writes the org→document rate for the invoice date
   (`NeoExchangeRateService.rateAsDecimal`: direct, then inverse — the lookup behind
@@ -7966,15 +7972,13 @@ wrapper fields. A new generic extension point lets the customization say so:
   `optional` with `serverDefaulted:true`.
 - **The `etendo_create` mandatory pre-check (`validateMandatoryFields`) does NOT skip declared
   fields.** In `handleCreate` it runs after `injectMandatoryDefaults` (the create callout cascade
-  that derives them) and — since ETP-5703 — after the customization's pre-hook as well, matching
-  REST single and batch, where the pre-hook runs before any validation. A declared field the cascade
-  or the pre-hook filled is therefore not missing there; one neither could fill is a real gap and
-  keeps its precise 422 `missingFields` instead of becoming a DAL NOT NULL error. It keeps skipping
-  only the selector policies' wrapper names, whose value the handler builds after the check.
-  Consequence for the extension point: declare only fields derived on every create (by the cascade
-  or by the customization's own `handle()`); one derived only sometimes stays `required`. (Before
-  ETP-5703 a field filled only by `handle()` was refused on `etendo_create`: the invoice header's
-  `partnerAddress` was the case. `etendo_batch` and REST run no such pre-check.)
+  that derives them) and before the customization's pre-hook. A declared field the cascade filled is
+  therefore not missing there; one it could not fill is a real gap and keeps its precise 422
+  `missingFields` instead of becoming a DAL NOT NULL error. It keeps skipping only the selector
+  policies' wrapper names, whose value the handler builds after the check. Consequence for the
+  extension point: declare only fields the create cascade derives — a field filled only by the
+  customization's own `handle()` would still be refused on `etendo_create`. (`etendo_batch` and REST run
+  no such pre-check.)
 - `SalesQuotationLineHandler` declares `tax`. A caller may still send one; the create path restores
   caller values after the cascade.
 - **Scope:** `quotationLine` only. `sales-order/lines` (`SalesOrderLineHandler`) very likely has the

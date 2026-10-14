@@ -1073,8 +1073,10 @@ public abstract class AbstractInvoiceHeaderHandler {
    * role cannot read never becomes the address of a document it writes.
    *
    * <p><b>Channels.</b> Called from each subclass's {@code handle()} pre-hook, which runs before
-   * the create on REST single, REST batch / {@code etendo_batch} ({@code handleWithHooks}) and
-   * {@code etendo_create} (before its mandatory pre-check since ETP-5703).
+   * the create on REST single and REST batch / {@code etendo_batch} ({@code handleWithHooks}).
+   * <b>Declared divergence:</b> on MCP {@code etendo_create} the mandatory pre-check runs before
+   * this pre-hook by design (ETP-5535), so a missing {@code partnerAddress} still answers the
+   * precise {@code missingFields} 422 there — see {@code neo-headless.md} §4.12.9.
    *
    * <p>Total: never throws.
    *
