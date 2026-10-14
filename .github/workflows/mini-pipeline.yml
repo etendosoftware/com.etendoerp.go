@@ -1,10 +1,13 @@
 name: Mini Pipeline
 
-# ETP-5695: the per-PR mini pipeline on GitHub Actions. It does the same work as the experimental
-# Jenkins job (etendo-go/experimental/ExperimentalJenkinsfile in com.etendoerp.jenkins.pipelines)
-# so the two can be timed against each other: the core and the extra modules, install against a
-# throwaway Postgres (GenerateEntitiesTask reads the dictionary from the database to write src-gen,
-# which the core needs to compile), then goTestUnit, the module's database-free tests.
+# ETP-5695: the per-PR mini pipeline. On every PR into develop: the core and the extra modules,
+# install against a throwaway Postgres (GenerateEntitiesTask reads the dictionary from the database
+# to write src-gen, which the core needs to compile), then goTestUnit, the module's database-free
+# tests. It runs here rather than in Jenkins: on the same commit and tests the Jenkins version took
+# more than twice as long, mostly waiting for its pod and cloning what it did not need.
+#
+# On a push to develop it only fills the Gradle cache: a PR can restore its base branch's caches,
+# so even the first run of a new PR skips the ~3.5 min of dependency downloads.
 #
 # Secrets: ETENDOBOT_TOKEN reads etendo_core and the GitHub modules; NEXUS_USER/NEXUS_PASSWORD
 # resolve dependencies; BITBUCKET_SSH_KEY (read access to bitbucket.org/koodu_software) clones the
@@ -14,6 +17,8 @@ on:
   pull_request:
     branches: [develop]
     types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [develop]
   workflow_dispatch:
 
 # The checkouts of other repos use ETENDOBOT_TOKEN; the workflow's own token only reads this one.
@@ -26,7 +31,7 @@ concurrency:
 
 jobs:
   go-unit:
-    name: goTestUnit
+    name: ${{ github.event_name == 'push' && 'Warm the Gradle cache' || 'goTestUnit' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     services:
@@ -45,6 +50,7 @@ jobs:
       # The Jenkins pod starts Postgres with these off; a service container takes no arguments,
       # but all three can be changed on a running server.
       - name: Tune Postgres for a throwaway database
+        if: github.event_name != 'push'
         env:
           PGPASSWORD: syspass
         run: |
@@ -137,7 +143,14 @@ jobs:
           org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
           EOF
 
+      # The first Gradle run of the job downloads the dependencies; setup-java saves them at the end.
+      - name: Warm the Gradle cache
+        if: github.event_name == 'push'
+        working-directory: etendo_core
+        run: ./gradlew prepareConfig
+
       - name: Install
+        if: github.event_name != 'push'
         working-directory: etendo_core
         run: |
           ./gradlew prepareConfig
@@ -145,11 +158,12 @@ jobs:
           ./gradlew install
 
       - name: goTestUnit
+        if: github.event_name != 'push'
         working-directory: etendo_core
         run: ./gradlew goTestUnit
 
       - name: Upload the test report
-        if: always()
+        if: always() && github.event_name != 'push'
         uses: actions/upload-artifact@v4
         with:
           name: goTestUnit-report
