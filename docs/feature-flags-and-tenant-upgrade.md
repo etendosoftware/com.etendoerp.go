@@ -99,8 +99,9 @@ Check the queries in Datadog before introducing a new value.
 **Targeting.** Datadog has no reserved user fields: the targeting key drives percentage bucketing
 and every rule matches a flat attribute **by its exact, case-sensitive name**. The rules in the
 Datadog project match on lowercase `email`, so `FeatureFlagContext.forAccount(...)` publishes the
-account email as the targeting key, as `email` (Datadog) **and** as `Email` (ConfigCat — see
-*Per-account targeting* below). Drop `Email` only when ConfigCat is retired.
+account email as the targeting key, as `email` (Datadog, **lowercased** with `Locale.ROOT` — rule
+values are matched case-sensitively and every value in the Datadog project is lowercase) **and** as
+`Email` (ConfigCat, as stored — see *Per-account targeting* below). Drop `Email` only when ConfigCat is retired.
 
 **Startup.** Installing the provider waits at most 5 s (`DATADOG_MAX_INIT_WAIT_SECONDS`; Datadog's
 own default is 30 s) for the first configuration. If it has not arrived, the provider stays

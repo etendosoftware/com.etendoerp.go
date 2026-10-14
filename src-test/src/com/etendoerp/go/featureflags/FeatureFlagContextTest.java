@@ -109,6 +109,21 @@ class FeatureFlagContextTest {
         context.getAttributes());
   }
 
+  /**
+   * Datadog rule values are all lowercase and matched case-sensitively, so the {@code email}
+   * attribute is lowercased (ETP-5751). The targeting key and the ConfigCat {@code Email}
+   * attribute keep the address as stored.
+   */
+  @Test
+  void lowercasesOnlyTheDatadogEmailAttribute() {
+    FeatureFlagContext context = FeatureFlagContext.forAccount("  User.Name@Example.COM ");
+    assertEquals("User.Name@Example.COM", context.getTargetingKey());
+    assertEquals(Map.of(
+        FeatureFlagContext.ATTRIBUTE_EMAIL, "User.Name@Example.COM",
+        FeatureFlagContext.ATTRIBUTE_EMAIL_LOWERCASE, "user.name@example.com"),
+        context.getAttributes());
+  }
+
   @Test
   void attributesAreNotModifiableByCallers() {
     FeatureFlagContext context = FeatureFlagContext.forAccount("user@example.com")

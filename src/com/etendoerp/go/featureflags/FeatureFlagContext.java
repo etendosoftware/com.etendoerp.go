@@ -19,6 +19,7 @@ package com.etendoerp.go.featureflags;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -63,6 +64,11 @@ public final class FeatureFlagContext {
    * {@value #ATTRIBUTE_EMAIL} alone would match none of them and the flag would read as off for
    * everyone — the ETP-4966 failure again. Both spellings are published while ConfigCat remains a
    * fallback arm; drop {@value #ATTRIBUTE_EMAIL} only when ConfigCat is retired.
+   *
+   * <p><b>The value is lowercased</b> ({@link Locale#ROOT}): rule values are matched
+   * case-sensitively too, and every value in the Datadog project is lowercase, so a mixed-case
+   * {@code ETGO_ACCOUNT} email would otherwise match no rule. The targeting key and
+   * {@value #ATTRIBUTE_EMAIL} keep the address as stored.
    */
   public static final String ATTRIBUTE_EMAIL_LOWERCASE = "email";
 
@@ -89,7 +95,8 @@ public final class FeatureFlagContext {
     // key nor the attribute rather than an empty-string identity that could match a rule.
     return new FeatureFlagContext(normalized, Collections.emptyMap())
         .with(ATTRIBUTE_EMAIL, normalized)
-        .with(ATTRIBUTE_EMAIL_LOWERCASE, normalized);
+        .with(ATTRIBUTE_EMAIL_LOWERCASE,
+            normalized == null ? null : normalized.toLowerCase(Locale.ROOT));
   }
 
   /**
