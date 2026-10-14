@@ -670,7 +670,7 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       // il.getUnitPrice()=null → unitPrice=0; invoice.getPriceList()=null → skip resolvePriceFromPriceList
       // il.getTax()=null → resolveApplicableTax (NPE caught internally → null); unitPrice=0 → no throw
 
-      // ensureDocumentNo, getSupport().ensureLineGrossAmounts, recalculateTotals
+      // ensureDocumentNo, getSupport().ensureLineGrossAmounts
       InvoiceFromOrderSupport support = mock(InvoiceFromOrderSupport.class);
       when(handler.createDraftInvoiceHandler.getSupport()).thenReturn(support);
 

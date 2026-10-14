@@ -622,6 +622,21 @@ final class ReturnShipmentUtils {
    * han asociado facturas a rectificar"). Complete first and the invoice can never be confirmed
    * nor linked — a permanently stuck document.
    *
+   * <p><b>Taxes and totals belong to the database, not to this method.</b> Flushing the lines is
+   * what computes them: {@code C_INVOICELINE_TRG2} inserts each line's {@code C_InvoiceLineTax},
+   * {@code C_INVOICELINETAX_TRG} folds those into ONE {@code C_InvoiceTax} row per tax rate
+   * ({@code Recalculate='Y'}, incremented in place by every further line of that rate), and the
+   * same chain keeps {@code C_Invoice.TotalLines} / {@code GrandTotal} current — exactly as for
+   * any other invoice. Never insert an {@code InvoiceTax} from Java here: a hand-made row sits
+   * NEXT TO the trigger-made one, and the completion then sums both, doubling the tax and the
+   * amount to pay (base -300, tax -126 instead of -63).
+   *
+   * <p>The {@code refresh(invoice)} below is safe with respect to the duplicate-row hazard
+   * described in {@code InvoiceFromOrderSupport#applyOrderDiscountToInvoice}: at that point the
+   * session holds no {@code InvoiceTax} instance at all (this flow never loads or creates one),
+   * so there is no stale tax entity for a cascade refresh to resurrect as an INSERT. Keep it that
+   * way — do not read {@code invoice.getInvoiceTaxList()} before the refresh.
+   *
    * @param originInvoiceIds ids of the invoices being rectified; must not be empty
    */
   static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
@@ -632,7 +647,6 @@ final class ReturnShipmentUtils {
     OBDal.getInstance().getSession().refresh(invoice);
     createDraftInvoiceHandler.ensureDocumentNo(invoice);
     createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
-    createDraftInvoiceHandler.recalculateTotals(invoice);
     linkRectifiedInvoices(invoice, originInvoiceIds);
     OBDal.getInstance().flush();
 
@@ -765,6 +779,14 @@ final class ReturnShipmentUtils {
     ShipmentInOutLine pricingLine = (origLine != null) ? origLine : retLine;
     InvoiceLine il = createDraftInvoiceHandler.createShipmentInvoiceLine(invoice, pricingLine, qty, lineNo);
     il.setGoodsShipmentLine(retLine);
+    // The original document's order line is only the SOURCE of price and tax. Keeping it as the
+    // line's C_OrderLine_ID would make the core treat this negative line as an invoice OF that
+    // order: C_INVOICE_POST adds the (negative) quantity to C_OrderLine.QtyInvoiced, so a fully
+    // invoiced order reads as pending again and its linked-invoice total drops below the order
+    // total. The rectificative invoice is tied to the return document through
+    // M_InOutLine_ID (above) and to the invoice it rectifies through C_Invoice_Reverse — never
+    // to the order.
+    il.setSalesOrderLine(null);
 
     BigDecimal unitPrice = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
     if (unitPrice.compareTo(BigDecimal.ZERO) == 0 && origLine != null) {
