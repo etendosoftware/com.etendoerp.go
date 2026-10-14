@@ -496,6 +496,24 @@ public class NeoCommercialLinePolicyTest {
   }
 
   /**
+   * ETP-5703 repro: 3 × 1.50 at 21 % persisted {@code grossAmount = 5.445} on every channel — the
+   * amounts were derived in {@code double} and never rounded. The gross must come out rounded
+   * HALF_UP to the currency precision (2 by default), and the net stays exact.
+   */
+  @Test
+  public void testInjectCommercialAmounts_grossRoundedHalfUpToCurrencyPrecision() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("invoicedQuantity", "3")
+        .put("unitPrice", 1.5)
+        .put("tax", "TAX21");
+
+    withTaxRate(21.0, () -> NeoCommercialLinePolicy.injectCommercialAmounts(body));
+
+    assertEquals("4.5", String.valueOf(body.get("lineNetAmount")));
+    assertEquals("5.45", String.valueOf(body.get("grossAmount")));
+  }
+
+  /**
    * Centralising the sequence must not leak invoice-side fields onto order lines: an order line
    * uses {@code orderedQuantity}, so only {@code lineGrossAmount} may be produced.
    */

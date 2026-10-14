@@ -93,8 +93,8 @@ final class InvoiceLineAmountSupport {
    *
    * <p><b>Typed values.</b> On {@code etendo_create} the pre-hook runs after
    * {@code coerceFieldTypes}, so the amounts are written as {@link BigDecimal}, the DAL type of
-   * both columns. The value is the policy's own, unrounded, exactly what {@code etendo_batch}
-   * persists for the same line.
+   * both columns. The value is the policy's own, rounded to the invoice currency's standard
+   * precision (ETP-5703), exactly what {@code etendo_batch} persists for the same line.
    *
    * <p>Total: never throws.
    *
@@ -112,7 +112,8 @@ final class InvoiceLineAmountSupport {
     }
     try {
       JSONObject view = amountInputs(body);
-      NeoCommercialLinePolicy.injectCommercialAmounts(view);
+      NeoCommercialLinePolicy.injectCommercialAmounts(view,
+          NeoCurrencyPrecision.forWrite(ctx.getAdTab(), body, null));
       for (String out : AMOUNT_OUTPUTS) {
         writeIfStale(body, out, view.opt(out));
       }

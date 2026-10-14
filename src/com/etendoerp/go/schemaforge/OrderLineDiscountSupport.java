@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.function.IntSupplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -268,7 +269,8 @@ final class OrderLineDiscountSupport {
           Collections.singletonList(FIELD_DISCOUNT), protectedFields(body, staleAmounts),
           SUPPRESSED_ON_REFIRE);
       if (update) {
-        deriveAmountsOnUpdate(body, formState, before);
+        deriveAmountsOnUpdate(body, formState, before,
+            NeoCurrencyPrecision.forWrite(adTab, formState, ctx.getRecordId()));
       } else {
         dropStaleGrossAfterRefire(body, staleAmounts);
       }
@@ -431,8 +433,18 @@ final class OrderLineDiscountSupport {
    */
   static void deriveAmountsOnUpdate(JSONObject body, JSONObject formState, JSONObject sentBody)
       throws JSONException {
+    deriveAmountsOnUpdate(body, formState, sentBody,
+        () -> NeoCurrencyPrecision.DEFAULT_SCALE);
+  }
+
+  /**
+   * {@link #deriveAmountsOnUpdate(JSONObject, JSONObject, JSONObject)} rounding to
+   * {@code amountScale} — the line currency's standard precision (ETP-5703).
+   */
+  static void deriveAmountsOnUpdate(JSONObject body, JSONObject formState, JSONObject sentBody,
+      IntSupplier amountScale) throws JSONException {
     JSONObject view = amountInputs(body, formState);
-    NeoCommercialLinePolicy.injectCommercialAmounts(view);
+    NeoCommercialLinePolicy.injectCommercialAmounts(view, amountScale);
     for (String out : AMOUNT_OUTPUTS) {
       if (view.has(out) && !sentBody.has(out)) {
         body.put(out, view.get(out));
@@ -491,7 +503,8 @@ final class OrderLineDiscountSupport {
     }
     try {
       JSONObject view = amountInputs(body, null);
-      NeoCommercialLinePolicy.injectCommercialAmounts(view);
+      NeoCommercialLinePolicy.injectCommercialAmounts(view,
+          NeoCurrencyPrecision.forWrite(ctx.getAdTab(), body, null));
       if (!view.has(FIELD_LINE_GROSS_AMOUNT)) {
         return;
       }

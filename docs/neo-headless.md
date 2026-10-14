@@ -3599,11 +3599,27 @@ measured on a local build and read back from the DB:
 
 `etendo_create` never reaches `executePostCreate`, where `etendo_batch` runs `injectCommercialAmounts`.
 The sales invoice line customization now calls it explicitly on every create (§4.12.20, *Sales
-invoice lines*), and writes the policy's own unrounded value — the same one `etendo_batch` persists, so
-the two verbs agree to the last digit. `McpToolRouter.handleCreate` is unchanged. **Purchase invoice
+invoice lines*), and writes the policy's own value — the same one `etendo_batch` persists, so
+the two verbs agree to the last digit. Since ETP-5703 that value is rounded HALF_UP to the document
+currency's standard precision on every channel (the "unrounded" figures above are the pre-ETP-5703
+measurements; see *Line amounts are rounded to the currency precision* below). `McpToolRouter.handleCreate` is unchanged. **Purchase invoice
 lines still persist 0 / 0 on `etendo_create`**, and purchase order lines still persist a gross amount
 of 0, as on `develop` (re-measured 2026-09-30) — they are not annotated and stay on
 `InvoiceLineHandler` / `OrderLineHandler` alone.
+
+##### Line amounts are rounded to the currency precision (ETP-5703)
+
+`NeoCommercialLinePolicy.injectCommercialAmounts` derived `lineNetAmount`, `grossAmount` and
+`lineGrossAmount` in `double` and wrote them unrounded (`lineGrossAmount` alone was rounded, to a fixed
+2): 120 × 1.50 at 21 % persisted `grossAmount = 217.79999999999998` through `etendo_batch`, and
+3 × 1.50 persisted `5.445` through `etendo_create`. The amounts are now computed in `BigDecimal` and
+rounded HALF_UP to `C_Currency.StdPrecision` of the record's currency, which is what core's amount
+callouts store. The currency is resolved **structurally** by `NeoCurrencyPrecision`: the first
+property whose target entity is `Currency`, on the line itself (body or stored record) and failing that
+on its `IsParent` record; 2 decimals when none resolves. No entity is named. It applies on every
+channel that derives these amounts — `NeoCrudHandler` create and update (REST single, REST batch,
+`etendo_batch`) and the line customizations that call the policy explicitly (`etendo_create`). A value
+that is already correctly rounded is unchanged.
 
 ##### REST `/sws/neo/batch` is unaffected
 
@@ -7790,14 +7806,15 @@ short-circuits), calls `InvoiceLineAmountSupport.deriveAmountsOnCreate` (CRUD PO
   afterwards, and for an invoice line both injectors write unconditionally (qty × price, then net ×
   (1 + rate)): whatever the pre-hook wrote is replaced by the same function over the same inputs, so
   those channels persist exactly what they did before.
-- Values are written as `BigDecimal` (`etendo_create` coerced before its pre-hook) and unrounded — the
-  policy's own value, identical to `etendo_batch`'s.
+- Values are written as `BigDecimal` (`etendo_create` coerced before its pre-hook) — the policy's own
+  value, identical to `etendo_batch`'s, rounded to the invoice currency's standard precision since
+  ETP-5703.
 - **Amounts only.** Prices, `standardPrice` and the line discount (`etgoDiscount`) are neither read
   for a decision nor written.
 
 | channel | sales invoice line, Fernet 18 × 10, 21 %: `lineNetAmount` / `grossAmount` |
 |---|---|
-| `etendo_create` | 180 / 217.79999999999998 (was 0 / 0) |
+| `etendo_create` | 180 / 217.79999999999998 (was 0 / 0); 180 / 217.80 since ETP-5703 |
 | `etendo_batch` | 180 / 217.79999999999998 (unchanged) |
 | REST single — the React form | unchanged: the add-line POST sends its own `lineNetAmount` and `grossAmount`, and `executePostCreate` re-derives both after the pre-hook as it always has |
 
