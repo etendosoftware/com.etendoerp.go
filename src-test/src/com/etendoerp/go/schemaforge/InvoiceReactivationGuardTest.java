@@ -262,6 +262,21 @@ public class InvoiceReactivationGuardTest {
         rectificativaRows("RECT-001"))).getJSONObject("messageParams").getString("fiscalSystem"));
   }
 
+  /**
+   * {@code fiscallyAcceptedSystem}'s if/else-if chain deterministically picks SII first when more
+   * than one fiscal system is simultaneously accepted — documented in the production Javadoc,
+   * guarded here.
+   */
+  @Test
+  public void siiTakesPrecedenceOverVerifactuWhenBothAreSimultaneouslyAccepted() throws Exception {
+    Invoice invoice = invoice(true);
+    when(invoice.getAeatsiiEstado()).thenReturn("CO");
+    when(invoice.getEtvfacInvoiceStatus()).thenReturn("AC");
+
+    assertEquals("SII", body(check(reactivateAction(rootBody("RE")), invoice,
+        rectificativaRows("RECT-004"))).getJSONObject("messageParams").getString("fiscalSystem"));
+  }
+
   @Test
   public void everySiiNonAcceptedStatusPassesThrough() throws Exception {
     for (String status : List.of("PE", "EE", "IN", "NR", "AN", "BA")) {

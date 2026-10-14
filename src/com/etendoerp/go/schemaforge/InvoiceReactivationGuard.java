@@ -212,6 +212,11 @@ public final class InvoiceReactivationGuard {
    * The human-readable name of the fiscal system that accepted this invoice, or {@code null} when
    * none of the three has an accepted status. Reading all three stored columns is cheap and
    * harmless even for a system the org never configured (the column then simply stays blank).
+   *
+   * <p><b>Precedence when more than one system is simultaneously accepted</b> (e.g. an org
+   * migrating between fiscal systems momentarily has both columns set): the if/else-if chain
+   * below deterministically picks SII first, then Verifactu, then TicketBAI. This is a
+   * documentation clarification only — the order itself is unchanged.
    */
   private static String fiscallyAcceptedSystem(Invoice invoice) {
     String sii = invoice.getAeatsiiEstado();
