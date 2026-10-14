@@ -305,6 +305,7 @@ public class TenantContextSubscriptionWriteIntegrationTest extends OBBaseTest {
     RecordingCheckoutRequestStore firstA = upgradeAsTenantAdmin(tenantA);
     assertEquals("Sanity: while ON, tenant A got a row", 1L, openActiveSubscriptionCount(tenantA));
     assertEquals(1, firstA.finds);
+    String rowOfA = openActiveSubscriptionId(tenantA);
 
     nativeUpdate("INSERT INTO AD_PREFERENCE (AD_PREFERENCE_ID, AD_CLIENT_ID, AD_ORG_ID, "
             + "ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, PROPERTY, VALUE, "
@@ -316,6 +317,9 @@ public class TenantContextSubscriptionWriteIntegrationTest extends OBBaseTest {
     RecordingCheckoutRequestStore secondA = upgradeAsTenantAdmin(tenantA);
     assertEquals("Tenant A has a row, so its new payment takes the row path", 1, secondA.finds);
     assertEquals("and reuses its open row", 1L, openActiveSubscriptionCount(tenantA));
+    assertEquals("without closing it and opening another", 1L, allSubscriptionCount(tenantA));
+    assertEquals("The open row is the same row as before the second payment", rowOfA,
+        openActiveSubscriptionId(tenantA));
     assertEquals("Tenant A never gets the marker", 0L, planPreferenceCount(tenantA));
 
     RecordingCheckoutRequestStore firstB = upgradeAsTenantAdmin(tenantB);
@@ -362,6 +366,24 @@ public class TenantContextSubscriptionWriteIntegrationTest extends OBBaseTest {
   private long openActiveSubscriptionCount(String tenant) {
     return count("SELECT COUNT(*) FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant"
         + " AND END_DATE IS NULL AND ISACTIVE = 'Y'", "tenant", tenant);
+  }
+
+  /** The id of {@code tenant}'s single open, active row, read as System. */
+  @SuppressWarnings("rawtypes")
+  private static String openActiveSubscriptionId(String tenant) {
+    OBContext previous = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+          "SELECT ETGO_SUBSCRIPTION_ID FROM ETGO_SUBSCRIPTION WHERE ENVIRONMENT_CLIENT_ID = :tenant"
+              + " AND END_DATE IS NULL AND ISACTIVE = 'Y'");
+      bind(query, "tenant", tenant);
+      return (String) query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+      OBContext.setOBContext(previous);
+    }
   }
 
   private long allSubscriptionCount(String tenant) {
