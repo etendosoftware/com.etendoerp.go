@@ -973,6 +973,9 @@ rule for any new use: the key carries everything the lookup reads, namespaced by
 two operations that would get different answers never share one. The memo is dropped whenever the
 DAL session changes — a process committing mid-batch closes it, and a DAL object loaded before that
 is detached.
+When the batch closes it logs one line with the hits and misses per namespace (owning class +
+lookup name), e.g. `[NEO-PERF] batch memo BatchService|spec hits=39 misses=1, BatchService|entity
+hits=36 misses=4, …`; nothing is logged for a batch that memoized nothing.
 
 ### 4.4 Selectors (FK Dropdowns)
 
