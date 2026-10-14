@@ -841,6 +841,55 @@ way would be a write permission grant, not a response projection, so the two are
 separate. `queryParams` is `null` for every existing 2-arg call site (write paths, tests), which is
 a no-op for `includeRequestedExtraProperties`.
 
+#### 4.3.6 An `@SQL=` foreign-key default never resolves to another tenant's row (ETP-5682)
+
+Some core `AD_Column` defaults query a client-scoped table with no `AD_Client_ID` filter. The one
+that broke production is `GL_Journal.C_DocType_ID`:
+`SELECT C_DocType_ID FROM C_DocType WHERE DocBaseType='GLJ' AND AD_ISORGINCLUDED(@AD_Org_ID@, AD_Org_ID, @#AD_Client_ID@) <> '-1' ORDER BY isdefault DESC`.
+Every tenant keeps its GLJ document type in org `0`, so the query matches the document type of
+every client and the first row is arbitrary. Classic hides it behind the combo's client filter;
+NEO evaluated it as-is, so manual journals took another tenant's document type, were numbered from
+that tenant's sequence and collided on `gl_journal_docno`. Other unscoped defaults of the same
+shape exist (e.g. the `returnToVendorShipment.documentType` `ETGO_SF_FIELD` default).
+
+`NeoDefaultTenantGuard`, called from `NeoDefaultsSqlHelper.resolveSQLDefaultWithOutcome` — the one
+choke point for `GET /defaults`, the create-time mandatory-default injection and MCP create —
+applies when the column is a foreign key (by primary key) to a **client-enabled** table and the
+context client is not `0`:
+
+- the query's rows are read in its own order, 200 at a time, and one
+  `SELECT <pk>, AD_Client_ID FROM <table> WHERE <pk> IN (…)` per batch resolves their owners;
+  the scan stops at the first acceptable row, so the usual case is one batch and one lookup.
+  There is no cap: an unscoped document-type default spans every tenant (production has more than
+  800 sales-order document types), and a cap would hide the tenant's own row past it;
+- the first row owned by the context client **or by client `0`** wins;
+- if every row belongs to another tenant, the outcome is "zero rows" (no default, the existing
+  `metadata.notes` explanation applies);
+- whenever at least one foreign row was skipped — also when the tenant's own row turns up later —
+  one WARN per resolution names the column, the table and the number of skipped rows, never the
+  ids. A recurring WARN for a column is the signal that its default needs a client-scoped
+  `defaultExpr`;
+- a row whose value is `null` is never chosen; if no non-null row is acceptable the outcome is
+  "zero rows" (without the guard a `null` first row resolves to `null` — the default is empty
+  either way, only `metadata.notes` differs);
+- a row it cannot find by primary key is accepted, and a failed lookup falls back to the first
+  row. On PostgreSQL a lookup that fails with an SQL error also aborts the transaction, exactly as
+  a failure of the default query itself would; the lookup reads only the primary key and
+  `AD_Client_ID` with names from the DAL model, so this is not expected in practice.
+
+The rule is structural (a default may never point at another tenant's row) and names no entity.
+A window can still pin the exact value with a client-scoped `defaultExpr` in its `decisions.json`
+(`simple-g-l-journal` does, for a deterministic order and no cross-tenant scan).
+
+**A row limit in the default defeats the guard.** `ORDER BY … LIMIT 1` on an unscoped query hands
+the guard a single row, usually another tenant's, so the outcome is "zero rows" instead of the
+tenant's own value. Scope such a default by `AD_Client_ID=@#AD_Client_ID@` instead of limiting it.
+
+Tests: `NeoDefaultTenantGuardTest` (applicability, ordering, batching across the 200-row boundary,
+unknown ids, lookup failure, null rows) and the `testResolveSqlDefaultOutcomeTenantGuard*` cases in
+`NeoDefaultsServiceTest`. Background and the list of known unscoped defaults:
+`etendo_schema_forge` `docs/etendo-ad/unscoped-sql-defaults.md`.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
