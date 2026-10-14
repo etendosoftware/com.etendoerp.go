@@ -26,6 +26,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+
 /**
  * State that lives for exactly one {@code /sws/neo/batch} (or MCP {@code etendo_batch}) request
  * and is shared by its operations (ETP-5676).
@@ -38,16 +41,25 @@ import org.openbravo.dal.service.OBDal;
  * request or leak into the next one served by the pooled thread. Outside a batch
  * {@link #current()} is {@code null} and every reader behaves exactly as before.</p>
  *
- * <p>What it holds is generic: the request's options ({@code _onlyReturnIds}), the per-batch
- * callout-discard memory and a lookup memo ({@link #memoize}). Nothing in it names an entity; a
- * customization that memoizes names its own keys.</p>
+ * <p>What it holds is generic: the request's options ({@code _onlyReturnIds},
+ * {@code _skipRedundantCallouts}), the per-batch callout-discard memory and a lookup memo
+ * ({@link #memoize}). Nothing in it names an entity; a customization that memoizes names its own
+ * keys.</p>
+ *
+ * <p>The callout-discard memory exists only when the request opted in with
+ * {@code _skipRedundantCallouts} <em>and</em> the {@link GoFeatureFlags#FLAG_BATCH_CALLOUT_SKIP_DISABLED}
+ * kill switch is off. Otherwise {@link #currentCalloutDiscardMemory()} answers {@code null} and the
+ * cascade runs every callout, exactly as outside a batch.</p>
  */
 public final class NeoBatchScope {
 
   private static final Logger log = LogManager.getLogger(NeoBatchScope.class);
   private static final ThreadLocal<NeoBatchScope> CURRENT = new ThreadLocal<>();
+  /** The kill switch is environment level: no targeting key, no attributes. */
+  private static final FeatureFlagContext ENVIRONMENT = FeatureFlagContext.forAccount(null);
 
-  private final NeoCalloutDiscardMemory calloutDiscardMemory = new NeoCalloutDiscardMemory();
+  /** {@code null} unless the request opted in and the kill switch is off. */
+  private final NeoCalloutDiscardMemory calloutDiscardMemory;
   private final boolean onlyReturnIds;
   private final Map<String, Object> memo = new HashMap<>();
   /** The DAL session the memo's values were loaded in; see {@link #memoize}. */
@@ -55,21 +67,46 @@ public final class NeoBatchScope {
   /** Namespace to {hits, misses}, reported once when the batch closes. Insertion-ordered. */
   private final Map<String, int[]> memoStats = new LinkedHashMap<>();
 
-  private NeoBatchScope(boolean onlyReturnIds) {
+  private NeoBatchScope(boolean onlyReturnIds, boolean skipRedundantCallouts) {
     this.onlyReturnIds = onlyReturnIds;
+    this.calloutDiscardMemory = skipRedundantCallouts && !calloutSkipKillSwitchOn()
+        ? new NeoCalloutDiscardMemory()
+        : null;
+  }
+
+  /**
+   * Opens a scope with every option off. <b>Must be paired with {@link #close(NeoBatchScope)} in a
+   * finally block</b>, passing the value returned here.
+   *
+   * @param onlyReturnIds the request's {@code _onlyReturnIds} option
+   * @return the scope that was current before (normally {@code null}), to restore on close
+   */
+  static NeoBatchScope open(boolean onlyReturnIds) {
+    return open(onlyReturnIds, false);
   }
 
   /**
    * Opens a scope for the current thread. <b>Must be paired with {@link #close(NeoBatchScope)} in
    * a finally block</b>, passing the value returned here.
    *
-   * @param onlyReturnIds the request's {@code _onlyReturnIds} option
+   * @param onlyReturnIds         the request's {@code _onlyReturnIds} option
+   * @param skipRedundantCallouts the request's {@code _skipRedundantCallouts} option; honoured only
+   *                              while the kill switch is off
    * @return the scope that was current before (normally {@code null}), to restore on close
    */
-  static NeoBatchScope open(boolean onlyReturnIds) {
+  static NeoBatchScope open(boolean onlyReturnIds, boolean skipRedundantCallouts) {
     NeoBatchScope previous = CURRENT.get();
-    CURRENT.set(new NeoBatchScope(onlyReturnIds));
+    CURRENT.set(new NeoBatchScope(onlyReturnIds, skipRedundantCallouts));
     return previous;
+  }
+
+  /**
+   * Toggle point of {@link GoFeatureFlags#FLAG_BATCH_CALLOUT_SKIP_DISABLED}. Evaluated once per
+   * batch, when the scope opens. A missing flag or an unreachable control plane resolves to
+   * {@code false}, which leaves the skip available to requests that ask for it.
+   */
+  static boolean calloutSkipKillSwitchOn() {
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_BATCH_CALLOUT_SKIP_DISABLED, ENVIRONMENT);
   }
 
   /**
@@ -89,7 +126,9 @@ public final class NeoBatchScope {
     NeoBatchScope closing = CURRENT.get();
     try {
       if (closing != null) {
-        closing.calloutDiscardMemory.logSummary();
+        if (closing.calloutDiscardMemory != null) {
+          closing.calloutDiscardMemory.logSummary();
+        }
         closing.logMemoSummary();
       }
     } catch (RuntimeException e) {
@@ -193,7 +232,8 @@ public final class NeoBatchScope {
 
   /**
    * @return the callout-discard memory of the batch running on this thread, or {@code null}
-   *     outside a batch (the cascade then runs every callout, as it always has)
+   *     outside a batch, when the request did not send {@code _skipRedundantCallouts}, or when the
+   *     kill switch is on (the cascade then runs every callout, as it always has)
    */
   static NeoCalloutDiscardMemory currentCalloutDiscardMemory() {
     NeoBatchScope scope = CURRENT.get();

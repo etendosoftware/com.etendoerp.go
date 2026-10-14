@@ -3906,9 +3906,10 @@ class NeoCrudHandlerTest {
             eq(context), eq(adTab), any(), any(), any(), any(),
             org.mockito.ArgumentMatchers.isNull()));
 
-        NeoBatchScope previous = NeoBatchScope.open(false);
+        NeoBatchScope previous = NeoBatchScope.open(false, true);
         try {
           NeoCalloutDiscardMemory memory = NeoBatchScope.currentCalloutDiscardMemory();
+          assertNotNull(memory);
           invokePrivate(handler, "executePostCalloutCascade", signature,
               body, adTab, context, Collections.emptySet(), Collections.emptySet());
           cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
