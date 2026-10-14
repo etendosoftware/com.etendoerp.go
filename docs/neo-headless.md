@@ -3674,6 +3674,19 @@ behaviour is unchanged. Channels as noted per field:
   a single bill-to location. The agent sends the address (one `etendo_selectors` call) or uses
   `etendo_batch`. Running the pre-hook before that check is a platform decision, pending and outside
   ETP-5703.
+- **Sales order and sales quotation headers** (`SalesOrderHeaderHandler`,
+  `SalesQuotationHeaderHandler`; not the purchase order) — the same create default for
+  `partnerAddress`, with the location flag the column's own AD validation rule requires:
+  `C_Order.C_BPartner_Location_ID` uses "C_BPartner Location - Ship To" (`IsShipTo='Y'`), the invoice
+  uses "… - Bill To" (`IsBillTo='Y'`). Only when that fills `partnerAddress` is `invoiceAddress`
+  (`BillTo_ID`, "… - Bill To") defaulted the same way, so an order the server addressed also has a
+  bill-to; a caller that sent an address (the SPA) is untouched. Shared helper:
+  `PartnerLocationDefaults` (names no entity; each customization passes the key and the flag).
+  On MCP `etendo_batch` the batch preprocessor's `McpBillToInjector` runs first and normally sets
+  `invoiceAddress` from the partner's bill-to location, in which case the pre-hook leaves it. Same
+  **declared divergence** as the invoice: MCP `etendo_create` still answers the `partnerAddress` 422,
+  because its mandatory pre-check runs before the customization pre-hook (platform decision,
+  pending).
 - **`eTGOCurrencyRate`** (`EM_ETGO_Currency_Rate`) — when a create, or an update that changes the
   currency, carries no rate, the post-hook resolves the org→document rate for the invoice date
   (`NeoExchangeRateService.rateAsDecimal`: direct, then inverse — the lookup behind `currencyOptions`,

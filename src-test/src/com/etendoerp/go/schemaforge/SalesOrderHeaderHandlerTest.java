@@ -55,6 +55,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.businesspartner.Location;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
@@ -67,6 +68,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  *   <li><strong>DB-mocked</strong> – mocks OBDal/Connection/PreparedStatement/ResultSet to test
  *       the hasLinkedDocuments annotation logic for both single-record and list responses</li>
  * </ul>
+ *
+ * <p>Also the create pre-hook's partnerAddress/invoiceAddress default (ETP-5703).
+ *
+ * @covers com.etendoerp.go.schemaforge.SalesOrderHeaderHandler
+ * @covers com.etendoerp.go.schemaforge.PartnerLocationDefaults
  */
 public class SalesOrderHeaderHandlerTest {
 
@@ -732,5 +738,77 @@ public class SalesOrderHeaderHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new SalesOrderHeaderHandler().handle(ctx));
+  }
+
+  // ── ETP-5703: partnerAddress / invoiceAddress default on create ─────────────
+
+  /** A Location criteria whose list() answers {@code locations}, for every flag queried. */
+  @SuppressWarnings("unchecked")
+  private static void stubLocations(OBDal dal, List<Location> locations) {
+    OBCriteria<Location> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Location.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(locations);
+  }
+
+  private static NeoContext createCtx(JSONObject body) {
+    return NeoContext.builder().httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+  }
+
+  /**
+   * ETP-5703 repro: an etendo_batch sales-order header with only {@code businessPartner} (partner with
+   * a single location) answered 422 for {@code partnerAddress}. The create pre-hook fills it, and the
+   * bill-to address with it.
+   */
+  @Test
+  public void testHandleCreateWithSingleLocationFillsPartnerAndInvoiceAddress() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location only = mock(Location.class);
+      when(only.getId()).thenReturn("loc-1");
+      stubLocations(dal, Collections.singletonList(only));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("loc-1", body.getString("partnerAddress"));
+      assertEquals("loc-1", body.getString("invoiceAddress"));
+    }
+  }
+
+  /** Two eligible locations: the choice is the caller's, nothing is filled. */
+  @Test
+  public void testHandleCreateWithTwoLocationsAbstains() throws Exception {
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Location first = mock(Location.class);
+      Location second = mock(Location.class);
+      when(first.getId()).thenReturn("loc-1");
+      when(second.getId()).thenReturn("loc-2");
+      stubLocations(dal, java.util.Arrays.asList(first, second));
+      JSONObject body = new JSONObject().put("businessPartner", "bp-1");
+
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertFalse(body.has("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+    }
+  }
+
+  /** An address the caller sent is kept, and nothing is read. */
+  @Test
+  public void testHandleCreateWithSentAddressLeavesBodyAlone() throws Exception {
+    JSONObject body = new JSONObject().put("businessPartner", "bp-1")
+        .put("partnerAddress", "loc-caller");
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      assertNull(new SalesOrderHeaderHandler().handle(createCtx(body)));
+
+      assertEquals("loc-caller", body.getString("partnerAddress"));
+      assertFalse(body.has("invoiceAddress"));
+      obDal.verifyNoInteractions();
+    }
   }
 }

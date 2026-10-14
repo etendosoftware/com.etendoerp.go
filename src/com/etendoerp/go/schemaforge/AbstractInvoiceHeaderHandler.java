@@ -42,7 +42,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.businesspartner.Location;
@@ -91,7 +90,6 @@ public abstract class AbstractInvoiceHeaderHandler {
   private static final String FIELD_CURRENCY_RATE = "eTGOCurrencyRate";
   /** {@code C_BPartner_Location_ID}: the invoicing address. */
   static final String FIELD_PARTNER_ADDRESS = "partnerAddress";
-  static final String FIELD_BUSINESS_PARTNER = "businessPartner";
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
@@ -1085,43 +1083,9 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @param context the current request context; its request body is mutated in place
    */
   protected static void injectPartnerAddressIfMissing(NeoContext context) {
-    if (context == null || !NeoEndpointType.CRUD.equals(context.getEndpointType())
-        || !"POST".equals(context.getHttpMethod()) || context.getRecordId() != null) {
-      return;
-    }
-    JSONObject body = context.getRequestBody();
-    if (body == null || hasUsableValue(body, FIELD_PARTNER_ADDRESS)) {
-      return;
-    }
-    String partnerId = usableValue(body, FIELD_BUSINESS_PARTNER);
-    if (partnerId == null) {
-      return;
-    }
-    try {
-      String locationId = findSingleBillToLocation(partnerId);
-      if (locationId != null) {
-        body.put(FIELD_PARTNER_ADDRESS, locationId);
-        log.debug("[ETP-5703] Defaulted partnerAddress {} from business partner {}", locationId,
-            partnerId);
-      }
-    } catch (Exception e) {
-      log.debug("[ETP-5703] partnerAddress default skipped for partner {}: {}", partnerId,
-          e.getMessage());
-    }
-  }
-
-  /**
-   * @return the id of the partner's only active bill-to location, or {@code null} when it has none
-   *     or more than one
-   */
-  static String findSingleBillToLocation(String partnerId) {
-    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
-    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", partnerId));
-    crit.add(Restrictions.eq(Location.PROPERTY_INVOICETOADDRESS, true));
-    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
-    crit.setMaxResults(2);
-    List<Location> locations = crit.list();
-    return locations.size() == 1 ? locations.get(0).getId() : null;
+    // The invoicing address column's AD rule ("C_BPartner Location - Bill To") requires IsBillTo.
+    PartnerLocationDefaults.fillIfMissing(context, FIELD_PARTNER_ADDRESS,
+        Location.PROPERTY_INVOICETOADDRESS);
   }
 
   /** Why a write leaves the exchange rate to the server (ETP-5703). */
@@ -1403,22 +1367,12 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
-  /** {@code true} when {@code key} holds a real value: not absent, null, blank, "null" or "0". */
   private static boolean hasUsableValue(JSONObject body, String key) {
-    if (!body.has(key) || body.isNull(key)) {
-      return false;
-    }
-    String value = body.optString(key, "").trim();
-    return !value.isEmpty() && !"null".equals(value) && !"0".equals(value);
+    return PartnerLocationDefaults.hasUsableValue(body, key);
   }
 
-  /** The id held under {@code key}, or {@code null} when unusable or still a batch reference. */
   private static String usableValue(JSONObject body, String key) {
-    if (!hasUsableValue(body, key)) {
-      return null;
-    }
-    String value = body.optString(key, "").trim();
-    return value.startsWith(BatchService.REF_PREFIX) ? null : value;
+    return PartnerLocationDefaults.usableValue(body, key);
   }
 
   // ---------------------------------------------------------------------------
