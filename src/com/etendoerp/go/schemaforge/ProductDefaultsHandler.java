@@ -393,8 +393,7 @@ public class ProductDefaultsHandler implements NeoHandler {
    */
   private void seedPriceOnDefaultTariff(NeoContext context, Product product,
       boolean salesPriceList) {
-    String versionId = PriceListVersionResolver.resolveDefaultVersionId(context.getObContext(),
-        salesPriceList);
+    String versionId = resolveDefaultVersionId(context.getObContext(), salesPriceList);
     if (StringUtils.isBlank(versionId)) {
       log.debug("No default {} price list configured; product {} gets no seeded price",
           salesPriceList ? "sales" : "purchase", product.getId());
@@ -421,6 +420,22 @@ public class ProductDefaultsHandler implements NeoHandler {
     price.setListPrice(BigDecimal.ZERO);
     price.setPriceLimit(BigDecimal.ZERO);
     OBDal.getInstance().save(price);
+  }
+
+  /**
+   * The default tariff version for one direction, resolved once per batch request (ETP-5676).
+   * Keyed by client and current organisation — the two inputs
+   * {@link PriceListVersionResolver#resolveDefaultVersionId} reads from the context.
+   */
+  private static String resolveDefaultVersionId(OBContext obContext, boolean salesPriceList) {
+    String clientId = obContext != null && obContext.getCurrentClient() != null
+        ? obContext.getCurrentClient().getId() : null;
+    String orgId = obContext != null && obContext.getCurrentOrganization() != null
+        ? obContext.getCurrentOrganization().getId() : null;
+    return NeoBatchScope.memoize(
+        ProductDefaultsHandler.class.getName() + "|priceListVersion|" + salesPriceList + "|"
+            + clientId + "|" + orgId,
+        () -> PriceListVersionResolver.resolveDefaultVersionId(obContext, salesPriceList));
   }
 
   /**
@@ -606,6 +621,15 @@ public class ProductDefaultsHandler implements NeoHandler {
    *         row marked as default
    */
   String resolveDefaultId(Class<? extends BaseOBObject> entityClass, String clientId) {
+    // ETP-5676: once per batch request and client — every product of an import asks the same.
+    return NeoBatchScope.memoize(
+        ProductDefaultsHandler.class.getName() + "|default|" + entityClass.getName() + "|"
+            + clientId,
+        () -> resolveDefaultIdUncached(entityClass, clientId));
+  }
+
+  private String resolveDefaultIdUncached(Class<? extends BaseOBObject> entityClass,
+      String clientId) {
     if (StringUtils.isNotBlank(clientId)) {
       String ownDefault = queryDefaultId(entityClass, clientId);
       if (ownDefault != null) {

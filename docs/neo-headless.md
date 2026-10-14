@@ -964,6 +964,16 @@ the callouts measured here, and the reason this is confined to bulk writes. The 
 identical to running every callout, so this is not a channel divergence (§4.12.9); REST batch and
 `etendo_batch` share it because both go through `BatchService`.
 
+**Automatic: per-batch lookup memo.** `NeoBatchScope.memoize(key, loader)` answers a lookup once per
+batch request and reuses it for every later operation; outside a batch it just calls the loader. Used
+for `BatchService`'s `findSpec` / `findEntity` (keyed by spec name, and spec id + entity name) and, in
+the product customization, for the default `uOM` / `taxCategory` (keyed by entity class + client) and
+the default sales/purchase tariff version (keyed by direction + client + current organisation). The
+rule for any new use: the key carries everything the lookup reads, namespaced by the owning class, so
+two operations that would get different answers never share one. The memo is dropped whenever the
+DAL session changes — a process committing mid-batch closes it, and a DAL object loaded before that
+is detached.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
