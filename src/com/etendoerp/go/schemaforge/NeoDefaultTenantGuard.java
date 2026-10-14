@@ -144,48 +144,62 @@ final class NeoDefaultTenantGuard {
     String firstRow = null;
     boolean anyRow = false;
     int rejected = 0;
-    List<String> batch = new ArrayList<>(BATCH_SIZE);
-    boolean exhausted = false;
-    while (!exhausted) {
-      batch.clear();
-      while (batch.size() < BATCH_SIZE && !exhausted) {
-        if (rows.next()) {
-          batch.add(rows.getString(1));
-        } else {
-          exhausted = true;
-        }
-      }
-      if (batch.isEmpty()) {
-        break;
-      }
+    List<String> batch = readBatch(rows);
+    // A short batch means the result set is exhausted: do not call next() on it again.
+    boolean more = batch.size() == BATCH_SIZE;
+    while (!batch.isEmpty()) {
       if (!anyRow) {
         anyRow = true;
         firstRow = batch.get(0);
       }
-      List<String> ids = new ArrayList<>(batch.size());
-      for (String candidate : batch) {
-        if (candidate != null) {
-          ids.add(candidate);
-        }
-      }
-      if (ids.isEmpty()) {
-        continue;
-      }
-      Optional<Map<String, String>> lookup = loadClients(ids);
-      if (lookup.isEmpty()) {
-        logRejected(rejected);
-        return new Scan(true, firstRow);
-      }
-      for (String candidate : ids) {
-        if (isAcceptable(lookup.get().get(candidate))) {
+      List<String> ids = nonNullValues(batch);
+      if (!ids.isEmpty()) {
+        Optional<Map<String, String>> lookup = loadClients(ids);
+        if (lookup.isEmpty()) {
           logRejected(rejected);
-          return new Scan(true, candidate);
+          return new Scan(true, firstRow);
         }
-        rejected++;
+        int accepted = indexOfAcceptable(ids, lookup.get());
+        if (accepted >= 0) {
+          logRejected(rejected + accepted);
+          return new Scan(true, ids.get(accepted));
+        }
+        rejected += ids.size();
       }
+      batch = more ? readBatch(rows) : List.of();
+      more = batch.size() == BATCH_SIZE;
     }
     logRejected(rejected);
     return anyRow ? new Scan(true, null) : Scan.NO_ROWS;
+  }
+
+  /** Up to {@link #BATCH_SIZE} values of the next rows; empty when there are none left. */
+  private static List<String> readBatch(ResultSet rows) throws SQLException {
+    List<String> batch = new ArrayList<>(BATCH_SIZE);
+    while (batch.size() < BATCH_SIZE && rows.next()) {
+      batch.add(rows.getString(1));
+    }
+    return batch;
+  }
+
+  private static List<String> nonNullValues(List<String> batch) {
+    List<String> ids = new ArrayList<>(batch.size());
+    for (String candidate : batch) {
+      if (candidate != null) {
+        ids.add(candidate);
+      }
+    }
+    return ids;
+  }
+
+  /** Position of the first acceptable candidate, or {@code -1} when every one is rejected. */
+  private int indexOfAcceptable(List<String> ids, Map<String, String> clientById) {
+    for (int i = 0; i < ids.size(); i++) {
+      if (isAcceptable(clientById.get(ids.get(i)))) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   /** A row is acceptable when it is unknown, the current client's, or client 0's. */
