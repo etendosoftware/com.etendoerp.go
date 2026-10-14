@@ -333,6 +333,60 @@ else
   echo "==> Relevance: no reliable change set (base='${BASE_REF:-none}') → running ALL steps."
 fi
 
+# 0. Conventions (ETP-5695): what CI's Git Police, Test Hygiene and Unit Test Classification
+# would reject, checked before the slow steps. CI keeps all three: hooks can be skipped, and only
+# Git Police sees the PR title. The branch check (lib/git-conventions.sh) blocks only a target
+# branch-merge-policy.yml rejects; an unusual name only warns, since Git Police's own rules are
+# not in this repo. The two test checks run when the push touches tests, build.gradle or them.
+. "$SCRIPT_DIR/lib/git-conventions.sh"
+PUSH_BRANCH="$(pushed_branch "$PUSH_REFS")"
+BRANCH_PROBLEM="$(branch_problem "$PUSH_BRANCH" "$TARGET_BRANCH")"
+CONVENTION_STEP="Branch name and target"
+case "$BRANCH_PROBLEM" in
+  error:*)
+    echo "==> [0/4] $CONVENTION_STEP... FAILED ❌ (${BRANCH_PROBLEM#error: })"
+    record_summary_row "$CONVENTION_STEP" "-" "FAILED" "${BRANCH_PROBLEM#error: }"
+    record_failure "$CONVENTION_STEP"
+    ;;
+  warning:*)
+    echo "==> [0/4] $CONVENTION_STEP... WARNING ⚠️  (${BRANCH_PROBLEM#warning: })"
+    record_summary_row "$CONVENTION_STEP" "-" "OK" "warning: ${BRANCH_PROBLEM#warning: }"
+    ;;
+  *)
+    echo "==> [0/4] $CONVENTION_STEP... SUCCESS ✅ (${PUSH_BRANCH:-?} → ${TARGET_BRANCH})"
+    record_summary_row "$CONVENTION_STEP" "-" "OK" "${PUSH_BRANCH:-?} → ${TARGET_BRANCH}"
+    ;;
+esac
+
+RUN_TEST_RULES=1
+if [ -n "${CHANGED_FILES:-}" ] && ! printf '%s\n' "$CHANGED_FILES" \
+    | grep -qE '^src-test/.*\.java$|^build\.gradle$|^scripts/check-(test-hygiene\.py|unit-test-classification\.sh)$'; then
+  RUN_TEST_RULES=0
+fi
+# $1 label, $2 command: output indented on the console (warnings included), one summary row.
+run_convention_check() {
+  local label="$1" cmd="$2" out status=0
+  echo "==> [0/4] $label..."
+  out="$(cd "$MODULE_DIR" && eval "$cmd" 2>&1)" || status=$?
+  [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/    /'
+  if [ "$status" -eq 0 ]; then
+    record_summary_row "$label" "-" "OK" ""
+  else
+    echo "==> [0/4] $label... FAILED ❌"
+    record_summary_row "$label" "-" "FAILED" ""
+    record_failure "$label"
+  fi
+}
+if [ "$RUN_TEST_RULES" = "1" ]; then
+  run_convention_check "Unit/integration test split" "bash scripts/check-unit-test-classification.sh"
+  if [ -n "$BASE_REF" ]; then
+    run_convention_check "Test hygiene (@covers, naming)" "python3 scripts/check-test-hygiene.py --base \"$BASE_REF\" --head HEAD"
+  fi
+else
+  skip_step "0" "Unit/integration test split"
+  skip_step "0" "Test hygiene (@covers, naming)"
+fi
+
 # 1. Validate sourcedata XML record order + constraints (mirrors CI's
 # xml-order-check.yml). Cheap and fails fast BEFORE the expensive tests/Sonar, so
 # XML mistakes surface as early as possible. Reads the committed sourcedata + its

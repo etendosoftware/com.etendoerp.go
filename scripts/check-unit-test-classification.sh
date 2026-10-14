@@ -28,15 +28,17 @@ fi
 
 # class<TAB>superclass, one per declared type. Javadoc and line comments are dropped first so a
 # base class merely *named* in a comment is not read as an extends, and the declaration is matched
-# after joining lines because `class X\n    extends Y {` is common here.
+# after joining lines because `class X\n    extends Y {` is common here. One perl process reads every
+# file (a process per file took ~7 s, too slow for the pre-push).
 decls=$(
   find "$TEST_ROOT" -name '*.java' -print0 |
-    xargs -0 -n1 sh -c '
-      sed -e "s|//.*||" -e "/^[[:space:]]*\*/d" -e "/^[[:space:]]*\/\*/d" "$0" |
-        tr "\n" " " |
-        grep -oE "class +[A-Za-z0-9_]+ +extends +[A-Za-z0-9_]+" |
-        awk "{print \$2 \"\t\" \$4}"
-    ' 2>/dev/null
+    xargs -0 perl -ne '
+      s{//.*}{};
+      next if m{^\s*(\*|/\*)};
+      s/\n/ /;
+      $text{$ARGV} .= $_;
+      END { for my $f (keys %text) { print "$1\t$2\n" while $text{$f} =~ /class +([A-Za-z0-9_]+) +extends +([A-Za-z0-9_]+)/g } }
+    '
 )
 
 # Transitive closure: a subclass of a local abstract DAL test is DB-backed too.

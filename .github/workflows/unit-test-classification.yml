@@ -4,7 +4,8 @@ name: Unit Test Classification
 # them by name: every *IntegrationTest is left out. A test that reaches OBBaseTest/WeldBaseTest
 # under any other name would run there and fail with a DAL stack trace that reads like broken
 # infrastructure. scripts/check-unit-test-classification.sh turns that into an explicit error
-# naming the class and its rename. The same job unit-tests the pre-push coverage scripts.
+# naming the class and its rename. The same job unit-tests the scripts and hook libraries the
+# pre-push relies on.
 
 on:
   pull_request:
@@ -15,6 +16,8 @@ on:
       - 'scripts/check-unit-test-classification.sh'
       - 'scripts/check-diff-coverage.py'
       - 'scripts/test_check_diff_coverage.py'
+      - 'scripts/test_git_conventions.py'
+      - '.githooks/lib/git-conventions.sh'
       - '.github/workflows/unit-test-classification.yml'
 
 jobs:

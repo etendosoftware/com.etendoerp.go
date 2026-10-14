@@ -22,13 +22,14 @@ git config --get core.hooksPath     # debe imprimir: .githooks
 | Hook | Cuándo | Qué hace |
 |------|--------|----------|
 | `pre-commit` | antes de crear el commit | Chequeos rápidos (marcadores de conflicto) y **registra la prueba** de que los hooks corrieron |
-| `commit-msg` | con el mensaje ya final | Agrega el trailer `Hooks-Verified: v1 <versión> <huella>` |
+| `commit-msg` | con el mensaje ya final | Valida el formato del mensaje que exige Git Police (`Feature ETP-1234: …`, `Issue #42: …` con el ticket en el cuerpo, primera línea de hasta 80 caracteres) y agrega el trailer `Hooks-Verified` |
 | `pre-push` | antes del push | Corre XML check + Sonar (issues, modo branch) + JUnit sin base + Sonar (gate, modo PR) + cobertura de las líneas cambiadas y **verifica el trailer** de cada commit que se sube |
 
 ### Pasos de `pre-push`
 
 | # | Paso | Script | Por qué |
 |---|------|--------|---------|
+| 0 | Convenciones: nombre de la rama contra su destino, división unit/integración y Test Hygiene | `lib/git-conventions.sh`, `scripts/check-unit-test-classification.sh`, `scripts/check-test-hygiene.py` | Adelanta lo que rechazarían Git Police, Unit Test Classification y Test Hygiene en el PR. Una rama que `main` no acepta bloquea; un nombre fuera de convención solo avisa. Los chequeos de tests corren si el push toca tests, `build.gradle` o los scripts. CI los mantiene: los hooks se pueden saltear |
 | 1 | Validar orden/constraints de los XML de `sourcedata` | `check-etgo-xml.sh` | Espeja el check de CI `xml-order-check.yml`; barato y falla rápido |
 | 1b | Sonar — issues, **modo branch** | `check-sonar-issues.sh` | El paso 3 analiza en modo PR, y ahí `sonar.java.binaries=.` apunta a un directorio sin `.class`, así que ECJ no resuelve tipos y el JavaSensor reporta 0 issues **siempre**. El modo branch (`-Dsonar.branch.name=...`) hace un parseo completo y encuentra issues reales. Bloquea solo si el issue cae en una línea que este push agregó o modificó |
 | 2 | Tests sin base de datos (`goTestUnit`) + su reporte JaCoCo | `./gradlew goTestUnit goTestUnitCoverageReport` en el core | Corre todo lo que no necesita Postgres ni Tomcat (ETP-5695). Los `*IntegrationTest` con base corren en la suite completa de CI, no acá |
