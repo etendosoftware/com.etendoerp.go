@@ -305,7 +305,9 @@ public class EtendoGoJwtServletCoverageTest {
   /**
    * ETP-5047: a purchase that persisted a canceled productive environment as its source (recorded
    * before eligibility excluded productive environments) is already paid, so it is not refused —
-   * like the spent demo above, it becomes a clean productive environment with no source.
+   * like the spent demo above, it becomes a clean productive environment with no source: the
+   * current free demos are not even looked up (no 409 DEMO_SELECTION_REQUIRED can follow), and
+   * neither the company profile copy nor the demo data transfer starts.
    */
   @Test
   public void paidSetupFromAProductiveSourceContinuesWithoutASource() throws Exception {
@@ -318,6 +320,11 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.tenantPaywallService = paywall;
     TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
     servlet.tenantEnvironmentLifecycleService = lifecycle;
+    OnboardingCompanyProfileTransferService profileTransfer =
+        mock(OnboardingCompanyProfileTransferService.class);
+    servlet.onboardingCompanyProfileTransferService = profileTransfer;
+    DemoDataTransferService dataTransfer = mock(DemoDataTransferService.class);
+    servlet.demoDataTransferService = dataTransfer;
     when(lifecycle.isProductiveEnvironment("STORED-DEMO")).thenReturn(true);
     when(store.hasRecordedDemoSelection("purchase-1", "account-1", "user@test.com"))
         .thenReturn(true);
@@ -328,11 +335,35 @@ public class EtendoGoJwtServletCoverageTest {
     when(store.findProvisioningAttempt("purchase-1", "account-1", "user@test.com"))
         .thenReturn(7L);
 
-    Object prepared = prepareOnboardingForPersistedSelection();
+    AtomicInteger answeredStatus = new AtomicInteger(-1);
+    AtomicReference<String> answeredBody = new AtomicReference<>();
 
+    Object prepared = prepareOnboardingForPersistedSelection((dal, response) -> {
+      dal.verify(() -> EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail(anyString()), never());
+      answeredStatus.set(response.status);
+      answeredBody.set(response.body());
+    });
+
+    Object preparedRequest = getField(prepared, "request");
     assertNull("A productive environment is never the origin of another productive environment",
-        getField(getField(prepared, "request"), "demoClientId"));
+        getField(preparedRequest, "demoClientId"));
+    assertEquals("nothing is answered while the paid setup goes on, least of all a 409",
+        0, answeredStatus.get());
+    assertEquals("", answeredBody.get());
+
+    // The two downstream steps receive the source exactly as the paid setup derives it.
+    Method sourceOf = EtendoGoJwtServlet.class.getDeclaredMethod("resolveDemoSourceClientId",
+        boolean.class, preparedRequest.getClass());
+    sourceOf.setAccessible(true);
+    String demoSourceClientId = (String) sourceOf.invoke(null, true, preparedRequest);
+    assertNull(demoSourceClientId);
+    invokeProfileTransfer(demoSourceClientId, "NEW-PRODUCTIVE");
+    servlet.startDemoDataTransferBestEffort("purchase-1", demoSourceClientId, "NEW-PRODUCTIVE",
+        "account-1", "user@test.com");
+
     verify(lifecycle, never()).associateDemoWithProductive(anyString(), anyString());
+    verifyNoInteractions(profileTransfer, dataTransfer);
+    verify(store, never()).findTransferSelection(anyString(), anyString(), anyString());
   }
 
   /**
@@ -376,6 +407,17 @@ public class EtendoGoJwtServletCoverageTest {
   }
 
   private Object prepareOnboardingForPersistedSelection() throws Exception {
+    return prepareOnboardingForPersistedSelection((dal, response) -> { });
+  }
+
+  /**
+   * As {@link #prepareOnboardingForPersistedSelection()}, then hands the still-open DAL helper
+   * mock and the response to {@code afterPrepare}, so a spec can verify what was (not) looked up
+   * and (not) answered.
+   */
+  private Object prepareOnboardingForPersistedSelection(
+      java.util.function.BiConsumer<MockedStatic<EtendoGoJwtDalHelper>, ResponseCapture>
+          afterPrepare) throws Exception {
     HttpServletRequest request = jsonRequest("/onboarding",
         "{\"clientName\":\"New Productive\",\"currency\":\"EUR\","
             + "\"paymentToken\":\"purchase-1\",\"demoClientId\":\"BODY-DEMO\","
@@ -413,6 +455,7 @@ public class EtendoGoJwtServletCoverageTest {
           .thenReturn(null);
       Object result = prepare.invoke(servlet, request, response.response);
       assertNotNull("preparation should pass authentication, currency, ownership and paywall", result);
+      afterPrepare.accept(dal, response);
       return result;
     }
   }

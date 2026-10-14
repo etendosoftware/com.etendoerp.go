@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -30,6 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.apache.logging.log4j.Level;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBSecurityException;
 import org.openbravo.base.provider.OBProvider;
@@ -869,6 +871,172 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     assertFalse(fixture.run(() -> service.isProductiveEnvironment(null)));
   }
 
+  // ----- fail-closed scope -----
+
+  @Test
+  public void anUnreadableEnvironmentTypeMarkerFailsClosedAsProductive() {
+    // No row, and the ETGO_EnvironmentType read itself throws: the tenant's type is unknown, so it
+    // is not offered as a purchase source. The throw ends the decision, so the retired plan
+    // fallback is never asked to answer instead.
+    givenEveryPlanLookupSaysFree();
+    Fixture fixture = new Fixture()
+        .failingPreferenceRead(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE);
+
+    assertTrue(fixture.run(() -> service.isProductiveEnvironment(freshClientId())));
+    assertTrue(fixture.queriedPreferenceAttributes.contains(
+        TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE));
+    verify(tenantPlanService, never()).resolvePlanWithoutSubscription(anyString());
+  }
+
+  /**
+   * Pins the accepted exception to fail-closed: the retired {@code ETGO_TenantPlan} fallback
+   * swallows its own failures and answers "not productive" ({@link TenantPlanPreferenceFallback}
+   * and {@link TenantPlanService#resolvePlanWithoutSubscription} both degrade to free), so a
+   * rowless, markerless tenant whose fallback fails stays a valid source. A change here must be
+   * deliberate, not a side effect.
+   */
+  @Test
+  public void aFailingRetiredPlanQueryAnswersNotProductive() {
+    TenantPlanService plans = plansWithSwitch(false);
+    TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plans, new SubscriptionService());
+    Fixture fixture = new Fixture().failingPreferenceRead(TenantPlanService.PREFERENCE_ATTRIBUTE);
+
+    assertFalse(fixture.run(() -> lifecycle.isProductiveEnvironment(freshClientId())));
+    assertTrue("the fallback query must really have been reached and failed",
+        fixture.queriedPreferenceAttributes.contains(TenantPlanService.PREFERENCE_ATTRIBUTE));
+  }
+
+  @Test
+  public void aThrowingRetiredPlanFallbackAnswersNotProductive() {
+    TenantPlanService plans = new TenantPlanService();
+    plans.preferenceFallback = mock(TenantPlanPreferenceFallback.class);
+    when(plans.preferenceFallback.isProductive(anyString()))
+        .thenThrow(new IllegalStateException("fallback broken"));
+    TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plans, new SubscriptionService());
+    String clientId = freshClientId();
+
+    assertFalse(new Fixture().run(() -> lifecycle.isProductiveEnvironment(clientId)));
+    verify(plans.preferenceFallback).isProductive(clientId);
+  }
+
+  // ----- independence from the subscription-model switch and the access decision -----
+
+  /** A real plan service whose retired fallback sees the subscription-model switch in a state. */
+  private static TenantPlanService plansWithSwitch(boolean on) {
+    TenantPlanService plans = new TenantPlanService();
+    SubscriptionModelSwitch modelSwitch = mock(SubscriptionModelSwitch.class);
+    when(modelSwitch.isOn()).thenReturn(on);
+    plans.preferenceFallback.subscriptionModelSwitch = modelSwitch;
+    return plans;
+  }
+
+  /**
+   * Asks {@code isProductiveEnvironment} with the switch in the given state and the access
+   * enforcement kill switch answering "enforcement off", proving neither the access guard nor the
+   * kill switch is consulted.
+   */
+  private boolean isProductiveWithSwitch(boolean switchOn, Fixture fixture, String clientId) {
+    TenantPlanService plans = plansWithSwitch(switchOn);
+    TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plans, new SubscriptionService());
+    try (MockedStatic<EnvironmentAccessEnforcementFlag> flag =
+            mockStatic(EnvironmentAccessEnforcementFlag.class);
+        MockedConstruction<EnvironmentAccessGuard> guards =
+            mockConstruction(EnvironmentAccessGuard.class)) {
+      flag.when(() -> EnvironmentAccessEnforcementFlag.isEnforcementSwitchedOff(any()))
+          .thenReturn(true);
+
+      boolean productive = fixture.run(() -> lifecycle.isProductiveEnvironment(clientId));
+
+      flag.verifyNoInteractions();
+      assertTrue("no access guard may be built: " + guards.constructed(),
+          guards.constructed().isEmpty());
+      return productive;
+    }
+  }
+
+  @Test
+  public void aRowlessMarkerOnlyProductiveIsProductiveWithTheSwitchOnAndOff() {
+    String clientId = freshClientId();
+    java.util.function.Supplier<Fixture> markerOnly = () -> new Fixture().withPreference(
+        TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+        TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE);
+
+    assertTrue(isProductiveWithSwitch(true, markerOnly.get(), clientId));
+    assertTrue(isProductiveWithSwitch(false, markerOnly.get(), clientId));
+  }
+
+  @Test
+  public void aClosedRowTenantIsProductiveWithTheSwitchOnAndOff() {
+    String clientId = freshClientId();
+    java.util.function.Supplier<Fixture> closedRow =
+        () -> new Fixture().withClosedRow("canceled", ENDED_AT);
+
+    assertTrue(isProductiveWithSwitch(true, closedRow.get(), clientId));
+    assertTrue(isProductiveWithSwitch(false, closedRow.get(), clientId));
+  }
+
+  @Test
+  public void aRetiredPlanOnlyProductiveIsProductiveWithTheSwitchOnAndOff() {
+    // The one shape that reaches the switch (the fallback reads it to pick its log level), so
+    // here "same answer" is not vacuous.
+    String clientId = freshClientId();
+    java.util.function.Supplier<Fixture> planOnly = () -> new Fixture().withPreference(
+        TenantPlanService.PREFERENCE_ATTRIBUTE, TenantPlanService.PLAN_PRODUCTIVE);
+
+    assertTrue(isProductiveWithSwitch(true, planOnly.get(), clientId));
+    assertTrue(isProductiveWithSwitch(false, planOnly.get(), clientId));
+  }
+
+  // ----- parity with resolve() -----
+
+  /**
+   * For one fixture shape: {@code isProductiveEnvironment} must answer exactly what
+   * {@link TenantEnvironmentLifecycleService#resolve} says about the type, over a real plan
+   * service so the retired {@code ETGO_TenantPlan} fallback answers from the fixture too.
+   */
+  private void assertParity(String shape, boolean expectedProductive,
+      java.util.function.Supplier<Fixture> fixtureOf) {
+    TenantEnvironmentLifecycleService lifecycle =
+        new TenantEnvironmentLifecycleService(plansWithSwitch(false), new SubscriptionService());
+    String clientId = freshClientId();
+
+    boolean productive = fixtureOf.get().run(() -> lifecycle.isProductiveEnvironment(clientId));
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot =
+        fixtureOf.get().run(() -> lifecycle.resolve(clientId));
+
+    boolean resolvedProductive = snapshot != null
+        && snapshot.getType() == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE;
+    assertEquals(shape + ": isProductiveEnvironment vs resolve()", resolvedProductive, productive);
+    assertEquals(shape, expectedProductive, productive);
+  }
+
+  @Test
+  public void isProductiveEnvironmentAgreesWithResolveForEveryLifecycleShape() {
+    assertParity("closed row, no marker", true,
+        () -> new Fixture().withClosedRow("canceled", ENDED_AT));
+    assertParity("open row plus a DEMO marker", true,
+        () -> new Fixture().withOpenRow("active", null).withPreference(
+            TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+            TenantEnvironmentLifecycleService.TYPE_DEMO));
+    assertParity("DEMO marker plus a productive ETGO_TenantPlan", true,
+        () -> new Fixture()
+            .withPreference(TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+                TenantEnvironmentLifecycleService.TYPE_DEMO)
+            .withPreference(TenantPlanService.PREFERENCE_ATTRIBUTE,
+                TenantPlanService.PLAN_PRODUCTIVE));
+    assertParity("PRODUCTIVE marker only", true,
+        () -> new Fixture().withPreference(
+            TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE,
+            TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE));
+    assertParity("no type at all (resolve answers no metadata)", false, Fixture::new);
+    assertParity("no type at all, with a demo trial start", false,
+        () -> new Fixture().withPreference(
+            TenantEnvironmentLifecycleService.DEMO_TRIAL_STARTED_ATTRIBUTE, EVENT_AT.toString()));
+  }
+
   // ===================== follow-up W1': a tenant with no row skips the second row lookup ========
 
   /** A lifecycle service over a spied SubscriptionService, to count the row lookups. */
@@ -1117,6 +1285,7 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
     boolean clientVanishes;
     boolean noClient;
     boolean failSubscriptionSave;
+    String failingPreferenceAttribute;
 
     Fixture() {
       when(client.getId()).thenReturn(CLIENT_ID);
@@ -1187,6 +1356,12 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
       return this;
     }
 
+    /** Reading this one preference attribute throws, as a failed {@code AD_Preference} query. */
+    Fixture failingPreferenceRead(String preferenceAttribute) {
+      failingPreferenceAttribute = preferenceAttribute;
+      return this;
+    }
+
     private Subscription rowMock(String status) {
       Subscription subscription = mock(Subscription.class);
       when(subscription.getSubscriptionStatus()).thenReturn(status);
@@ -1217,7 +1392,12 @@ public class TenantEnvironmentLifecycleServiceSubscriptionRowTest {
         }).when(preference).setSearchKey(anyString());
         stored.put(entry.getKey(), preference);
       }
-      when(preferenceQuery.uniqueResult()).thenAnswer(invocation -> stored.get(attribute.get()));
+      when(preferenceQuery.uniqueResult()).thenAnswer(invocation -> {
+        if (attribute.get() != null && attribute.get().equals(failingPreferenceAttribute)) {
+          throw new IllegalStateException("AD_Preference read failed: " + attribute.get());
+        }
+        return stored.get(attribute.get());
+      });
 
       OBQuery<Subscription> openQuery = mock(OBQuery.class);
       when(openQuery.uniqueResult()).thenAnswer(invocation -> row);

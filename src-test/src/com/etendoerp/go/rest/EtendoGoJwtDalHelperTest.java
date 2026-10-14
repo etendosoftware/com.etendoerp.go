@@ -435,6 +435,63 @@ class EtendoGoJwtDalHelperTest {
     }
   }
 
+  /**
+   * ETP-5047 — stubs the account's environments for the purchase-source lookups: each client id
+   * becomes one environment user, {@code closedRowClientId} has a closed (canceled) subscription
+   * row, and {@code markerClientId} has no row but the {@code ETGO_EnvironmentType = PRODUCTIVE}
+   * marker. Every other read finds nothing, so every plan reads free.
+   */
+  private void givenEnvironments(OBQuery<User> usersQuery, OBQuery<Preference> preferenceQuery,
+      OBQuery<Subscription> subscriptionQuery, String closedRowClientId, String markerClientId,
+      String... clientIds) {
+    List<User> users = new java.util.ArrayList<>();
+    for (String clientId : clientIds) {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn(clientId);
+      User user = mock(User.class);
+      when(user.getClient()).thenReturn(client);
+      users.add(user);
+    }
+    when(obDal.createQuery(eq(User.class), anyString())).thenReturn(usersQuery);
+    when(usersQuery.list()).thenReturn(users);
+
+    Subscription closedRow = mock(Subscription.class);
+    when(closedRow.getSubscriptionStatus()).thenReturn("canceled");
+    when(closedRow.getEndDate()).thenReturn(new Date());
+    java.util.concurrent.atomic.AtomicReference<Object> rowClient =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      if ("environmentClientId".equals(invocation.getArgument(0))) {
+        rowClient.set(invocation.getArgument(1));
+      }
+      return subscriptionQuery;
+    }).when(subscriptionQuery).setNamedParameter(anyString(), any());
+    when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+    when(subscriptionQuery.uniqueResult()).thenAnswer(invocation ->
+        closedRowClientId != null && closedRowClientId.equals(rowClient.get()) ? closedRow : null);
+
+    Preference productiveMarker = mock(Preference.class);
+    when(productiveMarker.getSearchKey())
+        .thenReturn(TenantEnvironmentLifecycleService.TYPE_PRODUCTIVE);
+    java.util.concurrent.atomic.AtomicReference<Object> attribute =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    java.util.concurrent.atomic.AtomicReference<Object> preferenceClient =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    org.mockito.Mockito.doAnswer(invocation -> {
+      if ("attribute".equals(invocation.getArgument(0))) {
+        attribute.set(invocation.getArgument(1));
+      } else if ("clientId".equals(invocation.getArgument(0))) {
+        preferenceClient.set(invocation.getArgument(1));
+      }
+      return preferenceQuery;
+    }).when(preferenceQuery).setNamedParameter(anyString(), any());
+    when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+    when(preferenceQuery.uniqueResult()).thenAnswer(invocation ->
+        TenantEnvironmentLifecycleService.ENVIRONMENT_TYPE_ATTRIBUTE.equals(attribute.get())
+            && markerClientId != null && markerClientId.equals(preferenceClient.get())
+            ? productiveMarker : null);
+  }
+
   @Nested
   @DisplayName("findFreeTenantIdsByAccountEmail")
   class FindFreeTenantIdsByAccountEmail {
@@ -550,6 +607,21 @@ class EtendoGoJwtDalHelperTest {
 
       assertEquals(Set.of("demo-client"), result);
     }
+
+    /**
+     * ETP-5047: with the subscription model OFF a productive environment has no row at all, only
+     * the {@code ETGO_EnvironmentType} marker; its plan reads free, yet it is no source either.
+     */
+    @Test
+    @DisplayName("leaves out a rowless productive environment that only carries the marker")
+    void excludesARowlessMarkerOnlyProductiveEnvironment() {
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, null, "marker-productive",
+          "demo-client", "marker-productive");
+
+      Set<String> result = EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail("owner@example.test");
+
+      assertEquals(Set.of("demo-client"), result);
+    }
   }
 
   @Nested
@@ -599,6 +671,43 @@ class EtendoGoJwtDalHelperTest {
       // Both tenants resolve as free here, so a single answer proves the destination was left out
       // of the candidates: counted in, the lookup would be ambiguous and answer null.
       assertEquals("demo-client", result);
+    }
+
+    /**
+     * ETP-5047: an account with a canceled productive environment and one demo resolves to that
+     * demo. Before the fix both read plan free, so the lookup was ambiguous and answered null —
+     * and the transfer status and paid-retry fallbacks that read it found no source.
+     */
+    @Test
+    @DisplayName("resolves the demo next to a canceled productive environment")
+    void resolvesTheDemoNextToACanceledProductiveEnvironment() {
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, "canceled-productive", null,
+          "canceled-productive", "demo-client");
+
+      assertEquals("demo-client",
+          EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail("owner@example.test"));
+      assertEquals("demo-client", EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+          "owner@example.test", "target-client"));
+    }
+
+    @Test
+    @DisplayName("resolves the demo next to a rowless productive environment with only the marker")
+    void resolvesTheDemoNextToARowlessMarkerOnlyProductiveEnvironment() {
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, null, "marker-productive",
+          "marker-productive", "demo-client");
+
+      assertEquals("demo-client",
+          EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail("owner@example.test"));
+    }
+
+    @Test
+    @DisplayName("still answers null when two real demos make the source ambiguous")
+    void staysAmbiguousWithTwoDemosBesideACanceledProductiveEnvironment() {
+      // Control: the productive environment is left out, but two demos remain ambiguous.
+      givenEnvironments(usersQuery, preferenceQuery, subscriptionQuery, "canceled-productive", null,
+          "canceled-productive", "demo-client", "other-demo");
+
+      assertNull(EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail("owner@example.test"));
     }
   }
 
