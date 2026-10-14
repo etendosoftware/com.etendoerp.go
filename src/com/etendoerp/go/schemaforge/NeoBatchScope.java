@@ -87,14 +87,21 @@ public final class NeoBatchScope {
    */
   static void close(NeoBatchScope previous) {
     NeoBatchScope closing = CURRENT.get();
-    if (closing != null) {
-      closing.calloutDiscardMemory.logSummary();
-      closing.logMemoSummary();
-    }
-    if (previous == null) {
-      CURRENT.remove();
-    } else {
-      CURRENT.set(previous);
+    try {
+      if (closing != null) {
+        closing.calloutDiscardMemory.logSummary();
+        closing.logMemoSummary();
+      }
+    } catch (RuntimeException e) {
+      // The summaries are diagnostics: a failure there must not keep the scope on a pooled thread
+      // nor reach BatchService's finally, which still has to release the transaction claim.
+      log.warn("[BATCH] could not log the batch scope summary: {}", e.getMessage());
+    } finally {
+      if (previous == null) {
+        CURRENT.remove();
+      } else {
+        CURRENT.set(previous);
+      }
     }
   }
 

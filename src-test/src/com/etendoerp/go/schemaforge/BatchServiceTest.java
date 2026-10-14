@@ -424,6 +424,35 @@ public class BatchServiceTest {
     }
   }
 
+  /**
+   * Review W1: closing the scope is not allowed to strand the transaction claim. If it throws, the
+   * next request on the pooled thread must still get core's self-committing write path.
+   */
+  @Test
+  public void executeBatchReleasesTheTransactionClaimWhenClosingTheScopeThrows() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoBatchScope> scopeMock =
+             mockStatic(NeoBatchScope.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      scopeMock.when(() -> NeoBatchScope.close(any())).thenThrow(new IllegalStateException("close"));
+
+      try {
+        BatchService.forBatchOnly().executeBatch(new JSONArray(), null, true);
+        fail("the close failure escapes executeBatch");
+      } catch (IllegalStateException expected) {
+        assertEquals("close", expected.getMessage());
+      }
+
+      // Read off the field: currentJsonService() would build core's service, which needs a
+      // servlet context this unit test does not have.
+      java.lang.reflect.Field claim =
+          BatchService.class.getDeclaredField("CALLER_OWNS_TRANSACTION");
+      claim.setAccessible(true);
+      assertNull("the claim must not survive the request", ((ThreadLocal<?>) claim.get(null)).get());
+    }
+  }
+
   /** A scope already open on the thread is put back when the batch closes its own. */
   @Test
   public void executeBatchRestoresAScopeThatWasAlreadyOpen() throws Exception {

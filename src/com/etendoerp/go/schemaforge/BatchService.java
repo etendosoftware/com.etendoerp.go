@@ -393,8 +393,13 @@ public class BatchService {
       return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Batch failed: " + e.getMessage(), null, tracker.durable());
     } finally {
-      NeoBatchScope.close(previousScope);
-      endCallerOwnedTransaction();
+      // Nested so the transaction claim is released whatever closing the scope does: a claim left
+      // on the pooled thread would stop the next, unrelated request from ever committing.
+      try {
+        NeoBatchScope.close(previousScope);
+      } finally {
+        endCallerOwnedTransaction();
+      }
     }
   }
 
