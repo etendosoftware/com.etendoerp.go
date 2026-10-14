@@ -55,6 +55,10 @@ import org.openbravo.model.ad.system.Client;
  * cohort exists that the backfill would orphan. So the read side tolerates the gap instead, and
  * this class is that tolerance.
  *
+ * <p>On an environment that has not switched to the subscription model yet
+ * ({@link SubscriptionModelSwitch} OFF, the default) this is not a gap but the normal state: every
+ * paying tenant, new ones included, is recorded with the preference and answered from here.
+ *
  * <h3>The preference is NOT scoped by {@code AD_CLIENT_ID}</h3>
  * {@code Preferences.setPreferenceValue} stores the row at {@code AD_CLIENT_ID = '0'} and encodes
  * the tenant it is about in <b>{@code VISIBLEAT_CLIENT_ID}</b> only. Filtering on
